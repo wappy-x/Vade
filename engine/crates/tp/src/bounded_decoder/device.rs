@@ -4,6 +4,7 @@ use spark_gpu_probe::driver::{Backend,BackendStats,DeviceVector,MhcBoundaryPass,
 use std::{cell::{Cell,RefCell},rc::Rc};
 use super::lineage::Lineage;
 pub struct Device<'b,'d> {pub backend:&'b Backend<'d>,weights:Rc<RefCell<crate::resident_weights::Weights<'b,'d>>>,
+    memo_bound:Rc<crate::projection_memo::Bound>,
     #[cfg(feature="kernel-bench")] pub(super) probe:Rc<RefCell<Option<super::projection_probe::Probe>>>,
     #[cfg(feature="kernel-bench")] attention_calls:Rc<Cell<u64>>,
     parameters:Rc<RefCell<parameters::ParameterCache<DeviceVector<'d>>>>,
@@ -35,9 +36,11 @@ const _:()=assert!(std::mem::size_of::<ChargedKey>()==72);
 /// The rows of one projection share one allocation, so they leave the memo together.
 use super::memo_batches::{self,Batch,Index};
 #[derive(Default)]
-struct Memo<'d> {origins:memo_batches::Origins<Group,Lineage,Rc<HeldStorage<'d>>>,batches:BTreeMap<u64,Batch<OriginKey>>,unverified:Vec<u64>,next:u64,clock:u64,bytes:usize,limit:usize,hits:u64,misses:u64,slab:Slab<'d>}
+struct Memo<'d> {origins:memo_batches::Origins<Group,Lineage,Rc<HeldStorage<'d>>>,batches:BTreeMap<u64,Batch<OriginKey>>,unverified:Vec<u64>,next:u64,clock:u64,bytes:usize,limit:usize,hits:u64,misses:u64,slab:Slab<'d>,
+    #[cfg(feature="kernel-bench")] peak_rows:usize,#[cfg(feature="kernel-bench")] peak_slab:usize,
+    #[cfg(feature="kernel-bench")] proof:super::memo_proof::Proof<OriginKey,Group>}
 /// Rows of one slab chunk: one allocation, 8 MiB at GLM's 131,072-byte expanded row.
-pub const SLAB_ROWS:usize=64;
+pub const SLAB_ROWS:usize=super::MEMO_SLAB_ROWS;
 /// The memo's own storage for kept rows: chunks of SLAB_ROWS rows, one slot a row. Every
 /// memo entry and every live value of a kept row holds its slot's handle (a range of such
 /// a value clones it too), so a slot whose only handle is this list is read by nobody and
@@ -83,11 +86,16 @@ impl<'d> Slab<'d> {
         self.slots.truncate(kept*SLAB_ROWS);self.bytes=held;self.next=0;
     }
 }
+// A clone gets its own empty memo at the startup limit. A clone made after startup (`freeze_memo`) is a second memo
+// that admission does not charge; one made before startup makes startup refuse (`Bound::freeze_device`). No server
+// code clones after startup: flash-serve moves its one device into `Split::new`. Only check tools and
+// `ResidentFactory`, which no server uses, clone a device.
 impl Clone for Device<'_,'_> {
     fn clone(&self)->Self {Self {backend:self.backend,weights:self.weights.clone(),parameters:self.parameters.clone(),norms:self.norms.clone(),
+        memo_bound:self.memo_bound.clone(),
         #[cfg(feature="kernel-bench")] probe:self.probe.clone(),
         #[cfg(feature="kernel-bench")] attention_calls:self.attention_calls.clone(),
-        blocks:self.blocks.clone(),mhc_host:self.mhc_host.clone(),mhc_fused:self.mhc_fused,stages:self.stages.clone(),cost:self.cost.clone(),memo:RefCell::new(Memo::default()),copies:RefCell::new(None),selection_checks:RefCell::new(Vec::new()),selection_read:RefCell::new(None),gathered:RefCell::new(None),ahead:RefCell::new(None),asked:RefCell::new(BTreeMap::new()),memo_epoch:Cell::new(0),ahead_counts:Cell::new([0;2]),selection_counts:Cell::new([0;2]),selection_shortcut:Cell::new(true),first_step:Cell::new(true),memo_share:Cell::new(true),asked_by_output:Cell::new(false),asked_counts:Cell::new([0;2]),screen_nan:Cell::new(None),screen_keep:Cell::new(false),row_workspace:RefCell::new(None),small_rows:Cell::new(false),source:self.source.clone(),programs:RefCell::new(BTreeMap::new()),serving:self.serving.as_ref().map(|_|RefCell::new(None)),state_copies:Cell::new(0),batch_keep:Cell::new(0),batch_route:Cell::new(0),group_charge:Cell::new(self.group_charge.get()),verify_route:Cell::new(false)}}
+        blocks:self.blocks.clone(),mhc_host:self.mhc_host.clone(),mhc_fused:self.mhc_fused,stages:self.stages.clone(),cost:self.cost.clone(),memo:RefCell::new(Memo {limit:self.memo_bound.plan().map_or(0,|p|p.bytes()),..Memo::default()}),copies:RefCell::new(None),selection_checks:RefCell::new(Vec::new()),selection_read:RefCell::new(None),gathered:RefCell::new(None),ahead:RefCell::new(None),asked:RefCell::new(BTreeMap::new()),memo_epoch:Cell::new(0),ahead_counts:Cell::new([0;2]),selection_counts:Cell::new([0;2]),selection_shortcut:Cell::new(true),first_step:Cell::new(true),memo_share:Cell::new(true),asked_by_output:Cell::new(false),asked_counts:Cell::new([0;2]),screen_nan:Cell::new(None),screen_keep:Cell::new(false),row_workspace:RefCell::new(None),small_rows:Cell::new(false),source:self.source.clone(),programs:RefCell::new(BTreeMap::new()),serving:self.serving.as_ref().map(|_|RefCell::new(None)),state_copies:Cell::new(0),batch_keep:Cell::new(0),batch_route:Cell::new(0),group_charge:Cell::new(self.group_charge.get()),verify_route:Cell::new(false)}}
 }
 /// The last Gather this device read: its output vector, the identity of the rows it gathered
 /// from, and the row ids the device returned. Row `slot` of the output is row `ids[slot]` of the source.
@@ -124,7 +132,7 @@ impl<'b,'d> Device<'b,'d> {
     pub fn fixture_reset(&self)->Result<()> {
         self.backend.synchronize()?;
         self.probe.borrow_mut().take();self.row_workspace.borrow_mut().take();self.small_rows.set(false);
-        self.programs.borrow_mut().clear();*self.memo.borrow_mut()=Memo::default();self.copies.borrow_mut().take();self.selection_read.borrow_mut().take();self.memo_changed();self.asked.borrow_mut().clear();self.gathered.borrow_mut().take();
+        self.programs.borrow_mut().clear();*self.memo.borrow_mut()=Memo {limit:self.memo_bound.plan().map_or(0,|p|p.bytes()),..Memo::default()};self.copies.borrow_mut().take();self.selection_read.borrow_mut().take();self.memo_changed();self.asked.borrow_mut().clear();self.gathered.borrow_mut().take();
         self.norms.borrow_mut().clear();self.blocks.borrow_mut().clear();self.parameters.borrow_mut().clear();
         self.backend.fixture_reset_resident()
     }
@@ -135,15 +143,15 @@ impl<'b,'d> Device<'b,'d> {
     /// Diagnostic runner counters. Normal construction keeps them disabled.
     pub fn with_ring_profiled(backend:&'b Backend<'d>,ring:Option<crate::transport::Ring>,cost:bool)->Self {
         Self {backend,weights:Rc::new(RefCell::new(crate::resident_weights::Weights::new(ring,cost))),parameters:Rc::new(RefCell::new(parameters::ParameterCache::default())),
+            memo_bound:Rc::new(crate::projection_memo::Bound::default()),
             #[cfg(feature="kernel-bench")] probe:Rc::new(RefCell::new(None)),
             #[cfg(feature="kernel-bench")] attention_calls:Rc::new(Cell::new(0)),
             norms:Rc::new(RefCell::new(BTreeMap::new())),blocks:Rc::new(RefCell::new(BTreeMap::new())),mhc_host:None,mhc_fused:false,stages:Rc::new(RefCell::new([[0;2];4])),cost:Rc::new(crate::resident_profile::Cost::new(cost)),memo:RefCell::new(Memo::default()),copies:RefCell::new(None),selection_checks:RefCell::new(Vec::new()),selection_read:RefCell::new(None),gathered:RefCell::new(None),ahead:RefCell::new(None),asked:RefCell::new(BTreeMap::new()),memo_epoch:Cell::new(0),ahead_counts:Cell::new([0;2]),selection_counts:Cell::new([0;2]),selection_shortcut:Cell::new(true),first_step:Cell::new(true),memo_share:Cell::new(true),asked_by_output:Cell::new(false),asked_counts:Cell::new([0;2]),screen_nan:Cell::new(None),screen_keep:Cell::new(false),row_workspace:RefCell::new(None),small_rows:Cell::new(false),source:Rc::new(Cell::new(0)),programs:RefCell::new(BTreeMap::new()),serving:None,state_copies:Cell::new(0),batch_keep:Cell::new(0),batch_route:Cell::new(0),group_charge:Cell::new(usize::MAX),verify_route:Cell::new(false)}
     }
     /// Wall counters only. This does not enable CUDA event profiling.
     pub fn with_serving_trace(mut self,enabled:bool)->Self {self.serving=enabled.then(||RefCell::new(None));self}
-    /// D1: one-row decode boundaries run as ONE launch (mhc_boundary_fused), bit-equal to the host lane and the
-    /// kernels (mhc-host-check). A boundary of 2 to FUSED_ROWS_MAX rows (the row group of a drafting check or a chat
-    /// batch) runs one such launch a row (`rows_begin`). Larger groups keep the kernels of their size.
+    /// Fused boundaries keep fixed per-row arithmetic. Swept shapes at 4 to FUSED_ROWS_MAX rows use three
+    /// ordered phases. Other fused cohorts use one entry per row. Larger groups keep the kernels of their size.
     pub fn with_mhc_fused(mut self)->Result<Self> {
         if !self.blocks.borrow().is_empty() {return Err("fused mHC boundaries require an unprepared boundary cache".into());}
         self.mhc_fused=true;Ok(self)
@@ -281,11 +289,16 @@ impl<'b,'d> Device<'b,'d> {
     pub fn prompt_state_copies(&self)->usize {self.state_copies.get()}
     /// Fixture and diagnostic use: a memo byte limit without a checkpoint, at most the charged bound.
     pub fn set_projection_memo_limit(&self,limit:usize)->Result<()> {
-        let mut memo=self.memo.borrow_mut();need(limit<=super::PROJECTION_MEMO_BYTES,"memo limit exceeds its charged bound")?;
+        let mut memo=self.memo.borrow_mut();need(limit<=self.memo_bound.plan().map_or(super::PROJECTION_MEMO_BYTES,|p|p.bytes()),"memo limit exceeds its charged bound")?;
+        need(self.memo_bound.plan().is_none_or(|p|limit==p.bytes()),"memo limit differs from its startup charge")?;
         need(limit>=memo.slab.bytes && limit>=memo.bytes,"memo limit is below the bytes it already holds")?;memo.limit=limit;Ok(())}
     /// Diagnostic: bytes of the memo's own row chunks (never above its limit).
     pub fn projection_slab_bytes(&self)->usize {self.memo.borrow().slab.bytes}
-    pub fn clear_projection_memo(&self)->Result<()> {self.backend.synchronize()?;self.memo_changed();let mut memo=self.memo.borrow_mut();memo.origins.clear();memo.batches.clear();memo.bytes=0;memo.limit=0;memo.slab=Slab::default();Ok(())}
+    #[cfg(feature="kernel-bench")]
+    fn memo_receipt(&self,phase:&str) {let memo=self.memo.borrow();
+        eprintln!("{}",memo.proof.receipt(self.sparse_topology().rank,phase,[memo.bytes,memo.slab.bytes,memo.peak_rows,memo.peak_slab],memo.limit,[self.backend.accounted_bytes(),self.backend.peak_accounted_bytes()]));
+    }
+    pub fn clear_projection_memo(&self)->Result<()> {self.backend.synchronize()?;self.memo_changed();let mut memo=self.memo.borrow_mut();memo.origins.clear();memo.batches.clear();memo.bytes=0;memo.limit=self.memo_bound.plan().map_or(0,|p|p.bytes());memo.slab=Slab::default();Ok(())}
     fn record(&self,stage:usize,started:std::time::Instant) {let mut stages=self.stages.borrow_mut();stages[stage][0]+=1;stages[stage][1]+=started.elapsed().as_nanos();}
     pub(crate) fn report(&self) {self.weights.borrow_mut().report();self.cost.report();
         let route=spark_gpu_probe::device_route::counts();eprintln!("RESIDENT DEVICE ROUTE gate_up={} down={} host_fallback={}",route[0],route[1],route[2]);
@@ -298,14 +311,21 @@ impl<'b,'d> Device<'b,'d> {
 impl<'b,'d> Compute for Device<'b,'d> {
     fn work<T>(&self,run:impl FnOnce()->Result<T>)->Result<T> {
         let queue=self.backend.resident_queue()?;self.backend.enable_resident_launches()?;
+        self.backend.resident_row_pass(1);
         let result=run();
         // A scope may end with no real read. Its known selections are still checked.
         let checked=if result.is_ok() {self.check_selection(None).map(|_|())} else {self.selection_checks.borrow_mut().clear();self.discard_unverified();Ok(())};
         drop(queue);
         if let Some(error)=self.backend.fatal_error() {return Err(error);}
-        checked?;self.weights.borrow().check_exchange()?;result
+        checked?;self.weights.borrow().check_exchange()?;
+        #[cfg(feature="kernel-bench")] self.memo_receipt("work");result
     }
     fn resident_weights_ready(&self)->bool {self.weights.borrow().prepared()}
+    fn memo_summary(&self,c:&CheckpointAdmission)->Option<crate::projection_memo::Summary> {self.weights.borrow().memo_summary(c)}
+    fn freeze_memo(&self,plan:crate::projection_memo::Plan)->Result<crate::projection_memo::Plan> {
+        let mut memo=self.memo.borrow_mut();need(memo.bytes<=plan.bytes() && memo.slab.bytes<=plan.bytes(),"startup memo already exceeds its charge")?;
+        let plan=crate::projection_memo::Bound::freeze_device(&self.memo_bound,plan)?;memo.limit=plan.bytes();Ok(plan)
+    }
     fn capture_counts(&self)->[u64;4] {let copies=self.backend.resident_copy_counts();[copies.captures_new_key,copies.captures_seen_key,copies.piece_evictions,self.backend.resident_piece_updates()]}
     fn folds_routed(&self)->bool {self.weights.borrow().folds_routed()}
     fn fatal_error(&self)->Option<String> {self.backend.fatal_error().or_else(||self.weights.borrow().check_exchange().err())}
@@ -321,9 +341,16 @@ impl<'b,'d> Compute for Device<'b,'d> {
     }}
     fn plan_cost(&self,name:&str,ns:u128) {self.cost.host(name,ns);}
     fn trace_start(&self) {if self.cost.enabled() {self.backend.set_profiling(true);}}
-    fn cost_report(&self,phase:&str) {if self.cost.enabled() {eprintln!("SERVED COST phase={phase}");self.report();}}
+    fn cost_report(&self,phase:&str) {#[cfg(feature="kernel-bench")] self.memo_receipt(phase);if self.cost.enabled() {eprintln!("SERVED COST phase={phase}");self.report();}}
     fn mhc_row_launches(&self)->u64 {spark_gpu_probe::driver::mhc_fused_row_launches()}
     type Value=Value<'b,'d>;type Pass=MhcBoundaryPass<'b,'d>;
+    fn state_allocations(&self,v:&Value<'b,'d>,out:&mut Vec<(usize,usize)>)->bool {
+        // A deferred residual is not a state plane. Never materialize it here.
+        if v.pending.as_ref().is_some_and(|p|p.borrow().post.is_some()) {return false;}
+        v.vector.allocations(out);
+        if let Some((storage,_))=&v.held {storage.whole.allocations(out);}
+        true
+    }
     fn projects_complete_rows(&self)->bool {true}
     fn sparse_topology(&self)->Topology {self.weights.borrow().sparse_topology()}
     fn owned_expansion(&self,name:&str,input:&Value<'b,'d>,tokens:usize,layout:crate::sparse_heads::Layout)->Result<Option<Value<'b,'d>>> {
@@ -346,6 +373,7 @@ impl<'b,'d> Compute for Device<'b,'d> {
     }
     fn prepare(&self,c:&CheckpointAdmission)->Result<()> {self.prepare_beside(c,0)}
     fn prepare_beside(&self,c:&CheckpointAdmission,live:usize)->Result<()> {
+        #[cfg(feature="kernel-bench")] self.memo_receipt("prepare_before");
         // A service keeps this owner while its sessions come and go, and the memo is one for all of them.
         self.row_workspace.borrow_mut().take();self.small_rows.set(false);self.backend.decode_phase(false);
         // While other sessions are open they decode with the memo's rows: a session that opens beside them leaves the
@@ -357,7 +385,7 @@ impl<'b,'d> Compute for Device<'b,'d> {
         // fills hundreds of chunks in its first steps; taken from the driver each time, that was most of the first step.
         if alone {
             let mut memo=self.memo.borrow_mut();let mut slab=if self.first_step.get() {std::mem::take(&mut memo.slab)} else {Slab::default()};
-            *memo=Memo::default();slab.keep(super::MEMO_KEEP);memo.slab=slab;
+            *memo=Memo {limit:self.memo_bound.plan().map_or(0,|p|p.bytes()),..Memo::default()};slab.keep(super::MEMO_KEEP.min(self.memo_bound.plan().map_or(super::PROJECTION_MEMO_BYTES,|p|p.bytes())));memo.slab=slab;
         }
         if alone {self.memo_changed();self.asked.borrow_mut().clear();self.gathered.borrow_mut().take();}
         self.weights.borrow_mut().prepare(c,self.backend)?;self.weights.borrow_mut().prepare_kda(c)?;
@@ -370,18 +398,25 @@ impl<'b,'d> Compute for Device<'b,'d> {
         // The ranks agree on the memo's limit when a session opens alone. Beside other sessions the limit stays: they
         // fill the memo under it now, and a smaller one would be theirs for the rest of their steps.
         if alone {
-            let local=self.backend.available_memory_bytes()?.saturating_sub(1<<30).min(super::PROJECTION_MEMO_BYTES);
+            let local=match self.memo_bound.plan() {Some(plan)=>plan.bytes(),None=>self.backend.available_memory_bytes()?.saturating_sub(1<<30).min(super::PROJECTION_MEMO_BYTES)};
             let limit=self.weights.borrow_mut().shared_budget(local)?;
+            need(self.memo_bound.plan().is_none_or(|p|p.bytes()==limit),"ranks changed the startup memo bound")?;
             // Kept chunks never stand above the new session's limit.
             let mut memo=self.memo.borrow_mut();memo.limit=limit;if memo.slab.bytes>limit {memo.slab=Slab::default();}
         }
-        if self.backend.resident_queue_active() {self.backend.enable_resident_launches()?;}Ok(())}
+        if self.backend.resident_queue_active() {self.backend.enable_resident_launches()?;}
+        #[cfg(feature="kernel-bench")] self.memo_receipt("prepare_after");Ok(())}
     fn prepare_names(&self,c:&CheckpointAdmission,names:&[String])->Result<()> {
+        need(self.memo_bound.plan().is_none() || self.weights.borrow().names_ready(names),"loaded projections changed after memo admission")?;
         // A weight load takes device scratch (the column-tile repack of NVFP4 planes). That is not a decode step's
         // storage: with the decode phase on it would return to the decode reserve and push the decode set out.
         let decoding=self.backend.decoding();self.backend.decode_phase(false);
         let loaded=self.weights.borrow_mut().prepare_names(c,self.backend,names);self.backend.decode_phase(decoding);
-        loaded?;self.weights.borrow_mut().prepare_kda(c)
+        loaded?;self.weights.borrow_mut().prepare_kda(c)?;
+        #[cfg(feature="kernel-bench")]
+        {let summary=self.weights.borrow().memo_summary(c);let plan=crate::projection_memo::Plan::new(summary,super::BATCH_ROWS);
+            eprintln!("MEMO LOADED rank={} summary={summary:?} proposed_bound_bytes={} chats={}",self.sparse_topology().rank,plan.bytes(),super::BATCH_ROWS);}
+        #[cfg(feature="kernel-bench")] self.memo_receipt("load");Ok(())
     }
     fn projection_origin(&self,name:&str,x:&Value<'b,'d>,round:bool)->Result<Option<Value<'b,'d>>> {
         if self.memo.borrow().limit==0 || x.pending.is_some() {return Ok(None);}
@@ -420,6 +455,18 @@ impl<'b,'d> Compute for Device<'b,'d> {
         let whole=width==rows.words;if !whole {self.ready(rows)?;}
         if self.memo.borrow().limit==0 || (whole && rows.pending.is_some()) {found.resize_with(slots.len(),||None);return Ok(found);}
         let topology=self.sparse_topology();let topology=(topology.rank,topology.parts);
+        #[cfg(feature="kernel-bench")]
+        {
+            let group=(name.to_owned(),round,topology);let gathered=self.gathered.borrow();
+            let source=gathered.as_ref().and_then(|g|g.source.first_source()).or_else(||rows.lineage.first_source()).unwrap_or(0);
+            let words=self.weights.borrow().memo_packed_words(name).ok_or("memo proof projection is absent")?;
+            let mut charge=0usize;let mut keys=Vec::new();
+            for &slot in slots {let lineage=rows.lineage.range(slot*width,width)?;
+                charge+=(words+width)*4+lineage.bytes()+2*name.len()+2*std::mem::size_of::<ChargedKey>()+std::mem::size_of::<Rc<DeviceVector<'d>>>();keys.push(lineage);}
+            let chunk=super::held::slab_chunk_bytes(SLAB_ROWS,words).ok_or("memo proof slab overflow")?;
+            let mut memo=self.memo.borrow_mut();memo.proof.working(group.clone(),source,charge.div_ceil(chunk)*chunk,super::BATCH_ROWS);
+            for lineage in keys {let hit=memo.origins.group(|g|*g==group).is_some_and(|g|g.contains_key(&lineage));memo.proof.read(&(group.clone(),lineage),hit);}
+        }
         let mut memo=self.memo.borrow_mut();let memo=&mut *memo;let now=memo.clock;
         // The projection's rows are found once. Each row is then one search by its identity,
         // written into one probe: no row view, no key and no allocation for a row.
@@ -475,13 +522,14 @@ impl<'b,'d> Compute for Device<'b,'d> {
             Ok(output.words.checked_add(x.words).and_then(|n|n.checked_mul(4)).and_then(|n|n.checked_add(key)).ok_or("projection memo byte count overflow")?)};
         let rows=kept.len();let mut total=0usize;
         for (x,output) in kept {total=total.checked_add(row_bytes(x,output)?).ok_or("projection memo byte count overflow")?;}
-        if total>memo.limit {return Ok(());}
+        if total>memo.limit {#[cfg(feature="kernel-bench")] {memo.proof.refused+=rows as u64;}return Ok(());}
         // Make room by dropping whole batches, the one used longest ago first.
         // Rows used by the present token stay; a dropped row is expanded again.
         memo.clock+=1;
         while memo.bytes.checked_add(total).is_none_or(|n|n>memo.limit) {
             let Some(oldest)=memo.batches.iter().min_by_key(|(id,batch)|(batch.used,**id)).map(|(id,_)|*id) else {break;};
             let batch=memo.batches.remove(&oldest).ok_or("projection memo batch disappeared")?;
+            #[cfg(feature="kernel-bench")] memo.proof.evict(batch.keys.iter().cloned());
             for key in &batch.keys {if memo.origins.owner(key)==Some(oldest) {memo.origins.forget(key);}}
             self.memo_changed();
             memo.bytes-=batch.bytes;
@@ -491,6 +539,7 @@ impl<'b,'d> Compute for Device<'b,'d> {
         // are not kept (expanded again when next selected), never kept outside the limit.
         let width=kept[0].1.words;if kept.iter().any(|(_,output)|output.words!=width) {return Ok(());}
         let limit=memo.limit;let slots=memo.slab.take(self.backend,width,kept.len(),limit)?;
+        #[cfg(feature="kernel-bench")] {memo.peak_slab=memo.peak_slab.max(memo.slab.bytes);memo.proof.refused+=(kept.len()-slots.len()) as u64;}
         let kept=&kept[..slots.len()];if kept.is_empty() {return Ok(());}
         let total=if kept.len()==rows {total} else {kept.iter().map(|(x,output)|row_bytes(x,output)).sum::<Result<usize>>()?};
         for (_,output) in kept {self.ready(output)?;}
@@ -499,11 +548,16 @@ impl<'b,'d> Compute for Device<'b,'d> {
         self.backend.resident_scatter(&sources,&mut targets,&mut self.copies.borrow_mut())?;drop(targets);
         let id=memo.next;memo.next+=1;let now=memo.clock;let mut keys=Vec::with_capacity(kept.len());
         let topology=self.sparse_topology();let group:Group=(name.to_owned(),round,(topology.rank,topology.parts));
-        for ((x,_),slot) in kept.iter().zip(slots) {memo.origins.insert(&group,x.lineage.clone(),(slot,id));keys.push((group.clone(),x.lineage.clone()));}
+        for ((x,_),slot) in kept.iter().zip(slots) {
+            #[cfg(feature="kernel-bench")] memo.proof.insert(&(group.clone(),x.lineage.clone()));
+            memo.origins.insert(&group,x.lineage.clone(),(slot,id));keys.push((group.clone(),x.lineage.clone()));}
         self.memo_changed();
         // A known selection's count is compared later. Until then, these rows may come from a refused selection.
         if !self.selection_checks.borrow().is_empty() {memo.unverified.push(id);}
-        memo.batches.insert(id,Batch {keys,bytes:total,used:now});memo.bytes+=total;memo.misses+=kept.len() as u64;Ok(())
+        memo.batches.insert(id,Batch {keys,bytes:total,used:now});memo.bytes+=total;
+        #[cfg(feature="kernel-bench")] {memo.peak_rows=memo.peak_rows.max(memo.bytes);
+            eprintln!("MEMO INSERT projection={name} rows={} added_bytes={total} total_bytes={} slab_bytes={}",kept.len(),memo.bytes,memo.slab.bytes);}
+        memo.misses+=kept.len() as u64;Ok(())
     }
     fn planar_kda(&self,shape:Shape)->bool {matches!(shape.op,Op::StepPlanar|Op::ConvParts) && spark_gpu_probe::causal_ops::fast_admitted(shape,spark_gpu_probe::causal_ops::FAST_THREADS)}
     fn has_latent_absorption(&self,name:&str)->bool {self.weights.borrow().has_absorption(name)}
@@ -516,6 +570,37 @@ impl<'b,'d> Compute for Device<'b,'d> {
         for value in [query,latent,selected] {self.ready(value)?;}
         let output=self.weights.borrow().absorb_rows(name,self.backend,shape,&query.vector,&latent.vector,&selected.vector)?;
         let words=output.len();self.value(output,words)
+    }
+    fn latent_absorption_chats(&self,name:&str,shape:spark_gpu_probe::prompt_ops::Shape,gathers:&[ChatGather<'_,Value<'b,'d>>],
+        stride:usize,query:&Value<'b,'d>,selected:&Value<'b,'d>)->Result<Option<Value<'b,'d>>> {
+        let (chats,width)=(gathers.len(),shape.cols as usize);
+        need(chats>0 && chats==shape.tokens as usize && Some(shape.rows as usize)==chats.checked_mul(stride),"chat attention rows differ")?;
+        let whole=self.backend.vector(chats.checked_mul(stride).and_then(|n|n.checked_mul(width)).ok_or("chat latent extent overflow")?)?;
+        let whole=whole.into_resident_shared()?;
+        for (chat,(s,x,expected)) in gathers.iter().enumerate() {
+            need(s.op==Op::Gather && s.dim as usize==width && s.cols as usize<=stride,"chat gather shape differs")?;
+            // The count check of `gather_absorbed`: a known count was checked when it became known, any other one later.
+            let count=x[2].ok_or("gather count is absent")?;
+            if count.assumed.get() {
+                let same=count.known.borrow().as_ref().is_some_and(|known|known.len()==1 && known[0].to_bits()==expected.to_bits());
+                need(same,"absorbed selection count differs")?;let [waits,known]=self.selection_counts.get();self.selection_counts.set([waits,known+1]);
+            } else {self.selection_checks.borrow_mut().push((count.vector.clone(),*expected));}
+            for value in x.iter().flatten() {self.ready(value)?;}
+            let started=std::time::Instant::now();let stamp=self.cost.start(self.backend);
+            let (lengths,_,units,words)=s.lengths().ok_or("invalid chat gather shape")?;
+            for (v,len) in x.iter().zip(lengths) {need(v.map_or(0,|v|v.words)==len,"chat gather input extent differs")?;}
+            let input=x.map(|v|v.filter(|v|v.words>0).map(|v|&*v.vector));
+            // Chat i's rows start at row i x stride: the row group's selection names them there.
+            let at=chat*stride*width;let mut output=whole.resident_range(at..at+units*words)?;
+            self.backend.resident_causal_into(*s,input,None,&mut output)?;
+            #[cfg(feature="kernel-bench")] crate::resident_weights::UNREAD_GATHERS.fetch_add(1,std::sync::atomic::Ordering::Relaxed);
+            self.cost.record(||"operation_Gather".into(),stamp,self.backend,0);self.record(3,started);
+        }
+        *self.gathered.borrow_mut()=None;
+        for value in [query,selected] {self.ready(value)?;}
+        let stamp=self.cost.start(self.backend);
+        let output=self.weights.borrow().absorb_rows(name,self.backend,shape,&query.vector,&whole,&selected.vector)?;
+        let words=output.len();let value=self.value(output,words)?;self.cost.record(||"chat_attention".into(),stamp,self.backend,0);Ok(Some(value))
     }
     fn indirect_attention(&self,shape:Shape,parts:&[&Value<'b,'d>],query:&Value<'b,'d>)->Result<Option<Value<'b,'d>>> {
         if !spark_gpu_probe::causal_ops::indirect_attention_proven(shape) {return Ok(None);}
@@ -546,6 +631,7 @@ impl<'b,'d> Compute for Device<'b,'d> {
         let words=result.len();let output=self.value(result,words)?;self.cost.record(||"attention_piece".into(),stamp,self.backend,0);Ok(Some(output))
     }
     fn embedding(&self,token:u32,streams:usize)->Result<Option<Value<'b,'d>>> {
+        self.backend.resident_row_pass(1);
         let stamp=self.cost.start(self.backend);let out=self.weights.borrow().embedding(self.backend,token,streams)?;let words=out.len();let value=self.value(out,words)?;self.cost.record(||"embedding".into(),stamp,self.backend,0);Ok(Some(value))
     }
     fn projection(&self,_:&CheckpointAdmission,name:&str,x:&Value<'b,'d>,round:bool)->Result<Option<Value<'b,'d>>> {
@@ -771,10 +857,11 @@ if start==0 && v.pending.as_ref().and_then(|p|p.borrow().state_prefix)==Some(len
         let weight=self.parameters.borrow_mut().resolve(w,None,|values|self.backend.upload_vector(values))?;
         let input=x.map(|v|v.filter(|v|v.words>0).map(|v|&*v.vector));
         let mut value=self.value(self.backend.prompt_operation(s,input,weight.as_deref())?,units*words)?;
-        if s.op==spark_gpu_probe::prompt_ops::Op::StepRows && s.tokens>256 {let prefix=(s.heads as usize).checked_mul(s.dim as usize).and_then(|n|n.checked_mul(s.dim as usize)).ok_or("state prefix overflow")?;value.pending=Some(Rc::new(RefCell::new(Pending {post:None,error:None,state_prefix:Some(prefix)})));}self.cost.settle(self.backend)?;
+        if s.op==spark_gpu_probe::prompt_ops::Op::StepRows && super::copy_prompt_state(s.tokens as usize) {let prefix=(s.heads as usize).checked_mul(s.dim as usize).and_then(|n|n.checked_mul(s.dim as usize)).ok_or("state prefix overflow")?;value.pending=Some(Rc::new(RefCell::new(Pending {post:None,error:None,state_prefix:Some(prefix)})));}self.cost.settle(self.backend)?;
         self.cost.record(||if s.op==spark_gpu_probe::prompt_ops::Op::Wrapped {format!("rows_{:?}",s.inner.op)} else {format!("rows_{:?}",s.op)},stamp,self.backend,w.len()*4);Ok(value)
     }
     fn rows_embedding(&self,tokens:&[u32],streams:usize)->Result<Option<Value<'b,'d>>> {
+        self.backend.resident_row_pass(tokens.len());
         // Prompt work: its vectors come from the vector pool and return to it, never the decode reserve.
         self.backend.decode_phase(false);
         self.batch_route.set(if self.batch_route.get()==1 {2} else {0});
@@ -916,8 +1003,8 @@ if start==0 && v.pending.as_ref().and_then(|p|p.borrow().state_prefix)==Some(len
         if !self.blocks.borrow().contains_key(&key) {self.blocks.borrow_mut().insert(key,self.upload_boundary(p)?);}
         let post=self.take_post(x)?;
         let blocks=self.blocks.borrow();let boundary=&blocks[&key];
-        // The rows of a chat step or of a drafting check pass (1 to FUSED_ROWS_MAX): a fused boundary takes them on the GPU,
-        // one launch a row, each row with the bits of its own one-row launch. Larger groups keep their path.
+        // A fused cohort keeps each row's arithmetic. Swept wider shapes share three ordered phases;
+        // other shapes use row entries. Larger groups keep their path.
         let fused=boundary.fused_bf16().is_some() && (1..=spark_gpu_probe::mhc_params::FUSED_ROWS_MAX).contains(&m);
         let result=match (post,fused) {(Some((pass,block)),true)=>boundary.begin_after_rows_fused(pass,block,x.vector.clone(),m),
             (None,true)=>boundary.begin_rows_fused(x.vector.clone(),m),

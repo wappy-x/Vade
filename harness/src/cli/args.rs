@@ -240,6 +240,7 @@ impl Config {
             mcp: false,
             mcp_home: None,
         };
+        let mut allow_plain_http = false;
         let mut no_check = false;
         let mut selected = None;
         let mut used = Vec::new();
@@ -285,6 +286,7 @@ impl Config {
                         }
                     })?;
                 }
+                "--allow-plain-http" => { vade_harness::http_policy::warn_plain_http(); allow_plain_http = true; },
                 "--verbose" => config.verbose = true,
                 "--greedy" => {
                     if used.contains(&"--greedy") { return Err("--greedy was specified more than once"); }
@@ -892,6 +894,10 @@ impl Config {
         }
         if used.contains(&"--context-tokens") {
             config.generation.context_limit = Some(config.context_tokens as u64);
+        }
+        if allow_plain_http {
+            if !matches!(config.mode, Mode::Direct | Mode::Agent | Mode::Gateway) { return Err("--allow-plain-http requires direct, agent or gateway mode"); }
+            vade_harness::http_policy::allow_plain_http();
         }
         Ok(Parsed::Run(config))
     }

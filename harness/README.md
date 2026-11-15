@@ -1,5 +1,24 @@
 <p align="center"><img src="docs/assets/vade-harness-banner.svg" width="100%" alt="VADE Harness: a coding-agent harness, written from scratch in Rust"></p>
 
+HTTP links to another machine are refused by default in `vade-harness` and
+`vade-gateway`. Vade checks the connected addresses before it sends any HTTP
+bytes. Loopback and same-address links work without a switch.
+
+Plain HTTP is not encrypted. Anyone on the network between the two machines
+can read and change your chat, your tool results and your API key.
+Do one of these:
+
+1. Use an SSH tunnel. It encrypts the link. `vade up` sets one up for
+   `vade chat`. By hand: run `ssh -N -L PORT:127.0.0.1:PORT USER@HOST` in
+   another terminal. Replace USER with your login name on that machine.
+   Then start Vade again with `--endpoint http://127.0.0.1:PORT`, or
+   `--upstream http://127.0.0.1:PORT` for a gateway upstream.
+   The doctor tool takes the address as its first word.
+2. Accept the risk for this run: add `--allow-plain-http`.
+
+A forwarder on this machine that is not SSH can pass the traffic on without
+encryption, and Vade cannot see that.
+
 # Vade Harness
 
 Vade Harness is the terminal program that you use to work with the model. It
@@ -214,8 +233,10 @@ works better than paging through a file from the top.
 
 Native `workspace_read` accepts a zero-based byte `offset` and a byte `limit`
 (1–4096) for sources up to 4 MiB. Partial results give the actual range, the
-total size and the next offset. Reads keep the hidden/credential path and
-directory-handle protections.
+total size and the next offset. A read of a common secret-related name asks
+first. Other hidden paths are refused, and writes to secret-related names are
+refused. The name check cannot detect secret content in an ordinary filename.
+Directory-handle protections still apply.
 
 A PDF file (up to 50 MiB) reads as the text of its text layer, page by page,
 and `offset` and `limit` then index that text. The reader is part of the
@@ -237,7 +258,7 @@ matching. Patch text is limited to 64 KiB, and each target and result may be up
 to 4 MiB.
 
 **The preview.** `apply_patch` checks all files first and shows unified diff
-hunks with three context lines before you approve. Overlapping context is
+hunks with three context lines when you press `5`. Overlapping context is
 merged. Nonprinting Unicode, tabs, carriage returns and literal backslashes are
 visibly escaped. The 192 KiB cap counts the escaped display bytes, and an
 oversized diff is refused before approval.
@@ -289,10 +310,10 @@ tools](docs/agent-tools.md#the-macos-sandbox) gives the full rules.
 
 There are three approval policies. Each one sets what runs without asking:
 
-- **`--approval ask` (default).** Only commands that an allow-list rule
-  matches run without asking. The allow list is empty by default (see [shell
-  safety](../docs/shell-safety.md)). Edits and every other command wait for
-  you.
+- **`--approval ask` (default).** A tiny fixed grammar of harmless read-only
+  commands runs without asking. Commands that an allow-list rule matches also
+  run without asking. The saved allow list is empty by default (see [shell
+  safety](../docs/shell-safety.md)). Edits and every other command wait for you.
 - **`--approval auto`.** Validated exact patches and all validated commands
   run without asking, inside the existing macOS sandbox, after preview. This
   includes programs inside the workspace, such as `./scripts/build.sh`, and
@@ -307,22 +328,40 @@ chat](../docs/mcp.md).
 
 In every policy, blocked commands (fork bombs, `rm -rf /` and similar) never
 run. [Shell safety](../docs/shell-safety.md) describes the three command
-classes, the `s`/`p` answers and the allow lists in `.vade/permissions.json`
+classes, the `3`/`4` answers and the allow lists in `.vade/permissions.json`
 and `~/.vade/permissions.json`.
 
-**Answering a prompt.** Under `ask`, type `y` or `n` on an empty line (or
-`/approve` / `/deny`) in the terminal. The patch preview shows additions and
-removals in color.
+**Answering a prompt.** Under `ask`, type `1` or `2` on an empty line (or
+`/approve` / `/deny`) in the terminal. Key 5 shows the exact change or outside-tool data.
+Commands show the whole executed command with shell quoting. Key `5` shows
+the argv JSON, timeout, execution folder, environment, scan exclusions, build
+environment and safety findings.
 
-- A `y`/`n` typed while there is a draft in the editor, during `/paste`, or
+Every prompt starts with the action. A square marks a risk of lost work or
+sent data. A triangle marks a smaller risk. The risk text comes next, then
+`Your turn.` and choice `1` on the same row. Other choices line up below it.\nRed and amber carry the risk: the target
+and the key numbers are bold red for a square and bold amber for a triangle.
+The top line and the marks are bold Petrol. The risk mark and words also work without color.
+Plain mode, redirected output and `NO_COLOR` have no color codes.
+
+The block uses the terminal width up to 64 cells. The tag and project scope
+line up at the right edge. Long targets stay complete; risk sentences and
+choices wrap with their own indents.
+
+Only offered choices work. `1` is Yes one time. `2` is always No. `3` allows
+the displayed scope until you close Vade. `4` saves that scope for later
+chats. The prompt names the scope: an exact command, a website, web searches,
+or project note changes. An empty answer never approves anything.
+
+- A `1`/`2` typed while there is a draft in the editor, during `/paste`, or
   within 400 ms of the prompt appearing is kept as text. In the full-screen
   editor, Enter can send a one-line draft as the answer. The draft must be one
-  line that you typed, and it must be only `y`, `yes`, `n` or `no` (or `s` or
-  `p` for a command). A pasted, recalled or multiline draft stays text.
+  line that you typed, and it must be only `1` or `2` (or `3` or
+  `4` for a command). A pasted, recalled or multiline draft stays text.
 - In plain line mode (`--plain`, or input from a pipe), a sent line of only
-  `y`, `yes`, `n` or `no` (or `s` or `p` for a command) answers the prompt.
+  `1` or `2` (or `3` or `4` for a command) answers the prompt.
   During line-mode `/paste`, such a line is part of the pasted text.
-- `/approve` and `/deny` answer the displayed operation once, exactly like y/n,
+- `/approve` and `/deny` answer the displayed operation once, exactly like 1/2,
   and sending them never authorizes a later operation.
 - With a draft already in the input, type `/approve` or `/deny` on its own final
   line and press Enter. The earlier draft stays. Pasted or recalled multiline
@@ -588,7 +627,7 @@ Use [slash command templates](docs/slash-commands.md) for named prompts.
 | `/instructions` | List the [project instruction](docs/project-instructions.md) files that loaded or were skipped, with size, path and reason; `--no-instructions` at start loads none |
 | `/skill NAME` | Inspect a catalog skill locally; no scripts execute |
 | `/map [PATH]`, `/symbols PATH` | Show bounded repository names, or lexical hints |
-| `/approve`, `/deny` | Answer a pending one-time native tool approval; `y`/`n` on an empty line do the same |
+| `/approve`, `/deny` | Answer a pending one-time native tool approval; `1`/`2` on an empty line do the same |
 | `/undo` | Remove the last direct/demo exchange; refused in native/delegated modes |
 | `/cancel` | Ask to cancel; an acknowledgment shows only once it is received |
 | `/steer TEXT` | Send input to the active Codex turn, with separate queued/accepted/rejected receipts |

@@ -3,6 +3,7 @@ use engine_model::plan::{admission::CheckpointAdmission,layer::Topology};
 use spark_serve::{Engine,Tokenizer};
 use spark_tp::{Result,row_split::{Factory,Split},bounded_decoder::Device,startup,transport::Ring};
 use std::{net::{SocketAddr,TcpListener},path::Path,sync::atomic::AtomicBool,time::Duration};
+#[path="boundary_gate.rs"] mod boundary_gate;
 /// `started`: when the process started. The caller gives a failure to `startup::failed`, which prints the rank and the step of a failed start.
 pub fn run(args:&[String],checkpoint:CheckpointAdmission,root:&Path,output_setting:Option<String>,memory_setting:Option<String>,started:std::time::Instant)->Result<()> {
     let diagnostic=super::settings::diagnostic_text(args.get(9..).unwrap_or_default())?;
@@ -14,7 +15,11 @@ pub fn run(args:&[String],checkpoint:CheckpointAdmission,root:&Path,output_setti
     let listen=args[2].parse::<SocketAddr>().map_err(|e|e.to_string())?;let next=args[3].parse::<SocketAddr>().map_err(|e|e.to_string())?;
     let context=args[6].parse::<usize>().map_err(|e|e.to_string())?;let bind=args[7].parse::<SocketAddr>().map_err(|e|e.to_string())?;
     let requests=args[8].parse::<usize>().map_err(|e|e.to_string())?;
-    let (key,mtp,trace,keep)=super::settings::text_options(&args[9..])?;
+    let (gate,options)=super::settings::boundary_gate_options(&args[9..])?;
+    let (key,mtp,trace,keep)=super::settings::text_options(&options)?;
+    if gate.is_some() && (!diagnostic || mtp!=Some(3)) {return Err("boundary gate requires --diagnostic-unqualified-text and --mtp 3".into());}
+    // One line for a hand start that sets a cache size of 0 and still keeps prompts. Nothing else follows from it.
+    if let Some(notice)=super::settings::text_cache_size_notice(keep,spark_tp::flash_pool::Request::from_env().ok().and_then(|request|request.cache_bytes)) {eprintln!("TEXT PROMPT KEEP rank={rank} {notice}");}
     super::settings::diagnostic_text_bind(bind)?;
     let auth=spark_serve::auth::ApiKey::load(key.as_deref(),false)?;
     // The tokenizer, the identity hashes and the memory query read different things, so they run at the same time.
@@ -41,11 +46,14 @@ pub fn run(args:&[String],checkpoint:CheckpointAdmission,root:&Path,output_setti
     let mut ring=Ring::connect(rank,world,listen,next)?;
     startup::step("rank_records");
     let wire_topology=ring.topology();let mut records=vec![0;world*80];let local=&mut records[rank*80..(rank+1)*80];
-    // The top bit of the context word says this rank keeps prompts, so ranks started with different options refuse each other.
-    local[..64].copy_from_slice(identity.fingerprint().as_bytes());local[64..72].copy_from_slice(&(context as u64|u64::from(keep)<<63).to_le_bytes());local[72..].copy_from_slice(&(budget as u64).to_le_bytes());
+    // The top bit of the context word says this rank keeps prompts, so ranks with different choices refuse each other:
+    // different options, or one build of before the default (off without an option) and one of after it (on).
+    // Bit 62 goes with it since a resume starts with the readiness word (`Factory::kept_ready`): a build of before
+    // that word keeps prompts with bit 62 clear, so it and this build refuse each other here, not at a first resume.
+    local[..64].copy_from_slice(identity.fingerprint().as_bytes());local[64..72].copy_from_slice(&(context as u64|u64::from(keep)<<63|u64::from(keep)<<62).to_le_bytes());local[72..].copy_from_slice(&(budget as u64).to_le_bytes());
     ring.all_gather(&mut records,80)?;
     for record in records.as_chunks::<80>().0 {
-        if record[..72]!=records[..72] {return Err("text service rank metadata, context or --prompt-keep differs".into());}
+        if record[..72]!=records[..72] {return Err("text service rank metadata, context or prompt keep choice differs: start every rank from one build with the same options (prompts are kept unless --no-prompt-keep is given)".into());}
         budget=budget.min(u64::from_le_bytes(record[72..].try_into().unwrap()).try_into().map_err(|_|"rank budget exceeds address space")?);
     }
     // The driver compiles a kernel image that is new to this box, one time, for about 40 s. A warm load takes 0.35 s. The log names the wait after 3 s, so nobody stops the rank in the middle of a compile.
@@ -98,20 +106,21 @@ pub fn run(args:&[String],checkpoint:CheckpointAdmission,root:&Path,output_setti
         startup::step("device_setup");
         let compute=Device::with_mailbox(backend,data,false,&mailbox)?.with_serving_trace(trace);
         let compute=match &conductor {Some(conductor)=>compute.with_mhc_host(conductor.link())?,None=>compute};
-        // D1: one-row decode boundaries run as one GPU launch, and the row groups (drafting checks, chat batches) as one such launch a row.
+        // Fused boundaries use the admitted row loop or the ordered phases of swept wider cohorts.
         let compute=compute.with_mhc_fused()?;
         // The decoder ends this step and starts the step `weights` when its host parameters are read.
         let split=Split::new(compute,ring)?;startup::step("decoder_parameters");let engine=Factory::new(&checkpoint,split,context,eos.to_vec())?;
         startup::step("predictor");
         // The predictor layer is loaded only for --mtp 1..3, before admission counts the resident bytes.
         let engine=match mtp {Some(depth) if depth>0=>engine.with_predictor(depth)?,_=>engine};
-        // --prompt-keep: the scheduler's prompt cache may fork this service's sessions (row_split `Session::fork`).
+        // Prompts are kept unless --no-prompt-keep is given: the scheduler's prompt cache may then fork this service's
+        // sessions (row_split `Session::fork`).
         let engine=if keep {engine.with_prompt_keep()} else {engine};
         // Load readers keep the initial mask; decode takes its mask once the weights are resident.
         placement.pin_decode();
         startup::step("prompt_group");
         // The largest prompt group this budget funds, agreed by the ranks; its buffers are in the workspace below.
-        let engine=engine.negotiate_prompt_group(budget)?;
+        let engine=engine.negotiate_prompt_group(budget)?.with_memo_bound()?;
         startup::step("memory_admission");
         let resident=backend.accounted_bytes();let workspace=engine.workspace_reservation_bytes();
         let local=budget.saturating_sub(resident).saturating_sub(workspace);
@@ -127,6 +136,10 @@ pub fn run(args:&[String],checkpoint:CheckpointAdmission,root:&Path,output_setti
         // Startup ends here on every rank: the weights are resident and the ranks agree on memory. Rank 0 opens its port right after.
         startup::done();
         if !engine.controller() {return engine.worker();}
+        if let Some(dir)=gate.as_deref() {
+            let result=boundary_gate::run(&engine,dir,context,budget,|| (backend.accounted_bytes(),backend.peak_accounted_bytes(),spark_gpu_probe::driver::mhc_fused_launches()));
+            let stopped=engine.shutdown();return result.and(stopped);
+        }
         // DEFAULT DRAFTING: a trial makes its first shadow where the answer leaves its think block (row_split/trial.rs).
         // The tokenizer's own encode reads control markers; the service's encode of request text does not.
         if let Ok(ids)=std::ops::Deref::deref(&tokenizer).encode("</think>") && let [marker]=ids.as_slice() {engine.set_answer_marker(*marker);eprintln!("TEXT TRIAL MARKER rank={rank} token={marker}");}
@@ -135,21 +148,26 @@ pub fn run(args:&[String],checkpoint:CheckpointAdmission,root:&Path,output_setti
         limits.metadata=Some(spark_serve::metadata::Metadata::resident_text(&identity,world,wire_topology));
         limits.identity=Some(identity);
         limits.validate()?;
-        // Without --prompt-keep the cache holds nothing (zero bytes), as before. With it the cache keeps up to as many
-        // prompts as each rank can hold, inside the session pool: live chats reserve first and the cache gives bytes
+        // With --no-prompt-keep the cache holds nothing (zero bytes), as before the cache existed. Without it (the
+        // default) the cache keeps up to as many prompts as each rank can hold, inside the session pool: live chats reserve first and the cache gives bytes
         // back before a request waits (`rebalance_within`). A kept prompt is charged all it holds (`retained_bytes`):
         // it holds no expanded rows, a chat that starts from it builds them again.
         let cache=spark_serve::cache::CacheLimits {entries:if keep {spark_tp::row_split::KEPT_PROMPTS} else {1},retained_bytes:kept_cap,tokens_per_entry:context,logits_per_entry:engine.vocab_size(),idle_ttl:Duration::from_secs(300)};
         // DEFAULT DRAFTING: with a predictor of at least TRIAL_DEPTH loaded, a request that names no draft mode
         // runs a trial and drafts at TRIAL_DEPTH (row_split.rs configure_request); "plain" and mtp_depth 0 turn it off.
         let default_depth=if engine.predictor_depth()>=spark_tp::row_split::TRIAL_DEPTH {spark_tp::row_split::TRIAL_DEPTH} else {0};
-        let schedule=spark_serve::scheduler::Config {active:8,connections:32,prefill_chunk:spark_tp::bounded_decoder::PROMPT_ROWS,foreground_rows:1,background_rows:1,active_bytes:pool,session_budget_bytes:pool,
+        let schedule=spark_serve::scheduler::Config {active:spark_tp::row_split::LIVE_SESSIONS,connections:32,prefill_chunk:spark_tp::bounded_decoder::PROMPT_ROWS,foreground_rows:1,background_rows:1,active_bytes:pool,session_budget_bytes:pool,
             draft:if default_depth>0 {spark_serve::protocol::DraftMode::Strict} else {spark_serve::protocol::DraftMode::Plain},mtp_depth:default_depth,
             draft_global_bank:false,prefix_cache:keep,sharing:spark_serve::scheduler::Sharing {private_counts:keep,..Default::default()}};
         mailbox.require_success()?;
         let listener=TcpListener::bind(bind).map_err(|e|e.to_string())?;let stop=AtomicBool::new(false);
         let name=root.file_name().ok_or("checkpoint needs a directory name")?.to_string_lossy().to_ascii_lowercase();
-        eprintln!("text_service qualification=unqualified diagnostic_option=--diagnostic-unqualified-text ready bind={bind} rank={rank} world={world} path=tensor_split context={context} resident_bytes={resident} session_bytes={reservation} shared_workspace_bytes={workspace} session_pool_bytes={pool} max_chats=8 {} cache={keep}",super::settings::text_drafting_words(default_depth,engine.predictor_depth()));
+        // The cache's room for the start line: its byte cap and the longest prompt whose PLANNED charge fits under it (the
+        // engine's loose invoice of a kept prompt and the cache's own notes; the cache books a real prompt by the bytes its
+        // state holds on the device), and a notice when that is small.
+        let largest=if keep {super::settings::text_largest_kept_prompt(context,kept_cap,|tokens|spark_serve::cache::publication_metadata_bytes(tokens,engine.vocab_size(),engine.kept_prompt_bytes(tokens),0,0))} else {0};
+        if let Some(notice)=super::settings::text_keep_room_notice(keep,context,kept_cap,largest) {eprintln!("TEXT PROMPT KEEP rank={rank} {notice}");}
+        eprintln!("text_service qualification=unqualified diagnostic_option=--diagnostic-unqualified-text ready bind={bind} rank={rank} world={world} path=tensor_split context={context} resident_bytes={resident} session_bytes={reservation} shared_workspace_bytes={workspace} session_pool_bytes={pool} max_chats=8 {} cache={keep} {}",super::settings::text_drafting_words(default_depth,engine.predictor_depth()),super::settings::text_keep_room_words(kept_cap,largest));
         let served=spark_serve::scheduler::serve_requests(listener,&engine,Some(&tokenizer),&limits,&cache,&schedule,&stop,&name,requests);
         let stopped=engine.shutdown();served.and(stopped)
             })();

@@ -103,7 +103,7 @@ pub fn group_pool_cap(rows:usize)->Option<usize> {(rows>PROMPT_GROUP).then(||spa
 /// The most the projection memo holds, charged once per server at admission. One kept
 /// row of this model is 65,536 bytes packed plus its key, and a token can select up to
 /// 2,051 rows in each of 11 latent layers (1.48 GB), so the memo holds about two tokens' rows.
-pub const PROJECTION_MEMO_BYTES:usize=3<<30;
+pub const PROJECTION_MEMO_BYTES:usize=crate::projection_memo::FULL;
 /// Largest union of selected rows whose attention scores run in tiles, computing all pairs.
 /// Past it, computing all pairs costs more than reading only the selected ones.
 pub const SCORE_MAP_ROWS:usize=16384;
@@ -129,6 +129,13 @@ pub fn group_workspace_bytes(c:&CheckpointAdmission,context:usize)->Result<usize
 /// head a token), scores and probabilities (`live` words: one a selected row), and the projected output (`value` words).
 pub fn absorbed_group_words(group:usize,heads:usize,latent:usize,value:usize,live:usize)->Option<usize> {
     group.checked_mul(heads)?.checked_mul(latent.checked_mul(2)?.checked_add(live.checked_mul(2)?)?.checked_add(value)?)
+}
+/// A chat group also owns its joined latent, selection table and local query beside the five planes.
+pub fn absorbed_chat_words(chats:usize,heads:usize,latent:usize,key:usize,value:usize,slots:usize)->Option<usize> {
+    absorbed_group_words(chats,heads,latent,value,slots)?
+        .checked_add(chats.checked_mul(slots)?.checked_mul(latent)?)?
+        .checked_add(chats.checked_mul(slots.checked_add(1)?)?)?
+        .checked_add(chats.checked_mul(heads)?.checked_mul(key)?)
 }
 /// The same charge for a group of this many rows.
 pub fn group_workspace_bytes_for(c:&CheckpointAdmission,context:usize,group:usize)->Result<usize> {
@@ -162,6 +169,8 @@ pub fn group_workspace_bytes_for(c:&CheckpointAdmission,context:usize,group:usiz
             // Absorbed attention replaces the expanded rows with five planes that a group holds at once.
             // Charge the larger alternative, with the same head count as the expanded rows above.
             selected=selected.max(absorbed_group_words(group,a.heads as usize,a.kv_rank as usize,a.value_dim as usize,live).ok_or("prompt workspace overflow")?);
+            // Chat steps and prompt groups are ordered. Their larger attention peak funds both forms.
+            selected=selected.max(absorbed_chat_words(super::BATCH_ROWS,a.heads as usize,a.kv_rank as usize,a.key_dim as usize,a.value_dim as usize,live).ok_or("chat workspace overflow")?);
         }
         // A group past PROMPT_GROUP also charges what the 256-row charge leaves to its margin (235 MB at 1,024 rows and a
         // 32,768 context): the layer's input rows, the two live planes and the partials of the open mHC boundary pass, and a
@@ -207,8 +216,10 @@ fn force_distinct_rows(selected:&mut [f32],slots:usize,first:usize) {
         row[count-1]=(first+token) as f32;row[slots]=count as f32;
     }
 }
-/// The memo bytes a memory proof must hold as ballast: the device's memo limit, and only when
-/// it equals what admission charges. A smaller limit would prove less than a server can reach.
+/// The memo bytes a memory proof must hold as ballast: the device's memo limit, and only when it equals the full
+/// allowance PROJECTION_MEMO_BYTES, which admission charges while no startup memo bound is set. A smaller limit would
+/// prove less than such a server can reach. A server with memo admission charges its smaller locked bound
+/// (`row_split::Factory::with_memo_bound`); this check does not cover that case.
 pub fn full_memo_ballast(limit:usize)->Result<usize> {
     if limit!=PROJECTION_MEMO_BYTES {return Err(format!("memo limit {limit} differs from the charged bound {PROJECTION_MEMO_BYTES}"));}
     Ok(limit)

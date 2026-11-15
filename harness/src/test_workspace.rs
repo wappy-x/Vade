@@ -4,8 +4,31 @@ use std::path::PathBuf;
 pub(crate) struct Fixture(pub PathBuf);
 impl Fixture {
     pub fn new() -> Self {
+        // macOS sandboxed Cargo must be able to resolve every parent of cwd.
+        // A workspace under a developer's home fails that check. Use the fixed
+        // scratch parent, not the process's configurable temporary directory.
+        #[cfg(target_os = "macos")]
+        let root = PathBuf::from("/private/tmp");
+        #[cfg(not(target_os = "macos"))]
+        let root = std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"))
+            .join("test-workspaces");
+        Self::under(root)
+    }
+    /// A folder that no source checkout holds, for a test of "no parent holds
+    /// `.git`". `new` cannot serve it on Linux: its folder is under `target`,
+    /// inside the checkout, so a walk up from it finds the checkout's `.git`.
+    pub fn outside_checkout() -> Self {
+        #[cfg(target_os = "macos")]
+        let root = PathBuf::from("/private/tmp");
+        #[cfg(not(target_os = "macos"))]
+        let root = std::env::temp_dir();
+        Self::under(root)
+    }
+    fn under(root: PathBuf) -> Self {
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let path = std::env::temp_dir().join(format!(
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join(format!(
             "vade-coding-test-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)

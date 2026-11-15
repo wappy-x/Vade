@@ -34,7 +34,8 @@ Modes:
 
 Options:
   --mode MODE           Select a mode; --demo is an alias for demo
-  --endpoint URL        Direct/agent upstream, plain http:// only
+  --endpoint URL        Direct/agent upstream, plain http:// only; same machine only by default
+  --allow-plain-http    Allow plain HTTP to another machine. Not encrypted: others on the network can read and change the chat and the API key.
   --model NAME          Required for direct/agent; optional Codex model override
   --prompt TEXT         One prompt and exit; interactive approvals are denied
                         Agent exits 3 after a normal run if its check failed or was not run
@@ -82,7 +83,7 @@ Options:
   --child-edit NAME=PATH
                         Host scope for exact file edits (repeat for each leased file)
   --child-shell NAME    Host scope for shell; exclusive workspace writes, approvals apply
-  --upstream URL        HTTP upstream; repeat for cache-aware routing
+  --upstream URL        HTTP upstream; repeat for cache-aware routing; same machine only by default
   --permission POLICY   Codex: read-only/workspace-write; Hermes: deny-callbacks; required
   --hermes-bin PATH     Hermes executable (default hermes on PATH); fixed acp argument
   --external-session ID Resume/load a Hermes-owned session if negotiated
@@ -114,10 +115,13 @@ Conversation commands:
 Agent tools: workspace_read/list, workspace_search, workspace_read_lines,
 workspace_edit_lines, apply_patch, workspace_shell (macOS only), tool_output_read,
 skill_read, workspace_manifest, workspace_symbols.
-Patch previews are shown before approval. ask requires y/n (or /approve, /deny) for
-edits and for every command; only a command that an allow-list rule matches
-runs without asking. For a command of plain words, s allows that exact command for
-the session and p saves it to .vade/permissions.json. Fork bombs and rm -rf / are always blocked. auto permits validated exact
+Approval prompts show the action, risk, Your turn., and numbered choices.
+1 approves one time. 2 says No. An empty answer approves nothing.
+Commands show the whole executed command. 5 shows the exact details. For eligible commands,
+3 allows that exact command until you close Vade. 4 saves it in this project
+in .vade/permissions.json. File changes and outside tools offer 5 to show the
+exact change or data. Only offered choices work. ask prompts outside a tiny
+fixed harmless grammar; an allow-list rule can also skip a prompt. Fork bombs and rm -rf / are always blocked. auto permits validated exact
 patches and all commands inside the macOS OS sandbox without asking. It never
 authorizes commands outside the sandbox; no unsandboxed fallback exists.
 never denies edits and commands. Noninteractive runs deny approval requests;
@@ -180,7 +184,8 @@ pub(crate) const AGENT_HELP: &str =
 
 Usage: vade-harness agent --endpoint URL --model NAME --workspace PATH [OPTIONS]
 
-  --endpoint URL        Required HTTP upstream; HTTPS is unsupported
+  --endpoint URL        Required HTTP upstream; HTTPS is unsupported; same machine only by default
+  --allow-plain-http    Allow plain HTTP to another machine. Not encrypted: others on the network can read and change the chat and the API key.
   --model NAME          Required literal upstream model ID
   --workspace PATH      Required root for bounded workspace tools
   --prompt TEXT         One prompt and exit; interactive approvals are denied
@@ -252,7 +257,8 @@ pub(crate) const DIRECT_HELP: &str =
 
 Usage: vade-harness direct --endpoint URL --model NAME [OPTIONS]
 
-  --endpoint URL        Required HTTP upstream; HTTPS is unsupported
+  --endpoint URL        Required HTTP upstream; HTTPS is unsupported; same machine only by default
+  --allow-plain-http    Allow plain HTTP to another machine. Not encrypted: others on the network can read and change the chat and the API key.
   --model NAME          Required literal upstream model ID
   --prompt TEXT         One prompt and exit
   --workspace PATH      Root for manual local read/list commands (default .)
@@ -290,7 +296,8 @@ pub(crate) const GATEWAY_HELP: &str =
 
 Usage: vade-harness gateway --upstream URL [--upstream URL ...] [OPTIONS]
 
-  --upstream URL        Required HTTP upstream; repeat for cluster routing
+  --upstream URL        Required HTTP upstream; repeat for cluster routing; same machine only by default
+  --allow-plain-http    Allow plain HTTP to another machine. Not encrypted: others on the network can read and change the chat and the API key.
   --bind ADDRESS        Listener address (default 127.0.0.1:8787)
   --allow-origin ORIGIN Admit this exact browser Origin, e.g. https://app.example (repeatable)
   --allow-host HOST     Admit another Host name, with or without the port (repeatable)

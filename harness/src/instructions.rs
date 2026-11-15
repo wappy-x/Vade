@@ -515,7 +515,9 @@ mod tests {
     /// repo/.git, repo/AGENTS.md, repo/app/CLAUDE.md, repo/app/web (workspace)
     /// with .vade/instructions.md, and home/.vade/instructions.md.
     fn tree() -> Fixture {
-        let f = Fixture::new();
+        tree_in(Fixture::new())
+    }
+    fn tree_in(f: Fixture) -> Fixture {
         for dir in ["home/.vade", "repo/.git", "repo/app/web/.vade"] {
             std::fs::create_dir_all(f.0.join(dir)).unwrap();
         }
@@ -564,8 +566,15 @@ mod tests {
         let i = load(&f);
         assert_eq!(skipped(&i, "../../AGENTS.md"), Some("not UTF-8 text"));
         assert!(i.section().contains("## ../../CLAUDE.md\nsecond name"));
-        // No git root: only the workspace folder and the user file.
+        // No git root: only the workspace folder and the user file. The same
+        // files, in a folder that no source checkout holds.
+        let f = tree_in(Fixture::outside_checkout());
+        f.write("AGENTS.md", "above the git root\n");
+        f.write("repo/CLAUDE.md", "second name\n");
+        f.write("repo/app/web/AGENTS.md", "web agents\n");
+        std::fs::write(f.0.join("repo/AGENTS.md"), [0xff, 0xfe]).unwrap();
         std::fs::remove_dir(f.0.join("repo/.git")).unwrap();
+        assert!(!f.0.ancestors().any(|dir| dir.join(".git").exists()), "this test needs a folder outside every git checkout: {}", f.0.display());
         assert_eq!(labels(&load(&f)), ["~/.vade/instructions.md", "AGENTS.md"]);
         let none = Instructions::load(&f.0.join("repo/app/web"), None);
         assert_eq!(labels(&none), ["AGENTS.md"]);

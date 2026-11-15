@@ -1,5 +1,7 @@
 # Serve Qwen3.6-35B on one Spark
 
+HTTP links stay on this machine by default; see [network setup](../network-setup.md) for SSH tunnels and the explicit opt-in.
+
 **History:** a dated single-Spark route that is not supported in v0.1.0; the supported model is in [INSTALL.md](../INSTALL.md).
 
 Use the official **Qwen3.6-35B-A3B-FP8** checkpoint on one NVIDIA GB10.

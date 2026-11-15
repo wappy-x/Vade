@@ -39,7 +39,8 @@ Usage: vade-harness workload --endpoint URL --model NAME --json FILE [OPTIONS]
   --seed N                 Fixed synthetic-content seed (default 41)
   --max-seconds N          Whole workload deadline, 1..86400 (default 600)
   --json FILE              Required new metrics file; never overwrite
-  --endpoint URL           Required OpenAI chat-compatible http:// URL
+  --endpoint URL           Required OpenAI chat-compatible http:// URL; same machine only by default
+  --allow-plain-http    Allow plain HTTP to another machine. Not encrypted: others on the network can read and change the chat and the API key.
   --model NAME             Required explicit model; never substituted
   -h, --help               Show this help
 
@@ -123,6 +124,7 @@ impl Config {
                 return Err("duplicate workload option");
             }
             seen.push(key.clone());
+            if key == "--allow-plain-http" { crate::http_policy::allow_plain_http(); continue; }
             let value = args
                 .next()
                 .ok_or("workload option needs a value; see workload --help")?;
@@ -531,6 +533,10 @@ fn session_run(
         stopped: None,
     };
     for turn in 1..=config.turns {
+        if crate::http_policy::interactive_result().is_err() {
+            cancel.store(true, Ordering::Relaxed);
+            break;
+        }
         if cancel.load(Ordering::Relaxed) {
             report.stopped = Some("workload_cancelled");
             break;
@@ -719,7 +725,7 @@ pub fn run(config: Config) -> io::Result<Report> {
         let mut reports = Vec::new();
         let mut last_notice = Instant::now();
         while reports.len() < config.sessions {
-            if start.elapsed() >= deadline {
+            if start.elapsed() >= deadline || crate::http_policy::interactive_result().is_err() {
                 cancel.store(true, Ordering::Relaxed);
             }
             match result_rx.recv_timeout(Duration::from_millis(100)) {
@@ -753,6 +759,7 @@ pub fn run(config: Config) -> io::Result<Report> {
         }
         Ok(reports)
     })?;
+    crate::http_policy::interactive_result()?;
     sessions.sort_by_key(|s| s.session);
     Ok(Report {
         config,
@@ -767,7 +774,7 @@ pub fn run(config: Config) -> io::Result<Report> {
 /// the report as a table or JSON.
 pub fn cli(args: impl IntoIterator<Item = String>) -> ExitCode {
     let args: Vec<_> = args.into_iter().collect();
-    if args.iter().any(|a| a == "--help" || a == "-h") {
+    if crate::http_policy::help_requested(&args) {
         return crate::diagnostics::print_stdout(HELP);
     }
     let config = match crate::diagnostics::parse_command("workload", |option| Config::parse_options(args, option)) {
@@ -797,9 +804,12 @@ pub fn cli(args: impl IntoIterator<Item = String>) -> ExitCode {
         "workload: starting {} native sessions ({} main), {} turns each; synthetic records only",
         config.sessions, config.main_sessions, config.turns
     ));
+    let _output = crate::http_policy::RefusalOutput(config.json_path.clone());
     let report = match run(config) {
         Ok(report) => report,
         Err(_) => {
+            drop(file);
+            if crate::http_policy::interactive_result().is_err() { return ExitCode::FAILURE; }
             crate::diagnostics::stderr_line(format_args!("vade: workload setup/worker failed; JSON is incomplete. Keep the partial file, check the endpoint/model with vade-harness doctor, then retry with a new --json path."));
             return ExitCode::FAILURE;
         }

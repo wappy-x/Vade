@@ -1,5 +1,7 @@
 # Install Vade
 
+HTTP links stay on this machine by default; see [network setup](network-setup.md) for SSH tunnels and the explicit opt-in.
+
 This guide installs Vade for text-only chat with the supported FP4-Local
 checkpoint, **nvidia/Qwen3.8-Flash-Next-FP4-Local**. The installer
 downloads the [prebuilt bundle](#prebuilt-bundle) of main from dl.vade.lol
@@ -1601,7 +1603,7 @@ engine refuses it, Vade reports the refusal and does not lower the context.
 | `--mtp` | Asks for a specific drafting depth. `0` turns drafting off. It overrides the `MTP` variable. A local launch saves the selected drafting depth for later starts. To restore engine-selected drafting, stop the engine, remove the `mtp=` line from `${VADE_HOME:-$HOME/.vade}/config`, unset `MTP`, and restart without `--mtp`. A controller uses the engine default when neither the flag nor `MTP` is set. |
 | `--chats` | It works only from a controller. On the Spark itself, Vade refuses it. Vade records it and passes it on, but FP4-Local sets the chat count from context and memory. So `--chats` changes neither the context nor how many chats run at once. With FP8, `--chats N` reserves room for N chats. |
 | `--memory-bytes` | Sets a memory budget. The engine's memory check and the memory actually free still apply. |
-| `--cache-bytes 0` | Turns the prefix cache off for a local install. Any local size above zero is refused. |
+| `--cache-bytes 0` | Turns the prefix cache off for a local install. Any local size above zero is refused. With `--diagnostic-unqualified-text` it turns the two-Spark GLM text service's prompt cache off, from a controller too. |
 
 ### The prefix cache
 
@@ -1614,6 +1616,24 @@ The cache keeps prompts only for requests that send `cache:true` or a
 `prompt_cache_key`. Other requests run as before. A cached answer has the same
 token IDs as an uncached one. The cache changes which prompt tokens the engine
 reads again, not how it computes them.
+
+The two-Spark GLM text service (`vade up --sparks 2
+--diagnostic-unqualified-text`) is different. It keeps the prompt of each
+request by default, with no field in the request, when the prompt fits the
+cache's room; a request that sends `"cache": false` is not looked up and not
+kept. Its room is the session pool less one full-size chat, and it moves
+with the free memory at start; rank 0's start line prints it. Measured on one
+pair on 2026-11-15: 2,666,771,392 bytes at context 32,768 (the context `vade
+up` starts), where a second turn of 8,759 tokens started from its kept
+8,192-token prompt. `vade up --cache-bytes 0`
+turns its prompt cache off (every engine rank is started with
+`--no-prompt-keep`), and a size above 0 is refused for it. Its limits and
+what it costs are in
+[the text service notes](../engine/crates/tp/RESIDENT-TEXT-SERVICE.md).
+
+The rest of this section is the FP4 prefix cache's rule. The two-Spark GLM
+text service does not use it: its room is the one above, with no floor and no
+upper limit, and it can be 0 bytes when the pool funds one chat and no more.
 
 At startup, the cache takes a memory room of its own from the chat memory
 (the session pool). The engine plans the chat slots so that the pool holds one

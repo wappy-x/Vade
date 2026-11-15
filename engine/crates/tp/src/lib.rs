@@ -55,6 +55,7 @@ pub mod expert_path;
 pub mod matrix_role;
 
 pub mod service_memory;
+pub mod projection_memo;
 
 pub mod group_admission;
 pub mod admission_plan;

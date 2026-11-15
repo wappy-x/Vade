@@ -18,11 +18,12 @@ fn main() {
 fn run() -> Result<(), String> {
     // No flag builds the two images every Linux engine build embeds: the production image, then the tensor-core
     // image. So `cargo kernels` stays the one kernel step of every build recipe (the installer runs only that).
-    let variants: &[ptx_stamp::Variant] = match env::args().skip(1).collect::<Vec<_>>().as_slice() {
-        [] => &[ptx_stamp::Variant::Production, ptx_stamp::Variant::Tc],
-        [flag] if flag == "--fp4" => &[ptx_stamp::Variant::Fp4],
-        [flag] if flag == "--tc" => &[ptx_stamp::Variant::Tc],
-        _ => return Err("usage: cargo kernels [--fp4 | --tc]".into()),
+    let (variants, allow_missing_ptxas): (&[ptx_stamp::Variant], bool) = match env::args().skip(1).collect::<Vec<_>>().as_slice() {
+        [] => (&[ptx_stamp::Variant::Production, ptx_stamp::Variant::Tc], false),
+        [flag] if flag == "--fp4" => (&[ptx_stamp::Variant::Fp4], false),
+        [flag] if flag == "--tc" => (&[ptx_stamp::Variant::Tc], false),
+        [flag] if flag == "--allow-missing-ptxas" => (&[ptx_stamp::Variant::Production, ptx_stamp::Variant::Tc], true),
+        _ => return Err("usage: cargo kernels [--fp4 | --tc | --allow-missing-ptxas]".into()),
     };
     // The environment is read here, once, for every image of the run.
     // Paths and stamp names are relative to crates/gpu. Prefer the directory `cargo run`
@@ -30,11 +31,11 @@ fn run() -> Result<(), String> {
     let manifest = env::var_os("CARGO_MANIFEST_DIR").map(PathBuf::from).unwrap_or_else(|| env!("CARGO_MANIFEST_DIR").into());
     let bin = env::var_os("KERNEL_BIN").filter(|bin| !bin.is_empty());
     let search = env::var_os("PATH").unwrap_or_default();
-    variants.iter().try_for_each(|&variant| build(variant, &manifest, bin.as_deref(), &search))
+    variants.iter().try_for_each(|&variant| build(variant, &manifest, bin.as_deref(), &search, allow_missing_ptxas))
 }
 
 /// Build, copy and stamp one image.
-fn build(variant: ptx_stamp::Variant, manifest: &Path, bin: Option<&OsStr>, search: &OsStr) -> Result<(), String> {
+fn build(variant: ptx_stamp::Variant, manifest: &Path, bin: Option<&OsStr>, search: &OsStr, allow_missing_ptxas: bool) -> Result<(), String> {
     let (fp4, tc) = (variant == ptx_stamp::Variant::Fp4, variant == ptx_stamp::Variant::Tc);
     let gpu = manifest.parent().unwrap();
     env::set_current_dir(gpu).map_err(|e| format!("cannot enter {}: {e}", gpu.display()))?;
@@ -82,17 +83,21 @@ fn build(variant: ptx_stamp::Variant, manifest: &Path, bin: Option<&OsStr>, sear
         ptx_stamp::stamp(Path::new("."), &ptx, variant).map_err(|e| format!("cannot stamp {}: {e}", ptx.display()))?;
     }
     if fp4 { eprintln!("FP4 PTX is isolated in target/fp4; host opt-in: SPARK_PTX_VARIANT=fp4 cargo build"); }
-    if tc { register_check(&variant.ptx_path(Path::new("."), true), Path::new("kernels-tc/REGISTERS.txt"))?; }
+    if tc { register_check(&variant.ptx_path(Path::new("."), true), Path::new("kernels-tc/REGISTERS.txt"), search, allow_missing_ptxas)?; }
     Ok(())
 }
 
 /// Kernel kit, part 2: the register check of the tensor-core image at build time. Compiles the stamped PTX with
 /// ptxas (`sm_121a`, the release arguments) and holds every entry to its row of `kernels-tc/REGISTERS.txt`.
-/// A machine that is not Linux and has no ptxas (the Mac) skips the check and says so. A Linux build with no ptxas fails.
-fn register_check(ptx: &Path, table: &Path) -> Result<(), String> {
-    let ptxas = match [PathBuf::from("ptxas"), PathBuf::from("/usr/local/cuda/bin/ptxas")].into_iter()
-        .find(|bin| Command::new(bin).arg("--version").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success())) {
+/// A machine that is not Linux and has no ptxas (the Mac) skips the check and says so. A Linux build with no ptxas fails
+/// unless its caller explicitly permits an unavailable compiler, as the GitHub-hosted Linux job does.
+fn register_check(ptx: &Path, table: &Path, search: &OsStr, allow_missing_ptxas: bool) -> Result<(), String> {
+    let ptxas = match find_ptxas(&[PathBuf::from("ptxas"), PathBuf::from("/usr/local/cuda/bin/ptxas")], search)? {
         Some(bin) => bin,
+        None if allow_missing_ptxas => {
+            eprintln!("TC REGISTER CHECK SKIPPED: no ptxas on this machine (the caller allowed a missing compiler); build on a Spark for the check");
+            return Ok(());
+        }
         // A Linux build is a build for a Spark: an unchecked image must not be stamped there.
         None if cfg!(target_os = "linux") => return Err("TC REGISTER CHECK FAIL: no ptxas on this machine (PATH or /usr/local/cuda/bin); the tensor-core image is not stamped unchecked".into()),
         None => { eprintln!("TC REGISTER CHECK SKIPPED: no ptxas on this machine (not a Linux build); build on a Spark for the check"); return Ok(()); }
@@ -144,4 +149,177 @@ fn register_check(ptx: &Path, table: &Path) -> Result<(), String> {
     eprint!("{report}");
     if failures.is_empty() { eprintln!("TC REGISTER CHECK PASS entries={} ptxas={}", measured.len(), ptxas.display()); Ok(()) }
     else { Err(format!("TC REGISTER CHECK FAIL\n{}", failures.join("\n"))) }
+}
+
+/// Probe in order. Absence is decided by looking for the file, never by the start error (a script whose
+/// interpreter is missing also fails to start with "not found"). A bare name is looked up in each `search` (PATH)
+/// folder; a path is looked at directly. Neither follows links, so a dangling link counts as present. Only an
+/// absent candidate permits trying the next one; a present one that cannot start or whose `--version` fails is an
+/// error, even when a later candidate works.
+fn find_ptxas(candidates: &[PathBuf], search: &OsStr) -> Result<Option<PathBuf>, String> {
+    // Present only when the look succeeds and shows an entry. Any error from looking (not found, a folder that
+    // cannot be searched, a PATH entry that is not a folder, and so on) means no entry here: try the next one.
+    let present = |path: &Path| path.symlink_metadata().is_ok();
+    for candidate in candidates {
+        let found = if candidate.parent() == Some(Path::new("")) {
+            // An empty PATH entry is the current folder, as for the shell.
+            env::split_paths(search).map(|dir| if dir.as_os_str().is_empty() { PathBuf::from(".") } else { dir })
+                .map(|dir| dir.join(candidate)).find(|path| present(path))
+        } else {
+            present(candidate).then(|| candidate.clone())
+        };
+        let Some(bin) = found else { continue };
+        let reason = match Command::new(&bin).arg("--version").stdout(Stdio::null()).stderr(Stdio::null()).status() {
+            Ok(status) if status.success() => return Ok(Some(bin)),
+            Ok(status) => status.to_string(),
+            Err(error) => error.to_string(),
+        };
+        return Err(format!("TC REGISTER CHECK FAIL: ptxas at {} did not run ({reason}); the tensor-core image is not stamped unchecked", bin.display()));
+    }
+    Ok(None)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::{os::unix::fs::{PermissionsExt, symlink}, sync::{Mutex, MutexGuard, atomic::{AtomicU64, Ordering}}};
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    /// One test at a time writes and runs scripts: on Linux a script still open for writing in a child that another
+    /// test thread forked fails to start ("text file busy"), which would read as a broken compiler.
+    static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+    struct Folder(PathBuf, #[allow(dead_code)] MutexGuard<'static, ()>);
+    impl Folder {
+        fn new() -> Self {
+            let lock = ONE_AT_A_TIME.lock().unwrap_or_else(|p| p.into_inner());
+            let path = env::temp_dir().join(format!("ptxas-probe-{}-{}", process::id(), SEQUENCE.fetch_add(1, Ordering::Relaxed)));
+            fs::create_dir(&path).unwrap();
+            Self(path, lock)
+        }
+        fn script(&self, name: &str, code: i32, mode: u32) -> PathBuf { self.file(name, &format!("#!/bin/sh\nexit {code}\n"), mode) }
+        fn file(&self, name: &str, text: &str, mode: u32) -> PathBuf {
+            let path = self.0.join(name);
+            if let Some(dir) = path.parent() { fs::create_dir_all(dir).unwrap(); }
+            fs::write(&path, text).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+            path
+        }
+        /// A PATH of these subfolders (created empty if missing).
+        fn search(&self, dirs: &[&str]) -> std::ffi::OsString {
+            env::join_paths(dirs.iter().map(|d| { let dir = self.0.join(d); fs::create_dir_all(&dir).unwrap(); dir })).unwrap()
+        }
+        fn broken(&self, path: &Path, reason: &str) -> String {
+            format!("TC REGISTER CHECK FAIL: ptxas at {} did not run ({reason}); the tensor-core image is not stamped unchecked", path.display())
+        }
+    }
+    impl Drop for Folder { fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); } }
+    #[test]
+    fn all_candidates_absent() {
+        // Pins the existing missing-compiler behavior without depending on PATH.
+        let folder = Folder::new();
+        assert_eq!(find_ptxas(&[folder.0.join("one"), folder.0.join("two")], folder.0.as_os_str()).unwrap(), None);
+    }
+    #[test]
+    fn failed_version_is_broken_even_with_a_working_fallback() {
+        // Regression: the old probe skipped this broken compiler.
+        let folder = Folder::new();
+        let bad = folder.script("bad", 1, 0o700);
+        let good = folder.script("good", 0, 0o700);
+        let error = find_ptxas(&[bad.clone(), good], folder.0.as_os_str()).unwrap_err();
+        assert_eq!(error, format!("TC REGISTER CHECK FAIL: ptxas at {} did not run (exit status: 1); the tensor-core image is not stamped unchecked", bad.display()));
+    }
+    #[test]
+    fn non_executable_is_broken() {
+        // Regression: the old probe treated permission denied as absence.
+        let folder = Folder::new();
+        let path = folder.script("blocked", 0, 0o600);
+        let error = find_ptxas(std::slice::from_ref(&path), folder.0.as_os_str()).unwrap_err();
+        assert!(error.contains(&format!("ptxas at {} did not run (", path.display())), "{error}");
+        assert!(error.contains("Permission denied"), "{error}");
+    }
+    #[test]
+    fn first_working_candidate_is_chosen_after_absence() {
+        // Pins the existing ordered fallback and successful version behavior.
+        let folder = Folder::new();
+        let good = folder.script("good", 0, 0o700);
+        let bad = folder.script("unused", 1, 0o700);
+        assert_eq!(find_ptxas(&[folder.0.join("absent"), good.clone(), bad], folder.0.as_os_str()).unwrap(), Some(good));
+    }
+    #[test]
+    fn missing_interpreter_is_broken_not_absent() {
+        // Regression: starting this script fails with "not found", which the old probe read as no ptxas (SKIPPED).
+        let folder = Folder::new();
+        let search = folder.search(&["empty", "bin"]);
+        let script = folder.file("bin/ptxas", "#!/nonexistent/interpreter\n", 0o700);
+        let good = folder.script("good", 0, 0o700);
+        let error = find_ptxas(&[PathBuf::from("ptxas"), good.clone()], &search).unwrap_err();
+        assert!(error.starts_with(&format!("TC REGISTER CHECK FAIL: ptxas at {} did not run (", script.display())), "{error}");
+        let error = find_ptxas(&[script.clone(), good], &search).unwrap_err();
+        assert!(error.starts_with(&format!("TC REGISTER CHECK FAIL: ptxas at {} did not run (", script.display())), "{error}");
+    }
+    #[test]
+    fn dangling_link_is_broken_not_absent() {
+        // Regression: a link to nothing also fails to start with "not found"; the entry exists, so it is broken.
+        let folder = Folder::new();
+        let search = folder.search(&["bin"]);
+        let link = folder.0.join("bin/ptxas");
+        symlink(folder.0.join("nowhere"), &link).unwrap();
+        let error = find_ptxas(&[PathBuf::from("ptxas")], &search).unwrap_err();
+        assert!(error.starts_with(&format!("TC REGISTER CHECK FAIL: ptxas at {} did not run (", link.display())), "{error}");
+        let error = find_ptxas(std::slice::from_ref(&link), &search).unwrap_err();
+        assert!(error.starts_with(&format!("TC REGISTER CHECK FAIL: ptxas at {} did not run (", link.display())), "{error}");
+    }
+    #[test]
+    fn bare_name_absent_from_every_path_folder() {
+        // Pins absence through the PATH lookup: no folder has an entry named ptxas.
+        let folder = Folder::new();
+        let search = folder.search(&["one", "two"]);
+        folder.script("one/not-ptxas", 0, 0o700);
+        assert_eq!(find_ptxas(&[PathBuf::from("ptxas"), folder.0.join("absent")], &search).unwrap(), None);
+    }
+    #[test]
+    fn bare_name_found_in_a_later_path_folder() {
+        // Pins the PATH order: the first folder holding ptxas is used, and a working one is chosen.
+        let folder = Folder::new();
+        let search = folder.search(&["empty", "bin", "later"]);
+        let good = folder.script("bin/ptxas", 0, 0o700);
+        let bad = folder.script("later/ptxas", 1, 0o700);
+        assert_eq!(find_ptxas(&[PathBuf::from("ptxas"), bad.clone()], &search).unwrap(), Some(good.clone()));
+        let error = find_ptxas(&[PathBuf::from("ptxas")], &folder.search(&["later", "bin"])).unwrap_err();
+        assert_eq!(error, folder.broken(&bad, "exit status: 1"));
+    }
+    /// Puts a folder's mode back on drop, so cleanup can remove it even when an assertion fails.
+    struct Mode(PathBuf, u32);
+    impl Drop for Mode { fn drop(&mut self) { let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(self.1)); } }
+    fn locked(folder: &Folder, dir: &str) -> Mode {
+        let path = folder.0.join(dir);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+        Mode(path, 0o700)
+    }
+    #[test]
+    fn unsearchable_path_folder_is_skipped_for_a_later_working_one() {
+        // Regression: a PATH folder without search permission read as a present, broken compiler.
+        let folder = Folder::new();
+        let search = folder.search(&["locked", "bin"]);
+        let good = folder.script("bin/ptxas", 0, 0o700);
+        let _mode = locked(&folder, "locked");
+        assert_eq!(find_ptxas(&[PathBuf::from("ptxas")], &search).unwrap(), Some(good));
+    }
+    #[test]
+    fn only_an_unsearchable_path_folder_is_absent() {
+        // A PATH whose only folder cannot be searched has no ptxas.
+        let folder = Folder::new();
+        let search = folder.search(&["locked"]);
+        let _mode = locked(&folder, "locked");
+        assert_eq!(find_ptxas(&[PathBuf::from("ptxas"), folder.0.join("absent")], &search).unwrap(), None);
+    }
+    #[test]
+    fn path_entry_that_is_a_file_is_skipped_for_a_later_working_one() {
+        // A PATH entry that is a plain file, not a folder, holds no ptxas.
+        let folder = Folder::new();
+        let search = folder.search(&["bin"]);
+        let file = folder.file("plain", "not a folder\n", 0o600);
+        let good = folder.script("bin/ptxas", 0, 0o700);
+        let search = env::join_paths([file].into_iter().chain(env::split_paths(&search))).unwrap();
+        assert_eq!(find_ptxas(&[PathBuf::from("ptxas")], &search).unwrap(), Some(good));
+    }
 }

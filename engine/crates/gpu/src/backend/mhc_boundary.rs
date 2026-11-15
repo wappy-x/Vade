@@ -93,9 +93,9 @@ impl<'b,'a> MhcHostLink<'b,'a> {
     }
 }
 thread_local! {static FUSED_LAUNCHES:std::cell::Cell<u64>=const {std::cell::Cell::new(0)};static FUSED_ROW_LAUNCHES:std::cell::Cell<u64>=const {std::cell::Cell::new(0)};}
-/// D1 counter: fused launches this thread has queued, one a row of a boundary (a new code path needs a counter above zero).
+/// Boundary kernel nodes this thread has queued, including ordered phases.
 pub fn fused_launches()->u64 {FUSED_LAUNCHES.with(|launches|launches.get())}
-/// The fused launches among them that belong to boundaries of 2 to FUSED_ROWS_MAX rows (chat steps, drafting check passes).
+/// Nodes for boundaries of 2 to FUSED_ROWS_MAX rows (chat steps and drafting checks).
 pub fn fused_row_launches()->u64 {FUSED_ROW_LAUNCHES.with(|launches|launches.get())}
 /// The longest a take waits for the host lane (ns). The service answers in tens of microseconds.
 const HOST_TAKE_LIMIT_NS:u64=10_000_000_000;
@@ -142,7 +142,7 @@ impl<'a> Backend<'a> {
     }
 }
 impl<'b,'a> ResidentMhcBoundary<'b,'a> {
-    /// D1: add the one-launch form to this boundary. `weights` must be the same rows the boundary was made
+    /// Add the fused form to this boundary. `weights` must be the same rows the boundary was made
     /// with (the strip copy is built from them). BF16 strips when every weight is an exact BF16 value and
     /// the strip fits the shared stage, FP32 strips otherwise. Same planes, same bits as `begin`.
     pub fn with_fused(mut self,weights:&[f32])->Result<Self,String> {
@@ -150,7 +150,7 @@ impl<'b,'a> ResidentMhcBoundary<'b,'a> {
         if !crate::mhc_params::fused_admitted(shape) {return Err("the fused mHC boundary does not admit this shape".into());}
         let (wide,count)=(shape.wide(),shape.coefficients());
         if weights.len()!=count*wide || weights.iter().any(|value|!value.is_finite()) {return Err("fused mHC weight geometry or value differs".into());}
-        backend.require_arm_kernels(&["mhc_boundary_fused"])?;
+        backend.require_arm_kernels(&["mhc_boundary_fused","mhc_boundary_phase_rms","mhc_boundary_phase_dots","mhc_boundary_phase_finish"])?;
         let periods=wide.div_ceil(256);let words=crate::mhc_params::FUSED_BLOCKS*periods*count*8;
         let mut strips=vec![0.0f32;words];
         for k in 0..crate::mhc_params::FUSED_BLOCKS {for p in 0..periods {for r in 0..count {for e in 0..8 {
@@ -162,14 +162,14 @@ impl<'b,'a> ResidentMhcBoundary<'b,'a> {
             let packed:Vec<f32>=strips.as_chunks::<2>().0.iter().map(|pair|f32::from_bits((pair[0].to_bits()>>16)|(pair[1].to_bits()&0xffff_0000))).collect();
             backend.upload_vector(&packed)?
         } else {backend.upload_vector(&strips)?};
-        let scratch=backend.upload_vector(&vec![0.0f32;crate::mhc_params::FUSED_SCRATCH_WORDS])?;backend.synchronize()?;
+        let scratch=backend.upload_vector(&vec![0.0f32;crate::mhc_params::FUSED_SCRATCH_WORDS*crate::mhc_params::FUSED_ROWS_MAX])?;backend.synchronize()?;
         self.fused=Some(Rc::new(Fused {strips:device,scratch,bf16,timed:std::cell::Cell::new(0),marks:std::cell::RefCell::new(Vec::new())}));Ok(self)
     }
     /// D1 diagnostic: the phase stamps of the last fused launch (mhc_params::FUSED_STAMPS_AT). Synchronizes.
     pub fn fused_stamps(&self)->Result<Vec<u64>,String> {
         let fused=self.fused.as_ref().ok_or("this mHC boundary has no fused form")?;
         let words=self.backend.read_vector_values(&fused.scratch)?;let at=crate::mhc_params::FUSED_STAMPS_AT;
-        Ok(words[at..].as_chunks::<2>().0.iter().map(|pair|u64::from(pair[0].to_bits())|(u64::from(pair[1].to_bits())<<32)).collect())
+        Ok(words[at..crate::mhc_params::FUSED_SCRATCH_WORDS].as_chunks::<2>().0.iter().map(|pair|u64::from(pair[0].to_bits())|(u64::from(pair[1].to_bits())<<32)).collect())
     }
     /// `launches` (0 = off, 1..=8) back-to-back launches of each pass between the two marks: the slope over the count
     /// is the cost of one launch inside the stream, without the host's submission gap.
@@ -184,19 +184,19 @@ impl<'b,'a> ResidentMhcBoundary<'b,'a> {
     }
     /// True when this boundary carries the one-launch form and it uses BF16 strips.
     pub fn fused_bf16(&self)->Option<bool> {self.fused.as_ref().map(|fused|fused.bf16)}
-    /// `begin_rows` on the GPU: one mhc_boundary_fused launch a row (1 to FUSED_ROWS_MAX rows), each on its own words of
+    /// `begin_rows` on the GPU: fused row launches or ordered phases, each on its own words of
     /// the row-major planes. A row has the bits of its one-row launch beside any partner rows, as on the host lane.
     pub fn begin_rows_fused(&self,input:Rc<DeviceVector<'a>>,rows:usize)->Result<MhcBoundaryPass<'b,'a>,String> {self.with_rows(rows)?.begin_fused(input)}
     /// `begin_after_rows` on the GPU, as `begin_rows_fused`.
     pub fn begin_after_rows_fused(&self,previous:MhcBoundaryPass<'b,'a>,block:Rc<DeviceVector<'a>>,residual:Rc<DeviceVector<'a>>,rows:usize)->Result<MhcBoundaryPass<'b,'a>,String> {
         self.with_rows(rows)?.begin_after_fused(previous,block,residual)
     }
-    /// `begin` as ONE launch (mhc_boundary_fused).
+    /// `begin` with fused row entries or the admitted ordered phases.
     pub fn begin_fused(&self,input:Rc<DeviceVector<'a>>)->Result<MhcBoundaryPass<'b,'a>,String> {
         self.backend.mhc_ready()?;self.backend.check_vector(&input,self.shape.rows as usize*self.shape.wide())?;
         let residual=Rc::new(self.backend.vector(input.len())?);self.submit_fused(input,residual,None)
     }
-    /// `begin_after` as ONE launch (mhc_boundary_fused).
+    /// `begin_after` with fused row entries or the admitted ordered phases.
     pub fn begin_after_fused(&self,previous:MhcBoundaryPass<'b,'a>,block:Rc<DeviceVector<'a>>,residual:Rc<DeviceVector<'a>>)->Result<MhcBoundaryPass<'b,'a>,String> {
         self.backend.mhc_ready()?;let shape=self.shape;
         if !ptr::eq(self.backend,previous.backend) || (shape.rows,shape.streams,shape.hidden)!=(previous.shape.rows,previous.shape.streams,previous.shape.hidden) {
@@ -209,7 +209,7 @@ impl<'b,'a> ResidentMhcBoundary<'b,'a> {
     }
     fn submit_fused(&self,source:Rc<DeviceVector<'a>>,residual:Rc<DeviceVector<'a>>,previous:Option<Box<MhcBoundaryPass<'b,'a>>>)->Result<MhcBoundaryPass<'b,'a>,String> {
         let backend=self.backend;let shape=self.shape;let fused=self.fused.as_ref().ok_or("this mHC boundary has no fused form (with_fused)")?;
-        // One launch a row. Every launch has the admitted one-row shape; `rows` only says how many rows the planes hold.
+        // Each row keeps the admitted one-row arithmetic. Wider cohorts share ordered phase launches.
         let one=Shape {rows:1,..shape};let rows=shape.rows as usize;
         if !crate::mhc_params::fused_admitted(one) || rows==0 || rows>crate::mhc_params::FUSED_ROWS_MAX {return Err("the fused mHC boundary does not admit this shape".into());}
         let (wide,count,hidden)=(one.wide(),one.coefficients(),one.hidden as usize);let chunks=hidden.div_ceil(128);
@@ -223,7 +223,7 @@ impl<'b,'a> ResidentMhcBoundary<'b,'a> {
         // mhc_params::fused_row then gives each launch one row's words of each, so a launch stays inside its checked plane.
         let mut vectors=vec![&*pass.source,&pass.parameters.base,&pass.parameters.scale,&pass.parameters.norm,&fused.strips,&*pass.residual,&pass.mixing,
             &pass.coefficients,&pass.collapsed,&pass.partials,&*pass.output,&fused.scratch];
-        let mut lengths=vec![rows*if pass.previous.is_some() {hidden} else {wide},count,3,hidden,strip_words,rows*wide,rows*wide,rows*count,rows*hidden,rows*chunks,rows*hidden,crate::mhc_params::FUSED_SCRATCH_WORDS];
+        let mut lengths=vec![rows*if pass.previous.is_some() {hidden} else {wide},count,3,hidden,strip_words,rows*wide,rows*wide,rows*count,rows*hidden,rows*chunks,rows*hidden,crate::mhc_params::FUSED_SCRATCH_WORDS*crate::mhc_params::FUSED_ROWS_MAX];
         if let Some(previous)=&pass.previous {vectors.extend([&*previous.residual,&previous.coefficients]);lengths.extend([rows*wide,rows*count]);}
         backend.mhc_planes(&vectors,&lengths,5)?;
         // The kernel's tail loads residual and norm-weight quads with 16-byte loads when the width is a multiple of 4.
@@ -237,17 +237,25 @@ impl<'b,'a> ResidentMhcBoundary<'b,'a> {
             norm_epsilon:self.norm.epsilon(),norm_bf16:u32::from(self.norm.weight_type()==WeightType::Bf16),
             prefetch:0,prefetch_bytes:0,prefetch_policy:0,prefetch_reserved:0};
         let whole=FusedBoundary {boundary,strips:fused.strips.device_address(),scratch:fused.scratch.device_address(),bf16:u32::from(fused.bf16),reserved:0};
-        // The rows' launches share the strip copy and the scratch plane. They are queued on the one ordered stream, so
-        // they run one after another, and each leaves its two counters at 0 for the next.
-        let launch=||->Result<(),String> {for row in 0..rows {let mut args=crate::mhc_params::fused_row(whole,row);backend.mhc_launch("mhc_boundary_fused",one,0,&mut args)?;}Ok(())};
+        let launches=crate::mhc_params::boundary_launches(one,rows);
+        let launch=||->Result<(),String> {
+            if rows>launches {
+                let mut args=whole;args.boundary.shape=shape;
+                for name in ["mhc_boundary_phase_rms","mhc_boundary_phase_dots","mhc_boundary_phase_finish"] {backend.mhc_launch(name,shape,0,&mut args)?;}
+            } else {
+                // The ordered row entries share scratch and leave their counters at zero.
+                for row in 0..rows {let mut args=crate::mhc_params::fused_row(whole,row);backend.mhc_launch("mhc_boundary_fused",one,0,&mut args)?;}
+            }
+            Ok(())
+        };
         if fused.timed.get()>0 {
             // `timed` launches of the same pass between the marks: each one rewrites the same planes with the same bits
             // (it reads only the previous pass and the parameters, and its counters rest at 0 when it ends).
             let before=backend.gpu_mark()?;for _ in 0..fused.timed.get() {launch()?;}let after=backend.gpu_mark()?;
             fused.marks.borrow_mut().push((before,after));
         } else {launch()?;}
-        FUSED_LAUNCHES.with(|launches|launches.set(launches.get()+rows as u64));
-        if rows>1 {FUSED_ROW_LAUNCHES.with(|launches|launches.set(launches.get()+rows as u64));}
+        FUSED_LAUNCHES.with(|count|count.set(count.get()+launches as u64));
+        if rows>1 {FUSED_ROW_LAUNCHES.with(|count|count.set(count.get()+launches as u64));}
         Ok(pass)
     }
     #[cfg(feature="kernel-bench")]

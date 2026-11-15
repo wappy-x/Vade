@@ -1,5 +1,7 @@
 # Two-Spark Flash server
 
+HTTP links stay on this machine by default; see [network setup](../../docs/network-setup.md) for SSH tunnels and the explicit opt-in.
+
 Connect a Mac, Vade's native harness or an existing application to the
 Qwen3.8-Flash-Next FP8 server started by [INSTALL.md](../../docs/INSTALL.md).
 

@@ -24,8 +24,10 @@ macro_rules! lane_square_sum {($x:expr,$d:expr,$lane:expr)=>{{
 }};}
 
 /// Wrapped `Prepare`: one warp per (token, head).
-#[no_mangle]
-pub extern "ptx-kernel" fn prompt_prepare(p:Arguments) {
+#[export_name="prompt_prepare"]
+pub extern "ptx-kernel" fn entry_prompt_prepare(p:Arguments) {prompt_prepare(p)}
+#[inline(always)]
+pub(crate) fn prompt_prepare(p:Arguments) {
     // SAFETY: The host (prompt_admission::wrapped_kernel) checked Shape::lengths for Op::Wrapped over causal Prepare with
     // causal_ops::fast_admitted: per token, x0 holds 3*width, x1 width and x2 heads values, the weight heads+width values
     // (shared by all tokens), and each (token, head) unit owns the disjoint 4*dim+1 output words at unit*(4*dim+1);
@@ -58,8 +60,10 @@ pub extern "ptx-kernel" fn prompt_prepare(p:Arguments) {
 }
 
 /// Wrapped `GatedNorm`: one warp per (token, head).
-#[no_mangle]
-pub extern "ptx-kernel" fn prompt_gated_norm(p:Arguments) {
+#[export_name="prompt_gated_norm"]
+pub extern "ptx-kernel" fn entry_prompt_gated_norm(p:Arguments) {prompt_gated_norm(p)}
+#[inline(always)]
+pub(crate) fn prompt_gated_norm(p:Arguments) {
     // SAFETY: As prompt_prepare, for Op::Wrapped over causal GatedNorm: per token x0 and x1 hold heads*dim values, the weight
     // dim values (shared), and each (token, head) unit owns the disjoint dim output words at unit*dim.
     unsafe {
@@ -87,8 +91,10 @@ pub extern "ptx-kernel" fn prompt_gated_norm(p:Arguments) {
 const PER_LANE:usize=16;
 /// Wrapped `Route` for one group (`heads == 1`, `dim == 1`): one warp per token. With one group every expert is kept, the
 /// group score is never read, and the selection is `cols` rounds of "largest corrected score, lowest id on a tie".
-#[no_mangle]
-pub extern "ptx-kernel" fn prompt_route(p:Arguments) {
+#[export_name="prompt_route"]
+pub extern "ptx-kernel" fn entry_prompt_route(p:Arguments) {prompt_route(p)}
+#[inline(always)]
+pub(crate) fn prompt_route(p:Arguments) {
     // SAFETY: The host (prompt_admission::route_admitted) checked Shape::lengths for Op::Wrapped over causal Route with one
     // group and one kept group: per token x0 holds `rows` logits, the weight `rows` biases (shared), and the token owns
     // the disjoint 2*cols + 2*rows + 2 output words at token*(2*cols+2*rows+2); `rows` <= 32*PER_LANE and `cols` <= 64.
@@ -156,8 +162,10 @@ pub extern "ptx-kernel" fn prompt_route(p:Arguments) {
 const FOLD_MAX:usize=8;
 /// Wrapped `ExpertFold`: one thread per (token, feature) with the token's experts in registers. The fold visits the experts
 /// in ascending id order (ties and gaps as the generic selection loop treats them), each term rounded to BF16 twice.
-#[no_mangle]
-pub extern "ptx-kernel" fn prompt_fold(p:Arguments) {
+#[export_name="prompt_fold"]
+pub extern "ptx-kernel" fn entry_prompt_fold(p:Arguments) {prompt_fold(p)}
+#[inline(always)]
+pub(crate) fn prompt_fold(p:Arguments) {
     // SAFETY: The host (prompt_admission::fold_admitted) checked Shape::lengths for Op::Wrapped over causal ExpertFold: per
     // token x0 and x1 hold `rows` values, x2 `rows*cols` values, x3 `cols` values when taps is 1 (otherwise p.input[3] is
     // never read); the output has one word per (token, feature) at index = token*cols+feature; `rows` <= FOLD_MAX (8, the routed experts of a token). The

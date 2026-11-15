@@ -341,9 +341,8 @@ fn auto_patch_allowlisted_command_and_disk_resume_keep_exact_tool_ids() {
     );
 }
 #[test]
-fn noninteractive_ask_denies_commands_unless_the_checker_is_on_while_never_denies_both() {
-    // Every command asks by default; VADE_SHELL_CHECKER=1 lets the checker's
-    // safe class run.
+fn noninteractive_ask_runs_fixed_harmless_commands_while_never_denies_them() {
+    // The fixed harmless grammar runs in ask mode with either checker setting.
     for (policy, checker) in [("ask", "0"), ("ask", "1"), ("never", "1")] {
         let f = Fixture::new();
         let (url, handle) = mock(vec![
@@ -377,10 +376,8 @@ fn noninteractive_ask_denies_commands_unless_the_checker_is_on_while_never_denie
         // Without the shell (Linux, or VADE_HARNESS_SHELL=off) the tool is not offered.
         let expected = if !vade_harness::coding_tools::shell_offered() {
             "unknown_tool"
-        } else if policy == "ask" && checker == "1" {
-            "Exited(Some(0))"
         } else if policy == "ask" {
-            "approval_required"
+            "Exited(Some(0))"
         } else {
             "denied"
         };
@@ -501,8 +498,8 @@ fn interactive_tty_approval_previews_exact_diff_before_writing() {
             )
             .unwrap();
         }
-        // `touch` needs approval, so the build command still shows a prompt;
-        // cargo build and test alone are safe and run without one.
+        // The shell script needs approval. Cargo build and test also need
+        // approval because they can run workspace code.
         let tool = if command_tool {
             call("shell-1", "workspace_shell", Value::Object(vec![
                 ("argv".into(), Value::Array(["/bin/sh", "-c", if build { "touch Cargo.toml && cargo build --offline && cargo test --offline" } else { r#"printf '%s' "${VADE_MOCK_SECRET-unset}"; printf shell > shell.txt"# }].into_iter().map(|s| Value::String(s.into())).collect())),
@@ -612,12 +609,22 @@ fn interactive_tty_approval_previews_exact_diff_before_writing() {
         terminal
             .write_all(format!("make the file{eol}").as_bytes())
             .unwrap();
-        let preview = until(&mut terminal, "Approval required");
-        assert!(preview.contains(if command_tool {
-            "command argv="
+        let mut preview = until(&mut terminal, "2  No,");
+        assert!(preview.contains("Vade wants to") && preview.contains("Your turn."), "{preview}");
+        if command_tool {
+            let prefix = if build { "■  /bin/sh -c '" } else { "■  /bin/sh -c $'" };
+            assert!(preview.contains(prefix) && !preview.contains("command argv="), "whole command missing: {preview}");
+            if raw { std::thread::sleep(Duration::from_millis(450)); }
+            terminal.write_all(if raw { b"5" } else { b"5\n" }).unwrap();
+            preview = until(&mut terminal, "Safety:");
+            assert!(preview.contains("Exact details:") && preview.contains("command argv=") && preview.contains("Environment (only these"));
         } else {
-            "+++ result.txt"
-        }));
+            assert!(!preview.contains("+++ result.txt"), "change shown before 5: {preview}");
+            if raw { std::thread::sleep(Duration::from_millis(450)); }
+            terminal.write_all(if raw { b"5" } else { b"5\n" }).unwrap();
+            preview = until(&mut terminal, "+++ result.txt");
+            assert!(preview.contains("Exact details:"), "{preview}");
+        }
         if !command_tool {
             for escaped in [
                 r"\u{200b}",

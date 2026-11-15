@@ -41,6 +41,32 @@ pub(super) fn load<'d>(b:&Backend<'d>,shape:Causal,bytes:&[u8])->Result<Absorbed
     Ok(Absorbed {shape,weight})
 }
 impl<'b,'d> Weights<'b,'d> {
+    pub fn memo_summary(&self,c:&CheckpointAdmission)->Option<crate::projection_memo::Summary> {
+        use engine_model::{plan::{description::TokenMixer,glm_index::{TensorRole,LatentTensor}},shapes::Place};
+        if self.identity!=Some(std::ptr::from_ref(c) as usize) {return None;}
+        let mut summary=crate::projection_memo::Summary::default();let mut seen=0usize;
+        for (name,matrix) in &self.matrices {
+            let binding=c.description().bind_tensor(name).ok()?;
+            if binding.operation!=TensorRole::Latent(LatentTensor::KvUp) {continue;}
+            seen+=1;if matrix.absorbed.is_some() {continue;}
+            let mixer=match binding.role.place {
+                Place::Layer(layer)=>c.description().layers.get(layer as usize)?.mixer,
+                Place::Draft {..}=>c.description().with_draft_layer().ok()??.layers.last()?.mixer,
+                _=>return None,
+            };
+            let TokenMixer::LatentAttention(a)=mixer else {return None;};
+            let width=a.key_dim.checked_add(a.value_dim)? as usize;
+            let latent=a.kv_rank as usize;
+            if width==0 || !matrix.rows.count.is_multiple_of(width) || matrix.cols!=latent {return None;}
+            let slots=a.indexer.token_budget.checked_add(if a.indexer.select_tail {a.indexer.pool.checked_sub(1)?} else {0})?;
+            summary.add(matrix.rows.count,matrix.cols,slots as usize,name.len())?;
+        }
+        let expected=c.description().layers.iter().filter(|l|matches!(l.mixer,TokenMixer::LatentAttention(_))).count();
+        (seen>=expected).then_some(summary)
+    }
+    pub fn names_ready(&self,names:&[String])->bool {names.iter().all(|name|self.matrices.contains_key(name))}
+    #[cfg(feature="kernel-bench")]
+    pub fn memo_packed_words(&self,name:&str)->Option<usize> {self.matrices.get(name).map(|m|m.rows.count/2)}
     pub fn absorb_rows(&self,name:&str,b:&Backend<'d>,shape:spark_gpu_probe::prompt_ops::Shape,query:&DeviceVector<'_>,latent:&DeviceVector<'_>,selected:&DeviceVector<'_>)->Result<DeviceVector<'d>> {
         use spark_gpu_probe::prompt_ops::{Op,Shape};
         let a=self.matrices.get(name).and_then(|m|m.absorbed.as_ref()).ok_or("absorbed projection is not resident")?;

@@ -1,6 +1,11 @@
 use super::*;
 use std::collections::VecDeque;
 use std::net::{Shutdown, TcpListener};
+#[path = "next_pp_test_clock.rs"]
+mod test_clock;
+use test_clock::slow_answer;
+#[path = "next_pp_heartbeat_tests.rs"]
+mod heartbeat_tests;
 
 fn prefetch_frame(id: u32, kind: u32, rows: &[f32]) -> Vec<u8> {
     let count = rows.len() / W;
@@ -857,6 +862,8 @@ pub(super) fn front(stream: TcpStream, limit: Duration) -> Link {
         limit,
         beats: 0,
         late: 0,
+        test_clock: None,
+        test_steps: None,
         floor: 1,
         mtp: false,
         kept: Vec::new(),
@@ -969,49 +976,6 @@ fn pp_reply_must_answer_its_own_request() {
     let e = link.exchange(KIND_POOLED, &[[1, 8, 2, 1]], &mut rows).unwrap_err();
     assert!(e.contains("out of order: id 2, expected 3"), "{e}");
     assert_eq!(back.join().unwrap(), 3);
-}
-
-/// A back that reads one pooled request, heartbeats every `beat` for `work`, then
-/// answers it (rows + 1) with the request's id.
-fn slow_answer(back: &mut TcpStream, beat: Option<Duration>, work: Duration, beat_id: Option<u32>) {
-    let mut request = vec![0u8; REQUEST_HEAD + 16 + W * 4];
-    assert!(read_message(back, &mut request, None, Duration::from_secs(5), true).unwrap());
-    let id = word(&request, 4);
-    let started = Instant::now();
-    while started.elapsed() < work {
-        match beat {
-            Some(period) => {
-                std::thread::sleep(period);
-                if back.write_all(&working_head(beat_id.unwrap_or(id))).is_err() {
-                    return;
-                }
-            }
-            None => std::thread::sleep(Duration::from_millis(10)),
-        }
-    }
-    let mut reply = Vec::new();
-    for v in [MAGIC_RESPONSE, 0, (W * 4) as u32, id] {
-        put(&mut reply, v);
-    }
-    let rows: Vec<f32> = request[REQUEST_HEAD + 16..].chunks(4).map(|c| f32::from_le_bytes(c.try_into().unwrap()) + 1.0).collect();
-    reply.extend_from_slice(f32_bytes(&rows));
-    let _ = back.write_all(&reply);
-}
-
-#[test]
-fn pp_heartbeats_keep_a_long_request_alive() {
-    // The back works 4x the limit but heartbeats: the reply arrives and is right.
-    let (near, mut far) = pair();
-    let limit = Duration::from_millis(200);
-    let mut link = front(near, limit);
-    let back = std::thread::spawn(move || slow_answer(&mut far, Some(beat_period(limit)), 4 * limit, None));
-    let mut rows = vec![1.5f32; W];
-    let started = Instant::now();
-    link.exchange(KIND_POOLED, &[[1, 8, 0, 1]], &mut rows).unwrap();
-    assert!(started.elapsed() >= 4 * limit);
-    assert!(rows.iter().all(|&v| v == 2.5));
-    assert!(link.beats >= 8, "beats {}", link.beats);
-    back.join().unwrap();
 }
 
 #[test]
@@ -1128,46 +1092,6 @@ fn pp_wire_reply_clock_starts_after_the_queued_acks() {
     assert!(started.elapsed() >= 3 * limit);
     assert!(rows.iter().all(|&v| v == 2.5));
     assert_eq!((link.carried, link.pending), (1, 0));
-    assert_eq!(back.join().unwrap(), 2);
-}
-
-#[test]
-fn pp_wire_heartbeats_keep_a_long_request_alive_and_late_ones_are_ignored() {
-    let (near, mut far) = pair();
-    let limit = Duration::from_millis(200);
-    let mut link = front(near, limit);
-    let (mine, mut theirs) = pipes();
-    link.fast = Some(Box::new(mine));
-    let back = std::thread::spawn(move || {
-        // Request 1 on the wire: 4x the limit, heartbeating on TCP; then a heartbeat of
-        // request 1 that the wire reply overtook; then request 2 (two rows: too big for
-        // the wire) on TCP.
-        assert_eq!(wire_answer(&mut theirs, &mut far, Some(beat_period(limit)), 4 * limit), 1);
-        std::thread::sleep(Duration::from_millis(100));
-        far.write_all(&working_head(1)).unwrap();
-        let mut request = vec![0u8; REQUEST_HEAD + 16 + 2 * W * 4];
-        assert!(read_message(&mut far, &mut request, None, Duration::from_secs(5), true).unwrap());
-        let id = word(&request, 4);
-        let mut reply = Vec::new();
-        for v in [MAGIC_RESPONSE, 0, (2 * W * 4) as u32, id] {
-            put(&mut reply, v);
-        }
-        reply.extend_from_slice(&request[REQUEST_HEAD + 16..]);
-        far.write_all(&reply).unwrap();
-        id
-    });
-    let mut rows = vec![1.5f32; W];
-    let started = Instant::now();
-    link.exchange(KIND_POOLED, &[[1, 8, 0, 1]], &mut rows).unwrap();
-    assert!(started.elapsed() >= 4 * limit);
-    assert!(rows.iter().all(|&v| v == 2.5));
-    assert!(link.beats >= 4, "beats {}", link.beats);
-    let mut two = vec![0.25f32; 2 * W];
-    link.exchange(KIND_ROWS, &[[1, 8, 1, 2]], &mut two).unwrap();
-    assert!(two.iter().all(|&v| v == 0.25));
-    // The planted late heartbeat, plus any the wire reply overtook while the front had
-    // not read the TCP link yet (it looks every 50 ms).
-    assert!(link.carried == 1 && link.late >= 1, "carried {} late {}", link.carried, link.late);
     assert_eq!(back.join().unwrap(), 2);
 }
 

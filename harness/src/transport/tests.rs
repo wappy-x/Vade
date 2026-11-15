@@ -4,6 +4,28 @@
     use std::thread;
 
     #[test]
+    fn direct_connections_always_bound_name_lookup_and_connect_together() {
+        let now = Instant::now();
+        assert_eq!(super::request::connect_deadline(None, now), now + CONNECT_TIMEOUT);
+        let earlier = now + Duration::from_millis(10);
+        assert_eq!(super::request::connect_deadline(Some(earlier), now), earlier);
+    }
+
+    #[test]
+    fn native_lookup_timeout_keeps_the_host_in_its_user_message() {
+        use crate::agent::{Conversation, Limits, Model};
+        let conversation = Conversation::from_request(json::parse(r#"{"model":"mock","messages":[{"role":"user","content":"hello"}]}"#).unwrap(), Limits::default()).unwrap();
+        let mut model = NativeModel::new("http://engine.invalid:80").unwrap();
+        resolve::with_lookup(Box::new(|_, _| Err(resolve::lookup_timeout("engine.invalid", false))), || {
+            let error = model.complete(conversation.request(Limits::default().wire), &AtomicBool::new(false), &mut |_| panic!("no tokens")).unwrap_err();
+            assert!(resolve::lookup_timed_out(&error));
+            let message = model.context().lookup_failure.as_ref().unwrap();
+            assert!(message.contains("Name lookup for engine.invalid did not finish"), "{message}");
+            assert!(!message.contains("engine did not answer"));
+        });
+    }
+
+    #[test]
     fn endpoint_rejects_tls_secrets_and_injection() {
         assert_eq!(
             Endpoint::parse("https://127.0.0.1:1").unwrap_err().kind(),

@@ -59,7 +59,16 @@ pub fn print_stdout(text: &str) -> ExitCode {
 }
 
 /// A next step for the common local-engine failures; never the raw error.
-pub fn error_hint(error: &io::Error) -> &'static str {
+pub fn error_hint(error: &io::Error) -> std::borrow::Cow<'static, str> {
+    use std::borrow::Cow;
+    if let Some(lookup) = error.get_ref().and_then(|e| e.downcast_ref::<crate::transport::resolve::LookupTimeout>()) {
+        let host: String = lookup.host.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':' )).take(253).collect();
+        return Cow::Owned(format!(" Name lookup for {host} did not finish before the request deadline. Check the name and resolver, then retry."));
+    }
+    Cow::Borrowed(error_hint_static(error))
+}
+
+fn error_hint_static(error: &io::Error) -> &'static str {
     if error.to_string().starts_with("cannot write replay statistics") {
         return " Replay stopped. Check the output destination. Inspect any --stats file before explicitly replaying remaining requests.";
     }
@@ -173,12 +182,19 @@ mod tests {
         ] {
             let error = io::Error::new(kind, "PRIVATE_URL?key=secret\x1b[2J");
             assert!(!error_hint(&error).trim().is_empty(), "{kind:?}");
-            for text in [error_hint(&error), error_category(&error)] {
+            for text in [error_hint(&error).as_ref(), error_category(&error)] {
                 assert!(!text.contains("PRIVATE"));
                 assert!(!text.contains("secret"));
                 assert!(!text.contains('\x1b'));
             }
         }
+    }
+    #[test]
+    fn lookup_timeout_names_the_host_and_does_not_blame_the_engine() {
+        let error = crate::transport::resolve::lookup_timeout("engine.invalid", false);
+        let message = error_hint(&error);
+        assert!(message.contains("Name lookup for engine.invalid did not finish"), "{message}");
+        assert!(!message.contains("engine did not answer"), "{message}");
     }
 }
 

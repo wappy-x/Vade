@@ -117,7 +117,11 @@ fn status_names_every_multi_spark_path_and_its_reason() {
 }
 
 /// `FakeRunner`, with one first start that the engine refuses for memory.
-struct RefusesOnce { inner: FakeRunner, refused: bool }
+struct RefusesOnce { inner: FakeRunner, refused: bool, log: &'static str }
+/// The FP4 engine's refusal of the long default context.
+const FP4_MEMORY_REFUSAL: &str = "Requested size does not fit.\n  Asked: CONTEXT=131072 OUTPUT=8192\n  Available: 1 GiB\n";
+/// The two-Spark text service's refusal of it, as rank 0 logs it (`flash-serve/text.rs`).
+const TEXT_MEMORY_REFUSAL: &str = "STARTUP rank=0 failed in step memory_admission after 3.1 s (23.6 s since the process started): text service memory refusal: CONTEXT=131072; budget=111627461837; resident=92304140296; shared_workspace=13365415224; session_pool=5957906317; full_session=10529525760; reduce CONTEXT\nFAIL text service memory refusal: CONTEXT=131072; budget=111627461837; resident=92304140296; shared_workspace=13365415224; session_pool=5957906317; full_session=10529525760; reduce CONTEXT\n";
 impl Runner for RefusesOnce {
     fn run(&mut self, exec: &Exec) -> Result<Output, String> {
         let request = text::parse(&String::from_utf8_lossy(&exec.stdin)).unwrap_or_default();
@@ -125,8 +129,7 @@ impl Runner for RefusesOnce {
         if op == Some("start") && !self.refused { self.inner.exit_on_health = Some("a".into()); }
         if op == Some("logs") && !self.refused {
             self.refused = true;
-            let log = "Requested size does not fit.\n  Asked: CONTEXT=131072 OUTPUT=8192\n  Available: 1 GiB\n";
-            return Ok(Output { success: true, stdout: text::encode(&Fields::from([("log".into(), log.into())])) });
+            return Ok(Output { success: true, stdout: text::encode(&Fields::from([("log".into(), self.log.into())])) });
         }
         self.inner.run(exec)
     }
@@ -211,7 +214,7 @@ fn a_running_engine_keeps_its_context_and_a_restart_keeps_it_too() {
 #[test]
 fn a_long_default_that_does_not_fit_falls_to_the_short_one_and_says_so() {
     let mut f = Fixture::fp4(2, false);
-    let mut app = App { config: f.app.config.clone(), dry: false, runner: RefusesOnce { inner: std::mem::take(&mut f.app.runner), refused: false } };
+    let mut app = App { config: f.app.config.clone(), dry: false, runner: RefusesOnce { inner: std::mem::take(&mut f.app.runner), refused: false, log: FP4_MEMORY_REFUSAL } };
     let capture = crate::output::testing::Capture::default();
     crate::output::with_writer(capture.clone(), || app.up(&fp4_options(&["--sparks", "2"]))).unwrap();
     let printed = String::from_utf8(capture.bytes.borrow().clone()).unwrap();
@@ -220,10 +223,39 @@ fn a_long_default_that_does_not_fit_falls_to_the_short_one_and_says_so() {
     assert_eq!(Session::load(&app.config.state_dir).unwrap().unwrap().context, 32768);
     // A size that the person named stays their choice: the refusal is the answer.
     let mut f = Fixture::fp4(2, false);
-    let mut app = App { config: f.app.config.clone(), dry: false, runner: RefusesOnce { inner: std::mem::take(&mut f.app.runner), refused: false } };
+    let mut app = App { config: f.app.config.clone(), dry: false, runner: RefusesOnce { inner: std::mem::take(&mut f.app.runner), refused: false, log: FP4_MEMORY_REFUSAL } };
     let error = app.up(&fp4_options(&["--sparks", "2", "--context", "131072"])).unwrap_err();
     assert!(error.contains("Requested size does not fit."), "{error}");
     assert!(Session::load(&app.config.state_dir).unwrap().is_none());
+}
+
+/// The text service words its refusal differently from the FP4 engine. A bare
+/// start of it must fall to the short context too, not stop at the refusal.
+#[test]
+fn a_text_service_start_that_does_not_fit_the_long_default_falls_to_the_short_one() {
+    let text = ["--sparks", "2", "--diagnostic-unqualified-text"];
+    let mut f = Fixture::fp4(2, false);
+    let mut app = App { config: f.app.config.clone(), dry: false, runner: RefusesOnce { inner: std::mem::take(&mut f.app.runner), refused: false, log: TEXT_MEMORY_REFUSAL } };
+    let capture = crate::output::testing::Capture::default();
+    crate::output::with_writer(capture.clone(), || app.up(&fp4_options(&text))).unwrap();
+    let printed = String::from_utf8(capture.bytes.borrow().clone()).unwrap();
+    assert!(printed.contains("Context 131072 does not fit in memory on these Sparks. Starting with context 32768.\n"), "{printed}");
+    let session = Session::load(&app.config.state_dir).unwrap().unwrap();
+    assert_eq!((session.context, session.diagnostic_unqualified_text), (32768, true));
+    // A size that the person named stays their choice: the refusal is the answer.
+    let mut f = Fixture::fp4(2, false);
+    let mut app = App { config: f.app.config.clone(), dry: false, runner: RefusesOnce { inner: std::mem::take(&mut f.app.runner), refused: false, log: TEXT_MEMORY_REFUSAL } };
+    let error = app.up(&fp4_options(&["--sparks", "2", "--context", "131072", "--diagnostic-unqualified-text"])).unwrap_err();
+    assert!(error.contains("text service memory refusal: CONTEXT=131072;"), "{error}");
+    assert!(Session::load(&app.config.state_dir).unwrap().is_none());
+    // Another text service stop is not a context refusal: no second start.
+    for log in ["text service needs 9 device bytes; budget=8; resident=1; session=1; reduce CONTEXT\n", "text service memory refusal: CONTEXT=32768; budget=1; resident=1; shared_workspace=1; session_pool=1; full_session=2; reduce CONTEXT\n"] {
+        let mut f = Fixture::fp4(2, false);
+        let mut app = App { config: f.app.config.clone(), dry: false, runner: RefusesOnce { inner: std::mem::take(&mut f.app.runner), refused: false, log } };
+        let capture = crate::output::testing::Capture::default();
+        crate::output::with_writer(capture.clone(), || app.up(&fp4_options(&text))).unwrap_err();
+        assert!(!String::from_utf8(capture.bytes.borrow().clone()).unwrap().contains("Starting with context"), "{log}");
+    }
 }
 
 /// The manifest of an older vade: one rank kept the folder of an earlier install.
@@ -312,6 +344,37 @@ fn up_status_and_doctor_hide_address_destinations_and_old_machine_names() {
     crate::evals::json::parse(&printed).unwrap();
 }
 
+/// The text service keeps prompts by default. `--cache-bytes 0` is this CLI's "cache off" and status prints it so:
+/// then every rank is started with the engine's off switch, once. Without it, or with a size above 0, no rank gets it.
+#[test]
+fn cache_bytes_zero_starts_every_text_rank_with_no_prompt_keep() {
+    let f=Fixture::fp4(2,false);
+    let text=["--sparks","2","--context","4096","--output","64","--diagnostic-unqualified-text"];
+    for (extra,off) in [(&["--cache-bytes","0"][..],1),(&[],0)] {
+        let options=fp4_options(&[&text[..],extra].concat());
+        let session=f.app.requested_session(&options,None,true).unwrap();assert_eq!(session.ranks.len(),2);
+        for at in 0..session.ranks.len() {
+            let args=session.engine_args(at);assert_eq!(args.iter().filter(|s|s.as_str()=="--no-prompt-keep").count(),off,"{extra:?} rank {at}");
+            assert!(!args.iter().any(|s|s=="--prompt-keep"),"{extra:?} rank {at}: the default needs no name");
+        }
+        if off==1 {assert_eq!(crate::app::retention_label(&session,None),"off (--cache-bytes 0)");}
+    }
+    // AN UPGRADE: a record that an older vade saved with cache_bytes=0 for this service. The record has no field of
+    // its own for prompt keep, so what an older vade wrote is what this one writes. Loaded again, every rank is
+    // started with the off switch: the user who turned the cache off keeps it off, and status still tells the truth.
+    let saved=f.app.requested_session(&fp4_options(&[&text[..],&["--cache-bytes","0"]].concat()),None,true).unwrap();
+    let record=saved.encode();assert!(record.contains("cache_bytes") && !record.contains("prompt_keep") && !record.contains("prompt-keep"),"{record}");
+    saved.save(&f.app.config.state_dir).unwrap();
+    let loaded=Session::load(&f.app.config.state_dir).unwrap().unwrap();assert_eq!((loaded.cache_bytes,loaded.diagnostic_unqualified_text),(Some(0),true));
+    for at in 0..loaded.ranks.len() {assert_eq!(loaded.engine_args(at),saved.engine_args(at));assert_eq!(loaded.engine_args(at).iter().filter(|s|s.as_str()=="--no-prompt-keep").count(),1,"rank {at} of the loaded record");}
+    assert_eq!(crate::app::retention_label(&loaded,None),"off (--cache-bytes 0)");
+    // A size above 0 never sets this cache: refused, with the way to turn it off.
+    let refused=f.app.requested_session(&fp4_options(&[&text[..],&["--cache-bytes","1073741824"]].concat()),None,true).unwrap_err();
+    assert!(refused.contains("--cache-bytes 0") && refused.contains("--diagnostic-unqualified-text"),"{refused}");
+    // Only the text service has this switch: a normal start with --cache-bytes 0 never gets it.
+    let plain=f.app.requested_session(&fp4_options(&["--cache-bytes","0"]),None,true).unwrap();
+    for at in 0..plain.ranks.len() {assert!(!plain.engine_args(at).iter().any(|s|s=="--no-prompt-keep"));}
+}
 #[test]
 fn diagnostic_text_opt_in_persists_but_bare_up_does_not_reuse_it() {
     let f=Fixture::fp4(2,false);

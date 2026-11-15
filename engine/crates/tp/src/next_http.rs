@@ -128,7 +128,7 @@ impl<'a, S: Causal> Runtime<'a, S> {
         }
         result
     }
-    fn chunk(&mut self, id: u64, tokens: &[u32], head: bool) -> Result<u32> {
+    fn validate_chunk(&self, id: u64, tokens: &[u32]) -> Result<()> {
         if tokens.is_empty()
             || tokens.len() > CHUNK_MAX
             || tokens.iter().any(|&t| t as usize >= self.vocab)
@@ -139,6 +139,10 @@ impl<'a, S: Causal> Runtime<'a, S> {
         {
             return Err("invalid_request_error: Next chunk outside admission limits".into());
         }
+        Ok(())
+    }
+    fn chunk(&mut self, id: u64, tokens: &[u32], head: bool) -> Result<u32> {
+        self.validate_chunk(id, tokens)?;
         let s = self.sessions.get_mut(&id).unwrap();
         let t = s.0.chunk(tokens, head)?;
         if t as usize >= self.vocab {
@@ -368,6 +372,7 @@ impl<'a, C: Commands, S: Causal> Engine<'a, C, S> {
         if tokens.is_empty() || tokens.len() > CHUNK_MAX {
             return Err("invalid Next chunk".into());
         }
+        self.runtime.borrow().validate_chunk(id, tokens)?;
         let result = (|| {
             let mut c = self.commands.borrow_mut();
             let timer = crate::next_timing::start();

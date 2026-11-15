@@ -18,6 +18,18 @@ enum Lookup {
     Found(u64, u64),
 }
 
+fn same_device(a: u64, b: u64) -> bool {
+    a == b
+}
+
+/// Whether a flipped-name lookup in the parent folder speaks for `device`.
+/// The entry and its parent folder must both be on `device`. A mount point
+/// reports the mounted device for the entry, but its parent folder is on
+/// another device, so that parent says nothing about this disk.
+fn root_name_probe_usable(device: u64, entry_dev: u64, parent_dev: u64) -> bool {
+    same_device(entry_dev, device) && same_device(parent_dev, device)
+}
+
 fn flip(name: &str) -> String {
     name.chars()
         .map(|c| if c.is_ascii_uppercase() { c.to_ascii_lowercase() } else { c.to_ascii_uppercase() })
@@ -112,7 +124,8 @@ impl Workspace {
                 break;
             };
             let Ok(meta) = std::fs::symlink_metadata(path) else { break };
-            if meta.dev() != device {
+            let Ok(up_meta) = std::fs::symlink_metadata(up) else { break };
+            if !root_name_probe_usable(device, meta.dev(), up_meta.dev()) {
                 break;
             }
             if !name.bytes().any(|b| b.is_ascii_alphabetic()) {
@@ -130,6 +143,7 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
+    use super::{root_name_probe_usable, same_device};
     use crate::tools::Workspace;
     use std::fs;
     use std::path::PathBuf;
@@ -166,5 +180,16 @@ mod tests {
         assert_eq!(Workspace::new(&empty.0).unwrap().same_entry(&[], "Abc", "abc").unwrap(), Some(folds));
         assert_eq!(fs::read_dir(&empty.0).unwrap().count(), 0);
         assert_eq!(fs::read_dir(&f.0).unwrap().count(), 1);
+    }
+    #[test]
+    fn root_name_probe_skips_a_parent_on_another_device() {
+        // A mount point reports the mounted device for the entry itself,
+        // but its parent folder is on the host device. That parent says
+        // nothing about this disk, so the probe must not use it.
+        assert!(!root_name_probe_usable(7, 7, 3));
+        assert!(root_name_probe_usable(7, 7, 7));
+        assert!(!root_name_probe_usable(7, 3, 7));
+        assert!(same_device(7, 7));
+        assert!(!same_device(7, 3));
     }
 }

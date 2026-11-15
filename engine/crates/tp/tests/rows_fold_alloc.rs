@@ -33,6 +33,8 @@ impl Compute for Measuring {
     fn rows_greedy(&self,_:&Self::Value,_:usize)->spark_tp::Result<Option<Vec<u32>>> {Ok(None)}
     fn routes_rows(&self,m:usize)->bool {(3..=BATCH_ROWS).contains(&m)}
     fn folds_rows(&self,m:usize)->bool {self.routes_rows(m)}
+    fn latent_absorption_chats(&self,name:&str,s:spark_gpu_probe::prompt_ops::Shape,g:&[spark_tp::bounded_decoder::ChatGather<'_,Self::Value>],stride:usize,
+        q:&Self::Value,n:&Self::Value)->spark_tp::Result<Option<Self::Value>> {Host.latent_absorption_chats(name,s,g,stride,q,n)}
     fn rows_project_local(&self,_:&CheckpointAdmission,_:&str,_:&V,m:usize,_:bool)->spark_tp::Result<Option<V>> {
         // The rows are made before the window opens: they are the compute's, not the decoder's.
         let rows=vec![7.0;3*m];

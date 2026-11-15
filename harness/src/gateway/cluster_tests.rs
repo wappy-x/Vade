@@ -282,6 +282,33 @@ fn exchange(cluster: &Cluster, path: &str, body: &[u8]) -> Exchange {
     let _ = worker.join().unwrap(); // Truncation intentionally yields a relay error.
     response
 }
+
+#[test]
+fn resolver_capacity_timeout_keeps_cluster_health_and_sends_no_request() {
+    let (mocks, cluster) = setup(RoutingConfig::default());
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let server_cluster = cluster.clone();
+    let worker = thread::spawn(move || transport::resolve::with_lookup(Box::new(|_, _| {
+        Err(transport::resolve::lookup_timeout("engine.invalid", true))
+    }), || handle_target(listener.accept().unwrap().0, &Upstream::Cluster(server_cluster), None,
+        &ConnectionPool::default(), &Access::default())));
+    let response = exchange_at(address, CHAT, &request(Some("local-limit"), "first", false, false));
+    worker.join().unwrap().unwrap();
+    assert_eq!(response.status, 502);
+    assert!(response.complete);
+    assert_eq!(mocks.iter().map(Mock::count).sum::<usize>(), 0);
+    for stats in &cluster.stats().endpoints {
+        assert!(stats.healthy && !stats.cooling_down);
+        assert_eq!(stats.failures, 0);
+    }
+    // Capacity pressure during a later health probe also leaves prior health intact.
+    transport::resolve::with_lookup(Box::new(|_, _| Err(transport::resolve::lookup_timeout("engine.invalid", true))), || {
+        cluster.refresh(0, &AtomicBool::new(false));
+    });
+    assert!(cluster.stats().endpoints[0].healthy);
+    assert_eq!(cluster.stats().endpoints[0].probe_failures, 0);
+}
 fn request(key: Option<&str>, conversation: &str, later: bool, stream: bool) -> Vec<u8> {
     format!(r#"{{ "temperature":0, "seed":42, "top_p":1, "model":"mock", "tools":[{{"type":"function","function":{{"name":"read"}}}}], {} "messages":[{{"role":"system","content":"fixed rules"}},{{"role":"user","content":{}}}{}], "stream":{}, "vendor":{{"number":1.00e+0}} }}"#,
         key.map_or(String::new(), |k| format!("\"prompt_cache_key\":{},", json::quote(k))), json::quote(conversation),
@@ -811,4 +838,51 @@ fn one_upstream_relays_checkpoint_release_unchanged() {
     assert_eq!((answer.status, answer.complete), (200, true));
     assert_eq!(answer.body, br#"{"released":true,"handle":"h1"}"#);
     assert_eq!(seen_at(&mock, "/v1/kv/release"), vec![body.to_vec()]);
+}
+
+#[test]
+fn core_refusal_is_502_and_logs_once() {
+    let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = Endpoint::parse(&format!("http://{}", upstream.local_addr().unwrap())).unwrap();
+    let (_, logs) = crate::http_policy::testing::remote(false, || {
+        for _ in 0..3 {
+            let gateway = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = gateway.local_addr().unwrap();
+            let client = thread::spawn(move || {
+                let mut c = TcpStream::connect(address).unwrap();
+                c.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                c.write_all(b"GET /v1/models HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+                let mut reply = String::new(); c.read_to_string(&mut reply).unwrap(); reply
+            });
+            handle_target(gateway.accept().unwrap().0, &Upstream::Single(endpoint.clone()), None, &ConnectionPool::default(), &Access::default()).unwrap();
+            let reply = client.join().unwrap();
+            assert!(reply.starts_with("HTTP/1.1 502") && reply.contains("--allow-plain-http"), "{reply}");
+            let mut bytes = Vec::new(); upstream.accept().unwrap().0.read_to_end(&mut bytes).unwrap(); assert!(bytes.is_empty());
+        }
+    });
+    assert_eq!(logs.len(), 1);
+    assert!(logs[0].contains("ssh -N -L"));
+}
+
+#[test]
+fn refused_cluster_probe_preserves_the_reason() {
+    let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", upstream.local_addr().unwrap());
+    let cluster = Cluster::new(&[url], RoutingConfig::default()).unwrap();
+    let (_, logs) = crate::http_policy::testing::remote(false, || {
+        cluster.refresh(0, &AtomicBool::new(false));
+        let gateway = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = gateway.local_addr().unwrap();
+        let client = thread::spawn(move || {
+            let mut c = TcpStream::connect(address).unwrap();
+            c.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            c.write_all(b"GET /v1/models HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+            let mut reply = String::new(); c.read_to_string(&mut reply).unwrap(); reply
+        });
+        handle_target(gateway.accept().unwrap().0, &Upstream::Cluster(cluster), None, &ConnectionPool::default(), &Access::default()).unwrap();
+        let reply = client.join().unwrap();
+        assert!(reply.starts_with("HTTP/1.1 502") && reply.contains("--allow-plain-http"), "{reply}");
+    });
+    assert_eq!(logs.len(), 1);
+    let mut bytes = Vec::new(); upstream.accept().unwrap().0.read_to_end(&mut bytes).unwrap(); assert!(bytes.is_empty());
 }

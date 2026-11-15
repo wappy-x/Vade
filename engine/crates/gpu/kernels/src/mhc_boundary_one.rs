@@ -10,6 +10,8 @@
 //!    the gates and Sinkhorn while the other seven warps collapse and norm (collapse needs only `pre`).
 //! Every product is `mul.rn.f32` and every sum `add.rn.f32` (no fused multiply-add); padded features add
 //! +0.0, which leaves a strip that starts at +0.0 unchanged.
+//! The phase entries cut this same body at its meetings. They give each row private scratch
+//! and use ordered launches for visibility. They do not change the arithmetic within a row.
 use crate::mhc_params::{FusedBoundary,FUSED_BLOCKS,FUSED_THREADS,FUSED_STAGE_BYTES,FUSED_STRIP_WORDS,FUSED_SUMS,FUSED_STAMPS_AT,FUSED_STAMP_SLOTS};
 use crate::{mhc_math as math,strip_warp::{add,mul}};
 use core::arch::asm;
@@ -49,21 +51,31 @@ macro_rules! wait_count {($counter:expr,$target:expr)=>{{
 #[inline(always)]
 fn word(bits:u32)->f32 {f32::from_bits(bits)}
 
-macro_rules! fused_body {($arg:expr)=>{{let f:FusedBoundary=$arg;let p=f.boundary;
+macro_rules! fused_body {($arg:expr,$phase:expr)=>{{let mut f:FusedBoundary=$arg;
+    let block=core::arch::nvptx::_block_idx_x() as usize;
+    let k=if $phase==0 {block} else {
+        let blocks=if $phase==3 {1} else {FUSED_BLOCKS};let row=block/blocks;
+        if row>=f.boundary.shape.rows as usize {core::arch::nvptx::trap();}
+        f=crate::mhc_params::fused_row(f,row);f.scratch+=4*(row*crate::mhc_params::FUSED_SCRATCH_WORDS) as u64;
+        block%blocks
+    };
+    let p=f.boundary;
     // SAFETY contract (the callers wrap this body in one unsafe block):
-    // The host binder (ResidentMhcBoundary::submit_fused) admits only fused_admitted shapes (one row,
-    // streams <= 4, a strip's planes fit the shared areas), checks every plane extent, alias and
-    // context, keeps every owner live through the ordered consumer, and launches exactly
-    // FUSED_BLOCKS x FUSED_THREADS (anything else traps). All FUSED_BLOCKS blocks are resident together
-    // (32 blocks of 31 KB shared on a 48-SM device), so the spin of meeting 1 ends. Block k writes only the
+    // The host binder admits fused_admitted geometry per row, checks whole plane extents, aliases and
+    // context, and keeps owners live through the ordered consumer. Phase 0 has one row and FUSED_BLOCKS
+    // blocks. Phases 1/2 have rows*FUSED_BLOCKS blocks; phase 3 has rows blocks. All use FUSED_THREADS.
+    // The row mapping above selects disjoint plane and scratch extents. Ordered phase launches replace
+    // cross-block meetings. Only phase 0 spins: its FUSED_BLOCKS blocks must be resident together.
+    // Block k writes only the
     // residual and mixing words of strip k, scratch word FUSED_SUMS + k and the words FUSED_SUMS + 32 + 32 r + k;
-    // the last block alone writes coefficients, collapsed, partials, output and resets both counters.
+    // in phase 0 the last block writes coefficients, collapsed, partials and output, then resets both counters.
+    // Phase 3 has one block per row for those outputs. The separate phases do not use or reset the counters.
     // The previous residual and coefficients are read only when present, inside their checked extents (wide, count).
     // Shared memory: the stage holds at most fused_stage_fits bytes of weights (checked by the binder),
     // later the collapsed plane (hidden <= FUSED_STAGE_BYTES / 4). Every barrier is reached by every thread
     // of the block (bar 1 by exactly warps 1..7); full-mask shuffles run in complete warps.
     {
-        let k=core::arch::nvptx::_block_idx_x() as usize;let thread=core::arch::nvptx::_thread_idx_x() as usize;
+        let thread=core::arch::nvptx::_thread_idx_x() as usize;let lane=thread%32;
         if k>=FUSED_BLOCKS || core::arch::nvptx::_block_dim_x() as usize!=FUSED_THREADS {asm!("trap;");}
         let shape=p.shape;let wide=shape.wide();let count=shape.coefficients();let streams=shape.streams as usize;let hidden=shape.hidden as usize;
         let periods=wide.div_ceil(256);let terms=periods*8;
@@ -81,7 +93,9 @@ macro_rules! fused_body {($arg:expr)=>{{let f:FusedBoundary=$arg;let p=f.boundar
         // issued before any arithmetic or store, so they share one memory round trip.
         let residual=p.residual as *mut f32;let input=p.input as *const f32;
         let (last,coefficients)=(p.previous_input as *const f32,p.previous_coefficients as *const f32);
+        if $phase<=2 {
         let mut held=[0.0f32;3];let mut last_words=[[0.0f32;4];3];let mut mixes=[[0.0f32;5];3];
+        if $phase!=2 {
         crate::strip_warp::unroll!(3,m,{let i=thread+m*FUSED_THREADS;if i<terms {let j=(i/8)*256+k*8+i%8;if j<wide {
             if !previous {held[m]=*input.add(j);} else {
                 let destination=(j as u32/hidden as u32) as usize;let d=j-destination*hidden;held[m]=*input.add(d);
@@ -89,25 +103,26 @@ macro_rules! fused_body {($arg:expr)=>{{let f:FusedBoundary=$arg;let p=f.boundar
                 mixes[m][4]=*coefficients.add(streams+destination);
             }
         }}});
-        if f.bf16!=0 {
+        }
+        if f.bf16!=0 && $phase!=1 {
             let chunks=periods*count;let source=(f.strips as *const u8).add(k*chunks*16);
             let mut c=thread;while c<chunks {crate::ptx::copy16(smem+(c*16) as u32,source.add(c*16).cast());c+=FUSED_THREADS;}
             crate::ptx::commit();
         }
         crate::strip_warp::unroll!(3,m,{let i=thread+m*FUSED_THREADS;if i<terms {let j=(i/8)*256+k*8+i%8;
-            let x=if j>=wide {0.0f32} else if !previous {crate::bf16::rounded(held[m])} else {
+            let x=if j>=wide {0.0f32} else if $phase==2 {*residual.add(j)} else if !previous {crate::bf16::rounded(held[m])} else {
                 let mut total=0.0f32;
                 crate::strip_warp::unroll!(4,src,{if src<streams {add!(total,mul!(crate::bf16::rounded(mixes[m][src]),last_words[m][src]));}});
                 let block=crate::bf16::rounded(mul!(crate::bf16::rounded(mixes[m][4]),crate::bf16::rounded(held[m])));
                 crate::bf16::rounded(sum!(crate::bf16::rounded(total),block))
             };
-            if j<wide {*residual.add(j)=x;}
+            if j<wide && $phase!=2 {*residual.add(j)=x;}
             crate::ptx::store(smem+X+(i*4) as u32,x);
         }});
         core::arch::nvptx::_syncthreads();
         if thread==0 {stamp!(mine,1);}
         // 2. The RMS strip: one ascending chain. Meeting 1.
-        if thread==0 {
+        if thread==0 && $phase!=2 {
             let mut s=0.0f32;let mut i=0;
             while i<terms {
                 let a=crate::ptx::load4(smem+X+(i*4) as u32);let b=crate::ptx::load4(smem+X+(i*4+16) as u32);
@@ -115,12 +130,20 @@ macro_rules! fused_body {($arg:expr)=>{{let f:FusedBoundary=$arg;let p=f.boundar
                 crate::strip_warp::unroll!(4,e,{add!(s,mul!(word(b[e]),word(b[e])));});
                 i+=8;
             }
-            *sums.add(k)=s;stamp!(mine,2);arrive!(counters);wait_count!(counters,FUSED_BLOCKS as u32);asm!("fence.acq_rel.gpu;");stamp!(mine,3);
+            *sums.add(k)=s;stamp!(mine,2);
+            if $phase==0 {arrive!(counters);wait_count!(counters,FUSED_BLOCKS as u32);asm!("fence.acq_rel.gpu;");stamp!(mine,3);}
         }
+        if $phase==1 {return;}
         core::arch::nvptx::_syncthreads();
         if thread<32 {
             let squares=crate::reduction::warp_root(load_cg!(sums.add(thread)));
-            if thread==0 {crate::ptx::store(smem+MISC,1.0/crate::qsa_common::root(squares/wide as f32+shape.rms_eps));}
+            if thread==0 {
+                // Pin quotient, epsilon order in direct and recorded entries. LLVM can commute a Rust add.
+                // Shape validation does not exclude NaN intermediates. Do not assume NaN words commute.
+                let shifted:f32;
+                asm!("add.rn.f32 {out}, {mean}, {eps};",out=out(reg32)shifted,mean=in(reg32)(squares/wide as f32),eps=in(reg32)shape.rms_eps,options(pure,nomem,nostack));
+                crate::ptx::store(smem+MISC,1.0/crate::qsa_common::root(shifted));
+            }
         }
         core::arch::nvptx::_syncthreads();
         // 3. y = x * inverse for this strip (the mixing plane), then one strip chain a coefficient row.
@@ -162,7 +185,10 @@ macro_rules! fused_body {($arg:expr)=>{{let f:FusedBoundary=$arg;let p=f.boundar
             }
             *sums.add(32+row*32+k)=s;
         }
-        // 4. Meeting 2: the last block finishes the boundary.
+        if $phase==2 {return;}
+        }
+        // 4. Meeting 2: the last block finishes the boundary. Ordered phases use one block per row.
+        if $phase==0 {
         core::arch::nvptx::_syncthreads();
         if thread==0 {stamp!(mine,5);for slot in 6..FUSED_STAMP_SLOTS {*mine.add(slot)=0;}}
         if thread==0 {let old=arrive!(counters.add(1));crate::ptx::store(smem+MISC+4,if old as usize+1==FUSED_BLOCKS {1.0} else {0.0});}
@@ -172,6 +198,7 @@ macro_rules! fused_body {($arg:expr)=>{{let f:FusedBoundary=$arg;let p=f.boundar
         core::arch::nvptx::_syncthreads();
         // Every block has passed meeting 1 (it arrived at meeting 2 after it), so both counters may rest at 0.
         if thread==0 {*counters=0;*counters.add(1)=0;}
+        }
         // Fast tail (hidden a multiple of 4, at most 5 quads a worker): every residual quad and norm-weight quad a
         // worker needs is loaded now, in one batch, while warp 0 joins the rows.
         let workers=FUSED_THREADS-32;let quads=hidden/4;let fast=hidden%4==0 && quads<=5*workers;
@@ -300,11 +327,21 @@ macro_rules! fused_body {($arg:expr)=>{{let f:FusedBoundary=$arg;let p=f.boundar
 #[no_mangle]
 pub extern "ptx-kernel" fn mhc_boundary_fused(f:FusedBoundary) {
     // SAFETY: The contract is the comment at the head of fused_body. The launch binder checks the arguments.
-    unsafe {fused_body!(f)}
+    unsafe {fused_body!(f,0)}
 }
-/// Replay the unchanged fused body with the original grid and checked arguments.
+/// Replay the fused body, or its ordered phases, with checked arguments.
 #[inline(always)]
-pub(crate) fn resident_mhc_boundary_fused(f:FusedBoundary) {
+pub(crate) fn resident_mhc_boundary_fused<const PHASE:u32>(f:FusedBoundary) {
     // SAFETY: The contract is the comment at the head of fused_body. The resident program checks the arguments before the replay.
-    unsafe {fused_body!(f)}
+    // PHASE 0 uses the original grid and counters. Phases 1, 2, and 3 use
+    // checked row planes and private scratch. Each block owns one row's strip
+    // or final fold. The stream completes each phase before the next reads it.
+    // All owners survive completion. Block barriers and shuffles stay unchanged.
+    unsafe {fused_body!(f,PHASE)}
 }
+#[no_mangle]
+pub extern "ptx-kernel" fn mhc_boundary_phase_rms(f:FusedBoundary) {resident_mhc_boundary_fused::<1>(f)}
+#[no_mangle]
+pub extern "ptx-kernel" fn mhc_boundary_phase_dots(f:FusedBoundary) {resident_mhc_boundary_fused::<2>(f)}
+#[no_mangle]
+pub extern "ptx-kernel" fn mhc_boundary_phase_finish(f:FusedBoundary) {resident_mhc_boundary_fused::<3>(f)}

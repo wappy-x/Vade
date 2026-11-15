@@ -21,6 +21,65 @@ fn web_schemas_and_launch_policy_apply_to_saved_calls() {
     }
 }
 #[test]
+fn a_secret_file_read_asks_and_a_secret_file_write_is_refused() {
+    let f = Fixture::new(); f.write("token.txt", "FAKE_TEST_TOKEN"); let w = f.workspace();
+    let mut prompts = Vec::new();
+    let mut tools = CodingTools::new(&w, ApprovalPolicy::Ask, |preview: Preview<'_>, _: &AtomicBool| {
+        if preview.approval_required { prompts.push((preview.title.to_owned(), preview.detail.to_owned(), preview.details.map(str::to_owned))); }
+        true
+    });
+    let raw = r#"{"path":"token.txt"}"#; let args = json::parse(raw).unwrap();
+    let call = ToolCall { id: "secret-read".into(), name: "workspace_read".into(), arguments: raw.into() };
+    let output = tools.execute(ToolInvocation { call: &call, arguments: &args, max_output_bytes: 4096 }, &AtomicBool::new(false)).unwrap();
+    drop(tools);
+    assert!(output.contains("FAKE_TEST_TOKEN"));
+    assert_eq!(prompts.len(), 1);
+    assert!(prompts[0].0 == "Secret file read" && prompts[0].1.contains("Your turn.  1  Yes, one time\n            2  No, leave it unread") && prompts[0].1.contains("token.txt") && prompts[0].2.is_none());
+    let patch = "*** Begin Patch\n*** Update File: token.txt\n@@\n-FAKE_TEST_TOKEN\n+CHANGED\n*** End Patch";
+    let error = match crate::edit::prepare(&w, patch) { Ok(_) => panic!("secret patch accepted"), Err(error) => error.to_string() };
+    assert!(error.contains("Secret-path write refused"), "{error}");
+    assert_eq!(f.read("token.txt"), "FAKE_TEST_TOKEN");
+}
+#[test]
+fn hidden_credential_reads_use_the_same_explicit_approval_route() {
+    for path in [".netrc", ".npmrc", ".pypirc", ".git-credentials", ".vault-token", ".gcloud/item"] {
+        let f = Fixture::new();
+        if let Some(parent) = std::path::Path::new(path).parent().filter(|parent| !parent.as_os_str().is_empty()) {
+            std::fs::create_dir_all(f.0.join(parent)).unwrap();
+        }
+        f.write(path, "SYNTHETIC_PRIVATE_MARKER");
+        let w = f.workspace();
+        let mut prompts = 0;
+        let mut tools = CodingTools::new(&w, ApprovalPolicy::Ask, |preview: Preview<'_>, _: &AtomicBool| {
+            if preview.approval_required {
+                prompts += 1;
+                assert!(preview.detail.starts_with("Vade wants to read this file") && preview.detail.contains("Your turn."));
+            }
+            true
+        });
+        let args = Value::Object(vec![("path".into(), Value::String(path.into()))]);
+        let call = ToolCall { id: "hidden-secret-read".into(), name: "workspace_read".into(), arguments: json::stringify(&args).unwrap() };
+        let output = tools.execute(ToolInvocation { call: &call, arguments: &args, max_output_bytes: 4096 }, &AtomicBool::new(false)).unwrap();
+        assert_eq!(prompts, 1, "{path}");
+        assert!(output.contains("SYNTHETIC_PRIVATE_MARKER"), "{path}: {output}");
+    }
+}
+#[test]
+fn invalid_secret_path_is_refused_before_an_approval() {
+    let f = Fixture::new();
+    let w = f.workspace();
+    let mut prompts = 0;
+    let mut tools = CodingTools::new(&w, ApprovalPolicy::Ask, |preview: Preview<'_>, _: &AtomicBool| {
+        prompts += usize::from(preview.approval_required);
+        true
+    });
+    let args = Value::Object(vec![("path".into(), Value::String(".env/../visible".into()))]);
+    let call = ToolCall { id: "invalid-secret-read".into(), name: "workspace_read".into(), arguments: json::stringify(&args).unwrap() };
+    let output = tools.execute(ToolInvocation { call: &call, arguments: &args, max_output_bytes: 4096 }, &AtomicBool::new(false)).unwrap();
+    assert_eq!(prompts, 0);
+    assert!(output.starts_with("Read refused:"), "{output}");
+}
+#[test]
 fn line_edits_guard_visible_ranges_and_retain_exact_bytes() {
     for old in ["", "α\r\nβ", "one\ntwo\n", "🦀"] {
         let f = Fixture::new(); f.write("source", old); let w = f.workspace();
@@ -137,7 +196,7 @@ fn malformed_update_feedback_contains_a_short_actionable_change() {
     }
     let f = Fixture::new(); f.write("seed.rs", "old\n"); let w = f.workspace();
     let mut approvals = 0;
-    let mut tools = CodingTools::new(&w, ApprovalPolicy::Ask, |preview: Preview<'_>, _: &AtomicBool| { if preview.approval_required { approvals += 1; assert_eq!(f.read("seed.rs"), "old\n"); } true });
+    let mut tools = CodingTools::new(&w, ApprovalPolicy::Ask, |preview: Preview<'_>, _: &AtomicBool| { if preview.approval_required { approvals += 1; assert_eq!(f.read("seed.rs"), "old\n"); assert!(preview.detail.contains("Your turn.  1  Yes, one time\n            2  No,")); assert!(preview.detail.starts_with("Vade wants to change 1 file") && !preview.detail.contains("-old")); assert!(preview.detail.contains("A wrong change can overwrite or delete your work.") && preview.detail.ends_with("5  Show the exact change")); assert!(preview.details.is_some_and(|details| details.contains("-old") && details.contains("+new"))); } true });
     let mut c = Conversation::from_request(json::parse(r#"{"tools":[{"type":"function","function":{"name":"apply_patch"}}],"messages":[{"role":"user","content":"edit seed.rs"}]}"#).unwrap(), Limits::default()).unwrap();
     let report = agent::run(&mut c, &mut Replay(0), &mut tools, Limits::default(), &AtomicBool::new(false), &mut |_| {});
     assert_eq!(report.reason, agent::StopReason::Finished(crate::agent_wire::FinishReason::Stop));
@@ -167,7 +226,7 @@ fn patch_failure_distinguishes_preflight_from_partial_writes() {
             &w,
             ApprovalPolicy::Ask,
             |preview: Preview<'_>, _: &AtomicBool| {
-                if (!partial && preview.title == "Patch preview")
+                if (!partial && preview.title == "Workspace change")
                     || (partial && preview.title == "File written")
                 {
                     f.write("b", "concurrent\n");
@@ -270,6 +329,7 @@ fn workspace_shell_builds_and_tests_real_std_only_crate_offline() {
             .args(["--exact", "coding_tools::tests::workspace_shell_builds_and_tests_real_std_only_crate_offline", "--nocapture"])
             .env_clear()
             .env(MARKER, VALUE)
+            .env("DEVELOPER_DIR", "/nonexistent/Fake.app/Contents/Developer")
             .output().unwrap();
         assert!(
             output.status.success(),
@@ -279,6 +339,7 @@ fn workspace_shell_builds_and_tests_real_std_only_crate_offline() {
         );
         return;
     }
+    assert_eq!(std::env::var("DEVELOPER_DIR").unwrap(), "/nonexistent/Fake.app/Contents/Developer");
     // Positive control: the synthetic marker is in the unsandboxed test
     // process's argument/environment buffer. Never print that buffer.
     unsafe extern "C" {
@@ -362,12 +423,13 @@ fn adds_and_preserves_sandbox_privacy() {{
         ApprovalPolicy::Ask,
         |preview: Preview<'_>, _: &AtomicBool| {
             if preview.title == "Command" {
+                let details = preview.details.unwrap();
                 assert!(
-                    preview
-                        .detail
+                    details
                         .contains("private session build/cache/temp area")
                 );
-                // Every command asks by default; the fixture approves each.
+                assert!(preview.detail.contains("Your turn.  1  Yes, one time\n            2  No,"));
+                assert!(preview.details.is_some_and(|details| details.contains("argv=")) && preview.detail.contains("Your turn."));
                 assert!(preview.approval_required);
                 approvals += 1;
             }
@@ -413,9 +475,10 @@ fn adds_and_preserves_sandbox_privacy() {{
     let result = invoke(&[
         "/bin/sh",
         "-c",
-        "test -d \"$CARGO_TARGET_DIR/debug\" && test \"$CARGO_NET_OFFLINE\" = true && test \"$HOME\" != \"$PWD\" && ! cat target/alias && ! cat node_modules/alias && ! printf changed > target/alias",
+        "/usr/bin/env; test -d \"$CARGO_TARGET_DIR/debug\" && test \"$CARGO_NET_OFFLINE\" = true && test \"$HOME\" != \"$PWD\" && ! cat target/alias && ! cat node_modules/alias && ! printf changed > target/alias",
     ]);
     assert!(result.starts_with("status: Exited(Some(0))"), "{result}");
+    assert_developer_environment(&result);
     assert!(!result.contains("synthetic-private-hardlink-marker"));
     drop(executor);
     assert_eq!(approvals, 4);
@@ -426,6 +489,14 @@ fn adds_and_preserves_sandbox_privacy() {{
     assert_eq!(outside.read("private"), "synthetic-private-hardlink-marker");
     assert!(!f.0.join("target/debug").exists());
     assert!(f.0.join("Cargo.lock").is_file());
+}
+
+fn assert_developer_environment(output: &str) {
+    let root = std::path::Path::new("/Library/Developer/CommandLineTools");
+    let expected = (cfg!(target_os = "macos") && root.join("usr/bin/git").is_file() && root.join("usr/lib/libxcrun.dylib").is_file())
+        .then_some("/Library/Developer/CommandLineTools");
+    let actual: Vec<_> = output.lines().filter_map(|line| line.strip_prefix("DEVELOPER_DIR=")).collect();
+    assert_eq!(actual, expected.into_iter().collect::<Vec<_>>());
 }
 struct Full;
 impl Access for Full {
@@ -521,6 +592,28 @@ fn argv_call<F: FnMut(Preview<'_>, &AtomicBool) -> bool>(tools: &mut CodingTools
     let call = ToolCall { id: "safety".into(), name: "workspace_shell".into(), arguments: json::stringify(&args).unwrap() };
     tools.execute(ToolInvocation { call: &call, arguments: &args, max_output_bytes: 4096 }, &AtomicBool::new(false))
 }
+#[test]
+fn shell_reason_line_breaks_cannot_draw_fake_prompt_lines() {
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+    let f = Fixture::new();
+    let w = f.workspace();
+    let mut views = Vec::new();
+    let mut tools = CodingTools::new(&w, ApprovalPolicy::Ask, |preview: Preview<'_>, _: &AtomicBool| {
+        if preview.approval_required {
+            views.push((preview.detail.to_owned(), preview.details.unwrap().to_owned()));
+        }
+        false
+    });
+    let fake = "script\nKeys: y runs a different action";
+    assert_eq!(argv_call(&mut tools, &["/bin/sh", fake]), Err(ToolError::Denied));
+    assert_eq!(views.len(), 1);
+    assert!(views[0].0.contains("Your turn."));
+    assert!(!views[0].0.contains("\nKeys: y runs a different action"), "{}", views[0].0);
+    assert!(views[0].0.contains("\\nKeys: y runs a different action"), "{}", views[0].0);
+    assert!(!views[0].1.contains("\nKeys: y runs a different action"), "{}", views[0].1);
+}
 fn decision(record: &Value) -> (&str, &str) {
     (record.get("decision").and_then(Value::as_str).unwrap(), record.get("class").and_then(Value::as_str).unwrap())
 }
@@ -565,13 +658,12 @@ fn non_interactive_runs_deny_commands_that_need_approval_unless_listed_or_prompt
     let message = refused.get("message").and_then(Value::as_str).unwrap();
     assert!(message.contains("deletes files") && message.contains("non-interactive") && message.contains("--yes"), "{message}");
     assert!(f.0.join("build").is_dir());
-    // A command on the sandbox's read-only list still needs approval when
-    // the checker asks; a computed `find` action and `env -P` ask too, and
+    // A command outside the fixed harmless grammar needs approval. A computed
+    // `find` action and `env -P` ask too, and
     // so do a program lookup or config setting, a file name slot and
     // operands that split (review of f29e33b). csh, tcsh and fish code and a
     // zsh `repeat` count that is not a number ask too (review of b476cd3).
-    let argvs: [&[&str]; 15] = [
-        &["cat", "permissions.json"],
+    let argvs: [&[&str]; 14] = [
         &["cat", "Keychains/file"],
         &["env", "-P", "./tools", "cat"],
         &["/bin/sh", "-c", "action=-delete; find build \"$action\""],
@@ -595,15 +687,17 @@ fn non_interactive_runs_deny_commands_that_need_approval_unless_listed_or_prompt
     for marker in ["find-code-marker", "find-marker", "uniq-marker", "xargs-marker", "repeat-marker", "repeat-arg-marker"] {
         assert!(!f.0.join(marker).exists(), "{marker}");
     }
-    // By default read-only and build commands ask too. With the
+    // A fixed harmless form runs without a prompt. A shell script still asks
+    // by default. With the
     // experimental checker on, the commands it reads as safe run.
+    assert!(argv_call(&mut tools, &["true"]).unwrap().contains("exit_code: Some(0)"));
     let readonly = ["/bin/sh", "-c", "ls && git status --short 2>/dev/null; true"];
     assert!(argv_call(&mut tools, &readonly).unwrap().contains("approval_required"));
     none.set_checker(true);
     assert!(argv_call(&mut tools, &readonly).unwrap().contains("exit_code: Some(0)"));
     none.set_checker(false);
     drop(tools);
-    assert_eq!(log.0.iter().map(decision).collect::<Vec<_>>(), [("denied_no_terminal", "needs approval"); 17]);
+    assert_eq!(log.0.iter().map(decision).filter(|decision| *decision == ("denied_no_terminal", "needs approval")).count(), 16);
     // A project rule approves the same command without a terminal.
     let rules = f.0.join("rules.json");
     std::fs::write(&rules, shell::permissions::render(&[vec!["rm".into(), "-rf".into(), "build".into()]])).unwrap();
@@ -641,20 +735,24 @@ fn an_always_answer_for_the_session_skips_the_next_prompt() {
     let approvals = shell::permissions::Approvals::new(None, None, true).unwrap();
     let mut prompts = 0;
     let mut notes = Vec::new();
+    let mut prompt_names = std::collections::BTreeSet::new();
     let mut log = Decisions::default();
     let mut tools = CodingTools::new(&w, ApprovalPolicy::Ask, |preview: Preview<'_>, _: &AtomicBool| {
         if preview.approval_required {
             prompts += 1;
-            assert!(preview.detail.contains("s (this exact argv, for this session), p (this exact argv, in .vade/permissions.json)"), "{}", preview.detail);
-            // The prompt shows what runs: the folder, the whole environment
-            // (the list the command gets) and the timeout.
+            assert!(preview.detail.contains("3  Yes, until you close Vade (this exact command)") && preview.detail.contains("4  Yes, always in this project (this exact command)"), "{}", preview.detail);
+            // Key 5 keeps the folder, complete environment and timeout.
+            let details = preview.details.unwrap();
             let root = shell::visible_json(&[w.root().display().to_string()]);
-            assert!(preview.detail.contains(&format!("\nFolder: {root}\n")), "{}", preview.detail);
-            let environment = preview.detail.lines().find_map(|line| line.strip_prefix("Environment (only these; <build> is the session build folder): ")).unwrap();
+            assert!(details.contains(&format!("\nFolder: {root}\n")), "{details}");
+            let environment = details.lines().find_map(|line| line.strip_prefix("Environment (only these; <build> is the session build folder): ")).unwrap();
             let names: Vec<String> = crate::json::parse(environment).unwrap().as_array().unwrap().iter().map(|w| w.as_str().unwrap().split('=').next().unwrap().to_owned()).collect();
             assert_eq!(names[..3], ["LANG", "PATH", "HOME"]);
             assert!(names.contains(&"CARGO_NET_OFFLINE".to_owned()) && environment.contains("HOME=<build>/home"), "{environment}");
-            assert!(preview.detail.contains("timeout=20000ms") && !preview.detail.contains("Runs as:"), "{}", preview.detail);
+            prompt_names = names.into_iter().collect();
+            let words = crate::json::parse(environment).unwrap();
+            assert_developer_environment(&words.as_array().unwrap().iter().map(|word| word.as_str().unwrap()).collect::<Vec<_>>().join("\n"));
+            assert!(details.contains("timeout=20000ms") && !details.contains("Runs as:"), "{details}");
             approvals.choose(shell::permissions::Scope::Session);
         }
         if preview.title == "Allow list" {
@@ -669,12 +767,17 @@ fn an_always_answer_for_the_session_skips_the_next_prompt() {
     }
     // `touch one.txt` and `touch two.txt` are different exact rules.
     assert!(argv_call(&mut tools, &["touch", "one.txt"]).unwrap().contains("exit_code: Some(0)"));
+    let environment = argv_call(&mut tools, &["/usr/bin/env"]).unwrap();
+    assert!(environment.starts_with("status: Exited(Some(0))"), "{environment}");
+    assert_developer_environment(&environment);
     drop(tools);
-    assert_eq!(prompts, 2);
-    assert_eq!(notes.len(), 2);
+    let child_names: std::collections::BTreeSet<_> = environment.split_once("stdout:\n").unwrap().1.split_once("stderr:\n").unwrap().0.lines().filter(|line| !line.is_empty()).map(|line| line.split_once('=').unwrap().0.to_owned()).collect();
+    assert_eq!(child_names, prompt_names);
+    assert_eq!(prompts, 3);
+    assert_eq!(notes.len(), 3);
     assert_eq!(
         log.0.iter().map(decision).collect::<Vec<_>>(),
-        [("approved", "needs approval"), ("approved", "needs approval"), ("allowed_by_rule", "needs approval")]
+        [("approved", "needs approval"), ("approved", "needs approval"), ("allowed_by_rule", "needs approval"), ("approved", "needs approval")]
     );
     assert_eq!(log.0[0].get("rules").and_then(Value::as_array).unwrap(), [Value::String("session: touch one.txt".into())]);
     // A person's no is recorded too; the command does not run.
@@ -683,13 +786,14 @@ fn an_always_answer_for_the_session_skips_the_next_prompt() {
     assert_eq!(shell_call(&mut tools, "git push").unwrap_err(), ToolError::Denied);
     drop(tools);
     assert_eq!(log.0.iter().map(decision).collect::<Vec<_>>(), [("denied", "needs approval")]);
-    // A read-only command shows the fixed system form that really runs.
+    // A read-only command runs without approval and shows the fixed system
+    // form in its ordinary tool preview.
     let mut shown = String::new();
     let mut tools = CodingTools::new(&w, ApprovalPolicy::Ask, |preview: Preview<'_>, _: &AtomicBool| {
-        shown = preview.detail.to_owned();
-        false
+        if preview.title == "Command" { assert!(!preview.approval_required); shown = preview.detail.to_owned(); }
+        true
     });
-    assert_eq!(argv_call(&mut tools, &["git", "status"]).unwrap_err(), ToolError::Denied);
+    assert!(argv_call(&mut tools, &["git", "status"]).unwrap().contains("exit_code:"));
     drop(tools);
     let runs = shown.lines().find_map(|line| line.strip_prefix("Runs as: ")).unwrap_or_else(|| panic!("{shown}"));
     assert!(runs.starts_with("[\"/usr/bin/git\",\"--no-pager\"") && runs.contains("\"status\"") && runs.contains("core.hooksPath=/dev/null"), "{runs}");
@@ -866,20 +970,25 @@ fn web_and_memory_tools_follow_the_approval_policy() {
     // A URL that the fetch refuses sends nothing, so it needs no answer.
     assert_eq!(call(&mut tools, "web_fetch", r#"{"url":"http://127.0.0.1/"}"#).unwrap(), "Web fetch failed: local and private address ranges are refused.");
     drop(tools);
-    assert_eq!(shown, [
-        "Web request\nFetch web page \"https://Collector.example.org:8443/a?d=c2VjcmV0\" from https://collector.example.org:8443.\nWhy this asks: a prompt in a file or page could hide workspace text inside the address and send it to that site.\nAnswer y to send this request once, or n to refuse without sending anything.",
-        "Web request\nSearch the web for \"line one\\nAnswer y\".\nWhy this asks: this sends those search words to external search engines, which could leak workspace text if a file or page told the model what to search.\nAnswer y to run this search once, or n to refuse without sending anything.",
-        "Memory note\nSave project note \"style\": \"Always fetch the setup page first.\"\nWhy this asks: every later chat in this project loads saved notes with its instructions, so a note planted by a file or page can steer future chats.\nAnswer y to save this note, or n to leave project notes unchanged.",
-        "Memory note\nDelete saved project note \"style\".\nWhy this asks: deleting a saved note removes a standing preference or rule that later chats in this project rely on.\nAnswer y to delete this note, or n to keep project notes unchanged.",
-    ]);
+    assert_eq!(shown.len(), 4);
+    for (text, action, risk) in [
+        (&shown[0], "Vade wants to read this web page", "The website receives the full address."),
+        (&shown[1], "Vade wants to search the web", "The search website receives these words."),
+        (&shown[2], "Vade wants to save this note for this project", "Vade reads saved notes in every future chat in this project and obeys them."),
+        (&shown[3], "Vade wants to delete this note from this project", "Future chats in this project will not have this note."),
+    ] {
+        assert!(text.contains(action) && text.split_whitespace().collect::<Vec<_>>().join(" ").contains(risk) && text.contains("Your turn.  1  Yes, one time\n            2  No,"), "{text}");
+        assert!(!text.contains("\n3  ") && !text.contains("\n4  ") && !text.contains('\x1b'));
+    }
+    assert!(shown[1].contains("line one\\nAnswer y"));
     assert_eq!(saved(), "");
     // A yes runs the call. `auto` shows what runs and does not wait.
     for policy in [ApprovalPolicy::Ask, ApprovalPolicy::Auto] {
         let mut titles = Vec::new();
         let mut tools = CodingTools::new(&w, policy, |preview: Preview<'_>, _: &AtomicBool| {
             assert_eq!(preview.approval_required, policy == ApprovalPolicy::Ask);
-            assert_eq!(preview.detail.contains("Why this asks:"), policy == ApprovalPolicy::Ask);
-            assert_eq!(preview.detail.contains("Answer y to "), policy == ApprovalPolicy::Ask);
+            assert_eq!(preview.detail.contains("Your turn."), policy == ApprovalPolicy::Ask);
+            assert_eq!(preview.detail.contains("1  Yes, one time"), policy == ApprovalPolicy::Ask);
             titles.push(preview.title);
             true
         }).with_web(true).with_memory(true);
@@ -914,8 +1023,8 @@ fn web_requests_ask_per_target_and_refuse_without_a_terminal() {
     let (mut prompts, mut notices) = (Vec::new(), Vec::new());
     let mut tools = CodingTools::new(&w, ApprovalPolicy::Ask, |preview: Preview<'_>, _: &AtomicBool| {
         if preview.approval_required {
-            assert!(preview.detail.contains("\nWhy this asks: ") && preview.detail.ends_with(" for this session, or n to refuse without sending anything."), "{}", preview.detail);
-            prompts.push(preview.detail.lines().next().unwrap().to_owned());
+            assert!(preview.detail.contains("Your turn.") && preview.prompt.unwrap().choices.contains("3  Yes, until you close Vade (allow requests to "), "{}", preview.detail);
+            prompts.push(preview.detail.lines().nth(1).unwrap().to_owned());
             approvals.choose(if preview.detail.contains("once.example.org") { shell::permissions::Scope::Once } else { shell::permissions::Scope::Session });
         } else {
             notices.push(format!("{}: {}", preview.title, preview.detail.lines().last().unwrap()));
@@ -927,16 +1036,16 @@ fn web_requests_ask_per_target_and_refuse_without_a_terminal() {
     }
     drop(tools);
     assert_eq!(prompts, [
-        "Fetch web page \"https://docs.example.org/a\" from https://docs.example.org.",
-        "Fetch web page \"https://docs.example.org:8443/a\" from https://docs.example.org:8443.",
-        "Fetch web page \"https://once.example.org/a\" from https://once.example.org.",
-        "Fetch web page \"https://once.example.org/a\" from https://once.example.org.",
+        "■  https://docs.example.org/a",
+        "■  https://docs.example.org:8443/a",
+        "■  https://once.example.org/a",
+        "■  https://once.example.org/a",
     ]);
     assert_eq!(notices, [
         "Web approval: Requests to the site https://docs.example.org need no approval for the rest of this session.",
-        "Web request: Fetch web page \"https://DOCS.example.org/b?x=1\" from https://docs.example.org.",
+        "Web request: ■  https://DOCS.example.org/b?x=1",
         "Web approval: Requests to the site https://docs.example.org:8443 need no approval for the rest of this session.",
-        "Web request: Fetch web page \"https://docs.example.org/c\" from https://docs.example.org.",
+        "Web request: ■  https://docs.example.org/c",
     ]);
     // The approval names the scheme too: the same host over plain http is another site.
     assert!(approvals.web_allowed("https://docs.example.org") && !approvals.web_allowed("http://docs.example.org") && !approvals.web_allowed("https://once.example.org"));
@@ -961,7 +1070,7 @@ fn a_redirect_to_another_site_needs_its_own_approval() {
     // The approved site sends the request on to a site that no one approved. The person sees the new URL and says no.
     let leak = "https://collector.example.org/?d=c2VjcmV0";
     assert_eq!(tools.approve_redirect("https://docs.example.org/go?to=x", leak, &cancel), Err(ToolError::Denied));
-    // A yes for one request does not approve the site. An `s` answer does.
+    // A yes for one request does not approve the site. Choice 3 does.
     for (scope, asked) in [(shell::permissions::Scope::Once, 2), (shell::permissions::Scope::Once, 3), (shell::permissions::Scope::Session, 4), (shell::permissions::Scope::Session, 4)] {
         answer.set(Some(scope));
         assert_eq!(tools.approve_redirect("https://docs.example.org/go?to=x", leak, &cancel), Ok(()));
@@ -970,10 +1079,14 @@ fn a_redirect_to_another_site_needs_its_own_approval() {
     // A step from https to http on the approved host is another site.
     answer.set(None);
     assert_eq!(tools.approve_redirect("https://docs.example.org/a", "http://docs.example.org/a", &cancel), Err(ToolError::Denied));
+    let cross_site_http = leak.replacen("https:", "http:", 1);
+    let source = leak.replacen("collector", "docs", 1);
+    assert_eq!(tools.approve_redirect(&source, &cross_site_http, &cancel), Err(ToolError::Denied));
     drop(tools);
     let prompts = prompts.into_inner();
-    assert_eq!(prompts[0], "Follow redirect from https://docs.example.org to \"https://collector.example.org/?d=c2VjcmV0\" on https://collector.example.org.\nWhy this asks: an approved site can forward a link to an unapproved site and send text hidden in the address there.\nAnswer y to follow this redirect once, s to allow requests to https://collector.example.org for this session, or n to stop the redirect without contacting that site.");
-    assert_eq!(prompts[4], "Follow redirect from https://docs.example.org to \"http://docs.example.org/a\" on http://docs.example.org.\nWhy this asks: following this redirect switches from HTTPS to unencrypted HTTP, exposing the address and reply on the network.\nAnswer y to follow this redirect once, s to allow requests to http://docs.example.org for this session, or n to stop the redirect without contacting that site.");
+    assert!(prompts[0].contains(leak) && prompts[0].contains("sends Vade to a different website") && prompts[0].contains("You did not approve the new website.") && prompts[0].contains("The address can contain your private text."));
+    assert!(prompts[4].split_whitespace().collect::<Vec<_>>().join(" ").contains("sends Vade to an address that is not encrypted (http, not https).") && prompts[4].split_whitespace().collect::<Vec<_>>().join(" ").contains("Other people on the network can read the address and the reply."));
+    assert!(prompts[5].contains("different website") && prompts[5].contains("Other people on the network can read"));
     assert!(approvals.web_allowed("https://collector.example.org") && !approvals.web_allowed("http://docs.example.org"));
     // No one can answer: the redirect is not followed. `auto` follows it and shows it. `never` denies it.
     let none = shell::permissions::Approvals::new(None, None, false).unwrap();
@@ -987,6 +1100,47 @@ fn a_redirect_to_another_site_needs_its_own_approval() {
     let mut tools = CodingTools::new(&w, ApprovalPolicy::Never, |_: Preview<'_>, _: &AtomicBool| panic!("never asks no one")).with_web(true);
     assert_eq!(tools.approve_redirect("https://docs.example.org/go", leak, &cancel), Err(ToolError::Denied));
 }
+#[test]
+fn redirect_prompts_show_the_complete_destination() {
+    let f = Fixture::new(); let w = f.workspace();
+    let cancel = AtomicBool::new(false);
+    let approvals = shell::permissions::Approvals::new(None, None, true).unwrap();
+    let mut prompts = Vec::new();
+    let mut tools = CodingTools::new(&w, ApprovalPolicy::Ask, |preview: Preview<'_>, _: &AtomicBool| {
+        prompts.push(preview.detail.to_owned());
+        false
+    }).with_approvals(&approvals).with_web(true);
+    let address = "https://collector.example.org/?d=c2VjcmV0";
+    assert_eq!(tools.approve_redirect("https://docs.example.org/start", address, &cancel), Err(ToolError::Denied));
+    assert_eq!(tools.approve_redirect(address, &address.replacen("https:", "http:", 1), &cancel), Err(ToolError::Denied));
+    drop(tools);
+    assert_eq!(prompts, [r#"https://docs.example.org sends Vade to a different website
+                                          sends the full address
+■  https://collector.example.org/?d=c2VjcmV0
+      You approved https://docs.example.org.
+      You did not approve the new website.
+      The new website receives the full address.
+      The address can contain your private text.
+----------------------------------------------------------------
+Your turn.  1  Yes, one time
+            2  No, stop the redirect without contacting that
+               site
+            3  Yes, until you close Vade (allow requests to
+               https://collector.example.org)"#,
+        r#"https://collector.example.org sends Vade to an address that is
+not encrypted (http, not https).
+                                          sends the full address
+■  http://collector.example.org/?d=c2VjcmV0
+      Other people on the network can read the address and the
+      reply.
+----------------------------------------------------------------
+Your turn.  1  Yes, one time
+            2  No, stop the redirect without contacting that
+               site
+            3  Yes, until you close Vade (allow requests to
+               http://collector.example.org)"#]);
+}
+
 #[test]
 fn approval_prompts_state_what_why_and_choices_in_plain_words() {
     let f = Fixture::new(); let w = f.workspace();
@@ -1007,13 +1161,15 @@ fn approval_prompts_state_what_why_and_choices_in_plain_words() {
     let prompts = captured.into_inner();
     assert_eq!(prompts.len(), 6);
     for prompt in &prompts {
-        let lines: Vec<_> = prompt.lines().collect();
-        assert_eq!(lines.len(), 3, "expected 3 plain lines (what, why, choices): {prompt}");
-        assert!(!lines[0].starts_with("web_") && !lines[0].contains("[\""), "raw tool/JSON code shown in prompt: {prompt}");
-        assert!(lines[1].starts_with("Why this asks: "), "missing plain risk explanation: {prompt}");
-        assert!(lines[2].starts_with("Answer y to ") && lines[2].contains(", or n to "), "missing plain yes/no outcome: {prompt}");
+        assert!(prompt.lines().next().is_some_and(|line| !line.starts_with("web_")));
+        assert!(prompt.contains("\nYour turn.  1  Yes, one time\n            2  No,"), "{prompt}");
+        assert!(prompt.contains("■  ") || prompt.contains("▲  "), "{prompt}");
+        assert!(!prompt.contains("Keys:") && !prompt.contains('\x1b'));
     }
-    assert!(prompts[1].contains("s to allow web searches for this session"));
+    assert!(prompts[1].contains("3  Yes, until you close Vade (allow web searches)"));
+    assert!(prompts[2].contains("The new website receives the full address."));
+    assert!(prompts[3].replace("\n", " ").contains("not encrypted (http, not https)"));
+    assert!(prompts[4].contains("▲  ") && prompts[5].contains("■  "));
 }
 /// The reply of a search that passed the policy.
 const SEARCH_REACHED: &str = "Web search failed: DuckDuckGo failed (network is disabled in tests)";
@@ -1064,7 +1220,7 @@ fn an_always_answer_is_saved_in_the_vade_home_for_that_exact_site_only() {
     let (prompts, notices) = (std::cell::RefCell::new(Vec::new()), std::cell::RefCell::new(Vec::new()));
     let mut tools = CodingTools::new(&w, ApprovalPolicy::Ask, |preview: Preview<'_>, _: &AtomicBool| {
         if preview.approval_required {
-            prompts.borrow_mut().push(preview.detail.lines().last().unwrap().to_owned());
+            prompts.borrow_mut().push(preview.prompt.unwrap().choices.clone());
             approvals.choose(shell::permissions::Scope::Always);
         } else {
             notices.borrow_mut().push(format!("{}: {}", preview.title, preview.detail));
@@ -1081,10 +1237,10 @@ fn an_always_answer_is_saved_in_the_vade_home_for_that_exact_site_only() {
     assert_eq!(call(&mut tools, "web_fetch", r#"{"url":"https://good.example.org/b"}"#).unwrap(), FETCH_REACHED);
     drop(tools);
     assert_eq!(prompts.into_inner(), [
-        "Answer y to send this request once, s to allow requests to https://good.example.org for this session, a to allow them always, or n to refuse without sending anything.",
-        "Answer y to run this search once, s to allow web searches for this session, a to allow them always, or n to refuse without sending anything.",
-        "Answer y to send this request once, s to allow requests to https://[2001:4860:0:0:0:0:0:8888]:0443 for this session, a to allow them always, or n to refuse without sending anything.",
-        "Answer y to send this request once, s to allow requests to https://other.example.org.:08443 for this session, a to allow them always, or n to refuse without sending anything.",
+        "1  Yes, one time\n2  No, refuse without sending anything\n3  Yes, until you close Vade (allow requests to https://good.example.org)\n4  Yes, always for this website (https://good.example.org)",
+        "1  Yes, one time\n2  No, refuse without sending anything\n3  Yes, until you close Vade (allow web searches)\n4  Yes, always for web searches",
+        "1  Yes, one time\n2  No, refuse without sending anything\n3  Yes, until you close Vade (allow requests to https://[2001:4860:0:0:0:0:0:8888]:0443)\n4  Yes, always for this website (https://[2001:4860:0:0:0:0:0:8888]:0443)",
+        "1  Yes, one time\n2  No, refuse without sending anything\n3  Yes, until you close Vade (allow requests to https://other.example.org.:08443)\n4  Yes, always for this website (https://other.example.org.:08443)",
     ]);
     assert_eq!(&notices.borrow()[..2], [
         format!("Web approval: Requests to the site https://good.example.org need no approval in this or any later session. To take this back, run: vade allowed remove 'https://good.example.org' --vade-home '{}'", home.display()),
@@ -1189,13 +1345,13 @@ fn a_vade_home_inside_the_workspace_is_not_used() {
     for home in homes {
         let approvals = shell::permissions::Approvals::for_workspace(&root, Some(&home), true).unwrap();
         let note = approvals.always_note().unwrap();
-        assert!(note.contains("inside this workspace") && note.contains("a cannot save"), "{note}");
+        assert!(note.contains("inside this workspace") && note.contains("saved approval is unavailable"), "{note}");
         assert!(!approvals.web_allowed("https://collector.example.org") && !approvals.memory_allowed() && !approvals.can_save(false));
         // The prompt offers no `a`, and an `a` that reaches the tool saves nothing.
         let (prompts, notices) = (std::cell::RefCell::new(Vec::new()), std::cell::RefCell::new(Vec::new()));
         let mut tools = CodingTools::new(&w, ApprovalPolicy::Ask, |preview: Preview<'_>, _: &AtomicBool| {
             if preview.approval_required {
-                prompts.borrow_mut().push(preview.detail.lines().last().unwrap().to_owned());
+                prompts.borrow_mut().push(preview.prompt.unwrap().choices.clone());
                 approvals.choose(shell::permissions::Scope::Always);
             } else {
                 notices.borrow_mut().push(preview.detail.to_owned());
@@ -1204,7 +1360,7 @@ fn a_vade_home_inside_the_workspace_is_not_used() {
         }).with_approvals(&approvals).with_web(true);
         assert_eq!(call(&mut tools, "web_fetch", r#"{"url":"https://docs.example.org/a"}"#).unwrap(), FETCH_REACHED);
         drop(tools);
-        assert_eq!(prompts.into_inner(), ["Answer y to send this request once, s to allow requests to https://docs.example.org for this session, or n to refuse without sending anything."]);
+        assert_eq!(prompts.into_inner(), ["1  Yes, one time\n2  No, refuse without sending anything\n3  Yes, until you close Vade (allow requests to https://docs.example.org)"]);
         let notices = notices.into_inner();
         assert!(notices[0].starts_with("Requests to the site https://docs.example.org were approved for this one call only; the approval was not saved: ") && notices[0].contains("inside this workspace"), "{notices:?}");
         assert!(!saved_web(&home).contains(&"https://docs.example.org".to_owned()));
@@ -1225,7 +1381,7 @@ fn memory_notes_take_s_for_the_session_and_a_for_always() {
     let (prompts, notices, answer) = (std::cell::RefCell::new(Vec::new()), std::cell::RefCell::new(Vec::new()), std::cell::Cell::new(shell::permissions::Scope::Session));
     let mut tools = CodingTools::new(&w, ApprovalPolicy::Ask, |preview: Preview<'_>, _: &AtomicBool| {
         if preview.approval_required {
-            prompts.borrow_mut().push(preview.detail.lines().last().unwrap().to_owned());
+            prompts.borrow_mut().push(preview.prompt.unwrap().choices.clone());
             approvals.choose(answer.get());
         } else {
             notices.borrow_mut().push(format!("{}: {}", preview.title, preview.detail));
@@ -1243,8 +1399,8 @@ fn memory_notes_take_s_for_the_session_and_a_for_always() {
     assert_eq!(call(&mut tools, "memory_forget", r#"{"key":"tests"}"#).unwrap(), r#"{"entries":0}"#);
     drop(tools);
     assert_eq!(prompts.into_inner(), [
-        "Answer y to save this note, s to allow note changes in this project for this session, a to allow them always, or n to leave project notes unchanged.",
-        "Answer y to delete this note, s to allow note changes in this project for this session, a to allow them always, or n to keep project notes unchanged.",
+        "1  Yes, one time\n2  No, leave project notes unchanged\n3  Yes, until you close Vade (allow note changes in this project)\n4  Yes, always in this project (note changes)",
+        "1  Yes, one time\n2  No, keep project notes unchanged\n3  Yes, until you close Vade (allow note changes in this project)\n4  Yes, always in this project (note changes)",
     ]);
     let project = w.root().canonicalize().unwrap().display().to_string();
     let notices = notices.into_inner();
@@ -1308,4 +1464,18 @@ fn raw_workspace_paths_cannot_share_a_saved_memory_approval() {
         assert_eq!(refused.get("error").and_then(Value::as_str), Some("approval_required"));
         assert_eq!(std::fs::read(home.join(crate::saved_approvals::FILE_NAME)).unwrap(), before);
     }
+}
+
+#[test]
+fn deleting_command_shows_the_whole_command_and_decided_consequence() {
+    if !shell_offered() { return; }
+    let f = Fixture::new(); let w = f.workspace();
+    let approvals = shell::permissions::Approvals::new(None, None, true).unwrap();
+    let mut tools = CodingTools::new(&w, ApprovalPolicy::Ask, |preview: Preview<'_>, _: &AtomicBool| {
+        assert!(preview.approval_required);
+        assert!(preview.details.unwrap().contains("argv=[\"rm\",\"-rf\",\"build\"]"));
+        assert_eq!(preview.detail, crate::approval_prompt::layout_tests::command_block());
+        false // Inspect presentation only. Never execute the deleting command.
+    }).with_approvals(&approvals);
+    assert_eq!(argv_call(&mut tools, &["rm", "-rf", "build"]), Err(ToolError::Denied));
 }

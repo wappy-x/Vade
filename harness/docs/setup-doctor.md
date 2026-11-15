@@ -1,5 +1,7 @@
 # Client setup and endpoint doctor
 
+HTTP links stay on this machine by default; see [network setup](../../docs/network-setup.md) for SSH tunnels and the explicit opt-in.
+
 Two commands help you connect another client to the engine:
 
 - **Setup** writes the client's configuration for you. It works offline and

@@ -99,9 +99,10 @@ fn shared_parent_child_approval_lane_serializes_exact_operations_and_clears_rece
     let a = std::thread::spawn(move || {
         first.show(
             None,
-            coding_tools::Preview {
+            coding_tools::Preview { prompt: None,
                 title: "Patch preview",
                 detail: "first exact operation",
+                details: None,
                 approval_required: true,
             },
             &AtomicBool::new(false),
@@ -120,9 +121,10 @@ fn shared_parent_child_approval_lane_serializes_exact_operations_and_clears_rece
     let b = std::thread::spawn(move || {
         second.show(
             None,
-            coding_tools::Preview {
+            coding_tools::Preview { prompt: None,
                 title: "Patch preview",
                 detail: "second exact operation",
+                details: None,
                 approval_required: true,
             },
             &AtomicBool::new(false),
@@ -166,9 +168,10 @@ fn child_cancellation_interrupts_both_queued_and_active_approvals() {
         std::thread::spawn(move || {
             let ok = gate.show(
                 None,
-                coding_tools::Preview {
+                coding_tools::Preview { prompt: None,
                     title: "Command",
                     detail: "exact command",
+                    details: None,
                     approval_required: true,
                 },
                 &cancel,

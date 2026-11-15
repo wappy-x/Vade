@@ -101,16 +101,16 @@ How can I help?
 === tool approval (80 columns) ===
 Read src/main.rs
 Run: cargo test
-[7mApproval required[0m  [1;32my[0m approve · [1;31mn[0m deny · or /approve /deny
-
-
-
-
-
-
-
-
-
+[1;38;2;27;143;196mVade wants to run a command[0m                     [1;37mcan delete files[0m
+[1;38;2;27;143;196m■  [0m[1;31mrm -rf build[0m                                     this project
+[2m      This command deletes files.[0m
+      You cannot get deleted files back.
+----------------------------------------------------------------
+[1;33mYour turn.  [0m[1;31m1[0m  Yes, one time
+            [1;31m2[0m  No, do not run it
+            [1;31m3[0m  Yes, until you close Vade (this exact command)
+            [1;31m4[0m  Yes, always in this project (this exact command)
+            [1;31m5[0m  Show the exact details
 
 
 

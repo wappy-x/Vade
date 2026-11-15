@@ -35,7 +35,7 @@ impl Contract {
             })();
             match result {
                 Err(error) if attempt == 0 && self.context.last_http_status.is_none_or(|status| status == 200)
-                    && matches!(error.kind(),
+                    && crate::http_policy::refusal(&error).is_none() && matches!(error.kind(),
                     io::ErrorKind::UnexpectedEof | io::ErrorKind::BrokenPipe
                     | io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted
                     | io::ErrorKind::ConnectionRefused | io::ErrorKind::TimedOut) => continue,

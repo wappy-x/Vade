@@ -27,6 +27,8 @@ use std::{
     },
     time::{Duration, Instant},
 };
+#[cfg(test)]
+use std::sync::atomic::AtomicU64;
 #[cfg(target_os = "linux")]
 use std::collections::BTreeMap;
 
@@ -45,6 +47,8 @@ use carrier::Early;
 pub(super) mod cache;
 #[path = "next_pp_overlap.rs"]
 mod overlap;
+#[path = "next_pp_heartbeat.rs"]
+mod heartbeat;
 #[cfg(target_os = "linux")] pub(super) use overlap::{GROUP_ROWS, IN_FLIGHT, split_groups};
 
 // Version 2: every request carries an exchange id that its reply echoes.
@@ -308,6 +312,9 @@ pub(super) fn f32_bytes_mut(v: &mut [f32]) -> &mut [u8] {
 fn read_message(stream: &mut TcpStream, buf: &mut [u8], stop: Option<&AtomicBool>, limit: Duration, idle: bool) -> Result<bool> {
     let mut at = 0;
     let mut since = (!idle).then(Instant::now);
+    #[cfg(test)]
+    // Tests: the manual clock owns this read's deadline (heartbeat::Unbounded).
+    let limit = if heartbeat::test_unbounded() { Duration::MAX } else { limit };
     while at < buf.len() {
         match stream.read(&mut buf[at..]) {
             Ok(0) if at == 0 && idle => return Ok(false),
@@ -382,6 +389,11 @@ pub(super) struct Link {
     /// heartbeat rides TCP, so one of a wire exchange can arrive after the wire's reply.
     beats: u64,
     late: u64,
+    /// Tests: a manual clock, and the steps of the test back that drive it (heartbeat::Steps).
+    #[cfg(test)]
+    test_clock: Option<(Instant, Arc<AtomicU64>)>,
+    #[cfg(test)]
+    test_steps: Option<heartbeat::Steps>,
     /// The oldest exchange id whose heartbeat may still arrive: the back writes a request's
     /// heartbeats before its reply and before it reads the next request, so after a TCP
     /// reply (or a heartbeat) for id t no heartbeat for an id below t can follow. Ids from
@@ -486,6 +498,10 @@ impl Link {
             limit,
             beats: 0,
             late: 0,
+            #[cfg(test)]
+            test_clock: None,
+            #[cfg(test)]
+            test_steps: None,
             floor: 1,
             mtp: recipe.mtp,
             kept: Vec::new(),
@@ -522,46 +538,6 @@ impl Link {
         }
         self.replied = id;
         Ok((word(reply, 1), word(reply, 2) as usize))
-    }
-    /// Read one TCP header for exchange `expect`; it must arrive within `limit` of `heard`
-    /// (the last sign of life). None for a heartbeat (the back is still running `expect`;
-    /// `heard` moves) or a late one of an answered wire exchange (`heard` stays), else the
-    /// reply's (status, len) (`heard` moves).
-    fn frame(&mut self, expect: u32, heard: &mut Instant) -> Result<Option<(u32, usize)>> {
-        let silent = || format!("pipeline back reply timed out after {} ms without a heartbeat", self.limit.as_millis());
-        let left = self.limit.saturating_sub(heard.elapsed());
-        if left.is_zero() {
-            return Err(silent());
-        }
-        let mut reply = [0u8; REPLY_HEAD];
-        read_rest(&mut self.stream, &mut reply, None, left).map_err(|e| if e.contains("timed out") { silent() } else { e })?;
-        if word(&reply, 0) == MAGIC_RESPONSE && word(&reply, 1) == STATUS_WORKING {
-            let id = word(&reply, 3);
-            if word(&reply, 2) == 0 && (id == expect || self.posted() && id.wrapping_sub(expect) <= self.sent.wrapping_sub(expect)) && self.replied != self.sent {
-                self.beats += 1;
-                (self.floor, *heard) = (id, Instant::now());
-                return Ok(None);
-            }
-            if word(&reply, 2) == 0 && id.wrapping_sub(self.floor) < self.replied.wrapping_add(1).wrapping_sub(self.floor) {
-                self.late += 1;
-                self.floor = id;
-                return Ok(None);
-            }
-            return Err(format!("pipeline heartbeat out of order: id {id}, expected {expect}"));
-        }
-        let reply = self.reply_head(&reply, expect)?;
-        (self.floor, *heard) = (expect.wrapping_add(1), Instant::now());
-        Ok(Some(reply))
-    }
-    /// The reply header for exchange `expect` (sent just now): heartbeats are skipped, and
-    /// the back must show life within `limit` of the send and of each heartbeat.
-    fn await_reply(&mut self, expect: u32) -> Result<(u32, usize)> {
-        let mut heard = Instant::now();
-        loop {
-            if let Some(reply) = self.frame(expect, &mut heard)? {
-                return Ok(reply);
-            }
-        }
     }
     /// Read the acks of every queued tile (in order); the first back failure is returned.
     /// Afterwards the sender thread has handed every queued byte to the socket.
@@ -635,6 +611,9 @@ impl Link {
     /// by earlier tiles, then `residual`. Returns the payload byte count.
     fn take_tcp_reply(&mut self, residual: &mut [f32]) -> Result<usize> {
         let (status, len) = self.await_reply(self.sent)?;
+        #[cfg(test)]
+        // Tests: under the manual clock the payload waits on that clock, never on real time.
+        let _unbounded = self.test_payload_within(if status != 0 { len.min(1 << 16) } else { len })?;
         if status != 0 {
             let mut text = vec![0u8; len.min(1 << 16)];
             read_rest(&mut self.stream, &mut text, None, self.limit)?;
@@ -658,6 +637,9 @@ impl Link {
                 }
                 // Receive in post order directly into each tile, under one payload deadline.
                 let receiving = Instant::now();
+                #[cfg(test)]
+                // Tests: no real-time budget under the manual clock (a future start never runs out).
+                let receiving = if heartbeat::test_unbounded() { receiving + Duration::from_secs(86_400) } else { receiving };
                 for t in self.kept.iter_mut().filter(|t| t.data.is_none()) {
                     let mut data = vec![0f32; t.rows * W];
                     let limit = self.limit.checked_sub(receiving.elapsed())
@@ -794,13 +776,15 @@ impl Link {
     }
     /// Wait for the wire reply of `expect`. Heartbeats of that request stay on TCP.
     fn wire_collect(&mut self, fast: &mut dyn PpWire, expect: u32, residual: &mut [f32]) -> Result<()> {
-        let (sent, mut heard, mut look) = (Instant::now(), Instant::now(), Duration::from_millis(50));
+        let (sent, mut heard, mut look) = (self.clock_now(), self.clock_now(), Duration::from_millis(50));
         while !fast.try_recv(&mut self.message)? {
-            if sent.elapsed() > look {
-                look = sent.elapsed() + Duration::from_millis(50);
+            #[cfg(test)]
+            self.test_wire_step()?;
+            if self.clock_elapsed(sent) > look {
+                look = self.clock_elapsed(sent) + Duration::from_millis(50);
                 self.wire_beats(expect, &mut heard)?;
             }
-            if heard.elapsed() > self.limit {
+            if self.clock_elapsed(heard) > self.limit {
                 return Err(format!("pipeline back reply timed out after {} ms without a heartbeat", self.limit.as_millis()));
             }
             std::hint::spin_loop();
@@ -1262,13 +1246,7 @@ fn serve_stage(
             .spawn(move || {
                 while !quit.load(Ordering::Relaxed) {
                     std::thread::sleep(period / 5);
-                    let mut mark = working.lock().unwrap_or_else(|p| p.into_inner());
-                    if let Some((id, last)) = mark.as_mut()
-                        && last.elapsed() >= period {
-                            // Full means a row payload is queued; the front is reading that frame.
-                            let _ = reply_tx.try_send(ReplySend::Bytes(working_head(*id)));
-                            *last = Instant::now();
-                        }
+                    heartbeat::beat(&working, period, &reply_tx, Instant::now);
                 }
             })
             .map_err(err)?

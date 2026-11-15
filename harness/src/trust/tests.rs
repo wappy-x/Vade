@@ -8,6 +8,17 @@ fn digest_matches_the_standard_vectors() {
     // 56 bytes: the length goes into a second block.
     assert_eq!(digest(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"), "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
     assert_eq!(digest(&[b'a'; 1000]), "41edece42d63e8d9bf515a9ba6932e1c20cbc9f5a5d134645adb5db1b9737ea3");
+    struct Small<'a>(&'a [u8]);
+    impl std::io::Read for Small<'_> {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            let count = out.len().min(self.0.len()).min(3);
+            out[..count].copy_from_slice(&self.0[..count]);
+            self.0 = &self.0[count..];
+            Ok(count)
+        }
+    }
+    let bytes = [b'a'; 1000];
+    assert_eq!(digest_reader(Small(&bytes)).unwrap(), digest(&bytes));
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]

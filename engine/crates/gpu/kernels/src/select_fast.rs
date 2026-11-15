@@ -11,8 +11,10 @@ use crate::prompt_ops::{Arguments,Op};
 /// Threads per block this kernel is written for.
 pub(crate) const THREADS:usize=1024;
 
-#[no_mangle]
-pub extern "ptx-kernel" fn prompt_select_rows(p:Arguments) {
+#[export_name="prompt_select_rows"]
+pub extern "ptx-kernel" fn entry_prompt_select_rows(p:Arguments) {prompt_select_rows(p)}
+#[inline(always)]
+pub(crate) fn prompt_select_rows(p:Arguments) {
     // SAFETY: The host (backend/prompt_ops.rs, select_fast::admitted) checked Shape::lengths and launches blocks of
     // THREADS threads, one block per token strided by the grid. Scores are read for groups <= rows (else the
     // block traps, as the generic slice would panic); the output unit of a token has slots+1 words and every write

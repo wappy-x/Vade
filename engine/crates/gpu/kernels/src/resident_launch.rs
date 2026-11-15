@@ -11,9 +11,31 @@ fn run<const KIND:u32>(table:*const Command,index:u64) {
     // body has exactly its direct entry's extents, aliases and initialization.
     // The causal-fast payload is an aligned, fully initialized Arguments value.
     // Its shared borrow cannot escape the call, and no replay writes the table.
+    // Row payloads use the original checked shape and the same launch geometry.
+    // Their bodies keep every row and lane guard before an in-bounds offset.
     unsafe {
         let c=&*table.add(index as usize);if c.kind!=KIND {core::arch::nvptx::trap();}let p=c.payload.as_ptr();let words=p.cast::<u64>();
         match KIND {
+            k if k==Kind::MxRows2 as u32=>crate::mx_rows_small::rows::<2,2,2>(p.cast::<crate::next_params::MxProjection>().read()),
+            k if k==Kind::MxRows4 as u32=>crate::mx_rows_small::rows::<4,2,4>(p.cast::<crate::next_params::MxProjection>().read()),
+            k if k==Kind::MxRows8 as u32=>crate::mx_rows_small::rows::<8,2,2>(p.cast::<crate::next_params::MxProjection>().read()),
+            k if k==Kind::MxRows8w as u32=>crate::mx_rows_small::rows::<8,2,4>(p.cast::<crate::next_params::MxProjection>().read()),
+            k if k==Kind::MixedRows as u32=>crate::next_decode::resident_projection_bf16_rows::<true>(p.cast::<crate::next_params::ResidentProjectionBatch>().read()),
+            k if k==Kind::Fp8RowsSmall as u32=>crate::fp8_rows_small::fp8_rows_small(p.cast::<crate::expert_ops::GroupArguments>().read()),
+            k if k==Kind::Fp8RowsMulti as u32=>crate::fp8_rows_multi::fp8_rows_multi(p.cast::<crate::expert_ops::GroupArguments>().read()),
+            k if k==Kind::Fp8RowsFew as u32=>crate::fp8_rows_few::fp8_rows_few(p.cast::<crate::expert_ops::GroupArguments>().read()),
+            k if k==Kind::PlainRowsSmall as u32=>crate::plain_rows_small::plain_rows_small(p.cast::<crate::prompt_ops::Arguments>().read()),
+            k if k==Kind::PromptRows as u32=>crate::prompt_operation::prompt_rows(p.cast::<crate::prompt_ops::Arguments>().read()),
+            k if k==Kind::RowPrepare as u32=>crate::prompt_fast::prompt_prepare(p.cast::<crate::prompt_ops::Arguments>().read()),
+            k if k==Kind::RowGatedNorm as u32=>crate::prompt_fast::prompt_gated_norm(p.cast::<crate::prompt_ops::Arguments>().read()),
+            k if k==Kind::RowRoute as u32=>crate::prompt_fast::prompt_route(p.cast::<crate::prompt_ops::Arguments>().read()),
+            k if k==Kind::RowFold as u32=>crate::prompt_fast::prompt_fold(p.cast::<crate::prompt_ops::Arguments>().read()),
+            k if k==Kind::RowPlace as u32=>crate::prompt_move::prompt_place(p.cast::<crate::prompt_ops::Arguments>().read()),
+            k if k==Kind::RowPermute as u32=>crate::prompt_move::prompt_permute(p.cast::<crate::prompt_ops::Arguments>().read()),
+            k if k==Kind::RowSelect as u32=>crate::select_fast::prompt_select_rows(p.cast::<crate::prompt_ops::Arguments>().read()),
+            k if k==Kind::TransposeSmem as u32=>crate::transpose_tiles::transpose_smem(p.cast::<crate::prompt_ops::Arguments>().read()),
+            k if k==Kind::DeviceRouteRows as u32=>crate::device_route::build_rows(p.cast::<crate::device_route_abi::BuildRows>().read()),
+
             k if k==Kind::Causal as u32=>crate::causal_operation::resident_causal_operation(p.cast::<crate::causal_ops::Arguments>().read()),
             k if k==Kind::Expert as u32=>crate::expert_operation::resident_expert_operation(p.cast::<crate::expert_ops::LaunchArguments>().read()),
             k if k==Kind::CausalFast as u32=>crate::causal_operation::resident_causal_fast(&*p.cast::<crate::causal_ops::Arguments>()),
@@ -49,7 +71,10 @@ fn run<const KIND:u32>(table:*const Command,index:u64) {
             k if k==Kind::MhcBoundaryRms as u32=>crate::mhc_boundary_chain::resident_mhc_boundary_rms(p.cast::<crate::mhc_params::Boundary>().read()),
             k if k==Kind::MhcBoundaryDots as u32=>crate::mhc_boundary_chain::resident_mhc_boundary_dots(p.cast::<crate::mhc_params::Boundary>().read()),
             k if k==Kind::MhcBoundaryFinish as u32=>crate::mhc_boundary_fused::resident_mhc_boundary_finish(p.cast::<crate::mhc_params::Boundary>().read()),
-            k if k==Kind::MhcBoundaryFused as u32=>crate::mhc_boundary_one::resident_mhc_boundary_fused(p.cast::<crate::mhc_params::FusedBoundary>().read()),
+            k if k==Kind::MhcBoundaryFused as u32=>crate::mhc_boundary_one::resident_mhc_boundary_fused::<0>(p.cast::<crate::mhc_params::FusedBoundary>().read()),
+            k if k==Kind::MhcPhaseRms as u32=>crate::mhc_boundary_one::resident_mhc_boundary_fused::<1>(p.cast::<crate::mhc_params::FusedBoundary>().read()),
+            k if k==Kind::MhcPhaseDots as u32=>crate::mhc_boundary_one::resident_mhc_boundary_fused::<2>(p.cast::<crate::mhc_params::FusedBoundary>().read()),
+            k if k==Kind::MhcPhaseFinish as u32=>crate::mhc_boundary_one::resident_mhc_boundary_fused::<3>(p.cast::<crate::mhc_params::FusedBoundary>().read()),
             k if k==Kind::RmsPartials as u32=>crate::layer::resident_model_rms_partials(p.cast::<crate::kernel_params::ModelRms>().read()),
             k if k==Kind::RmsApply as u32=>crate::layer::resident_model_rms_apply(p.cast::<crate::kernel_params::ModelRms>().read()),
             k if k==Kind::Elementwise as u32=>crate::layer::resident_model_elementwise(p.cast::<crate::kernel_params::ModelElementwise>().read()),
@@ -88,6 +113,9 @@ entry!(resident_launch_mhc_boundary_rms,0);
 entry!(resident_launch_mhc_boundary_dots,24);
 entry!(resident_launch_mhc_boundary_finish,25);
 entry!(resident_launch_mhc_boundary_fused,Kind::MhcBoundaryFused as u32);
+entry!(resident_launch_mhc_phase_rms,Kind::MhcPhaseRms as u32);
+entry!(resident_launch_mhc_phase_dots,Kind::MhcPhaseDots as u32);
+entry!(resident_launch_mhc_phase_finish,Kind::MhcPhaseFinish as u32);
 entry!(resident_launch_nv_quarters,Kind::NvQuarters as u32);
 entry!(resident_launch_quarter_fold,Kind::QuarterFold as u32);
 entry!(resident_launch_reduce_take,Kind::ReduceTake as u32);
@@ -97,3 +125,24 @@ entry!(resident_launch_shadow_side,30);
 
 entry!(resident_launch_absorb_dense,Kind::AbsorbDense as u32);
 entry!(resident_launch_absorb_attention,Kind::AbsorbAttention as u32);
+
+// Each row entry uses the checked original ABI and geometry through run.
+entry!(resident_launch_mx_rows_small2,Kind::MxRows2 as u32);
+entry!(resident_launch_mx_rows_small4,Kind::MxRows4 as u32);
+entry!(resident_launch_mx_rows_small8,Kind::MxRows8 as u32);
+entry!(resident_launch_mx_rows_small8w,Kind::MxRows8w as u32);
+entry!(resident_launch_flash_resident_projection_bf16_rows,Kind::MixedRows as u32);
+entry!(resident_launch_fp8_rows_small,Kind::Fp8RowsSmall as u32);
+entry!(resident_launch_fp8_rows_multi,Kind::Fp8RowsMulti as u32);
+entry!(resident_launch_fp8_rows_few,Kind::Fp8RowsFew as u32);
+entry!(resident_launch_plain_rows_small,Kind::PlainRowsSmall as u32);
+entry!(resident_launch_prompt_rows,Kind::PromptRows as u32);
+entry!(resident_launch_prompt_prepare,Kind::RowPrepare as u32);
+entry!(resident_launch_prompt_gated_norm,Kind::RowGatedNorm as u32);
+entry!(resident_launch_prompt_route,Kind::RowRoute as u32);
+entry!(resident_launch_prompt_fold,Kind::RowFold as u32);
+entry!(resident_launch_prompt_place,Kind::RowPlace as u32);
+entry!(resident_launch_prompt_permute,Kind::RowPermute as u32);
+entry!(resident_launch_prompt_select_rows,Kind::RowSelect as u32);
+entry!(resident_launch_transpose_smem,Kind::TransposeSmem as u32);
+entry!(resident_launch_device_route_rows,Kind::DeviceRouteRows as u32);

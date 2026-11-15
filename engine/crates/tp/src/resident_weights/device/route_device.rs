@@ -209,21 +209,30 @@ impl<'b,'d> Weights<'b,'d> {
         let output=output.into_resident_shared()?;
         let unfused=CausalShape {cols:local.try_into().map_err(|_|"routed fold row count exceeds ABI")?,..fold};
         let fused=CausalShape {dim:FOLD_ROUNDS,..unfused};let fast=fast_admitted(fused,FAST_THREADS);
-        let mut folded=rows_fold::Folded::default();
-        for token in 0..m {
-            // The token's own planes: its picks, its weights, this rank's rows of its picks, this rank's rows of its shared row.
-            let at=rows_fold::planes(token,m,picks,rows,shared.map(|shared|shared.len()))?;
-            let (picked,scales)=(ids.resident_range(at.picked.clone())?,weights.resident_range(at.picked)?);
-            let projected=output.resident_range(at.projected)?;
-            let own=match (shared,at.own) {(Some(shared),Some(own))=>Some(shared.resident_range(own)?),_=>None};
-            folded.push(if fast {b.causal_operation(fused,[Some(&picked),Some(&scales),Some(&projected),own.as_ref()],None)?} else {
-                let rounded=b.round_bf16_lanes(&projected)?.into_vector();
-                b.causal_operation(unfused,[Some(&picked),Some(&scales),Some(&rounded),own.as_ref()],None)?})?;
-        }
-        drop(output);
-        // One message: this rank's folded row of every token, in token order. The gathered rows lie token-major with no gap.
-        let (parts,list)=(folded.parts()?,rows_fold::message_rows(rows));
-        let gathered=gather_joined(b,mailbox,&mut self.sequence,self.topology,&parts[..m],&list[..m])?;
+        let list=rows_fold::message_rows(rows);
+        // FOLD ROWS ONE LAUNCH: every token's fold in the one row-fold launch, where the planes and the shape allow it.
+        let one=rows_fold::one_launch(unfused,m,shared.map(|shared|shared.len()),local);
+        // One message either way: this rank's folded row of every token, in token order. The gathered rows lie token-major with no gap.
+        let gathered=if let Some(shape)=one {
+            let folded=b.prompt_operation(shape,[Some(ids),Some(weights),Some(&output),shared,None],None)?;drop(output);
+            if folded.len()!=m*local {return Err("routed rows fold extent differs".into());}
+            gather_joined(b,mailbox,&mut self.sequence,self.topology,&[(&folded,false)],&list[..m])?
+        } else {
+            let mut folded=rows_fold::Folded::default();
+            for token in 0..m {
+                // The token's own planes: its picks, its weights, this rank's rows of its picks, this rank's rows of its shared row.
+                let at=rows_fold::planes(token,m,picks,rows,shared.map(|shared|shared.len()))?;
+                let (picked,scales)=(ids.resident_range(at.picked.clone())?,weights.resident_range(at.picked)?);
+                let projected=output.resident_range(at.projected)?;
+                let own=match (shared,at.own) {(Some(shared),Some(own))=>Some(shared.resident_range(own)?),_=>None};
+                folded.push(if fast {b.causal_operation(fused,[Some(&picked),Some(&scales),Some(&projected),own.as_ref()],None)?} else {
+                    let rounded=b.round_bf16_lanes(&projected)?.into_vector();
+                    b.causal_operation(unfused,[Some(&picked),Some(&scales),Some(&rounded),own.as_ref()],None)?})?;
+            }
+            drop(output);
+            let parts=folded.parts()?;
+            gather_joined(b,mailbox,&mut self.sequence,self.topology,&parts[..m],&list[..m])?
+        };
         if gathered.len()!=m*rows.total {return Err("routed rows fold gather extent differs".into());}
         self.cost.settle(b)?;self.cost.record(||"exchange_fold_rows".into(),stamp,b,0);
         // The wait of `apply_routed_rows` for a batch step: every ROUTE_ROWS_WAIT layers.
@@ -231,7 +240,7 @@ impl<'b,'d> Weights<'b,'d> {
         // One line a row count, at first use: a served log then shows that the rows were folded before the exchange.
         static SEEN:std::sync::atomic::AtomicU64=std::sync::atomic::AtomicU64::new(0);
         let bit=1u64<<m.min(63);
-        if SEEN.fetch_or(bit,std::sync::atomic::Ordering::Relaxed)&bit==0 {eprintln!("ROWS FOLD rank={} rows={m} picks={picks} local_rows={local} fused={fast} first use",self.topology.rank);}
+        if SEEN.fetch_or(bit,std::sync::atomic::Ordering::Relaxed)&bit==0 {eprintln!("ROWS FOLD rank={} rows={m} picks={picks} local_rows={local} fused={fast} fold_launches={} first use",self.topology.rank,rows_fold::launches(one.is_some(),m));}
         Ok(Some(gathered))
     }
     pub fn apply_routed(&mut self,b:&Backend<'d>,steps:&[engine_model::plan::layer::Step],ids:&DeviceVector<'_>,input:&DeviceVector<'_>)->Result<Option<Vec<DeviceVector<'d>>>> {

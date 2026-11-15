@@ -3,6 +3,7 @@
 //! `Connection: close`, so the harness never reuses a socket we closed.
 use super::{fnv, n, obj, s, u64_of, write};
 use crate::json::{self, Value};
+use crate::transport::{self, BodyReader, DeadlineStream};
 use std::collections::VecDeque;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
@@ -12,9 +13,14 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub const MAX_BODY: usize = 64 << 20;
+const MAX_REQUEST_BODY: usize = json::MAX_INPUT_BYTES;
 /// Tool calls in one reply; a higher index is not a real call.
 const MAX_CALLS: usize = 256;
 const RECORD_CAP: usize = 16 << 20;
+const MAX_CONNECTIONS: usize = if cfg!(test) { 3 } else { 16 };
+const REQUEST_RECEIVE_TIMEOUT: Duration = if cfg!(test) { Duration::from_millis(150) } else { Duration::from_secs(30) };
+const RELAY_TIMEOUT: Duration = Duration::from_secs(900);
+const CLIENT_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
 pub struct Reply { pub status: u16, pub content_type: String, pub body: String }
@@ -72,10 +78,18 @@ impl Drop for Busy {
 }
 
 /// Runs `f` on its own thread and counts it in `busy` until it ends.
+#[cfg(test)]
 fn track(s: &Arc<Shared>, f: impl FnOnce(&Shared) + Send + 'static) {
     s.busy.fetch_add(1, Ordering::AcqRel);
     let guard = Busy(s.clone());
     std::thread::spawn(move || f(&guard.0));
+}
+
+fn try_reserve(s: &Arc<Shared>) -> Option<Busy> {
+    if s.busy.try_update(Ordering::AcqRel, Ordering::Acquire, |busy| (busy < MAX_CONNECTIONS).then_some(busy + 1)).is_err() {
+        return None;
+    }
+    Some(Busy(s.clone()))
 }
 
 /// How long `exchanges` waits for the handlers that are still running.
@@ -85,7 +99,7 @@ pub struct Server { pub url: String, pub shared: Arc<Shared>, thread: Option<std
 
 impl Server {
     pub fn start(source: Source, record: Option<std::fs::File>, sse: bool, work: &std::path::Path) -> io::Result<Server> {
-        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
         let url = format!("http://{}/v1/chat/completions", listener.local_addr()?);
         listener.set_nonblocking(true)?;
         let shared = Arc::new(Shared {
@@ -97,7 +111,11 @@ impl Server {
         let thread = std::thread::spawn(move || {
             while !s.stop.load(Ordering::Acquire) {
                 match listener.accept() {
-                    Ok((stream, _)) => track(&s, move |s| { let _ = handle(s, stream); }),
+                    Ok((stream, _)) => if let Some(guard) = try_reserve(&s) {
+                        std::thread::spawn(move || { let _ = handle(&guard.0, stream); });
+                    } else {
+                        let _ = reject_busy(stream);
+                    },
                     Err(e) if e.kind() == io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(5)),
                     Err(_) => std::thread::sleep(Duration::from_millis(50)),
                 }
@@ -137,84 +155,68 @@ impl Drop for Server {
 
 struct Request { method: String, path: String, headers: Vec<(String, String)>, body: Vec<u8> }
 
-fn read_request(r: &mut BufReader<TcpStream>) -> io::Result<Request> {
-    let mut line = String::new();
-    r.read_line(&mut line)?;
-    let mut parts = line.split_whitespace();
+fn read_request(r: &mut impl BufRead) -> io::Result<Request> {
+    let head = transport::read_head(r)?;
+    let mut parts = head.first.split_whitespace();
     let (method, path) = (parts.next().unwrap_or("").to_string(), parts.next().unwrap_or("").to_string());
     if method.is_empty() { return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "empty request")); }
-    let headers = read_headers(r)?;
-    let body = read_body(r, &headers, true)?;
+    let headers = head.fields;
+    let mut body = Vec::new();
+    BodyReader::new(r, &transport::Head { first: head.first, fields: headers.clone() }, true, MAX_REQUEST_BODY)?.read_to_end(&mut body)?;
     Ok(Request { method, path, headers, body })
-}
-
-fn read_headers(r: &mut impl BufRead) -> io::Result<Vec<(String, String)>> {
-    let mut headers = Vec::new();
-    loop {
-        let mut h = String::new();
-        if r.read_line(&mut h)? == 0 { return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "headers cut off")); }
-        let h = h.trim_end();
-        if h.is_empty() { return Ok(headers); }
-        if let Some((k, v)) = h.split_once(':') { headers.push((k.trim().to_ascii_lowercase(), v.trim().to_string())); }
-    }
 }
 
 fn header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
     headers.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
 }
 
-/// Reads a body framed by Content-Length or chunks. A request with neither has no body.
-fn read_body(r: &mut impl BufRead, headers: &[(String, String)], request: bool) -> io::Result<Vec<u8>> {
-    if let Some(n) = header(headers, "content-length") {
-        let n: usize = n.parse().map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "bad length"))?;
-        if n > MAX_BODY { return Err(io::Error::new(io::ErrorKind::InvalidData, "body too large")); }
-        let mut b = vec![0; n];
-        r.read_exact(&mut b)?;
-        return Ok(b);
-    }
-    if header(headers, "transfer-encoding").is_some_and(|v| v.to_ascii_lowercase().contains("chunked")) {
-        let mut out = Vec::new();
-        while let Some(chunk) = read_chunk(r)? {
-            out.extend_from_slice(&chunk);
-            if out.len() > MAX_BODY { return Err(io::Error::new(io::ErrorKind::InvalidData, "body too large")); }
-        }
-        return Ok(out);
-    }
-    let mut out = Vec::new();
-    if !request { r.take(MAX_BODY as u64).read_to_end(&mut out)?; }
-    Ok(out)
-}
-
-fn read_chunk(r: &mut impl BufRead) -> io::Result<Option<Vec<u8>>> {
-    let mut size = String::new();
-    if r.read_line(&mut size)? == 0 { return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "chunk cut off")); }
-    let n = usize::from_str_radix(size.trim().split(';').next().unwrap_or(""), 16)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "bad chunk size"))?;
-    if n == 0 {
-        loop { let mut t = String::new(); if r.read_line(&mut t)? == 0 || t.trim().is_empty() { break; } }
-        return Ok(None);
-    }
-    if n > MAX_BODY { return Err(io::Error::new(io::ErrorKind::InvalidData, "chunk too large")); }
-    let mut b = vec![0; n + 2];
-    r.read_exact(&mut b)?;
-    b.truncate(n);
-    Ok(Some(b))
-}
-
-fn respond(out: &mut TcpStream, status: u16, content_type: &str, body: &[u8]) -> io::Result<()> {
-    let reason = match status { 200 => "OK", 404 => "Not Found", _ => "Error" };
-    write!(out, "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len())?;
+fn respond(out: &mut impl Write, status: u16, content_type: &str, body: &[u8]) -> io::Result<()> {
+    let reason = match status { 200 => "OK", 400 => "Bad Request", 404 => "Not Found", 408 => "Request Timeout", 413 => "Content Too Large", 503 => "Service Unavailable", _ => "Error" };
+    let retry = if matches!(status, 408 | 503) { "Retry-After: 1\r\n" } else { "" };
+    write!(out, "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\n{retry}Content-Length: {}\r\nConnection: close\r\n\r\n", body.len())?;
     out.write_all(body)?;
     out.flush()
 }
 
-fn handle(s: &Shared, stream: TcpStream) -> io::Result<()> {
-    // On macOS an accepted socket inherits the listener's nonblocking flag.
-    stream.set_nonblocking(false)?;
-    stream.set_read_timeout(Some(Duration::from_secs(600)))?;
+fn reject_busy(stream: TcpStream) -> io::Result<()> {
     let mut out = stream.try_clone()?;
+    let mut stream = DeadlineStream::new(stream, None)?;
+    out.set_write_timeout(Some(CLIENT_WRITE_TIMEOUT))?;
+    stream.bound_deadline(Instant::now() + Duration::from_millis(100));
     let mut reader = BufReader::new(stream);
-    let req = read_request(&mut reader)?;
+    let _ = transport::read_head(&mut reader);
+    reader.get_mut().clear_deadline();
+    respond(&mut out, 503, "text/plain", b"suite listener is busy; send the request again")
+}
+
+fn request_error(error: &io::Error) -> (u16, &'static [u8]) {
+    if error.kind() == io::ErrorKind::TimedOut {
+        (408, b"request headers and body did not arrive before the deadline; send the request again")
+    } else if transport::body_limit_exceeded(error) {
+        (413, b"request body exceeds the suite limit")
+    } else {
+        (400, b"invalid or oversized request headers or body")
+    }
+}
+
+fn handle(s: &Shared, stream: TcpStream) -> io::Result<()> {
+    let mut out = stream.try_clone()?;
+    let mut input = DeadlineStream::new(stream, None)?;
+    // Cloned sockets share timeout options. Set this after constructing the
+    // request reader, which installs its own short polling timeout.
+    out.set_write_timeout(Some(CLIENT_WRITE_TIMEOUT))?;
+    input.bound_deadline(Instant::now() + REQUEST_RECEIVE_TIMEOUT);
+    let mut reader = BufReader::new(input);
+    let req = match read_request(&mut reader) {
+        Ok(request) => request,
+        Err(error) => {
+            let (status, message) = request_error(&error);
+            reader.get_mut().clear_deadline();
+            let _ = respond(&mut out, status, "text/plain", message);
+            return Err(error);
+        }
+    };
+    reader.get_mut().clear_deadline();
     let chat = req.method == "POST" && req.path.ends_with("/chat/completions");
     let started = Instant::now();
     let mut ex = Exchange { step: s.step.load(Ordering::Acquire), ..Default::default() };
@@ -293,9 +295,9 @@ fn handle(s: &Shared, stream: TcpStream) -> io::Result<()> {
     Ok(())
 }
 
-fn wait_closed(r: &mut BufReader<TcpStream>, limit: Duration) -> bool {
+fn wait_closed(r: &mut BufReader<DeadlineStream<'_>>, limit: Duration) -> bool {
     let start = Instant::now();
-    let _ = r.get_ref().set_read_timeout(Some(Duration::from_millis(200)));
+    r.get_mut().set_idle_timeout(limit);
     let mut b = [0; 512];
     while start.elapsed() < limit {
         match r.read(&mut b) {
@@ -312,8 +314,34 @@ fn wait_closed(r: &mut BufReader<TcpStream>, limit: Duration) -> bool {
 /// closing connection. Returns status, content type, the decoded body (capped)
 /// and whether the client went away first.
 fn relay(addr: &str, req: &Request, client: &mut TcpStream) -> io::Result<(u16, String, Vec<u8>, bool)> {
-    let mut up = TcpStream::connect(addr)?;
-    up.set_read_timeout(Some(Duration::from_secs(900)))?;
+    relay_with_timeout(addr, req, client, RELAY_TIMEOUT)
+}
+
+fn client_write(client: &mut TcpStream, bytes: &[u8]) -> io::Result<()> {
+    let mut written = 0;
+    while written < bytes.len() {
+        client.set_write_timeout(Some(CLIENT_WRITE_TIMEOUT))?;
+        match client.write(&bytes[written..]) {
+            Ok(0) => return Err(io::Error::new(io::ErrorKind::WriteZero, "suite client stopped accepting the response")),
+            Ok(count) => written += count,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+fn relay_with_timeout(addr: &str, req: &Request, client: &mut TcpStream, timeout: Duration) -> io::Result<(u16, String, Vec<u8>, bool)> {
+    relay_with_stream(addr, req, client, timeout, |_| {})
+}
+
+fn relay_with_stream(addr: &str, req: &Request, client: &mut TcpStream, timeout: Duration, before_read: impl FnOnce(&mut DeadlineStream<'_>)) -> io::Result<(u16, String, Vec<u8>, bool)> {
+    let deadline = Instant::now() + timeout;
+    let endpoint = transport::Endpoint::parse(&format!("http://{addr}"))?;
+    let up = transport::connect_fresh(&endpoint, deadline)?;
+    let mut up = DeadlineStream::new(up, None)?;
+    up.bound_deadline(deadline);
+    up.set_idle_timeout(timeout);
     let mut head = format!("{} {} HTTP/1.1\r\nHost: {addr}\r\n", req.method, req.path);
     for (k, v) in &req.headers {
         if !matches!(k.as_str(), "host" | "connection" | "content-length" | "transfer-encoding" | "keep-alive") {
@@ -321,17 +349,21 @@ fn relay(addr: &str, req: &Request, client: &mut TcpStream) -> io::Result<(u16, 
         }
     }
     head.push_str(&format!("Connection: close\r\nContent-Length: {}\r\n\r\n", req.body.len()));
+    if head.len() > transport::MAX_HEADERS {
+        return Err(transport::invalid("forwarded HTTP headers exceed limit"));
+    }
     up.write_all(head.as_bytes())?;
     up.write_all(&req.body)?;
+    before_read(&mut up);
     let mut r = BufReader::new(up);
-    let mut status_line = String::new();
-    r.read_line(&mut status_line)?;
-    let status: u16 = status_line.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-    let headers = read_headers(&mut r)?;
+    let response = transport::read_head(&mut r)?;
+    let status: u16 = response.first.split_whitespace().nth(1).and_then(|s| s.parse().ok())
+        .ok_or_else(|| transport::invalid("invalid HTTP response status"))?;
+    let headers = response.fields.clone();
     let ctype = header(&headers, "content-type").unwrap_or("").to_string();
     let chunked = header(&headers, "transfer-encoding").is_some_and(|v| v.to_ascii_lowercase().contains("chunked"));
     let length = header(&headers, "content-length").and_then(|v| v.parse::<usize>().ok());
-    let mut out = format!("{}\r\n", status_line.trim_end());
+    let mut out = format!("{}\r\n", response.first);
     for (k, v) in &headers {
         if !matches!(k.as_str(), "connection" | "content-length" | "transfer-encoding" | "keep-alive") {
             out.push_str(&format!("{k}: {v}\r\n"));
@@ -341,28 +373,25 @@ fn relay(addr: &str, req: &Request, client: &mut TcpStream) -> io::Result<(u16, 
     if chunked { out.push_str("Transfer-Encoding: chunked\r\n"); } else if let Some(n) = length { out.push_str(&format!("Content-Length: {n}\r\n")); }
     out.push_str("\r\n");
     let mut body = Vec::new();
-    let mut closed = client.write_all(out.as_bytes()).is_err();
+    let mut closed = client_write(client, out.as_bytes()).is_err();
     let keep = |piece: &[u8], body: &mut Vec<u8>| if body.len() < RECORD_CAP { body.extend_from_slice(&piece[..piece.len().min(RECORD_CAP - body.len())]); };
-    if chunked {
-        while !closed {
-            match read_chunk(&mut r)? {
-                Some(c) => {
-                    keep(&c, &mut body);
-                    closed = client.write_all(format!("{:x}\r\n", c.len()).as_bytes()).and_then(|_| client.write_all(&c)).and_then(|_| client.write_all(b"\r\n")).and_then(|_| client.flush()).is_err();
-                }
-                None => { closed = client.write_all(b"0\r\n\r\n").is_err(); break; }
-            }
+    let mut input = BodyReader::new(r, &response, false, MAX_BODY)?;
+    while !closed {
+        let piece = input.fill_buf()?;
+        if piece.is_empty() { break; }
+        keep(piece, &mut body);
+        if chunked {
+            closed = client_write(client, format!("{:x}\r\n", piece.len()).as_bytes())
+                .and_then(|_| client_write(client, piece))
+                .and_then(|_| client_write(client, b"\r\n")).is_err();
+        } else {
+            closed = client_write(client, piece).is_err();
         }
-    } else {
-        let mut left = length.unwrap_or(usize::MAX);
-        let mut buf = vec![0; 64 << 10];
-        while left > 0 && !closed {
-            let n = r.read(&mut buf[..left.min(64 << 10)])?;
-            if n == 0 { break; }
-            left = left.saturating_sub(n);
-            keep(&buf[..n], &mut body);
-            closed = client.write_all(&buf[..n]).and_then(|_| client.flush()).is_err();
-        }
+        let n = piece.len();
+        input.consume(n);
+    }
+    if chunked && !closed {
+        closed = client_write(client, b"0\r\n\r\n").is_err();
     }
     Ok((status, ctype, body, closed))
 }
@@ -529,6 +558,24 @@ pub fn to_sse(body: &str, request_bytes: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn connect(server: &Server) -> TcpStream {
+        let endpoint = crate::transport::Endpoint::parse(&server.url).unwrap();
+        TcpStream::connect((endpoint.host, endpoint.port)).unwrap()
+    }
+    #[test]
+    fn suite_relay_refuses_before_writing_and_switch_allows() {
+        // The relay opens its own socket to the engine. A review found that no test failed when its check was removed.
+        for allow in [false, true] {
+            crate::http_policy::tests::wire(allow, |url| {
+                let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+                let mut client = TcpStream::connect(listener.local_addr()?)?;
+                let _reply_side = listener.accept()?;
+                let request = Request { method: "POST".into(), path: "/v1/chat/completions".into(), headers: Vec::new(), body: b"{}".to_vec() };
+                relay(url.trim_start_matches("http://"), &request, &mut client).map(drop)
+            });
+        }
+    }
+
     #[test]
     fn usage_reads_last_object() {
         let sse = "data: {\"choices\":[]}\n\ndata: {\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":3}}\n\ndata: {\"usage\":{\"prompt_tokens\": 812,\"completion_tokens\":41,\"prompt_tokens_details\":{\"cached_tokens\":768}}}\n\ndata: [DONE]\n";
@@ -577,6 +624,166 @@ mod tests {
         let _ = server.exchanges_within(Duration::from_millis(20));
         assert!(server.wait_expired());
         server.shared.busy.fetch_sub(1, Ordering::AcqRel);
+    }
+    #[test]
+    fn listener_caps_slow_connections_and_gives_a_retry_time() {
+        let dir = std::env::temp_dir();
+        let server = Server::start(Source::Replay(Mutex::new(VecDeque::new())), None, false, &dir).unwrap();
+        let mut slow = Vec::new();
+        for _ in 0..MAX_CONNECTIONS {
+            let mut socket = connect(&server);
+            socket.write_all(b"G").unwrap();
+            slow.push(socket);
+            let until = Instant::now() + Duration::from_secs(1);
+            while server.shared.busy.load(Ordering::Acquire) < slow.len() && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            assert_eq!(server.shared.busy.load(Ordering::Acquire), slow.len());
+        }
+        let mut extra = connect(&server);
+        extra.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        extra.write_all(b"GET /v1/chat/completions HTTP/1.1\r\n\r\n").unwrap();
+        let mut reply = String::new();
+        extra.read_to_string(&mut reply).unwrap();
+        assert!(reply.starts_with("HTTP/1.1 503 ") && reply.contains("Retry-After: 1\r\n") && reply.contains("send the request again"), "{reply}");
+        drop(slow);
+    }
+    #[test]
+    fn listener_bounds_headers_and_the_total_receive_time() {
+        let dir = std::env::temp_dir();
+        let server = Server::start(Source::Replay(Mutex::new(VecDeque::new())), None, false, &dir).unwrap();
+        let mut slow = connect(&server);
+        slow.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        for byte in b"GET" {
+            let _ = slow.write_all(&[*byte]);
+            std::thread::sleep(Duration::from_millis(60));
+        }
+        let mut timeout = String::new();
+        slow.read_to_string(&mut timeout).unwrap();
+        assert!(timeout.starts_with("HTTP/1.1 408 ") && timeout.contains("Retry-After: 1\r\n"), "{timeout}");
+
+        let mut oversized = Vec::from(&b"GET /v1/chat/completions HTTP/1.1\r\n"[..]);
+        for _ in 0..5 {
+            oversized.extend_from_slice(b"X-Pad: ");
+            oversized.extend(std::iter::repeat_n(b'x', 7000));
+            oversized.extend_from_slice(b"\r\n");
+        }
+        oversized.extend_from_slice(b"\r\n");
+        let mut client = connect(&server);
+        client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let _ = client.write_all(&oversized);
+        let mut reply = String::new();
+        client.read_to_string(&mut reply).unwrap();
+        assert!(reply.starts_with("HTTP/1.1 400 ") && reply.contains("oversized request headers"), "{reply}");
+
+        let mut body = connect(&server);
+        body.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        body.write_all(b"POST /v1/chat/completions HTTP/1.1\r\nContent-Length: 3\r\n\r\na").unwrap();
+        std::thread::sleep(Duration::from_millis(220));
+        let _ = body.write_all(b"bc");
+        let mut reply = String::new();
+        let _ = body.read_to_string(&mut reply);
+        assert!(reply.starts_with("HTTP/1.1 408 ") && reply.contains("send the request again"), "{reply}");
+    }
+    fn relay_response(response: impl FnOnce(TcpStream) + Send + 'static, timeout: Duration) -> io::Result<(u16, String, Vec<u8>, bool)> {
+        let upstream = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = upstream.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (socket, _) = upstream.accept().unwrap();
+            let mut reader = BufReader::new(socket);
+            let head = transport::read_head(&mut reader).unwrap();
+            let mut body = BodyReader::new(reader, &head, true, MAX_BODY).unwrap();
+            io::copy(&mut body, &mut io::sink()).unwrap();
+            response(body.reader.into_inner());
+        });
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let mut caller = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut downstream, _) = listener.accept().unwrap();
+        let drain = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = downstream.read_to_end(&mut bytes);
+            bytes
+        });
+        let request = Request { method: "POST".into(), path: "/v1/chat/completions".into(), headers: Vec::new(), body: Vec::new() };
+        let result = relay_with_timeout(&address.to_string(), &request, &mut caller, timeout);
+        let _ = caller.shutdown(Shutdown::Both);
+        server.join().unwrap();
+        let _ = drain.join().unwrap();
+        result
+    }
+    #[test]
+    fn suite_relay_bounds_an_unterminated_response_header() {
+        let error = relay_response(|mut socket| {
+            socket.write_all(b"HTTP/1.1 200 OK\r\nX-Pad: ").unwrap();
+            let _ = socket.write_all(&vec![b'x'; transport::MAX_HEADERS]);
+        }, Duration::from_secs(2)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+    #[test]
+    fn suite_relay_bounds_response_trailers() {
+        let error = relay_response(|mut socket| {
+            socket.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n").unwrap();
+            for _ in 0..5 {
+                let _ = socket.write_all(b"X-Pad: ");
+                let _ = socket.write_all(&vec![b'x'; 7000]);
+                let _ = socket.write_all(b"\r\n");
+            }
+            let _ = socket.write_all(b"\r\n");
+        }, Duration::from_secs(2)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+    #[test]
+    fn suite_relay_stops_a_slow_close_delimited_response_at_one_deadline() {
+        let error = relay_response(|mut socket| {
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n").unwrap();
+            for _ in 0..20 {
+                if socket.write_all(b"x").is_err() { break; }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }, Duration::from_millis(100)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    }
+    #[test]
+    fn suite_engine_first_byte_after_thirty_five_seconds_is_relayed() {
+        let upstream = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = upstream.local_addr().unwrap();
+        let worker = std::thread::spawn(move || {
+            let socket = upstream.accept().unwrap().0;
+            let mut input = BufReader::new(socket);
+            transport::read_head(&mut input).unwrap();
+            input.get_mut().write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").unwrap();
+        });
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut sink, _) = listener.accept().unwrap();
+        let req = Request { method: "POST".into(), path: "/v1/chat/completions".into(), headers: Vec::new(), body: Vec::new() };
+        let result = relay_with_stream(&address.to_string(), &req, &mut client, RELAY_TIMEOUT, |up| {
+            up.elapse_for_test(Duration::from_secs(35));
+        }).unwrap();
+        assert_eq!((result.0, result.2), (200, b"ok".to_vec()));
+        assert!(!result.3);
+        client.shutdown(Shutdown::Both).unwrap();
+        let mut bytes = String::new();
+        sink.read_to_string(&mut bytes).unwrap();
+        assert!(bytes.ends_with("ok"));
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn suite_slow_reader_receives_all_eight_megabytes() {
+        let body = "x".repeat(8 << 20);
+        let server = Server::start(Source::Replay(Mutex::new(VecDeque::from([Reply {
+            status: 200, content_type: "text/plain".into(), body: body.clone(),
+        }]))), None, false, &std::env::temp_dir()).unwrap();
+        let mut client = connect(&server);
+        client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        client.write_all(b"POST /v1/chat/completions HTTP/1.1\r\nContent-Length: 0\r\n\r\n").unwrap();
+        std::thread::sleep(Duration::from_millis(700));
+        let mut bytes = Vec::new();
+        client.read_to_end(&mut bytes).unwrap();
+        let header_end = bytes.windows(4).position(|s| s == b"\r\n\r\n").unwrap() + 4;
+        assert_eq!(&bytes[header_end..], body.as_bytes());
+        assert!(!server.exchanges()[0].client_closed);
     }
     #[test]
     fn edit_tags_come_from_the_workspace() {

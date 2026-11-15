@@ -372,7 +372,9 @@ impl App {
                 self.terminal.alert(&line)?;
             }
             if !finished && !pending.canceled && !time_limited {
-                if let Some(failure) = self.context.failure {
+                if let Some(failure) = self.context.lookup_failure.clone() {
+                    self.run_notice(&failure)?;
+                } else if let Some(failure) = self.context.failure {
                     self.run_notice(failure)?;
                 } else if let StopReason::ModelError(kind) = native.report.reason {
                     // The engine may be down, busy or at the wrong address: name
@@ -756,9 +758,10 @@ impl CompactingJournal {
         );
         super::approval::request_tool_preview(
             &self.events,
-            coding_tools::Preview {
+            coding_tools::Preview { prompt: None,
                 title: "Context",
                 detail: &detail,
+                details: None,
                 approval_required: false,
             },
             cancel,
@@ -915,9 +918,10 @@ impl RunObserver for CompactingJournal {
             );
         super::approval::request_tool_preview(
             &self.events,
-            coding_tools::Preview {
+            coding_tools::Preview { prompt: None,
                 title: "Context",
                 detail: &notice,
+                details: None,
                 approval_required: false,
             },
             cancel,

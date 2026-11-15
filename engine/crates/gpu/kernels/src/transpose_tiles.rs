@@ -40,8 +40,10 @@ pub extern "ptx-kernel" fn transpose_tiles(p:Arguments) {
 /// 33.5 MB exchange upload took 0.92 ms (byte floor 0.3 ms).
 ///
 /// Launch: 256 threads, grid (ceil(cols/32), ceil(rows/32)); the loops stride by the grid, so any grid is correct.
-#[no_mangle]
-pub extern "ptx-kernel" fn transpose_smem(p:Arguments) {
+#[export_name="transpose_smem"]
+pub extern "ptx-kernel" fn entry_transpose_smem(p:Arguments) {transpose_smem(p)}
+#[inline(always)]
+pub(crate) fn transpose_smem(p:Arguments) {
     // SAFETY: The host (backend/prompt_ops.rs, prompt_admission::transpose_admitted) validated Shape::lengths: the input holds
     // rows * cols words, the output rows * cols words, same-context contiguous owners that live through stream completion, the
     // output private and disjoint from the input. The block must have 256 threads (else it traps). Tile (rt, ct) covers input

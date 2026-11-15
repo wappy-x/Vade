@@ -15,8 +15,10 @@
 //! All parts share rows and cols (the host checks); a part has at most 16 tokens.
 use crate::expert_ops::{GroupArguments,GroupEntry,Op};
 
-#[no_mangle]
-pub extern "ptx-kernel" fn fp8_rows_multi(launch:GroupArguments) {
+#[export_name="fp8_rows_multi"]
+pub extern "ptx-kernel" fn entry_fp8_rows_multi(launch:GroupArguments) {fp8_rows_multi(launch)}
+#[inline(always)]
+pub(crate) fn fp8_rows_multi(launch:GroupArguments) {
     // SAFETY: The host checks every part (shape, raw owners, input span), that all parts share rows and cols, and keeps all owners and the table alive
     // through stream completion, as for expert_group. Weights, scales and inputs are immutable; each (part, row, token) output word has exactly one
     // writer (the thread of that row whose warp holds that token) and the output is private and initialized earlier on the stream. The body traps unless

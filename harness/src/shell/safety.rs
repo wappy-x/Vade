@@ -9,7 +9,7 @@ use std::path::Path;
 /// How much agreement a command needs. Order matters: the strictest wins.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Class {
-    /// Read-only, build or test work: runs without a prompt.
+    /// Read-only work that does not run project code: no prompt.
     Safe,
     /// Needs a yes from a person, an allow-list rule or `--yes`.
     Ask,
@@ -725,6 +725,7 @@ impl Ctx {
             if raw_disk(&target.text) {
                 self.add(Class::Blocked, format!("writes over a disk device: {}", target.text), display, false);
             }
+            self.block_secret_write(&target.text, display);
             outside |= self.outside(&target.text);
         }
         let reason = if outside { format!("{reason} outside the workspace") } else { reason.into() };
@@ -739,8 +740,16 @@ impl Ctx {
         if raw_disk(text) {
             return self.add(Class::Blocked, format!("writes over a disk device: {text}"), display, false);
         }
+        self.block_secret_write(text, display);
         let place = if self.outside(text) { "outside the workspace" } else { "a file" };
         self.add(Class::Ask, format!("{reason} {place}"), display, true);
+    }
+
+    fn block_secret_write(&mut self, text: &str, display: &[String]) {
+        let Some(paths) = braces(text) else { return };
+        if let Some(why) = paths.iter().find_map(|path| crate::tools::secret_path_reason(path)) {
+            self.add(Class::Blocked, format!("refuses to write a secret-related path because {why}: {text}"), display, false);
+        }
     }
 
     fn credentials(&mut self, word: &Word, display: &[String]) {
@@ -755,15 +764,15 @@ impl Ctx {
         // with a name.
         let option = word.text.starts_with('-');
         let parts = || paths.iter().flat_map(|path| path.split('/').enumerate()).map(|(at, part)| (option && at == 0, part.to_ascii_lowercase()));
-        let named = |attached: bool, lower: &str, name: &str| if attached { lower.ends_with(name) } else { lower == name };
-        let hit = parts().any(|(attached, lower)| {
-            SECRET_DIRS.iter().chain(crate::tools::CREDENTIAL_NAMES).any(|name| named(attached, &lower, name))
-                || (lower.len() > 1 && crate::tools::CREDENTIAL_SUFFIXES.iter().any(|s| lower.ends_with(s)))
+        let hit = parts().any(|(attached, lower)| if attached {
+            crate::tools::SECRET_PATH_RULES.iter().any(|rule| rule.matches_attached(&lower))
+        } else {
+            crate::tools::secret_component_reason(&lower).is_some()
         });
         if hit {
             self.add(Class::Ask, format!("touches credential files: {}", word.text), display, false);
         }
-        if parts().any(|(attached, lower)| named(attached, &lower, super::permissions::FILE_NAME)) {
+        if parts().any(|(attached, lower)| if attached { lower.ends_with(super::permissions::FILE_NAME) } else { lower == super::permissions::FILE_NAME }) {
             self.add(Class::Ask, format!("touches an allow-list file: {}", word.text), display, false);
         }
     }
@@ -814,13 +823,6 @@ struct Resolved {
     shell: bool,
     downloads: bool,
 }
-
-/// Folder names that hold keys or tokens, in addition to the workspace tools'
-/// credential names and suffixes.
-pub(crate) const SECRET_DIRS: &[&str] = &[
-    ".ssh", ".gnupg", ".aws", ".azure", ".netrc", ".npmrc", ".pypirc", ".git-credentials",
-    ".docker", ".kube", "keychains", ".password-store", ".vault-token", ".gcloud",
-];
 
 /// Folders whose recursive removal or permission change is never wanted.
 const SYSTEM_DIRS: &[&str] = &[

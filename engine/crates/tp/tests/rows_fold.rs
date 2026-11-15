@@ -19,7 +19,16 @@ struct Folding {with_shared:std::cell::Cell<usize>,without_shared:std::cell::Cel
     /// The compute does not fold (`folds_rows` false: a batch step in the grouped expert form, a verify pass, a prompt group).
     closed:bool,
     /// Times the row pass asked `folds_rows`: the one flag a routed layer pays.
-    flags:std::cell::Cell<usize>}
+    flags:std::cell::Cell<usize>,
+    /// The fold launches the device plans for the stages of this compute, on one rank of a pair at the model's shape
+    /// (`rows_fold::one_launch`, the rule `apply_routed_rows_fold` reads). The plan, not a device run.
+    launches:std::cell::Cell<usize>}
+/// The model's fold on one rank of a pair: 8 picks, 2,048 of the 4,096 rows, with the shared row kept on its rank.
+fn model_fold_launches(m:usize)->usize {
+    use spark_tp::resident_weights::rows_fold;
+    let fold=Shape {op:Op::ExpertFold,rows:8,cols:2048,taps:1,heads:0,dim:0,epsilon:0.0,bound:0.0};
+    rows_fold::launches(rows_fold::one_launch(fold,m,Some(m*2048),2048).is_some(),m)
+}
 /// The mark of a shared row kept on its rank. A host compute has no rows of its own, so the words are a mark, not rows.
 const LOCAL:f32=7.0;
 impl Compute for Folding {
@@ -27,6 +36,8 @@ impl Compute for Folding {
     fn mhc_row_launches(&self)->u64 {0}
     fn rows_greedy(&self,_:&Self::Value,_:usize)->spark_tp::Result<Option<Vec<u32>>> {Ok(None)}
     fn routes_rows(&self,m:usize)->bool {(3..=BATCH_ROWS).contains(&m)}
+    fn latent_absorption_chats(&self,name:&str,s:spark_gpu_probe::prompt_ops::Shape,g:&[spark_tp::bounded_decoder::ChatGather<'_,Self::Value>],stride:usize,
+        q:&Self::Value,n:&Self::Value)->spark_tp::Result<Option<Self::Value>> {Host.latent_absorption_chats(name,s,g,stride,q,n)}
     fn folds_rows(&self,m:usize)->bool {self.flags.set(self.flags.get()+1);!self.closed && self.routes_rows(m)}
     fn rows_routed_fold(&self,down:&Step,ids:&V,input:&V,weights:&V,shared:Option<&V>,fold:Shape,m:usize)->spark_tp::Result<Option<V>> {
         // What the device form needs: the one down step, every token's picks and weights, one middle row a (token, pick),
@@ -42,6 +53,7 @@ impl Compute for Folding {
             else {assert_eq!(shared.len(),m*fold.cols as usize,"the shared row is one gathered row a token");}
         }
         let count=if shared.is_some() {&self.with_shared} else {&self.without_shared};count.set(count.get()+1);self.rows.set(self.rows.get()+m);
+        self.launches.set(self.launches.get()+model_fold_launches(m));
         Ok(self.answer.then(||vec![0.0;m*fold.cols as usize]))
     }
     fn rows_project_local(&self,_:&CheckpointAdmission,_:&str,x:&V,m:usize,_:bool)->spark_tp::Result<Option<V>> {
@@ -111,6 +123,23 @@ fn a_batch_step_folds_its_routed_down_rows_at_the_fold_step_or_keeps_both_steps(
         assert_eq!((answered.with_shared.get(),answered.kept.get(),answered.flags.get()),(routed,if local {routed} else {0},routed));
         for (chat,(got,want)) in actual.iter().zip(&expected).enumerate() {assert_ne!(got,want,"chat {chat}: the folded output was not used");}
     }
+    // Cohorts of 3 to 8 chats at eight positions, the chats rotating through the slots: every routed layer is still ONE
+    // stage of all rows, each chat keeps the bits of its own step, and the stage's launch plan at the model's shape is
+    // ONE fold launch a routed layer on a rank, for any row count (it was one a row).
+    let prompts:[&[u32];8]=[&[1],&[7,2],&[3,4,5],&[6],&[2,2,7,1],&[5,3],&[4],&[1,6,6]];let tokens=[2u32,5,1,7,3,6,4,2];
+    let alone=states(&plain,&prompts).iter().zip(tokens).map(|(state,token)|bits(&plain.step(token,state,|_,_|Ok(())).unwrap().0)).collect::<Vec<_>>();
+    for n in 3..=8usize {
+        let compute=Folding {local:true,..Folding::default()};
+        let decoder=Decoder::new(&c.admission,&compute,8).unwrap();let held=states(&decoder,&prompts);
+        let chats=(0..n).map(|slot|(slot*3+n)%8).collect::<Vec<_>>();
+        let mut seen=chats.clone();seen.sort_unstable();seen.dedup();assert_eq!(seen.len(),n,"the cohort names a chat once");
+        let rows=chats.iter().map(|&chat|(tokens[chat],&held[chat])).collect::<Vec<_>>();
+        let actual=decoder.step_batch(&rows).unwrap();
+        for (&chat,(logits,_,_)) in chats.iter().zip(&actual) {assert_eq!(bits(logits),alone[chat],"rows={n} chat={chat}");}
+        assert_eq!((compute.with_shared.get(),compute.without_shared.get(),compute.rows.get()),(routed,0,n*routed),"rows={n}");
+        assert_eq!(compute.launches.get(),routed,"rows={n}: one fold launch a routed layer on a rank");
+    }
+    assert_eq!((1..=8).map(model_fold_launches).collect::<Vec<_>>(),[1;8],"1 chat keeps its one launch; 2 to 8 chats share one");
     // A compute that does not fold: the pass pays its one flag a routed layer and nothing else of the fold runs.
     let closed=Folding {closed:true,local:true,answer:true,..Folding::default()};
     assert_eq!(batch(&closed),expected,"a pass that does not fold keeps every chat's bits");
@@ -171,4 +200,106 @@ fn rows_folded_on_each_rank_then_gathered_equal_the_gathered_rows_folded() {
     assert!(rows_fold::planes(0,3,8,rows,Some(3*96+1)).is_err());assert!(rows_fold::planes(3,3,8,rows,None).is_err());
     assert!(rows_fold::planes(0,rows_fold::TOKENS+1,8,rows,None).is_err());assert!(rows_fold::planes(0,3,0,rows,None).is_err());
     assert_eq!(rows_fold::planes(2,3,8,Rows {start:48,..rows},Some(3*96)).unwrap(),rows_fold::Planes {picked:16..24,projected:2*8*48..3*8*48,own:Some(2*96+48..3*96)});
+}
+/// FOLD ROWS ONE LAUNCH twin (no device): a run of batch steps whose cohort changes (1 to 8 chats; chats join, leave and
+/// move between slots), at the model's shape on a pair (8 picks of 288, 4,096 rows, 2,048 a rank, the shared row kept on
+/// its rank). Each rank folds as the device path does: the ONE row-fold launch where `rows_fold::one_launch` gives a
+/// shape (its host reference, `prompt_ops::reference`), else the launch a token (`causal_ops::reference` with the round
+/// mark, over `rows_fold::planes`). Every chat's gathered row must have the bits of the chat ALONE: the plain step's fold
+/// of its own whole rows with the round mark (`fold_then_gather`). A chat's planes depend on the chat and the step only,
+/// so a word read from another chat's planes, or from the wrong slot, cannot pass. The fold launches of each step are
+/// counted on each rank. What this does NOT run: the device function, the kernel and the gather themselves (a GPU: the
+/// list sweep `kernel-bench --reading-probe .. route-fold` and the check tool's rows against the chat alone).
+#[test]
+fn one_fold_launch_of_a_changing_cohort_gives_each_chat_the_bits_of_the_chat_alone() {
+    use spark_gpu_probe::{bf16::rounded,causal_ops::{reference as fold_one,FOLD_ROUNDS},prompt_ops::reference as fold_rows};
+    use spark_tp::resident_weights::{Rows,rows_fold};
+    let (picks,hidden,experts,ranks,chats)=(8usize,4096usize,288usize,2usize,8usize);let count=hidden/ranks;
+    // Finished BF16 words, as the routed column-tile projection stores them.
+    let word=|seed:usize|rounded(((seed.wrapping_mul(2654435761))%4001) as f32/500.0-4.0);
+    // A chat's planes at a step: its picks (slot order is not ID order, no pick twice), weights, whole rows, shared row.
+    let planes_of=|chat:usize,step:usize| {
+        let salt=chat*7919+step*104729;
+        let ids=(0..picks).map(|pick|((salt*31+pick*101+11)%experts) as f32).collect::<Vec<_>>();
+        assert!((0..picks).all(|pick|!ids[..pick].contains(&ids[pick])) && ids.windows(2).any(|pair|pair[0]>pair[1]));
+        let weights=(0..picks).map(|pick|word(salt+pick*7+3)/8.0).collect::<Vec<_>>();
+        let down=(0..picks*hidden).map(|at|word(salt*13+at+17)).collect::<Vec<_>>();
+        let shared=(0..hidden).map(|at|word(salt*5+at*3+1)).collect::<Vec<_>>();
+        (ids,weights,down,shared)
+    };
+    let whole=Shape {op:Op::ExpertFold,rows:picks as u32,cols:hidden as u32,taps:1,heads:0,dim:0,epsilon:0.0,bound:0.0};
+    let local=Shape {cols:count as u32,..whole};
+    let mut widths=std::collections::BTreeSet::new();let mut total=[0usize;2];
+    // Widths 1 to 8, back down, and up again; the cohort rotates so a chat leaves, returns and changes its slot.
+    for (step,width) in (1..=chats).chain((1..chats).rev()).chain([3,8,5,2]).enumerate() {
+        let cohort=(0..width).map(|slot|(slot*5+step*3)%chats).collect::<Vec<_>>();
+        let mut seen=cohort.clone();seen.sort_unstable();seen.dedup();assert_eq!(seen.len(),width);
+        let held=cohort.iter().map(|&chat|planes_of(chat,step)).collect::<Vec<_>>();
+        // The row-major planes of the batch step: one row a (token, pick), in slot order.
+        let ids=held.iter().flat_map(|p|p.0.iter().copied()).collect::<Vec<_>>();
+        let weights=held.iter().flat_map(|p|p.1.iter().copied()).collect::<Vec<_>>();
+        let mut got=vec![f32::NAN;width*hidden];let mut launches=Vec::with_capacity(ranks);
+        for rank in 0..ranks {
+            let rows=Rows {start:rank*count,count,total:hidden,split:true};
+            // This rank's rows of every (token, pick), and of every token's shared row (`rows_project_local`).
+            let projected=held.iter().flat_map(|p|(0..picks).flat_map(move |pick|p.2[pick*hidden+rows.start..pick*hidden+rows.start+count].iter().copied())).collect::<Vec<_>>();
+            let own=held.iter().flat_map(|p|p.3[rows.start..rows.start+count].iter().copied()).collect::<Vec<_>>();
+            let one=rows_fold::one_launch(Shape {dim:64,..local},width,Some(own.len()),count);
+            assert_eq!(one.is_some(),width>=2,"width={width}: 2 to 8 chats of the model's shape take the one launch");
+            launches.push(rows_fold::launches(one.is_some(),width));
+            let folded=match one {
+                Some(shape)=>{assert_eq!((shape.tokens as usize,shape.inner.cols as usize,shape.inner.dim),(width,count,0));
+                    fold_rows(shape,[&ids,&weights,&projected,&own,&[]],&[]).unwrap()},
+                None=>(0..width).flat_map(|token| {
+                    let at=rows_fold::planes(token,width,picks,rows,Some(own.len())).unwrap();
+                    fold_one(Shape {dim:FOLD_ROUNDS,..local},[&ids[at.picked.clone()],&weights[at.picked],&projected[at.projected],&own[at.own.unwrap()]],&[]).unwrap()
+                }).collect(),
+            };
+            assert_eq!(folded.len(),width*count);
+            // The gather: this rank's folded row of token t at its rows of token t's whole row.
+            for token in 0..width {got[token*hidden+rows.start..token*hidden+rows.start+count].copy_from_slice(&folded[token*count..(token+1)*count]);}
+        }
+        assert_eq!(launches,[1,1],"step={step} width={width}: one fold launch a rank");
+        for (sum,made) in total.iter_mut().zip(&launches) {*sum+=made;}
+        for (slot,(&chat,planes)) in cohort.iter().zip(&held).enumerate() {
+            let alone=fold_one(Shape {dim:FOLD_ROUNDS,..whole},[&planes.0,&planes.1,&planes.2,&planes.3],&[]).unwrap();
+            assert!(alone.iter().map(|v|v.to_bits()).eq(got[slot*hidden..(slot+1)*hidden].iter().map(|v|v.to_bits())),"step={step} width={width} slot={slot} chat={chat}");
+        }
+        widths.insert(width);
+    }
+    assert_eq!(widths.into_iter().collect::<Vec<_>>(),(1..=chats).collect::<Vec<_>>());assert_eq!(total[0],total[1]);
+    // The forms that keep a launch a token: the gathered shared plane, a rank count or a fold the sweep does not hold.
+    let own=|m:usize|Some(m*count);
+    for m in 2..=chats {
+        assert!(rows_fold::one_launch(local,m,own(m),count).is_some());
+        assert!(rows_fold::one_launch(local,m,Some(m*hidden),count).is_none(),"the gathered shared plane holds a token's rows apart");
+        assert!(rows_fold::one_launch(Shape {taps:0,..local},m,None,count).is_none() && rows_fold::one_launch(local,m,None,count).is_none());
+        assert!(rows_fold::one_launch(Shape {cols:1024,..local},m,Some(m*1024),1024).is_none(),"a rank of four is not swept");
+        assert!(rows_fold::one_launch(Shape {rows:7,..local},m,own(m),count).is_none() && rows_fold::one_launch(local,m,own(m),count+1).is_none());
+        assert!(rows_fold::one_launch(Shape {op:Op::Route,..local},m,own(m),count).is_none());
+        assert_eq!((rows_fold::launches(true,m),rows_fold::launches(false,m)),(1,m));
+    }
+    assert!(rows_fold::one_launch(local,1,own(1),count).is_none() && rows_fold::one_launch(local,rows_fold::TOKENS+1,own(rows_fold::TOKENS+1),count).is_none());
+    // No row reads another row: with every other chat's planes replaced (other IDs, NaN rows), a chat's folded words stay.
+    let width=8;let held=(0..width).map(|chat|planes_of(chat,99)).collect::<Vec<_>>();
+    let build=|poison:Option<usize>| {
+        let rows=Rows {start:count,count,total:hidden,split:true};let at=|chat:usize|poison.is_some_and(|keep|keep!=chat);
+        let ids=held.iter().enumerate().flat_map(|(chat,p)|p.0.iter().map(move |&id|if at(chat) {(experts-1) as f32-id} else {id})).collect::<Vec<_>>();
+        let weights=held.iter().enumerate().flat_map(|(chat,p)|p.1.iter().map(move |&w|if at(chat) {-w} else {w})).collect::<Vec<_>>();
+        let projected=held.iter().enumerate().flat_map(|(chat,p)|(0..picks).flat_map(move |pick|p.2[pick*hidden+rows.start..pick*hidden+rows.start+count].iter().map(move |&v|if at(chat) {f32::NAN} else {v}))).collect::<Vec<_>>();
+        let own=held.iter().enumerate().flat_map(|(chat,p)|p.3[rows.start..rows.start+count].iter().map(move |&v|if at(chat) {f32::NAN} else {v})).collect::<Vec<_>>();
+        fold_rows(rows_fold::one_launch(local,width,Some(own.len()),count).unwrap(),[&ids,&weights,&projected,&own,&[]],&[]).unwrap()
+    };
+    let clean=build(None);
+    for keep in [0usize,3,7] {let poisoned=build(Some(keep));
+        assert!(clean[keep*count..(keep+1)*count].iter().map(|v|v.to_bits()).eq(poisoned[keep*count..(keep+1)*count].iter().map(|v|v.to_bits())),"chat {keep} read another chat's planes");
+        assert!((0..width).filter(|&chat|chat!=keep).all(|chat|poisoned[chat*count..(chat+1)*count].iter().all(|v|v.is_nan())),"the poison did not reach its own rows");}
+    // Why the premise matters (negative control): on words that are NOT finished BF16 the launch a token (it casts each
+    // row word first) and the row fold (it reads the word as it lies) differ. ROUTE ROWS makes finished words only.
+    let raw=(0..picks*count).map(|at|((at*37+5)%1013) as f32/977.0-0.5).collect::<Vec<_>>();
+    assert!(raw.iter().any(|&v|rounded(v).to_bits()!=v.to_bits()));
+    let (ids,weights,_,shared)=planes_of(0,0);
+    let cast=fold_one(Shape {dim:FOLD_ROUNDS,..local},[&ids,&weights,&raw,&shared[..count]],&[]).unwrap();
+    let lies=fold_one(local,[&ids,&weights,&raw,&shared[..count]],&[]).unwrap();
+    assert!(cast.iter().zip(&lies).any(|(a,b)|a.to_bits()!=b.to_bits()),"the control has no teeth");
 }

@@ -525,7 +525,7 @@ fn raw_ui_shows_tool_call_rows_and_result_summaries_without_verbose() {
     for expected in [
         "[file: input.txt, 2 lines]",
         "● Edit workspace files",
-        "Patch preview",
+        "Workspace change",
         "+exact result",
         "⎿ file written · ",
         "result.txt",

@@ -40,7 +40,14 @@ fn scatter(b:&spark_gpu_probe::driver::Backend<'_>)->Result<()> {
 
 fn slab<'b,'d>(b:&'b spark_gpu_probe::driver::Backend<'d>,lines:&mut String,recording:bool)->Result<()> {
     let d=Device::new(b);let width=32768usize;let latent=512usize;
-    let chunk_bytes=SLAB_ROWS*width*4;let limit=2*chunk_bytes;d.set_projection_memo_limit(limit)?;
+    let chunk_bytes=SLAB_ROWS*width*4;let limit=2*chunk_bytes;
+    let mut summary=spark_tp::projection_memo::Summary::default();summary.add(width*2,latent,SLAB_ROWS/2,2).ok_or("memo fixture geometry overflow")?;
+    let plan=spark_tp::projection_memo::Plan::new(Some(summary),1);
+    if plan.bytes()!=limit || plan.replace_charge(spark_tp::projection_memo::FULL)?!=limit {return Err("memo fixture planner charge differs from its device limit".into());}
+    let older=d.clone();
+    if d.freeze_memo(plan).is_ok() {return Err("memo admission accepted a clone with an older local limit".into());}
+    drop(older);d.freeze_memo(plan)?;
+    if d.set_projection_memo_limit(limit+chunk_bytes).is_ok() {return Err("memo passed its immutable startup bound".into());}
     let counts=||{let s=b.vector_pool_stats();(s.allocated_count,s.allocated_bytes)};
     let next_id=std::cell::Cell::new(0usize);let mut inputs:Vec<(Value<'b,'d>,usize)>=Vec::new();
     // Remember `rows` new rows as one batch, the way ExpandKv keeps one group.
@@ -97,6 +104,9 @@ fn slab<'b,'d>(b:&'b spark_gpu_probe::driver::Backend<'d>,lines:&mut String,reco
     if d.set_projection_memo_limit(chunk_bytes).is_ok() {return Err("memo limit was lowered below its slab".into());}
     drop((kept_now,fresh));d.clear_projection_memo()?;
     if d.projection_slab_bytes()!=0 {return Err("cleared memo kept its slab".into());}
+    if d.memo_counts().1!=plan.bytes() || d.clone().memo_counts().1!=plan.bytes() {return Err("clear or clone changed the charged memo limit".into());}
+    #[cfg(feature="kernel-bench")]
+    if !recording {d.fixture_reset()?;if d.memo_counts().1!=plan.bytes() {return Err("reset changed the charged memo limit".into());}}
     lines.push_str(&format!("MEMO SLAB recording={recording} width={width} chunk_bytes={chunk_bytes} limit={limit} first_new_buffers={first_buffers} first_new_bytes={first_bytes} steady_new_buffers={} steady_new_bytes={} pinned={pinned_count} full_slab_kept={kept_fresh}_of_16\n",steady.0,steady.1));
     drop(d);padded(b,lines,recording)
 }

@@ -13,6 +13,7 @@ pub enum Event {
     Extend {held:bool,rows:usize,words:usize,room:usize}}
 #[derive(Default)]
 pub struct Watch {pub events:RefCell<Vec<Event>>,paused:Cell<bool>,
+    pub memo:Cell<Option<spark_tp::projection_memo::Summary>>,pub memo_bound:spark_tp::projection_memo::Bound,pub wrong_memo:Cell<bool>,
     /// The append with this number (from 0) fails. None: none fails.
     pub fail_extend:Cell<Option<usize>>,extends:Cell<usize>}
 impl Watch {
@@ -21,7 +22,12 @@ impl Watch {
     pub fn extends(&self)->usize {self.extends.get()}
 }
 impl Compute for Watch {
+    fn memo_summary(&self,_:&engine_model::plan::admission::CheckpointAdmission)->Option<spark_tp::projection_memo::Summary> {self.memo.get()}
+    fn freeze_memo(&self,p:spark_tp::projection_memo::Plan)->Result<spark_tp::projection_memo::Plan> {
+        if self.wrong_memo.get() {Ok(spark_tp::projection_memo::Plan::full())} else {self.memo_bound.freeze(p)}
+    }
     type Value=Vec<f32>;type Pass=<Host as Compute>::Pass;
+    fn state_allocations(&self,v:&Self::Value,out:&mut Vec<(usize,usize)>)->bool {Host.state_allocations(v,out)}
     fn rows_unrecorded(&self,pause:bool)->Result<bool> {self.events.borrow_mut().push(Event::Pause(pause));Ok(self.paused.replace(pause))}
     fn rows_keep(&self)->Result<()> {self.events.borrow_mut().push(Event::Keep);Ok(())}
     fn rows_extend(&self,held:Option<&Vec<f32>>,rows:usize,new:&Vec<f32>,width:usize,room:usize)->Result<Vec<f32>> {
@@ -32,6 +38,8 @@ impl Compute for Watch {
     }
     fn mhc_row_launches(&self)->u64 {0}
     fn rows_greedy(&self,_:&Vec<f32>,_:usize)->Result<Option<Vec<u32>>> {Ok(None)}
+    fn latent_absorption_chats(&self,name:&str,s:spark_gpu_probe::prompt_ops::Shape,g:&[spark_tp::bounded_decoder::ChatGather<'_,Self::Value>],stride:usize,
+        q:&Self::Value,n:&Self::Value)->spark_tp::Result<Option<Self::Value>> {Host.latent_absorption_chats(name,s,g,stride,q,n)}
     fn has_latent_absorption(&self,_:&str)->bool {false}
     fn gather_absorbed(&self,s:spark_gpu_probe::causal_ops::Shape,x:[Option<&Vec<f32>>;4],reserve:usize,expected:f32)->Result<Vec<f32>> {Host.gather_absorbed(s,x,reserve,expected)}
     fn latent_absorption(&self,name:&str,s:spark_gpu_probe::causal_ops::Shape,q:&Vec<f32>,l:&Vec<f32>,n:&Vec<f32>,slots:usize)->Result<Vec<f32>> {Host.latent_absorption(name,s,q,l,n,slots)}

@@ -7,7 +7,7 @@ export PATH
 unset CDPATH
 umask 077
 root=$(cd -P "$(dirname "$0")/.." && pwd)
-matrix=$(mktemp -d "${TMPDIR:-/tmp}/vade-install-matrix.XXXXXXXX")
+matrix=$(mktemp -d "$root/vade-install-matrix.XXXXXXXX")
 trap 'rm -rf "$matrix"' EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
@@ -228,11 +228,11 @@ run_case() (
             [ -s "$case_dir/stderr" ]
             ;;
         no)
-            # A complete function without its last call must also run nothing.
+            # A complete outer group without its main call must also run nothing.
             # Save the producer status because a pipe can hide it.
             if (
                 set +e
-                sed '$d' "$case_dir/checkout/scripts/install.sh"
+                sed '/^main "\$@"$/d' "$case_dir/checkout/scripts/install.sh"
                 producer_status=$?
                 printf '%s\n' "$producer_status" > "$case_dir/producer-status"
                 exit "$producer_status"
@@ -324,6 +324,18 @@ run_case() (
 )
 
 failed=0
+# Require the full outer group's ending, including its final newline. The old
+# ending guarded only the call and left a cut in the main declaration exposed.
+printf '%s\n' '}' 'main "$@"' '}' > "$matrix/ending"
+printf '%s\n' '}' '{' 'main "$@"' > "$matrix/old-ending"
+printf '%s' '}' >> "$matrix/old-ending"
+has_ending() { tail -n 3 "$1" | cmp -s "$matrix/ending" -; }
+if has_ending "$root/scripts/install.sh" && ! has_ending "$matrix/old-ending"; then
+    printf 'PASS static: outer group ending accepts the new suffix and rejects the old one\n'
+else
+    printf 'FAIL static: outer group ending\n'
+    failed=1
+fi
 # Every write, move and removal in the Vade home must run through in_dir or by_name
 # (scripts/install.sh): from inside a checked folder, on relative names. This reads
 # install.sh and lists each command line outside those two helpers where an argument

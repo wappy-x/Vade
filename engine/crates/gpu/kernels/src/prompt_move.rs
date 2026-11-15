@@ -15,8 +15,10 @@ use crate::prompt_ops::{Arguments,Op};
 
 const THREADS:usize=crate::prompt_admission::MOVE_THREADS as usize;
 
-#[no_mangle]
-pub extern "ptx-kernel" fn prompt_permute(p:Arguments) {
+#[export_name="prompt_permute"]
+pub extern "ptx-kernel" fn entry_prompt_permute(p:Arguments) {prompt_permute(p)}
+#[inline(always)]
+pub(crate) fn prompt_permute(p:Arguments) {
     // SAFETY: The host (backend/prompt_ops.rs, prompt_admission::permute_admitted) checked Shape::lengths: the source
     // holds `first` rows of `cols` words, the table `rows` words, the output `rows * cols` words, all owners live and
     // disjoint through completion, and source and output 16-byte aligned with `cols` divisible by 4. The block must have
@@ -72,8 +74,10 @@ pub extern "ptx-kernel" fn prompt_permute(p:Arguments) {
     }
 }
 
-#[no_mangle]
-pub extern "ptx-kernel" fn prompt_place(p:Arguments) {
+#[export_name="prompt_place"]
+pub extern "ptx-kernel" fn entry_prompt_place(p:Arguments) {prompt_place(p)}
+#[inline(always)]
+pub(crate) fn prompt_place(p:Arguments) {
     // SAFETY: The host (prompt_admission::place_admitted) checked Shape::lengths for Op::ExpertPlaceTile: the exchange
     // holds `slots * taps` words, the table `4 * rows` words (`rows` triples, then the slot to row inverse built by
     // prompt_ops::place_table, a permutation of 0..rows), the output `rows * cols` words with `cols = dim * taps`

@@ -200,6 +200,7 @@ impl CommandSpec {
                 "/bin/ls"
             }
             "cat" | "/bin/cat" if !args.is_empty() && args.iter().all(path) => "/bin/cat",
+            "rg" if !args.is_empty() && !args[0].starts_with('-') && args[1..].iter().all(path) => "rg",
             "git" | "/usr/bin/git" => return self.read_only_git_argv(),
             _ => return None,
         };
@@ -214,16 +215,8 @@ impl CommandSpec {
         let command = args.first()?.as_str();
         let valid = match command {
             "status" => args.len() == 1 || args.len() == 2 && args[1] == "--short",
-            "diff" => args.len() == 1 || args.len() == 2 && args[1] == "--stat",
-            "log" => {
-                args.len() == 1
-                    || args.len() == 2 && args[1] == "--oneline"
-                    || args.len() == 3
-                        && args[1] == "-n"
-                        && args[2]
-                            .parse::<usize>()
-                            .is_ok_and(|n| (1..=100).contains(&n))
-            }
+            "diff" => args.len() == 2 && args[1] == "--stat",
+            "log" => args.len() == 2 && args[1] == "--oneline",
             _ => false,
         };
         if !valid {
@@ -250,9 +243,7 @@ impl CommandSpec {
         argv.extend(args.iter().cloned());
         if command == "log" {
             argv.push("--no-show-signature".into());
-            if args.len() < 3 {
-                argv.extend(["-n".into(), "100".into()]);
-            }
+            argv.extend(["-n".into(), "100".into()]);
         } else {
             argv.push("--ignore-submodules=all".into());
             if command == "diff" {
@@ -266,15 +257,11 @@ impl CommandSpec {
                 ":(exclude,glob)**/.*".into(),
                 ":(exclude,glob)**/.*/**".into(),
             ]);
-            for name in crate::tools::CREDENTIAL_NAMES
-                .iter()
-                .map(|s| (*s).to_owned())
-                .chain(
-                    crate::tools::CREDENTIAL_SUFFIXES
-                        .iter()
-                        .map(|s| format!("*{s}")),
-                )
-            {
+            for name in crate::tools::SECRET_PATH_RULES.iter().map(|rule| match rule.match_kind {
+                crate::tools::SecretPathMatch::Exact => rule.value.to_owned(),
+                crate::tools::SecretPathMatch::Prefix => format!("{}*", rule.value),
+                crate::tools::SecretPathMatch::Suffix => format!("*{}", rule.value),
+            }) {
                 argv.push(format!(":(exclude,icase,glob)**/{name}"));
                 argv.push(format!(":(exclude,icase,glob)**/{name}/**"));
             }
@@ -311,6 +298,12 @@ fn escape_visible(json: &str) -> String {
 /// One JSON-quoted string that a terminal shows on one line as written.
 pub fn visible_text(text: &str) -> String {
     escape_visible(&crate::json::quote(text))
+}
+/// Untrusted text for one trusted prompt line. JSON escaping makes line
+/// breaks and controls visible without putting quote marks around the line.
+pub fn visible_line(text: &str) -> String {
+    let quoted = crate::json::quote(text);
+    escape_visible(&quoted[1..quoted.len() - 1])
 }
 /// Words as one JSON array that a terminal shows as written: JSON already
 /// escapes C0 and literal backslashes. Other nonprinting Unicode is escaped

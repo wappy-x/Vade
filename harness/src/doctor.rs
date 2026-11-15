@@ -23,7 +23,8 @@ pub const HELP: &str = "Vade endpoint doctor (active HTTP probe; synthetic data 
 
 Usage: vade-harness doctor URL [--model NAME] [--max-seconds N]
 
-  URL                  HTTP origin, /v1 base, or known chat/responses route
+  URL                  HTTP origin, /v1 base, or known chat/responses route; same machine only by default
+  --allow-plain-http    Allow plain HTTP to another machine. Not encrypted: others on the network can read and change the chat and the API key.
   --model NAME         Required when capabilities cannot identify the model;
                        otherwise validates the advertised model
   --max-seconds N       Whole probe budget, 1..300 (default 60)
@@ -79,6 +80,7 @@ impl Config {
             if seen.contains(&flag) {
                 return Err("duplicate doctor option");
             }
+            if flag == "--allow-plain-http" { crate::http_policy::allow_plain_http(); continue; }
             let value = args.next().ok_or("doctor option needs a value")?;
             match flag.as_str() {
                 "--model" if setup::valid_model(&value) => model = Some(value),
@@ -827,7 +829,7 @@ fn run(config: &Config) -> Report {
 /// configured engine and print the report.
 pub fn cli(args: impl IntoIterator<Item = String>) -> ExitCode {
     let args: Vec<_> = args.into_iter().collect();
-    if args.iter().any(|a| a == "--help" || a == "-h") {
+    if crate::http_policy::help_requested(&args) {
         return crate::diagnostics::print_stdout(HELP);
     }
     let config = match Config::parse(args) {

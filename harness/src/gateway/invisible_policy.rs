@@ -22,6 +22,7 @@ pub(super) struct Runtime {
     origins: Vec<Origin>,
     limits: Vec<Option<Limits>>,
     flags: Flags,
+    startup_refusals: Vec<Option<String>>,
     router: Router,
 }
 pub(super) struct Prepared<'a> {
@@ -31,6 +32,7 @@ pub(super) struct Prepared<'a> {
     pub report: String,
 }
 impl Runtime {
+    pub(super) fn startup_refusal(&self, index: usize) -> Option<&str> { self.startup_refusals[index].as_deref() }
     pub(super) fn new(urls: &[String], flags: Flags) -> io::Result<Self> {
         let origins = urls
             .iter()
@@ -40,9 +42,14 @@ impl Runtime {
             return Err(transport::invalid("configure 1..64 upstreams"));
         }
         let mut limits = Vec::new();
-        for origin in &origins {
+        let mut startup_refusals = vec![None; origins.len()];
+        for (index, origin) in origins.iter().enumerate() {
             limits.push(if flags.clamp {
-                let (status, body) = fetch(origin, "GET", "/v1/capabilities", b"", None)?;
+                let (status, body) = match fetch(origin, "GET", "/v1/capabilities", b"", None) {
+                    Ok(reply) => reply,
+                    Err(error) if crate::http_policy::refusal(&error).is_some() => { startup_refusals[index] = Some(error.to_string()); limits.push(None); continue; }
+                    Err(error) => return Err(error),
+                };
                 if status != 200 {
                     return Err(transport::invalid("capabilities request failed"));
                 }
@@ -76,6 +83,7 @@ impl Runtime {
         }
         Ok(Self {
             router: Router::new(origins.len(), !flags.no_sticky),
+            startup_refusals,
             origins,
             limits,
             flags,
@@ -84,6 +92,7 @@ impl Runtime {
     #[cfg(test)]
     pub(super) fn single(origin: Origin) -> Self {
         Self {
+            startup_refusals: vec![None],
             origins: vec![origin],
             limits: vec![None],
             flags: Flags::default(),
@@ -546,7 +555,6 @@ fn fetch(
     body: &[u8],
     forwarded: Option<&Head>,
 ) -> io::Result<(u16, Vec<u8>)> {
-    let mut socket = origin.connect()?;
     let parsed = Head {
         first: format!("{method} {path} HTTP/1.1"),
         fields: forwarded.map_or_else(
@@ -563,6 +571,7 @@ fn fetch(
         )
         .collect();
     let head = WireHead { parsed, lines };
+    let mut socket = origin.connect()?;
     head.forward_upstream(
         &mut socket,
         &format!("{method} {} HTTP/1.1", origin.target(path)),

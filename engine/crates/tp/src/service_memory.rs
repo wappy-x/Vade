@@ -1,6 +1,8 @@
 //! Device charges for ordered prompt and decode execution.
 use engine_model::plan::{admission::CheckpointAdmission,layer::Topology,state::StatePlan};
 use crate::{Result,bounded_decoder::{expanded_bytes,group_workspace_bytes_for,RESERVED_ROWS,PROJECTION_MEMO_BYTES}};
+/// Replace the full startup allowance only after the device locks the same plan.
+pub fn with_memo_bound(workspace:usize,plan:crate::projection_memo::Plan)->Result<usize> {plan.replace_charge(workspace)}
 
 /// Committed and unpublished state coexist. Expanded prompt rows are copied only
 /// while their prefix grows. After that point both states share the same owners.
@@ -29,10 +31,11 @@ fn session_with_expanded(checkpoint:&CheckpointAdmission,prompt:usize,tokens:usi
 /// owners and descriptor storage retain the separate ancillary allowance.
 ///
 /// This is the charge of ONE session whose caller clears the projection memo before prompt work
-/// (`Device::clear_projection_memo`: rows, chunks and limit go). `Device::prepare` alone does not meet the rule: it
-/// keeps memo chunks (MEMO_KEEP), the last prompt group seeds the memo, and beside other open sessions the whole memo
-/// stays while a prompt runs. A service with several sessions charges the memo AND the prompt scratch
-/// (`row_split::sparse_service_charges`), as flash-serve does.
+/// (`Device::clear_projection_memo`: rows and chunks go; the limit returns to the startup bound, or 0 before startup).
+/// `Device::prepare` alone does not meet the rule: it keeps memo chunks (MEMO_KEEP), the last prompt group seeds the
+/// memo, and beside other open sessions the whole memo stays while a prompt runs. A service with several sessions charges
+/// the memo AND the prompt scratch (`row_split::sparse_service_charges`, the full PROJECTION_MEMO_BYTES); flash-serve then
+/// replaces that memo charge with the startup bound it locks on every device (`row_split::Factory::with_memo_bound`).
 pub fn workspace(checkpoint:&CheckpointAdmission,context:usize,staging:usize,group:usize)->Result<usize> {
     let state=StatePlan::new(checkpoint.description(),Topology {rank:0,parts:1},context as u64,isize::MAX as usize).map_err(|e|e.to_string())?;
     let scalar=state.scratch_bytes().checked_mul(2).ok_or("scalar scratch overflow")?;

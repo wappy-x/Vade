@@ -104,13 +104,15 @@ fn prompt_workspace_charge_covers_the_five_planes_of_absorbed_attention() {
     // An absorbed prompt group holds five planes at once: the absorbed query and the mixed latent (latent width),
     // scores and probabilities (one word a selected row), and the projected output (value width).
     use engine_model::plan::description::TokenMixer;
-    use spark_tp::bounded_decoder::{absorbed_group_words,group_workspace_bytes_for};
+    use spark_tp::bounded_decoder::{absorbed_group_words,absorbed_chat_words,group_workspace_bytes_for,BATCH_ROWS};
     // The model's shapes: a 256-token group, latent 512, value 256, 2,051 selected rows. 32 heads is one rank of two
     // Sparks, 64 heads is every head. The two latent planes that were charged before are a fifth of the second number.
     assert_eq!(absorbed_group_words(256,32,512,256,2051),Some(44_089_344));
     assert_eq!(absorbed_group_words(256,64,512,256,2051),Some(88_178_688));
     assert_eq!(absorbed_group_words(256,64,512,0,0),Some(16_777_216),"the two latent planes alone");
     assert_eq!(absorbed_group_words(usize::MAX,2,1,1,1),None);
+    assert_eq!(absorbed_chat_words(usize::MAX,2,1,1,1,1),None);
+    assert_eq!(absorbed_chat_words(8,1,1,1,1,usize::MAX),None);
     let c=fixture::Checkpoint::new_with_capacity(Dtype::Bf16,true,8192);let mut seen=0;
     for layer in &c.admission.description().layers {
         let TokenMixer::LatentAttention(a)=layer.mixer else {continue;};seen+=1;
@@ -120,6 +122,8 @@ fn prompt_workspace_charge_covers_the_five_planes_of_absorbed_attention() {
             let planes=4*absorbed_group_words(group,a.heads as usize,a.kv_rank as usize,a.value_dim as usize,live).unwrap();
             let charge=group_workspace_bytes_for(&c.admission,context,group).unwrap();
             assert!(charge>=planes,"group {group} context {context}: charge {charge} is under the five planes {planes}");
+            let chats=4*absorbed_chat_words(BATCH_ROWS,a.heads as usize,a.kv_rank as usize,a.key_dim as usize,a.value_dim as usize,live).unwrap();
+            assert!(charge>=chats,"group {group} context {context}: charge {charge} is under the chat owners {chats}");
         }}
     }
     assert!(seen>0,"the fixture has no latent attention layer");

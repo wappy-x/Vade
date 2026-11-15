@@ -22,7 +22,7 @@ fn main() {
     if let Ok(mode) = std::env::var("FAKE_MCP") {
         return serve(&mode);
     }
-    let tests: [(&str, fn()); 14] = [
+    let tests: [(&str, fn()); 29] = [
         ("initialize_and_list", initialize_and_list),
         ("calls_progress_and_server_requests", calls_progress_and_server_requests),
         ("timeout_and_malformed_json", timeout_and_malformed_json),
@@ -34,6 +34,21 @@ fn main() {
         ("wrapper_children_stop_with_the_server", wrapper_children_stop_with_the_server),
         ("startup_failures_are_reported", startup_failures_are_reported),
         ("cli_manages_and_lists_servers", cli_manages_and_lists_servers),
+        ("trusted_project_program_path_and_bytes_must_stay_same", trusted_project_program_path_and_bytes_must_stay_same),
+        ("trusted_server_reads_its_neighbor_in_place", trusted_server_reads_its_neighbor_in_place),
+        ("trusted_interpreter_keeps_its_virtual_environment_path", trusted_interpreter_keeps_its_virtual_environment_path),
+        ("trusted_data_changes_and_writes_stay_in_place", trusted_data_changes_and_writes_stay_in_place),
+        ("untrusted_mcp_test_gives_the_exact_trust_command", untrusted_mcp_test_gives_the_exact_trust_command),
+        ("interpreter_code_without_a_script_name_is_bound", interpreter_code_without_a_script_name_is_bound),
+        ("script_names_bind_code_in_any_letter_case_and_through_links", script_names_bind_code_in_any_letter_case_and_through_links),
+        ("env_commands_are_refused_at_trust_time_and_at_start", env_commands_are_refused_at_trust_time_and_at_start),
+        ("commands_that_load_their_code_are_trusted_and_say_what_is_not_checked", commands_that_load_their_code_are_trusted_and_say_what_is_not_checked),
+        ("argument_files_that_appear_or_change_after_trust_keep_trust", argument_files_that_appear_or_change_after_trust_keep_trust),
+        ("trust_saves_the_program_stamp_and_a_start_does_not_write_the_record", trust_saves_the_program_stamp_and_a_start_does_not_write_the_record),
+        ("a_record_from_an_older_vade_asks_for_a_new_yes_without_calling_it_changed", a_record_from_an_older_vade_asks_for_a_new_yes_without_calling_it_changed),
+        ("interpreter_binds_every_file_argument_except_later_data", interpreter_binds_every_file_argument_except_later_data),
+        ("add_and_test_say_what_is_checked", add_and_test_say_what_is_checked),
+        ("inline_shell_entries_are_trusted_and_changed_inner_scripts_are_not_detected", inline_shell_entries_are_trusted_and_changed_inner_scripts_are_not_detected),
         ("config_writes_keep_a_readable_file", config_writes_keep_a_readable_file),
         ("chat_calls_mcp_tools_and_resumes_web_on", || chat_calls_mcp_tools_and_resumes(true)),
         ("chat_calls_mcp_tools_and_resumes_web_off", || chat_calls_mcp_tools_and_resumes(false)),
@@ -69,6 +84,11 @@ fn text_result(id: &Value, text: &str) {
 }
 
 fn serve(mode: &str) {
+    if mode == "venv-path" {
+        // A real virtual environment locates packages from this path. The
+        // fixture checks argv[0] without requiring Python on the test host.
+        assert_eq!(std::env::args().next().unwrap(), std::env::var("FAKE_ARGV0").unwrap());
+    }
     let log = std::env::var_os("FAKE_MCP_LOG").map(PathBuf::from);
     let note = |line: &str| {
         if let Some(log) = &log {
@@ -297,6 +317,7 @@ fn wait_for_value(log: &Path, prefix: &str) -> String {
 }
 
 // ---- Tests ----
+include!("support/mcp_launch_cases.rs");
 
 fn initialize_and_list() {
     let temp = Temp::new("init");
@@ -759,6 +780,95 @@ fn cli_manages_and_lists_servers() {
     assert!(!ok && err.contains("Run vade tools --help"), "{err}");
 }
 
+fn trusted_project_program_path_and_bytes_must_stay_same() {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        let home = Temp::new("program-trust-home");
+        let project = Temp::new("program-trust-project");
+        let (h, p) = (&home.0, &project.0);
+        let first = p.join("server-first");
+        let second = p.join("server-second");
+        let link = p.join("server-program");
+        std::fs::copy(exe(), &first).unwrap();
+        std::fs::copy(exe(), &second).unwrap();
+        symlink(&first, &link).unwrap();
+        std::fs::create_dir_all(p.join(".vade")).unwrap();
+        std::fs::write(p.join(".vade/mcp.json"), r#"{"servers":{"changed":{"command":"./server-program","env":{"FAKE_MCP":"normal"}}}}"#).unwrap();
+        let run = |args: &[&str]| harness(h, p, args, None);
+
+        assert!(run(&["mcp", "trust", "changed"]).0);
+        let (ok, out, err) = run(&["tools"]);
+        assert!(ok && out.contains("changed__echo"), "{out}{err}");
+
+        std::fs::remove_file(&link).unwrap();
+        symlink(&second, &link).unwrap();
+        let (ok, out, err) = run(&["tools"]);
+        assert!(ok && !out.contains("changed__echo"), "{out}{err}");
+        assert!(err.contains("program path changed") && err.contains("file and network access") && err.contains("Check the new program, then run vade mcp trust changed"), "{err}");
+        assert!(run(&["mcp", "trust", "changed"]).0);
+
+        let mut changed = std::fs::read(&second).unwrap();
+        changed.push(0);
+        std::fs::write(&second, changed).unwrap();
+        let (ok, out, err) = run(&["tools"]);
+        assert!(ok && !out.contains("changed__echo"), "{out}{err}");
+        assert!(err.contains("program contents changed") && err.contains("file and network access") && err.contains("Check the changed program, then run vade mcp trust changed"), "{err}");
+        assert!(run(&["mcp", "trust", "changed"]).0);
+        let (_, out, _) = run(&["mcp", "list"]);
+        assert!(out.contains("changed  project  enabled"), "{out}");
+
+        let script = p.join("server.sh");
+        let marker = p.join("changed-script-ran");
+        let original = format!("export FAKE_MCP=normal\nexec {}\n", exe());
+        std::fs::write(&script, &original).unwrap();
+        std::fs::write(p.join(".vade/mcp.json"), r#"{"servers":{"script":{"command":"/bin/sh","args":["server.sh"]}}}"#).unwrap();
+        assert!(run(&["mcp", "trust", "script"]).0);
+        let (ok, out, err) = run(&["tools"]);
+        assert!(ok && out.contains("script__echo"), "{out}{err}");
+        std::fs::write(&script, format!("touch {}\n{original}", marker.display())).unwrap();
+        let (ok, out, err) = run(&["tools"]);
+        assert!(ok && !out.contains("script__echo") && !marker.exists(), "{out}{err}");
+        assert!(err.contains("file selected by its command arguments changed") && err.contains("Check the argument files, then run vade mcp trust script"), "{err}");
+
+    }
+}
+
+fn inline_shell_entries_are_trusted_and_changed_inner_scripts_are_not_detected() {
+    #[cfg(unix)]
+    {
+        let home = Temp::new("inline-limit-home");
+        let project = Temp::new("inline-limit-project");
+        let (h, p) = (&home.0, &project.0);
+        std::fs::create_dir_all(p.join(".vade")).unwrap();
+        let original = format!("export FAKE_MCP=normal\nexec {}\n", exe());
+        for (name, args) in [
+            ("combined", r#"["-ec","exec /bin/sh inner-combined.sh","anchor-combined.txt"]"#),
+            ("separate", r#"["-eu","-c","exec /bin/sh inner-separate.sh","anchor-separate.txt"]"#),
+        ] {
+            let script = p.join(format!("inner-{name}.sh"));
+            let marker = p.join(format!("changed-{name}-ran"));
+            std::fs::write(&script, &original).unwrap();
+            std::fs::write(p.join(format!("anchor-{name}.txt")), "fixed launch argument\n").unwrap();
+            let config = ["{\"servers\":{\"", name, "\":{\"command\":\"/bin/sh\",\"args\":", args, "}}}"].concat();
+            std::fs::write(p.join(".vade/mcp.json"), config).unwrap();
+            let (ok, out, err) = harness(h, p, &["mcp", "trust", name], None);
+            assert!(ok && err.is_empty(), "{out}{err}");
+            // The anchor file is the shell's first file argument, so its bytes
+            // are bound. The inner script is named only inside the command string.
+            assert!(out.contains(&format!("\n  script: {}\n  {NOT_CHECKED}\n", p.join(format!("anchor-{name}.txt")).display()))
+                && out.contains("Your yes covers this exact config entry, the program's path and bytes, and each script's path and bytes.")
+                && !out.contains(&format!("inner-{name}.sh\n")), "{out}");
+            let (ok, out, err) = harness(h, p, &["tools"], None);
+            assert!(ok && out.contains(&format!("{name}__echo")), "{out}{err}");
+            std::fs::write(&script, format!("touch {}\n{original}", marker.display())).unwrap();
+            let (ok, out, err) = harness(h, p, &["tools"], None);
+            assert!(ok && out.contains(&format!("{name}__echo")) && marker.exists(), "{out}{err}");
+            assert!(!err.contains("trust"), "{err}");
+        }
+    }
+}
+
 /// A change the next read would refuse is never saved; the old file stays.
 fn config_writes_keep_a_readable_file() {
     let home = Temp::new("limits-home");
@@ -768,7 +878,7 @@ fn config_writes_keep_a_readable_file() {
     // Trust copies the project entry one level deeper into the user file.
     let deep = format!("{}0{}", "[".repeat(61), "]".repeat(61));
     std::fs::create_dir_all(p.join(".vade")).unwrap();
-    std::fs::write(p.join(".vade/mcp.json"), format!(r#"{{"servers":{{"deep":{{"command":"unused","metadata":{deep}}}}}}}"#)).unwrap();
+    std::fs::write(p.join(".vade/mcp.json"), format!(r#"{{"servers":{{"deep":{{"command":{},"metadata":{deep}}}}}}}"#, json::quote(&exe()))).unwrap();
     let user = r#"{"servers":{"existing":{"command":"unused"}}}"#;
     std::fs::write(h.join("mcp.json"), user).unwrap();
     let (ok, out, err) = run(&["mcp", "trust", "deep"]);

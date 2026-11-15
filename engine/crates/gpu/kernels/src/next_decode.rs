@@ -367,7 +367,7 @@ macro_rules! four {
 ///   arm of premise D1: 1.9 to 3.8 times the one-row time on the plain rows, so it has no entry.
 /// Grid: `ends[count]` blocks of 128 threads; MXFP8 descriptors as in the one-row entry.
 #[inline(always)]
-fn resident_projection_bf16_rows<const SPREAD:bool>(batch:crate::next_params::ResidentProjectionBatch) {
+pub(crate) fn resident_projection_bf16_rows<const SPREAD:bool>(batch:crate::next_params::ResidentProjectionBatch) {
     // SAFETY: The caller passes descriptors that satisfy the one-row entry's contract with `tokens` in 2..=4 on
     // every descriptor: weights (and scales) as there; `tokens * cols` initialized FP32 input words and
     // `tokens * rows` output words a descriptor, 16-byte aligned input and plain weights, cols a multiple of 32,

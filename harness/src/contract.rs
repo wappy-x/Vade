@@ -339,6 +339,8 @@ pub struct Context {
     pub request_bytes: usize,
     pub input: InputCount,
     pub failure: Option<&'static str>,
+    /// Keep the specific lookup remedy when a model error keeps only its I/O kind.
+    pub lookup_failure: Option<String>,
     pub turns: VecDeque<TurnUsage>,
     pub completed_responses: u64,
     pub responses_with_cached_usage: u64,
@@ -651,6 +653,7 @@ impl Contract {
 
     pub(crate) fn reset_attempt(&mut self) {
         self.context.failure = None;
+        self.context.lookup_failure = None;
         self.context.input = InputCount::Unknown;
         self.context.request_bytes = 0;
         self.context.response_streamed = false;

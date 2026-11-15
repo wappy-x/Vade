@@ -46,8 +46,9 @@ rubric.txt). See docs/harness-suite.md.
   --replay DIR       Grade recorded replies without a model. DIR has replay.json
                      with suite_version and spark_count, and tasks/ID/transcript.jsonl.
                      Writes cards to DIR/replay-cards unless --out is set.
-  --endpoint URL     The server address, for example http://127.0.0.1:18080
+  --endpoint URL     The server address, for example http://127.0.0.1:18080; same machine only by default
                      (live only). Chat calls go to /v1/chat/completions on it.
+  --allow-plain-http    Allow plain HTTP to another machine. Not encrypted: others on the network can read and change the chat and the API key.
   --model NAME       The served model name (live only).
   --runs N           Live runs, 1 to 9 (default 1). Three runs give a grade.
   --suite DIR        The suite folder (default harness/tests/agent-suite or
@@ -67,11 +68,12 @@ enum Mode { DryRun, Live { endpoint: String, model: String, runs: usize }, Repla
 
 struct Opts {
     mode: Mode, suite: PathBuf, out: Option<PathBuf>, only: Vec<String>, toolchain: Option<PathBuf>, harness_args: Vec<String>, harness: PathBuf,
+    allow_plain_http: bool,
 }
 
 pub fn cli(args: impl IntoIterator<Item = String>) -> ExitCode {
     let args: Vec<String> = args.into_iter().collect();
-    if args.iter().any(|a| a == "--help" || a == "-h") { return crate::diagnostics::print_stdout(HELP); }
+    if crate::http_policy::help_requested(&args) { return crate::diagnostics::print_stdout(HELP); }
     let result = parse_opts(&args).and_then(|o| match &o.mode {
         Mode::DryRun => dry_run(&o),
         Mode::Live { .. } => live(&o),
@@ -79,6 +81,7 @@ pub fn cli(args: impl IntoIterator<Item = String>) -> ExitCode {
     });
     match result {
         Ok(code) => ExitCode::from(code),
+        Err(_) if crate::http_policy::interactive_result().is_err() => ExitCode::FAILURE,
         Err(e) => { crate::diagnostics::stderr_line(format_args!("vade: suite: {e}")); ExitCode::from(2) }
     }
 }
@@ -86,10 +89,11 @@ pub fn cli(args: impl IntoIterator<Item = String>) -> ExitCode {
 fn parse_opts(a: &[String]) -> Result<Opts, String> {
     let (mut dry, mut live, mut endpoint, mut model, mut runs) = (false, false, None, None, 1);
     let mut replay_dir = None;
-    let mut o = Opts { mode: Mode::DryRun, suite: PathBuf::new(), out: None, only: Vec::new(), toolchain: None, harness_args: Vec::new(), harness: PathBuf::new() };
+    let mut o = Opts { mode: Mode::DryRun, suite: PathBuf::new(), out: None, only: Vec::new(), toolchain: None, harness_args: Vec::new(), harness: PathBuf::new(), allow_plain_http: false };
     let mut i = 0;
     while i < a.len() {
         match a[i].as_str() {
+            "--allow-plain-http" => { crate::http_policy::allow_plain_http(); o.allow_plain_http = true; i += 1; continue; }
             "--dry-run" => { dry = true; i += 1; continue; }
             "--live" => { live = true; i += 1; continue; }
             _ => {}
@@ -521,6 +525,7 @@ fn run_step(o: &Opts, model: &str, server: &Server, n: usize, s: &task::Step, t:
         .args(["--reply-tokens", &crate::contract::NATIVE_REPLY_MAX_TOKENS.to_string()]);
     // The command sandbox exists only on macOS; elsewhere workspace_shell reports an unsupported platform.
     if let Some(tc) = o.toolchain.as_ref().filter(|_| crate::coding_tools::SHELL_AVAILABLE) { cmd.arg("--shell-toolchain").arg(tc); }
+    if o.allow_plain_http { cmd.arg("--allow-plain-http"); }
     cmd.args(&o.harness_args);
     match s.kind.as_str() {
         "new" => { cmd.args(["--session", "suite", "--prompt", &s.prompt]); }
@@ -550,13 +555,13 @@ fn run_step(o: &Opts, model: &str, server: &Server, n: usize, s: &task::Step, t:
         let _ = stdin.flush();
         // Wait for the held call, or for the run to end without reaching it.
         let mut held = false;
-        while begun.elapsed() < limit && !saw_run(&err_lines) && child.try_wait().ok().flatten().is_none() {
+        while begun.elapsed() < limit && crate::http_policy::interactive_result().is_ok() && !saw_run(&err_lines) && child.try_wait().ok().flatten().is_none() {
             if rx.recv_timeout(Duration::from_millis(100)).is_ok() { held = true; break; }
         }
         if held {
             let _ = writeln!(stdin, "/cancel");
             let _ = stdin.flush();
-            while begun.elapsed() < limit && !saw_run(&err_lines) && child.try_wait().ok().flatten().is_none() { std::thread::sleep(Duration::from_millis(50)); }
+            while begun.elapsed() < limit && crate::http_policy::interactive_result().is_ok() && !saw_run(&err_lines) && child.try_wait().ok().flatten().is_none() { std::thread::sleep(Duration::from_millis(50)); }
         }
         drop(stdin);
     }
@@ -592,7 +597,9 @@ fn direct(url: &str, model: &str, request: &Path, work: &Path) -> Result<(u16, S
     let payload = write(&body);
     let addr = upstream(url)?;
     let path = url.find(&addr).map(|i| &url[i + addr.len()..]).unwrap_or("/");
-    let mut stream = std::net::TcpStream::connect(&addr).map_err(|e| e.to_string())?;
+    let endpoint = crate::transport::Endpoint::parse(url).map_err(|e| e.to_string())?;
+    let stream = std::net::TcpStream::connect(&addr).map_err(|e| e.to_string())?;
+    let mut stream = crate::http_policy::check(stream, &endpoint).map_err(|e| e.to_string())?;
     stream.set_read_timeout(Some(Duration::from_secs(900))).map_err(|e| e.to_string())?;
     write!(stream, "POST {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{payload}", payload.len()).map_err(|e| e.to_string())?;
     let mut raw = Vec::new();
@@ -704,5 +711,18 @@ mod tests {
         assert_eq!(json::parse(&pretty(&a, 0)).unwrap(), a);
         assert_eq!(fnv([]), 0xcbf2_9ce4_8422_2325);
         assert_ne!(fnv([1, 2]), fnv([2, 1]));
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn suite_direct_refuses_before_writing_and_switch_allows() {
+    let fixture = crate::test_workspace::Fixture::new();
+    fixture.write("request.json", "{}");
+    for allow in [false, true] {
+        crate::http_policy::tests::wire(allow, |url| {
+            direct(url, "mock", &fixture.0.join("request.json"), &fixture.0)
+                .map(drop).map_err(std::io::Error::other)
+        });
     }
 }

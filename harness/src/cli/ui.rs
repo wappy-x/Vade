@@ -13,7 +13,7 @@ use super::help::SlashMenu;
 use super::{App, RunState};
 use crate::native_children;
 
-/// A y/n typed within this time of the approval appearing is draft text.
+/// An answer key typed within this time of the approval appearing is draft text.
 pub(crate) const APPROVAL_SETTLE: Duration = Duration::from_millis(400);
 /// Shown when a piped /exit lets the current message finish first.
 pub(crate) const EXIT_AFTER_MESSAGE: &str = "/exit: the current message finishes first, then chat ends.";
@@ -188,6 +188,7 @@ impl App {
         let mut run_started = None;
         let mut notified_approval = None;
         while !self.quit || self.pending.is_some() {
+            vade_harness::http_policy::interactive_result()?;
             if let Some(error) = self.input.history_error() {
                 self.notice(&error)?;
             }
@@ -359,7 +360,7 @@ impl App {
                             tail.push(format!("{queued} queued"));
                         }
                         let (status, transient) = if self.approval_reply.is_some() {
-                            tail.insert(0, "Approval required · y / n".to_owned());
+                            tail.insert(0, "Your turn. · 1 / 2".to_owned());
                             (tail.join(" · "), String::new())
                         } else if if self.config.mode == Mode::Agent {
                             self.terminal.preview_is_empty()
@@ -641,7 +642,7 @@ impl App {
         if self.pending_approval_key(&key)? {
             return Ok(());
         }
-        // With an empty single-line editor, a single y/n answers the pending
+        // With an empty single-line editor, a single answer key answers the pending
         // approval once the prompt has been on screen long enough to read.
         // Any other text, multiline input, paste, or an early key is a draft
         // and keeps the approval waiting.
@@ -654,17 +655,9 @@ impl App {
                 .is_some_and(|shown| shown.elapsed() >= APPROVAL_SETTLE)
         {
             if let Key::Text(text) = &key {
-                let answer = match text.as_str() {
-                    "y" | "Y" => Some("/approve"),
-                    "n" | "N" => Some("/deny"),
-                    "s" | "S" if self.approval_command || self.approval_reach => Some("/approve session"),
-                    "a" | "A" if self.approval_reach => Some("/approve always"),
-                    "p" | "P" if self.approval_command => Some("/approve project"),
-                    _ => None,
-                };
-                if let Some(answer) = answer {
+                if text.chars().count() == 1 && self.answer_approval_key(text)? {
                     self.dirty = true;
-                    return self.line_input(answer.into());
+                    return Ok(());
                 }
             }
         }
@@ -716,14 +709,14 @@ impl App {
                 if self.approval_reply.is_some() {
                     if let Some((command, _)) = self.input.approval_command() {
                         let command = command.to_owned();
-                        self.line_input(command)?;
+                        self.sent_line(command)?;
                         if self.approval_reply.is_none() {
                             self.input.remove_approval_command();
                         }
                     } else if self.input.text().contains('\n')
                         && matches!(self.input.text().trim(), "/approve" | "/deny" | "/approve session" | "/approve project")
                     {
-                        self.notice("Multiline approval text retained as draft. Type /approve or /deny on a new line, or clear the draft and press y or n.")?;
+                        self.notice("Multiline approval text retained as draft. Type /approve or /deny on a new line, or clear the draft and press 1 or 2.")?;
                     } else {
                         self.line_input(self.input.text().to_owned())?;
                         if self.approval_reply.is_none() {

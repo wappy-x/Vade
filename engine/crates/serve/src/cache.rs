@@ -703,6 +703,7 @@ impl<S: crate::Session> SessionCache<S> {
     fn release_replay(&mut self, index: usize) { self.release(index, S::release_replay_snapshot); }
     fn release(&mut self, index: usize, release: fn(&mut S)) {
         let entry = &mut self.entries[index];
+        if entry.state.session.retention_is_immutable() { release(&mut entry.state.session); return; }
         let before = entry.state.session.retained_bytes();
         let private_before = entry.state.session.retained_private_bytes();
         release(&mut entry.state.session);
@@ -785,15 +786,18 @@ impl<S: crate::Session> SessionCache<S> {
     /// A candidate that fails to fork gives its error to the caller; the search goes on to the next one.
     fn fork_candidates(&mut self, scope: Option<&str>, prompt: &[u32], key: Option<&SessionKey>, now: Instant) -> Forked<S> {
         self.expire(now);
-        let mut forked = Forked { state: None, failed: Vec::new() };
+        let (mut forked, mut refused) = (Forked { state: None, failed: Vec::new() }, Vec::new());
         // Positions shift when a fork refreshes an entry; the search ends at the first success.
         for (index, _) in self.candidates(scope, prompt, key) {
             match self.fork_entry(index, prompt, now) {
                 Ok(Some(state)) => { forked.state = Some(state); break; }
                 Ok(None) => {}
-                Err(error) => forked.failed.push(error),
+                Err(error) => { forked.failed.push(error); refused.push(self.entries[index].id); }
             }
         }
+        // An entry whose fork failed and whose session can fork no more (the engine dropped what it held) is dead:
+        // it leaves now, so the same prompt, kept again by the cold read that follows, is one entry and not two.
+        for id in refused { if let Some(index) = self.entries.iter().position(|e| e.id == id && !e.state.session.can_fork()) { self.remove(index); } }
         forked
     }
     /// Search only the supplied capability's history. Fork before truncating;
@@ -936,6 +940,7 @@ impl<S: crate::Session> SessionCache<S> {
 #[cfg(test)]
 #[path = "cache_replay_history_tests.rs"]
 mod replay_history_tests;
+#[cfg(test)] #[path="cache_owner_tests.rs"] mod owner_tests;
 
 #[cfg(test)]
 mod tests {

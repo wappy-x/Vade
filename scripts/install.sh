@@ -3,9 +3,10 @@
 # From a checkout:  sh scripts/install.sh
 # With no checkout: curl -fsSL https://vade.lol/install.sh | sh
 # No sudo, shell profile edits, or model downloads.
-# Every statement is inside main, and main runs on the last line, so a cut-off
-# download is a syntax error and runs nothing. Keep main "$@" as the last line:
-# the release upload checks it.
+# One brace group contains the main definition and call. A cut-off download runs
+# nothing unless only the final newline is missing, which leaves the full program.
+# The release upload checks the ending below.
+{
 main() {
 set -eu
 
@@ -1060,3 +1061,4 @@ if [ "$launch" = true ]; then
 fi
 }
 main "$@"
+}

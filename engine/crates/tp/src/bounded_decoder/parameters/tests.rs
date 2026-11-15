@@ -94,6 +94,8 @@ impl super::super::Compute for Recorder {
     fn gather_absorbed(&self,s:Shape,x:[Option<&Self::Value>;4],reserve:usize,expected:f32)->Result<Self::Value> {super::super::Host.gather_absorbed(s,x,reserve,expected)}
     fn latent_absorption(&self,name:&str,s:Shape,q:&Self::Value,l:&Self::Value,n:&Self::Value,slots:usize)->Result<Self::Value> {super::super::Host.latent_absorption(name,s,q,l,n,slots)}
     fn latent_absorption_rows(&self,name:&str,s:spark_gpu_probe::prompt_ops::Shape,q:&Self::Value,l:&Self::Value,n:&Self::Value)->Result<Self::Value> {super::super::Host.latent_absorption_rows(name,s,q,l,n)}
+    fn latent_absorption_chats(&self,name:&str,s:spark_gpu_probe::prompt_ops::Shape,g:&[super::super::ChatGather<'_,Self::Value>],stride:usize,
+        q:&Self::Value,n:&Self::Value)->Result<Option<Self::Value>> {super::super::Host.latent_absorption_chats(name,s,g,stride,q,n)}
     fn upload(&self,v:&[f32])->Result<Self::Value> {super::super::Host.upload(v)}
     fn read(&self,v:&Self::Value)->Result<Vec<f32>> {super::super::Host.read(v)}
     fn words(&self,v:&Self::Value)->usize {v.len()}

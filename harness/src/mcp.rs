@@ -10,7 +10,7 @@ pub mod config;
 use crate::agent::{ToolError, ToolExecutor, ToolInvocation};
 use crate::coding_tools::Preview;
 use crate::json::{self, Value};
-use crate::shell::ApprovalPolicy;
+use crate::shell::{self, ApprovalPolicy};
 use client::{CallError, Connection, ServerInfo};
 use config::ServerSpec;
 use std::path::{Path, PathBuf};
@@ -340,8 +340,9 @@ impl Hub {
             match started {
                 None if !server.spec.enabled => {}
                 None => notes.push(format!(
-                    "MCP: project server {} is not trusted yet, so it did not start; run vade mcp trust {} after you check its command",
-                    server.spec.name, server.spec.name
+                    "MCP: project server {} {}",
+                    server.spec.name,
+                    server.spec.trust_reason.as_deref().unwrap_or("is not trusted, so it did not start. Check its command and program, then run vade mcp trust again")
                 )),
                 Some((Ok((connection, tools, resources, prompts)), found)) => {
                     notes.extend(found);
@@ -512,13 +513,18 @@ where
         }
         let arguments = json::stringify(invocation.arguments).map_err(|_| ToolError::InvalidArguments("arguments must be JSON"))?;
         let (server, tool) = name.split_once(SEPARATOR).unwrap_or((name, ""));
-        // Bound the preview like the native tools do; the call itself gets every byte.
-        let detail = format!("MCP server {server}, tool {tool}\nArguments: {}", truncate(arguments, 4096));
+        // The approval must cover every byte. The terminal refuses a review
+        // that exceeds its full-preview limit instead of approving a prefix.
+        let detail = format!("Arguments: {arguments}");
+        let what = crate::approval_prompt::action("Vade wants to use an outside tool", &format!("{} on {}", shell::visible_text(tool), shell::visible_text(server)), crate::approval_prompt::Risk::Red, "can send data or change things", None);
+        let prompt = crate::approval_prompt::finish(&what, "This tool runs outside Vade. It can send your data to that server.\nIt can change things on that server.", &crate::approval_prompt::choices("do not run this tool", None, None, Some("data")));
         // Drop a record left by another tool's request on this thread.
         if let Some(approvals) = self.approvals {
             approvals.take_not_shown();
         }
-        if !(self.preview)(Preview { title: "MCP tool", detail: &detail, approval_required: self.policy == ApprovalPolicy::Ask }, cancel) {
+        let asking = self.policy == ApprovalPolicy::Ask;
+        let shown = prompt.render(64, false);
+        if !(self.preview)(Preview { prompt: asking.then_some(&prompt), title: "MCP tool", detail: if asking { &shown } else { &detail }, details: asking.then_some(detail.as_str()), approval_required: asking }, cancel) {
             if cancel.load(Ordering::Relaxed) {
                 return Err(ToolError::Cancelled);
             }

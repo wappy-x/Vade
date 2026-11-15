@@ -134,10 +134,11 @@ fn probe(origin: &Origin) -> Probe {
     probe
 }
 fn fetch_health(origin: &Origin) -> io::Result<(u16, Vec<u8>)> {
+    let key = crate::auth::ApiKey::configured()?;
     let mut socket = origin.connect()?;
     socket.bound_deadline(Instant::now() + Duration::from_secs(5));
     write!(socket, "GET {} HTTP/1.1\r\nHost: {}\r\nAccept: application/json\r\nConnection: close\r\n", origin.target("/health"), origin.endpoint.authority)?;
-    if let Some(key) = crate::auth::ApiKey::configured()? {
+    if let Some(key) = key {
         socket.write_all(key.bearer_header().as_bytes())?;
     }
     socket.write_all(b"\r\n")?;
@@ -172,7 +173,10 @@ pub(super) fn health(origins: &[Origin]) -> (u16, String) {
         values.len() > 1
     });
     let ready = probes.iter().filter(|p| p.status == "ready" && p.http == Some(200)).count();
-    let (code, status, error) = if models.len() > 1 {
+    let refusal = origins.iter().find_map(|o| crate::http_policy::last_refusal(&o.endpoint));
+    let (code, status, error) = if let Some(reason) = refusal.as_deref() {
+        (502, "error", Some(reason))
+    } else if models.len() > 1 {
         (502, "error", Some("upstream model ids differ"))
     } else if identities_differ {
         (502, "error", Some("upstream engine builds or checkpoints differ"))

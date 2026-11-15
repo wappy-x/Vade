@@ -1,5 +1,5 @@
 //! Exercise the source installer with fake host probes, never a GPU or external network.
-use std::{fs, os::unix::fs::PermissionsExt, path::{Path, PathBuf}, process::{Command, Output}, time::{SystemTime, UNIX_EPOCH}};
+use std::{fs, os::unix::{fs::PermissionsExt, process::CommandExt}, path::{Path, PathBuf}, process::{Command, Output}, time::{SystemTime, UNIX_EPOCH}};
 
 #[path = "source_install/http.rs"]
 mod http;
@@ -12,7 +12,10 @@ static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::ne
 struct Fixture { root: PathBuf }
 impl Fixture {
     fn new() -> Self {
-        let root = std::env::temp_dir().join(format!("vade source install {}-{}-{}", std::process::id(),
+        Self::under(&std::env::temp_dir())
+    }
+    fn under(parent: &Path) -> Self {
+        let root = parent.join(format!("vade source install {}-{}-{}", std::process::id(),
             SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos(),
             SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
         for dir in ["bin", "scripts", "engine", "harness", "cli/target/release", "home", "tmp"] {
@@ -587,7 +590,7 @@ fn check_writes_nothing_and_source_skips_the_bundle() {
 const CLONE_URL: &str = "https://github.com/wappy-x/vade.git";
 const CURL_LINE: &str = "curl -fsSL https://vade.lol/install.sh | sh";
 fn script() -> Vec<u8> { fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/install.sh")).unwrap() }
-fn shells() -> Vec<&'static str> { ["/bin/sh", "/bin/dash"].into_iter().filter(|shell| Path::new(shell).is_file()).collect() }
+fn shells() -> Vec<&'static str> { ["/bin/sh", "/bin/dash", "/bin/bash"].into_iter().filter(|shell| Path::new(shell).is_file()).collect() }
 impl Fixture {
     fn piped_with(&self, shell: &str, script: &[u8], cwd: &Path, env: &[(&str, &str)], args: &[&str]) -> Output {
         let mut child = Command::new(shell).args(["-c", "umask 002 && exec \"$0\" -s -- \"$@\""])
@@ -646,17 +649,19 @@ printf 'cargo %s in %s\n' "$2" "$PWD" >> "$INSTALL_CALLS"
 }
 
 #[test]
-fn the_installer_is_plain_sh_and_ends_in_main() {
+fn the_installer_is_plain_sh_and_ends_in_a_guarded_main_call() {
     for shell in shells() {
         let check = Command::new(shell).arg("-n").arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/install.sh")).output().unwrap();
         assert!(check.status.success(), "{shell}: {}", String::from_utf8_lossy(&check.stderr));
     }
     let text = String::from_utf8(script()).unwrap();
     assert!(text.starts_with("#!/bin/sh\n"));
-    assert_eq!(text.lines().last(), Some("main \"$@\""));
-    assert!(text.ends_with("\n}\nmain \"$@\"\n"), "the last line needs a final newline");
-    // Nothing runs before main: only comments are outside it.
-    let (head, _) = text.split_once("\nmain() {\n").unwrap();
+    assert_eq!(text.lines().last(), Some("}"));
+    const ENDING: &str = "\n}\nmain \"$@\"\n}\n";
+    assert!(text.ends_with(ENDING), "the outer group must end after the main call and a final newline");
+    assert!(!"\n}\n{\nmain \"$@\"\n}".ends_with(ENDING), "the old suffix must be refused");
+    // Only comments precede the group containing both the definition and call.
+    let (head, _) = text.split_once("\n{\nmain() {\n").unwrap();
     assert!(head.lines().all(|line| line.starts_with('#')), "{head}");
     let repository = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/repository.rs")).unwrap();
     assert!(text.contains(&format!("clone_url={CLONE_URL}\n")) && repository.contains(&format!("\"{}\"", CLONE_URL.trim_end_matches(".git"))));
@@ -667,7 +672,7 @@ fn a_cut_off_download_runs_nothing() {
     let whole = script();
     let text = String::from_utf8(whole.clone()).unwrap();
     let first = text.find("main() {\n").unwrap() + "main() {\n".len();
-    let last = text.rfind("}\nmain \"$@\"\n").unwrap();
+    let last = text.rfind("}\nmain \"$@\"\n}\n").unwrap();
     let mut cuts: Vec<usize> = (first..last).step_by(211).collect();
     cuts.extend([first, last - 1, last]);
     assert!(cuts.len() > 50, "{}", cuts.len());
@@ -681,20 +686,80 @@ fn a_cut_off_download_runs_nothing() {
     };
     for cut in cuts {
         for shell in shells() {
-            let output = f.piped_with(shell, &whole[..cut], &f.root.join("scripts"), &env, &[]);
+            let output = f.piped_with(shell, &whole[..cut], &f.root.join("scripts"), &env, &["--check"]);
             assert!(!output.status.success(), "{shell} cut at {cut}");
             assert!(output.stdout.is_empty(), "{shell} cut at {cut}: {}", String::from_utf8_lossy(&output.stdout));
             clean(format!("{shell} cut at {cut}"));
         }
         // The same cut saved to a file in a checkout.
         fs::write(f.root.join("scripts/install.sh"), &whole[..cut]).unwrap();
-        assert!(!f.run_args(&env, &[]).status.success(), "file cut at {cut}");
+        assert!(!f.run_args(&env, &["--check"]).status.success(), "file cut at {cut}");
         clean(format!("file cut at {cut}"));
     }
-    // A cut after the closing brace defines main and never calls it.
-    let output = f.piped_with("/bin/sh", &whole[..last + 2], &f.root.join("scripts"), &env, &[]);
-    assert!(output.status.success() && output.stdout.is_empty());
+    // Even after the main definition closes, the outer group is incomplete.
+    let output = f.piped_with("/bin/sh", &whole[..last + 2], &f.root.join("scripts"), &env, &["--check"]);
+    assert!(!output.status.success() && output.stdout.is_empty());
     clean("cut after main".into());
+}
+
+#[test]
+fn short_prefixes_at_both_ends_and_through_the_body_run_nothing() {
+    let whole = script();
+    assert_eq!(whole.last(), Some(&b'\n'));
+    assert!(whole.len() > 1101);
+    let f = Fixture::under(&Path::new(env!("CARGO_MANIFEST_DIR")).join(".."));
+    // A full sweep is slow: test each of the first 700 and last 400 lengths,
+    // and every 37th length between. The final newline alone may be missing;
+    // that complete program is checked separately below.
+    let cuts: Vec<_> = (1..=700).chain((701..whole.len() - 400).step_by(37))
+        .chain(whole.len() - 400..whole.len() - 1).collect();
+    // HOME stays inside the work tree and PATH contains only fixture tools.
+    // The first external call in main records entry; partial command names
+    // also record a call. A fake unsupported host stops even a bare main call.
+    f.tool("date", "printf '%s\\n' main >> \"$INSTALL_CALLS\"; echo 0");
+    f.tool("uname", "printf '%s\\n' uname >> \"$INSTALL_CALLS\"; echo unsupported");
+    for name in ["m", "ma", "mai", "main"] { f.tool(name, &format!("echo {name} >> \"$INSTALL_CALLS\"")); }
+    for shell in shells() {
+        let mut ran = Vec::new();
+        for &cut in &cuts {
+            let output = f.piped_with(shell, &whole[..cut], &f.root, &[], &["--check"]);
+            let calls = f.calls();
+            if !calls.is_empty() || !output.stdout.is_empty() { ran.push((cut, calls, output.stdout)); }
+            fs::write(f.root.join("calls"), "").unwrap();
+        }
+        assert!(ran.is_empty(), "{shell}: {ran:?}");
+        println!("{shell}: {} incomplete prefixes ran nothing; final-newline prefix checked separately", cuts.len());
+    }
+}
+
+#[test]
+fn the_complete_program_with_or_without_its_final_newline_keeps_check_and_help() {
+    let whole = script();
+    let text = std::str::from_utf8(&whole).unwrap();
+    // Main's layout had no outer group. Keep the same body and call as the
+    // reference, so output and status comparisons need no network or git.
+    let (_, body) = text.split_once("\n{\nmain() {\n").unwrap();
+    let body = body.strip_suffix("\nmain \"$@\"\n}\n").unwrap();
+    let reference = format!("main() {{\n{body}\nmain \"$@\"\n");
+    let f = Fixture::under(&Path::new(env!("CARGO_MANIFEST_DIR")).join(".."));
+    f.tool("date", "printf '%s\\n' main >> \"$INSTALL_CALLS\"; echo 0");
+    for shell in shells() {
+        for arg in ["--check", "--help"] {
+            fs::write(f.root.join("calls"), "").unwrap();
+            let expected = f.piped_with(shell, reference.as_bytes(), &f.root, &[], &[arg]);
+            assert!(expected.status.success(), "{shell} {arg}: {expected:?}");
+            let calls = f.calls();
+            assert_eq!(calls, if arg == "--check" { "main\n" } else { "" });
+            for len in [whole.len() - 1, whole.len()] {
+                fs::write(f.root.join("calls"), "").unwrap();
+                let actual = f.piped_with(shell, &whole[..len], &f.root, &[], &[arg]);
+                assert_eq!(actual.status.code(), expected.status.code(), "{shell} {arg}, {len} bytes");
+                assert_eq!(actual.stdout, expected.stdout, "{shell} {arg}, {len} bytes");
+                assert_eq!(actual.stderr, expected.stderr, "{shell} {arg}, {len} bytes");
+                assert_eq!(f.calls(), calls, "{shell} {arg}, {len} bytes");
+            }
+        }
+    }
 }
 
 #[test]
@@ -935,29 +1000,83 @@ fn a_fresh_home_gets_one_login_advice_line_and_a_short_chat_hint() {
     }
 }
 
-#[test]
-fn a_hanging_login_profile_is_stopped_before_the_outer_limit() {
+/// The installer, leading its own process group. Stopping it (or dropping it, so a failed
+/// assertion cleans up too) kills the whole group and waits for the installer.
+struct Group(Option<std::process::Child>);
+impl Group {
+    /// Kill the group, then wait for the installer (until then it holds the group's number);
+    /// its status and the processes still in the group (none expected).
+    fn stop(&mut self) -> (Option<std::process::ExitStatus>, String) {
+        let Some(mut child) = self.0.take() else { return (None, String::new()) };
+        let id = child.id().to_string();
+        let _ = Command::new("/bin/kill").args(["-KILL", "--", &format!("-{id}")])
+            .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+        let status = child.wait().ok();
+        // A killed process can linger until the system reaps it: look again for up to 5 seconds.
+        let started = std::time::Instant::now();
+        loop {
+            let found = Command::new("pgrep").args(["-g", &id]).output().unwrap();
+            let left = String::from_utf8_lossy(&found.stdout).split_whitespace().collect::<Vec<_>>().join(" ");
+            if left.is_empty() || started.elapsed() >= std::time::Duration::from_secs(5) { return (status, left); }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+}
+impl Drop for Group { fn drop(&mut self) { self.stop(); } }
+
+fn check_hanging_login_profile(timeout: Option<&Path>) {
     let f = Fixture::new();
     let shell = f.login_shell();
-    let timeout = ["/usr/bin/timeout", "/bin/timeout"].into_iter().find(|tool| Path::new(tool).is_file())
-        .expect("the hanging login test needs the system timeout command");
+    let timeout_available = timeout.is_some();
     fs::remove_file(f.root.join("bin/timeout")).unwrap();
-    std::os::unix::fs::symlink(timeout, f.root.join("bin/timeout")).unwrap();
+    if let Some(timeout) = timeout { std::os::unix::fs::symlink(timeout, f.root.join("bin/timeout")).unwrap(); }
     let profile = "printf '%s\\n' started > \"$HOME/login-started\"\nexec /bin/sleep 30\n";
     fs::write(f.root.join("home/.profile"), profile).unwrap();
-    // The outer limit fails the test if the installer's shorter probe limit stops working.
-    let output = Command::new(timeout).args(["15", "/bin/sh"]).arg(f.root.join("scripts/install.sh"))
+    // A Rust watchdog is the outer limit. The test does not require the optional timeout tool.
+    let stdout_path = f.root.join("install-stdout");
+    let stderr_path = f.root.join("install-stderr");
+    // The installer leads its own process group, so cleanup reaches what the profile started.
+    let mut group = Group(Some(Command::new("/bin/sh").arg(f.root.join("scripts/install.sh"))
         .current_dir(&f.root).env_clear()
         .env("PATH", f.root.join("bin")).env("TMPDIR", f.root.join("tmp"))
         .env("HOME", f.root.join("home")).env("CARGO_NET_OFFLINE", "true").env("SHELL", shell)
         .env("INSTALL_ROOT", &f.root).env("INSTALL_CALLS", f.root.join("calls"))
-        .output().unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(output.status.success(), "{stdout}{}", String::from_utf8_lossy(&output.stderr));
-    assert!(f.root.join("home/login-started").is_file(), "the login profile did not run");
+        .stdout(std::process::Stdio::from(fs::File::create(&stdout_path).unwrap()))
+        .stderr(std::process::Stdio::from(fs::File::create(&stderr_path).unwrap()))
+        .process_group(0).spawn().unwrap()));
+    let started = std::time::Instant::now();
+    let (status, left) = loop {
+        // Look without reaping: an exited installer shows as a zombie and keeps its group's number.
+        let state = Command::new("ps").args(["-o", "stat=", "-p", &group.0.as_ref().unwrap().id().to_string()]).output().unwrap();
+        if String::from_utf8_lossy(&state.stdout).trim_start().starts_with('Z') { break group.stop(); }
+        if started.elapsed() >= std::time::Duration::from_secs(15) {
+            let (_, left) = group.stop();
+            assert!(left.is_empty(), "processes left in the installer's group: {left}");
+            panic!("the installer exceeded the 15 second outer limit; its process group is stopped");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    let status = status.expect("the installer's status");
+    assert!(left.is_empty(), "processes left in the installer's group: {left}");
+    let stdout_bytes = fs::read(stdout_path).unwrap();
+    let stderr_bytes = fs::read(stderr_path).unwrap();
+    let stdout = String::from_utf8_lossy(&stdout_bytes);
+    assert!(status.success(), "{stdout}{}", String::from_utf8_lossy(&stderr_bytes));
+    assert_eq!(f.root.join("home/login-started").is_file(), timeout_available,
+        "the login profile must run only when timeout is available");
     assert!(stdout.ends_with(PATH_LINE), "{stdout}");
     assert!(stdout.contains("Then start the engine and open chat: ~/.vade/bin/vade launch\n"), "{stdout}");
     assert_eq!(fs::read_to_string(f.root.join("home/.profile")).unwrap(), profile);
+}
+
+#[test]
+fn a_hanging_login_profile_is_stopped_before_the_outer_limit() {
+    // macOS has no system timeout. The installer must skip the login probe there.
+    check_hanging_login_profile(None);
+    // Where timeout exists, it must stop the hanging profile and retain the same advice.
+    if let Some(timeout) = ["/usr/bin/timeout", "/bin/timeout"].into_iter().map(Path::new).find(|tool| tool.is_file()) {
+        check_hanging_login_profile(Some(timeout));
+    }
 }
 
 #[test]

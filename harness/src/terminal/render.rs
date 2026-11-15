@@ -537,14 +537,10 @@ pub fn editor(
     }
 }
 
-/// The approval prompt line: approve with y, deny with n.
+/// Fallback for internal previews without a full decision layout.
 pub fn approval(color: bool) -> String {
-    format!(
-        "{}  {} approve · {} deny · or /approve /deny",
-        style("Approval required", "7", color),
-        style("y", "1;32", color),
-        style("n", "1;31", color)
-    )
+    format!("{}\n{}  Yes, one time\n{}  No", style("Your turn.", "1;33", color),
+        style("1", "1;31", color), style("2", "1;31", color))
 }
 
 /// Color a unified diff: additions green, removals red, hunk headers cyan,

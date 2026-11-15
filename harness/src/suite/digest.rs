@@ -22,7 +22,7 @@ impl Rng {
 
 const CRATES: &[&str] = &["core", "store", "query", "sched", "codec", "audit", "cache", "index"];
 const VERBS: &[&str] = &["merge", "split", "load", "flush", "scan", "probe", "align", "shift", "pack", "trim", "fold", "rank"];
-const NOUNS: &[&str] = &["cursor", "segment", "bucket", "frame", "record", "window", "column", "token", "slot", "page", "range", "tile"];
+const NOUNS: &[&str] = &["cursor", "segment", "bucket", "frame", "record", "window", "column", "token", "slot", "page", "range", "tile"]; // vade-secret-list-allow: synthetic code vocabulary, not path names
 const TYPES: &[&str] = &["u64", "usize", "u32"];
 
 fn file_name(i: usize, rng: &mut Rng) -> String {

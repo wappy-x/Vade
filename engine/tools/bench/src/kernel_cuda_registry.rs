@@ -42,5 +42,6 @@ mod mxgroup;
 #[path = "kernel_fp8moe.rs"] mod fp8moe;
 #[path = "kernel_mhc.rs"] mod mhc; #[path = "kernel_plainp.rs"] pub(super) mod plainp; #[path = "kernel_causalp.rs"] pub(super) mod causalp; #[path = "kernel_readp.rs"] pub(super) mod readp;
 pub(super) use mhc::{run as mhc_bytes, project::run as mhc_project, project::sweep as mhc_sweep, mxwave::run as mx_wave, nvbatch::run as nv_batch, rowstile::run as rows_tile, transp::run as transpose_smem, scorestile::run as scores_tile, rowsmall::run as rows_small, nofill::run as no_fill, nvsmall::run as nv_small, fp8small::run as fp8_small, mxsmall::run as mx_small, fp8tile::run as fp8_tile, nvrows::run as nv_rows, mxrows::run as mx_rows, fp8rows::run as fp8_rows, attnsweep::run as attn_table};
+pub(super) use mhc::project::phased::run as mhc_phased;
 pub(super) use fp8moe::run as fp8_moe;
 use mxgroup::{all_mx, group_mx, mx_range_warps, mxgroup_fixture, mxgroup_weight, mxrows_a, mxrows_entries, mxrows_shared, mxrows_x};

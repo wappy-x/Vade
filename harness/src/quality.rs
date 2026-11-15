@@ -22,7 +22,7 @@ use crate::process_group::kill_group;
 use std::{
     fs::OpenOptions,
     io::{self, Read, Write},
-    net::{TcpStream, ToSocketAddrs},
+    net::TcpStream,
     path::PathBuf,
     process::{Command, ExitCode, Stdio},
     sync::mpsc,
@@ -46,7 +46,8 @@ Usage: vade-harness quality-card --endpoint URL --model NAME --json FILE [OPTION
        vade-harness quality-card --set engine-1 --endpoint URL --model NAME --json FILE
        vade-harness quality-card --print-prompts
 
-  --endpoint URL        Required http:// chat endpoint (base, /v1 or full path)
+  --endpoint URL        Required http:// chat endpoint (base, /v1 or full path); same machine only by default
+  --allow-plain-http    Allow plain HTTP to another machine. Not encrypted: others on the network can read and change the chat and the API key.
   --model NAME          Required explicit model; never substituted
   --json FILE           Required new JSON receipt file; never overwrite
   --card FILE           Optional new text file for the two printed cards
@@ -177,6 +178,7 @@ impl Config {
                 return Err("duplicate quality-card option");
             }
             seen.push(key.clone());
+            if key == "--allow-plain-http" { crate::http_policy::allow_plain_http(); continue; }
             match key.as_str() {
                 "--no-code-run" => {
                     config.code_run = false;
@@ -270,6 +272,7 @@ impl Config {
 /// The request target split from the endpoint URL.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Endpoint {
+    pub authority: String,
     pub host: String,
     pub port: u16,
     pub path: String,
@@ -303,7 +306,7 @@ pub fn parse_endpoint(endpoint: &str) -> io::Result<Endpoint> {
     } else {
         format!("{path}/chat/completions")
     };
-    Ok(Endpoint { host, port, path })
+    Ok(Endpoint { authority: authority.to_owned(), host, port, path })
 }
 
 const SYSTEM: &str =
@@ -1242,6 +1245,7 @@ pub fn run(config: Config) -> io::Result<Report> {
                     };
                     QualityCase { case, reply, checks, error: None }
                 }
+                Err(error) if crate::http_policy::refusal(&error).is_some() => return Err(error),
                 Err(error) => QualityCase {
                     case,
                     reply: Reply::default(),
@@ -1261,8 +1265,10 @@ pub fn run(config: Config) -> io::Result<Report> {
             ));
             let strict = request_body(&config, case, Some("strict"))
                 .and_then(|body| send(&endpoint, &body, auth.as_deref(), deadline));
+            crate::http_policy::interactive_result()?;
             let plain = request_body(&config, case, Some("plain"))
                 .and_then(|body| send(&endpoint, &body, auth.as_deref(), deadline));
+            crate::http_policy::interactive_result()?;
             exactness.push(match (strict, plain) {
                 (Ok(strict), Ok(plain)) => {
                     ExactCase { case, strict: Some(strict), plain: Some(plain), error: None }
@@ -1362,7 +1368,7 @@ pub use report::prompts_json;
 /// and print both cards.
 pub fn cli(args: impl IntoIterator<Item = String>) -> ExitCode {
     let args: Vec<_> = args.into_iter().collect();
-    if args.iter().any(|a| a == "--help" || a == "-h") {
+    if crate::http_policy::help_requested(&args) {
         return crate::diagnostics::print_stdout(HELP);
     }
     let config = match crate::diagnostics::parse_command("quality-card", |option| {
@@ -1413,6 +1419,8 @@ pub fn cli(args: impl IntoIterator<Item = String>) -> ExitCode {
         },
         None => None,
     };
+    let _json_output = crate::http_policy::RefusalOutput(config.json_path.clone());
+    let _card_output = config.card_path.clone().map(crate::http_policy::RefusalOutput);
     if config.set == CardSet::Engine {
         return engine_report::cli(config, json_file, card_file);
     }
@@ -1423,6 +1431,9 @@ pub fn cli(args: impl IntoIterator<Item = String>) -> ExitCode {
     let report = match run(config) {
         Ok(report) => report,
         Err(error) => {
+            drop(card_file);
+            drop(json_file);
+            if crate::http_policy::refusal(&error).is_some() { return ExitCode::FAILURE; }
             crate::diagnostics::stderr_line(format_args!("vade: quality-card setup failed ({error}); JSON is incomplete. Keep the partial file, check the endpoint and model, then retry with a new --json path."));
             return ExitCode::FAILURE;
         }

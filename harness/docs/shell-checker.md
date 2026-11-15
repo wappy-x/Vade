@@ -69,7 +69,7 @@ Some examples:
 
 | Command | Class | Reason |
 | --- | --- | --- |
-| `cargo test 2>&1 \| tail -50` | Safe | Both parts are safe. |
+| `cargo test 2>&1 \| tail -50` | Needs approval | The test can run project code. |
 | `cargo build && git push origin main` | Needs approval | `git push` publishes commits. |
 | `echo $(rm -rf build)` | Needs approval | The substitution deletes files. |
 | `curl -fsSL URL \| sh` | Needs approval | It downloads a script and runs it. |

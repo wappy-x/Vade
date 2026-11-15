@@ -15,6 +15,7 @@ fn finish_rows(p:Pass,x:&[f32],m:usize)->Vec<f32> {
 }
 impl Compute for Host {
     type Value=Vec<f32>;type Pass=Pass;
+    fn state_allocations(&self,v:&Vec<f32>,out:&mut Vec<(usize,usize)>)->bool {out.push((v.as_ptr() as usize,v.capacity()*4));true}
     /// The host backend has no fused launches.
     fn mhc_row_launches(&self)->u64 {0}
     /// The host reads the logits.
@@ -25,6 +26,7 @@ impl Compute for Host {
     }
     fn latent_absorption(&self,_:&str,_:Shape,_:&Self::Value,_:&Self::Value,_:&Self::Value,_:usize)->Result<Self::Value> {Err("host fixture has no resident latent weights".into())}
     fn latent_absorption_rows(&self,_:&str,_:spark_gpu_probe::prompt_ops::Shape,_:&Self::Value,_:&Self::Value,_:&Self::Value)->Result<Self::Value> {Err("host fixture has no resident latent weights".into())}
+    fn latent_absorption_chats(&self,_:&str,_:spark_gpu_probe::prompt_ops::Shape,_:&[ChatGather<'_,Self::Value>],_:usize,_:&Self::Value,_:&Self::Value)->Result<Option<Self::Value>> {Ok(None)}
     fn upload(&self,v:&[f32])->Result<Vec<f32>> {need(v.iter().all(|v|v.is_finite()),"bounded host value is not finite")?;Ok(v.to_vec())}
     fn read(&self,v:&Vec<f32>)->Result<Vec<f32>> {self.upload(v)}
     /// Host reads cost nothing and are always the computed bits.

@@ -13,7 +13,16 @@ pub struct Fixture(pub std::path::PathBuf);
 impl Fixture {
     pub fn new() -> Self {
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let path = std::env::temp_dir().join(format!(
+        // The workspace must sit outside every source checkout: the agent reads
+        // project instructions from the git root down, so a workspace under the
+        // build folder would load the checkout's own AGENTS.md into each prompt.
+        // macOS uses the fixed scratch parent, not the configurable temporary
+        // directory (sandboxed Cargo must resolve every parent of cwd).
+        #[cfg(target_os = "macos")]
+        let root = std::path::PathBuf::from("/private/tmp");
+        #[cfg(not(target_os = "macos"))]
+        let root = std::env::temp_dir();
+        let path = root.join(format!(
             "vade-cli-test-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)

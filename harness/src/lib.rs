@@ -1,5 +1,6 @@
 //! Vade's terminal harness. Inference and KV state belong to the upstream engine.
 pub mod agent;
+pub mod approval_prompt;
 pub mod agent_wire;
 pub mod app_server;
 pub mod child_agents;
@@ -12,11 +13,13 @@ pub mod prompt;
 pub mod memory;
 pub mod protocol;
 pub mod session;
+mod secret_paths;
 pub mod setup;
 pub mod terminal;
 pub mod pdf;
 pub mod tools;
 pub mod transport;
+pub mod http_policy;
 
 pub mod artifacts;
 pub mod branch;

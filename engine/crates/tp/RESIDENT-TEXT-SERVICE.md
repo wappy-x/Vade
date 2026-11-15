@@ -109,11 +109,68 @@ complete on all ranks before the controller continues.
 
 The service retains matrix rows and the stored embedding table through the
 resident decoder owner across requests.
-Prompt prefix retention is off by default and experimental: when `flash-serve`
-is started with `--prompt-keep`, each rank enables session forking and the
+Prompt prefix retention is on by default: unless `flash-serve` is started
+with `--no-prompt-keep`, each rank enables session forking and the
 prompt cache retains up to eight finished prompt states across requests within
 the session pool, restoring only at the exact end of a kept prompt without
-copying state words and evicting cached prompts before live requests wait. Its
+copying state words and evicting cached prompts before live requests wait. A
+kept prompt stays until memory is needed for a live request or a newer kept
+prompt, until eight newer
+prompts have replaced it, or until no request has used it for 5 minutes (a
+request that touches the cache checks the times at once, and the running
+server at most once a second). Every request is looked up, and its prompt is
+kept when it fits the cache's room (below), unless it sends `"cache": false`;
+no cache field is needed. Callers that use the same
+API key share kept prompts, and so do all callers that send no credential
+when no key is set; a `cache_salt` of its own keeps a caller's prompts apart. With the cache on,
+`/health` shows `"prefix_cache":{"enabled":true}` with no counts and
+`"device_bytes":null`, and `/v1/events` leaves out the cache's event lines. A
+reply does tell its own caller how much of its own prompt came from the cache:
+`prompt_tokens_details.cached_tokens` in the usage block and, on a streamed
+reply, the `X-Vade-Cached-Tokens` and `X-Vade-Estimated-First-Token-Ms`
+headers. The cache's room is still one pool for all
+callers, so a caller's own hits can change when another caller uses it
+([what a scope keeps apart](../../docs/server.md)): where callers do not
+trust each other, start every rank with `--no-prompt-keep`. A resume that a
+rank refuses or cannot start drops that one kept prompt on both ranks, and
+the request reads its prompt cold.
+The default has a small cost on a first turn and a large gain on a later one.
+Measured on one pair against the build before it, at context 16,384 with
+`--mtp 3`: a decode step took 0.036 ms longer (0.09 percent of 41.13 ms), a
+request took about 13 ms longer once, after its first token, and four first
+turns of 2,048 tokens at once took 0.4 to 1.7 percent longer; a second turn
+at 8,759 prompt tokens then gave its first token after 2.9 s in place of
+36.9 s. The cache holds what fits under its byte cap, the session pool less
+one full-size chat; the cap moves with the free memory at start. Measured on
+one pair on 2026-11-15 with `--mtp 3`: the cap was 2,543,628,429 bytes at
+context 16,384 and 2,666,771,392 bytes at context 32,768 (which `vade up`
+starts); six kept prompts of 8,192 tokens held 2,208,055,296 bytes; and at
+both contexts a second turn of 8,759 tokens started from its kept prompt and
+gave its first token after 2.769 s in place of 34.5 to 36.1 s cold, with the
+token IDs of a cold read. `--prompt-keep`
+is still accepted and names the default; both names at once are refused.
+`vade up` never passes `--prompt-keep`. It passes `--no-prompt-keep` to every
+rank only for a cache size of 0: `vade up --cache-bytes 0`, a saved setup
+with that 0, or `FLASH_SERVE_KV_BYTES=0` given to `vade up`. With no cache
+size (a saved setup without one included) the service it starts keeps
+prompts. A rank started by hand reads no cache size from its
+environment: give it `--no-prompt-keep`. If `FLASH_SERVE_KV_BYTES=0` is set
+and the rank keeps prompts, it prints one `TEXT PROMPT KEEP` line at start
+that says so and names the option. A size above 0 does not set this
+cache (its byte cap is the engine's), so `vade up` refuses it for this
+service.
+With `--no-prompt-keep` no session is forked, the cache holds zero bytes and
+no request looks a prompt up. With the cache on but a byte cap of 0 (the pool
+funds one full-size chat and nothing beside it) every request is still looked
+up and nothing is kept. The start line of rank 0 ends with `cache=true`
+or `cache=false`, then `kept_cap_bytes=N largest_kept_prompt_tokens=M`: the
+cache's byte cap and the longest prompt whose planned charge fits under it:
+the state planes at that length, their append room and the short-group output
+the state can pin. No prompt exists at start; the cache books a real prompt by
+the bytes its state holds on the device, so the real limit can differ from M.
+When the cache is on and M is under 1,024 tokens, one `TEXT PROMPT KEEP`
+line at start says that the cache keeps little or nothing at this context and
+that a smaller `--context` gives it room. Its
 memory bound includes session state, local-head expanded rows, cache append
 slack, shared layer and prompt-group scratch, the projection memo, optional
 weight staging, and logits (plus predictor state and trail room when `--mtp`
@@ -133,8 +190,10 @@ The CUDA allocator also enforces the smallest negotiated rank ceiling.
 `SEQPAR_MEMORY_BYTES` can lower that ceiling. `FLASH_SERVE_OUTPUT_TOKENS`
 sets the output cap. These are existing service controls.
 
-Startup compares the rank metadata fingerprints, context, and `--prompt-keep`
-setting. The fingerprint covers safetensors header metadata and text artifacts.
+Startup compares the rank metadata fingerprints, context, and the prompt
+retention choice, so two ranks with different choices refuse each other. The
+same holds for a rank of a build from before the default changed and a rank of
+a build from after it. The fingerprint covers safetensors header metadata and text artifacts.
 It is not a hash of all weight payloads. Metadata reports this limit. A host
 pass does not prove device exactness, generated answer quality, or speed.
 

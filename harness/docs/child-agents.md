@@ -1,5 +1,7 @@
 # Child agents
 
+HTTP links stay on this machine by default; see [network setup](../../docs/network-setup.md) for SSH tunnels and the explicit opt-in.
+
 Child agents are helpers that the native agent can start for side tasks. Each
 child works on its own task and reports what it found to the agent that started
 it, called the *parent*.

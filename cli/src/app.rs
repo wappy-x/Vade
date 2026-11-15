@@ -128,7 +128,7 @@ impl<R: Runner> App<R> {
         }
         let refused = result.as_ref().err().filter(|error| options.fp4_local && !options.supplied_options.contains("--context")
             && error.contains(&format!("CONTEXT={}", crate::cli::FP4_LONG_CONTEXT)) && !error.contains("Cleanup could not finish")
-            && crate::launch::memory_refusal(error).is_some()).is_some();
+            && (crate::launch::memory_refusal(error).is_some() || text_memory_refusal(error))).is_some();
         if !refused { return result; }
         crate::output::line(format_args!("Context {} does not fit in memory on these Sparks. Starting with context {}.", crate::cli::FP4_LONG_CONTEXT, crate::cli::FP4_CONTEXT))?;
         let mut smaller = options.clone();
@@ -836,6 +836,15 @@ impl<R: Runner> App<R> {
         if self.dry { return Ok(()); }
         runner::check_ssh(&mut self.runner, &machines.iter().map(|machine| (machine.name.as_str(), machine.ssh.as_str())).collect::<Vec<_>>())
     }
+}
+
+/// The two-Spark text service's refusal of the long default context
+/// (`--diagnostic-unqualified-text`): one engine line that names that context
+/// and ends "reduce CONTEXT". Its wording differs from the FP4 engine's
+/// "Requested size does not fit.", which `launch::memory_refusal` reads.
+fn text_memory_refusal(error: &str) -> bool {
+    let long = format!("text service memory refusal: CONTEXT={};", crate::cli::FP4_LONG_CONTEXT);
+    error.lines().any(|line| line.contains(&long) && line.trim_end().ends_with("reduce CONTEXT"))
 }
 
 fn clear_cloud_auth(exec: &mut Exec) {

@@ -46,6 +46,16 @@ impl Request {
                 .then(|| (name.to_ascii_lowercase(), value.trim()))
         }).collect()
     }
+    fn wire(&self) -> Vec<u8> {
+        let mut wire = self.first.as_bytes().to_vec();
+        for header in &self.headers {
+            wire.extend_from_slice(header.as_bytes());
+            wire.extend_from_slice(b"\r\n");
+        }
+        wire.extend_from_slice(b"\r\n");
+        wire.extend_from_slice(&self.body);
+        wire
+    }
 }
 struct Mock {
     address: SocketAddr,
@@ -164,8 +174,33 @@ fn response_body(response: &[u8]) -> Vec<u8> {
     }
 }
 
+/// This is the request shape on main before the link-policy experiment. Keep
+/// this copy literal so a later partial refusal cannot silently change a send.
+fn main_request_wire(standalone: bool, upstream: SocketAddr, selected: Option<&str>) -> Vec<u8> {
+    let mut wire = if standalone {
+        format!("POST /v1/chat/completions HTTP/1.1\r\nContent-Type: application/json\r\n")
+    } else {
+        format!("POST /v1/chat/completions HTTP/1.1\r\nHost: {upstream}\r\nContent-Length: {}\r\nConnection: keep-alive\r\ncontent-type: application/json\r\n", BODY.len())
+    };
+    if selected.is_none() {
+        if standalone {
+            wire.push_str(&format!("Authorization: Bearer {CLIENT}\r\nX-Api-Key: {CLIENT}\r\n"));
+        } else {
+            wire.push_str(&format!("authorization: Bearer {CLIENT}\r\nx-api-key: {CLIENT}\r\n"));
+        }
+    }
+    wire.push_str(if standalone { "X-Fixture: untouched\r\n" } else { "x-fixture: untouched\r\n" });
+    if standalone {
+        wire.push_str(&format!("Host: {upstream}\r\nContent-Length: {}\r\nConnection: close\r\n", BODY.len()));
+    }
+    if let Some(selected) = selected { wire.push_str(&format!("Authorization: Bearer {selected}\r\n")); }
+    wire.push_str("\r\n");
+    wire.push_str(BODY);
+    wire.into_bytes()
+}
+
 #[test]
-fn configured_credentials_cover_both_gateways_admission_and_recorded_replay() {
+fn configured_credentials_and_request_bytes_match_main_for_both_gateways() {
     let root = Root::new("matrix");
     let environment = root.key("environment.key", ENV_KEY);
     let explicit = root.key("explicit.key", FLAG_KEY);
@@ -201,6 +236,8 @@ fn configured_credentials_cover_both_gateways_admission_and_recorded_replay() {
                 assert!(request.first.starts_with("POST /v1/chat/completions "));
                 assert_eq!(request.body, BODY.as_bytes());
                 assert!(request.headers.iter().any(|line| line.eq_ignore_ascii_case("X-Fixture: untouched")));
+                let selected = match selected { 0 => None, 1 => Some(ENV_KEY), _ => Some(FLAG_KEY) };
+                assert_eq!(request.wire(), main_request_wire(standalone, mock.address, selected));
             } else {
                 assert!(request.first.starts_with(if number == 0 { "GET /v1/capabilities " } else { "POST /v1/admission " }));
             }

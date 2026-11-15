@@ -1,5 +1,24 @@
 # Hardware and network setup
 
+HTTP links to another machine are refused by default in `vade-harness` and
+`vade-gateway`. Vade checks the connected addresses before it sends any HTTP
+bytes. Loopback and same-address links work without a switch.
+
+Plain HTTP is not encrypted. Anyone on the network between the two machines
+can read and change your chat, your tool results and your API key.
+Do one of these:
+
+1. Use an SSH tunnel. It encrypts the link. `vade up` sets one up for
+   `vade chat`. By hand: run `ssh -N -L PORT:127.0.0.1:PORT USER@HOST` in
+   another terminal. Replace USER with your login name on that machine.
+   Then start Vade again with `--endpoint http://127.0.0.1:PORT`, or
+   `--upstream http://127.0.0.1:PORT` for a gateway upstream.
+   The doctor tool takes the address as its first word.
+2. Accept the risk for this run: add `--allow-plain-http`.
+
+A forwarder on this machine that is not SSH can pass the traffic on without
+encryption, and Vade cannot see that.
+
 **How to buy, cable, address and check the network that joins DGX Sparks for Vade.**
 
 New to some of these terms? Each one is explained the first time it appears,

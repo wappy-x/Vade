@@ -44,9 +44,7 @@ pub fn extend(in_place:bool,needed:usize,room:usize)->Option<Extend> {
 }
 /// Bytes of one memo slab chunk as allocated: whole 4 KiB pages, the device allocator's
 /// unit. The chunk is allocated at exactly this size, so its page rounding is charged.
-pub fn slab_chunk_bytes(rows:usize,width:usize)->Option<usize> {
-    rows.checked_mul(width)?.checked_mul(4)?.checked_add(4095).map(|n|n/4096*4096)
-}
+pub use crate::projection_memo::slab_chunk_bytes;
 #[cfg(test)]
 mod tests {
     use super::*;

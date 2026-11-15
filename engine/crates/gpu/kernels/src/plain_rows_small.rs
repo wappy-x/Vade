@@ -16,8 +16,10 @@
 //! and weight, one output word per unit; anything else keeps the old kernels.
 use crate::prompt_ops::{Arguments,Op};
 
-#[no_mangle]
-pub extern "ptx-kernel" fn plain_rows_small(p:Arguments) {
+#[export_name="plain_rows_small"]
+pub extern "ptx-kernel" fn entry_plain_rows_small(p:Arguments) {plain_rows_small(p)}
+#[inline(always)]
+pub(crate) fn plain_rows_small(p:Arguments) {
     // SAFETY: The host validates Shape::lengths and passes those exact extents, with same-context
     // contiguous owners that live through stream completion. Input and weight are immutable and
     // 16-byte aligned (checked here, else the block traps). `cols` is a positive multiple of 4, so

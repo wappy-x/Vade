@@ -225,6 +225,11 @@ impl Session {
         {
             return Err("Memory must be positive and cache must be smaller than memory.".into());
         }
+        // The two-Spark text service keeps prompts by default and sizes that cache itself. 0 is its off switch
+        // (`engine_args`); a size above 0 would be saved and shown but never used, so it is refused.
+        if options.diagnostic_unqualified_text && cache_bytes.is_some_and(|bytes| bytes > 0) {
+            return Err("With --diagnostic-unqualified-text the prompt cache sizes itself: use --cache-bytes 0 (or FLASH_SERVE_KV_BYTES=0) to turn it off, or give no cache size.".into());
+        }
         let machines = config.selected(options)?;
         // Each group of Sparks serves one model: every machine, or one replica.
         let group = if options.replicas { options.replica_sparks.max(1) } else { machines.len() };
@@ -389,6 +394,10 @@ impl Session {
             format!("127.0.0.1:{}", self.serve_port), "0".into()];
         if self.fp4_local && !self.diagnostic_unqualified_text { args.push("--fp4-local".into()); }
         if self.diagnostic_unqualified_text {args.push("--diagnostic-unqualified-text".into());}
+        // The text service keeps prompts unless it is told not to, and it reads no cache size from its environment.
+        // `--cache-bytes 0` (or FLASH_SERVE_KV_BYTES=0, or a saved 0) is this CLI's "cache off", and status says so:
+        // every rank gets the engine's off switch, so that is what runs.
+        if self.diagnostic_unqualified_text && self.cache_bytes == Some(0) {args.push("--no-prompt-keep".into());}
         if self.mtp_explicit { args.extend(["--mtp".into(), self.mtp.to_string()]); }
         if !self.diagnostic_unqualified_text && (self.decode_fuse || size == 1) { args.extend(["--decode-fuse".into(), if self.decode_fuse { "on" } else { "off" }.into()]); }
         args

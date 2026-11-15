@@ -24,8 +24,12 @@ pub fn prepare_cases()->Vec<(usize,usize,usize,bool)> {
 }
 /// Wrapped Route: (tokens, experts, chosen, normalized).
 pub fn route_cases()->Vec<(usize,usize,usize,usize)> {group_tokens().map(|m|(m,288,ROUTED,1)).collect()}
-/// Wrapped ExpertFold: (tokens, routed rows, width, shared).
-pub fn fold_cases()->Vec<(usize,usize,usize,usize)> {group_tokens().map(|m|(m,ROUTED,4096,1)).collect()}
+/// The rows one rank of a pair owns of the fold's 4096, and the most tokens folded at that width (the chats of a batch step).
+pub const FOLD_LOCAL:usize=2048;
+pub const FOLD_LOCAL_TOKENS:usize=8;
+/// Wrapped ExpertFold: (tokens, routed rows, width, shared). The whole width at every group size; a pair rank's own rows
+/// at 1 to `FOLD_LOCAL_TOKENS` tokens (ROWS FOLD in one launch).
+pub fn fold_cases()->Vec<(usize,usize,usize,usize)> {group_tokens().map(|m|(m,ROUTED,4096,1)).chain((1..=FOLD_LOCAL_TOKENS).map(|m|(m,ROUTED,FOLD_LOCAL,1))).collect()}
 /// ConvRows: (tokens, heads, dim, taps).
 pub fn conv_cases()->Vec<(usize,usize,usize,usize)> {group_tokens().flat_map(|m|RECURRENT_HEADS.into_iter().map(move |h|(m,h,128,4))).collect()}
 /// mHC project tile: (rows, streams, hidden).

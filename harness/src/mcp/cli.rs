@@ -24,7 +24,7 @@ Commands:
       --timeout-ms N        Time limit for one call, 1 to 600000 (default 60000).
       --disabled            Add the server but do not start it.
   remove NAME [--project]   Remove a server from your user list or the project list.
-  test NAME                 Start the server, list its tools, resources and prompts, then stop it.
+  test NAME                 Start a trusted server, list its tools, resources and prompts, then stop it.
   trust NAME                Let a server from the project list start in chat.
 
 Options:
@@ -128,6 +128,13 @@ fn describe(spec: &ServerSpec) -> String {
     line
 }
 
+/// What Vade checks for a project server before each start, and what it
+/// does not, one indented line each. `vade mcp trust`, `vade mcp add
+/// --project`, `vade mcp test` and `vade mcp list` all print these lines.
+fn checked(program: &config::ProgramIdentity) -> String {
+    program.checked_lines().iter().map(|line| format!("  {}\n", sanitize(line))).collect()
+}
+
 fn list(root: &Path) -> ExitCode {
     let loaded = config::load(root, None);
     for note in &loaded.notes {
@@ -141,6 +148,9 @@ fn list(root: &Path) -> ExitCode {
     for spec in &loaded.servers {
         out.push_str(&describe(spec));
         out.push('\n');
+        if let Some(program) = &spec.program {
+            out.push_str(&checked(program));
+        }
     }
     print_stdout(&out)
 }
@@ -207,8 +217,12 @@ fn add(root: &Path, rest: &[String]) -> ExitCode {
     entry.push(("enabled".into(), Value::Bool(enabled)));
     let entry = Value::Object(entry);
     let source = if project { Source::Project } else { Source::User };
-    if let Err(error) = config::parse_entry(name, &entry, source) {
-        return usage(error);
+    let spec = match config::parse_entry(name, &entry, source) {
+        Ok(spec) => spec,
+        Err(error) => return usage(error),
+    };
+    if project && let Err(refusal) = config::program_identity(&spec, root, None) {
+        return fail(refusal.at_trust(name, "vade mcp add --project again"));
     }
     // A project entry also writes a trust record; check that file first so a
     // broken user list stops the command before anything is written.
@@ -230,10 +244,15 @@ fn add(root: &Path, rest: &[String]) -> ExitCode {
         return fail(format!("cannot write {}: {error}", path.display()));
     }
     // You added it yourself, so the project entry is trusted as written.
-    if project && let Err(error) = record_trust(root, name, &entry) {
-        return fail(error);
-    }
-    print_stdout(&format!("Added MCP server {name} to {}.\nCheck it with: vade mcp test {name}\n", path.display()))
+    let trusted = if project {
+        match record_trust(root, &spec) {
+            Ok(program) => format!("Trusted it as written. Checked before each start:\n{}", checked(&program)),
+            Err(error) => return fail(error),
+        }
+    } else {
+        String::new()
+    };
+    print_stdout(&format!("Added MCP server {name} to {}.\n{trusted}Check it with: vade mcp test {name}\n", path.display()))
 }
 
 fn remove(root: &Path, name: &str, project: bool) -> ExitCode {
@@ -260,7 +279,7 @@ fn remove(root: &Path, name: &str, project: bool) -> ExitCode {
 }
 
 /// Replace this project's trust record for `name` with `entry`, or drop it.
-fn edit_trust(root: &Path, name: &str, entry: Option<&Value>) -> Result<(), String> {
+fn edit_trust(root: &Path, name: &str, trusted: Option<(&Value, &config::ProgramIdentity)>) -> Result<(), String> {
     let (path, mut user) = open(root, false)?;
     let project = root.to_string_lossy();
     let mut records = user.get("trusted").and_then(Value::as_array).map(<[_]>::to_vec).unwrap_or_default();
@@ -268,19 +287,18 @@ fn edit_trust(root: &Path, name: &str, entry: Option<&Value>) -> Result<(), Stri
     records.retain(|record| {
         record.get("project").and_then(Value::as_str) != Some(&project) || record.get("server").and_then(Value::as_str) != Some(name)
     });
-    if entry.is_none() && records.len() == before {
+    if trusted.is_none() && records.len() == before {
         return Ok(());
     }
-    records.extend(entry.map(|entry| Value::Object(vec![
-        ("project".into(), Value::String(project.into_owned())),
-        ("server".into(), Value::String(name.into())),
-        ("entry".into(), entry.clone()),
-    ])));
+    records.extend(trusted.map(|(entry, program)| config::trust_record_value(root, name, entry, program)));
     config::set_member(&mut user, "trusted", Value::Array(records));
     config::write_file(&path, &user).map_err(|error| format!("cannot write {}: {error}", path.display()))
 }
-fn record_trust(root: &Path, name: &str, entry: &Value) -> Result<(), String> {
-    edit_trust(root, name, Some(entry))
+fn record_trust(root: &Path, spec: &ServerSpec) -> Result<config::ProgramIdentity, String> {
+    // A yes reads every bound file again; it never reuses an older hash.
+    let program = config::program_identity(spec, root, None).map_err(|refusal| refusal.at_trust(&spec.name, &format!("vade mcp trust {}", spec.name)))?;
+    edit_trust(root, &spec.name, Some((&spec.entry, &program)))?;
+    Ok(program)
 }
 
 fn find(root: &Path, name: &str) -> Result<ServerSpec, ExitCode> {
@@ -299,11 +317,22 @@ fn trust(root: &Path, name: &str) -> ExitCode {
     if spec.source != Source::Project {
         return print_stdout(&format!("MCP server {name} is in your user list; it needs no trust.\n"));
     }
-    match record_trust(root, name, &spec.entry) {
-        Ok(()) => print_stdout(&format!(
-            "Trusted project MCP server {name}:\n  {}\nIf .vade/mcp.json changes this entry, run vade mcp trust {name} again.\n",
-            describe(&ServerSpec { trusted: true, ..spec })
-        )),
+    match record_trust(root, &spec) {
+        Ok(program) => {
+            // A command whose code is not bound says what the yes covers in its own line.
+            let covers = if program.code_unchecked {
+                String::new()
+            } else if program.scripts.is_empty() {
+                "Your yes covers this exact config entry, and the program's path and bytes.\n".to_owned()
+            } else {
+                "Your yes covers this exact config entry, the program's path and bytes, and each script's path and bytes.\n".to_owned()
+            };
+            print_stdout(&format!(
+                "Trusted project MCP server {name}:\n  {}\n{}{covers}If the entry or a checked file changes, run vade mcp trust {name} again.\nFiles run in place. Checks immediately before and after start narrow the gap but cannot close it if someone can rewrite a program at that instant.\n",
+                describe(&ServerSpec { trusted: true, ..spec }),
+                checked(&program),
+            ))
+        }
         Err(error) => fail(error),
     }
 }
@@ -326,7 +355,17 @@ fn test(root: &Path, name: &str) -> ExitCode {
         Err(code) => return code,
     };
     if !spec.trusted {
-        stderr_line(format_args!("vade: project server {name} is not trusted; this test runs it once because you asked"));
+        // A server with a record that no longer holds says what changed.
+        if let Some(reason) = spec.trust_reason.as_deref().filter(|reason| reason.starts_with("did not start")) {
+            return fail(format!("project server {name} {reason}"));
+        }
+        return fail(format!("project server {name} is not trusted yet. Check the command and files, then run vade mcp trust {name}"));
+    }
+    // Say what is and is not checked before anything starts.
+    if let Some(program) = spec.program.as_ref().filter(|_| spec.source == Source::Project)
+        && crate::diagnostics::write_stdout(&format!("Project MCP server {name}. Checked before each start:\n{}", checked(program))).is_err()
+    {
+        return fail("cannot write standard output. Check the destination's permissions and available space, then retry.");
     }
     let started = std::time::Instant::now();
     let hub = Hub::start(vec![ServerSpec { enabled: true, trusted: true, ..spec }], root);

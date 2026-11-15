@@ -1,5 +1,7 @@
 # Cache-aware gateway routing
 
+HTTP links stay on this machine by default; see [network setup](../../docs/network-setup.md) for SSH tunnels and the explicit opt-in.
+
 This module lets the harness gateway spread requests from external harnesses
 across several endpoints (cluster routing). We wrote it in Rust using only the
 standard library. Inference, tokenization, scheduling and KV stay with the

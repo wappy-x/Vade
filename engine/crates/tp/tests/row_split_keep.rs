@@ -10,6 +10,15 @@ use std::sync::mpsc::{sync_channel,SyncSender,Receiver};
 #[path="support/attention_checkpoint.rs"] mod fixture;
 #[allow(dead_code)]
 #[path="support/watch_compute.rs"] mod watch;
+// Host ranges copy the planes. There is no StepRows tail or append arena.
+fn host_charge(checkpoint:&engine_model::plan::admission::CheckpointAdmission,tokens:usize)->usize {
+    let plan=engine_model::plan::state::StatePlan::new(checkpoint.description(),Topology {rank:0,parts:1},80,isize::MAX as usize).unwrap();
+    plan.planes().iter().map(|p|p.used_bytes(tokens as u64).unwrap().div_ceil(4096)*4096).sum()
+}
+fn host_owner_count(checkpoint:&engine_model::plan::admission::CheckpointAdmission)->usize {
+    let plan=engine_model::plan::state::StatePlan::new(checkpoint.description(),Topology {rank:0,parts:1},80,isize::MAX as usize).unwrap();
+    plan.planes().iter().filter(|p|p.used_bytes(10).unwrap()>0).count()
+}
 struct Wire {topology:Topology,controller:bool,tx:SyncSender<Vec<u8>>,rx:Receiver<Vec<u8>>}
 impl Exchange for Wire {
     fn topology(&self)->Topology {self.topology}
@@ -47,9 +56,8 @@ fn a_kept_prompt_is_charged_all_it_holds_and_a_keep_past_the_byte_cap_is_refused
         let fresh=|prompt:&[u32],count:usize| {let mut session=engine.session().unwrap();let mut logits=session.prefill(prompt).unwrap();let mut rows=Vec::new();
             for at in 0..count {let id=best(&logits);rows.push((id,bits(&logits)));if at+1<count {logits=Session::step(&mut session,id).unwrap();}}rows};
         // The engine's own storage plan, asked apart from the service: the planes of a state of that length and the room behind them.
-        let plan=spark_tp::admission_plan::StateChargePlan::new(checkpoint.description(),80).unwrap();
-        let charge=|tokens:usize|plan.bytes(tokens).unwrap()+plan.append_reservation_bytes();
-        assert!(plan.append_reservation_bytes()>0 && charge(13)>charge(10) && charge(10)>charge(7));
+        let charge=|tokens:usize|host_charge(checkpoint,tokens);
+        assert!(charge(13)>=charge(10) && charge(10)>=charge(7));
         let prompts=[vec![1u32,3,2,7,5,11,4,9,6,13,8,2,10],vec![2u32,6,4,1,15,3,8,12,5,9],vec![3u32,9,1,14,6,2,11]];
         let extras=[vec![12u32,1,14],vec![5u32,5,9,2],vec![7u32,13]];
         let expected=(0..3).map(|chat|fresh(&[prompts[chat].as_slice(),extras[chat].as_slice()].concat(),6)).collect::<Vec<_>>();
@@ -119,13 +127,12 @@ fn the_shared_cache_holds_kept_prompts_by_bytes_and_gives_back_the_least_recentl
         let bits=|v:&[f32]|v.iter().map(|v|v.to_bits()).collect::<Vec<_>>();
         let fresh=|prompt:&[u32],count:usize| {let mut session=engine.session().unwrap();let mut logits=session.prefill(prompt).unwrap();let mut rows=Vec::new();
             for at in 0..count {let id=best(&logits);rows.push((id,bits(&logits)));if at+1<count {logits=Session::step(&mut session,id).unwrap();}}rows};
-        let plan=spark_tp::admission_plan::StateChargePlan::new(checkpoint.description(),80).unwrap();
-        let private=plan.bytes(10).unwrap()+plan.append_reservation_bytes();let vocab=engine.vocab_size();
+        let private=host_charge(checkpoint,10);let vocab=engine.vocab_size();
         // Three chats, each with its own key and a prompt of 10 tokens. One cache entry: the kept bytes and the cache's own notes.
         let prompts=[vec![1u32,3,2,7,5,11,4,9,6,13],vec![2u32,6,4,1,15,3,8,12,5,9],vec![3u32,9,1,14,6,2,11,7,10,4]];let extra=[12u32,1,14];
         let keys=[SessionKey::generate().unwrap(),SessionKey::generate().unwrap(),SessionKey::generate().unwrap()];
         let expected=(0..3).map(|chat|fresh(&[prompts[chat].as_slice(),extra.as_slice()].concat(),5)).collect::<Vec<_>>();
-        let entry=spark_serve::cache::publication_metadata_bytes(10,vocab,private,0,0).unwrap();
+        let entry=spark_serve::cache::publication_metadata_bytes(10,vocab,private,host_owner_count(checkpoint),0).unwrap();
         // Room for two entries and a half: the third prompt fits only when one is given back.
         let limits=|bytes|CacheLimits {entries:8,retained_bytes:bytes,tokens_per_entry:80,logits_per_entry:vocab,idle_ttl:Duration::from_secs(300)};
         let mut cache=SessionCache::new(limits(2*entry+entry/2)).unwrap();let start=Instant::now();let at=|seconds|start+Duration::from_secs(seconds);
@@ -151,7 +158,7 @@ fn the_shared_cache_holds_kept_prompts_by_bytes_and_gives_back_the_least_recentl
         }
         // A cache with less room than one prompt needs keeps nothing: the snapshot is skipped before any fork.
         let mut small=SessionCache::new(limits(private-1)).unwrap();read(&mut small,1,at(5));
-        assert_eq!((small.len(),small.counts().skipped[1],engine.kept_prompts()),(0,1,(2,2*private)));
+        assert_eq!((small.len(),small.counts().skipped[0],engine.kept_prompts()),(0,1,(2,2*private)));
         // The service is whole, and dropping the cache releases every kept prompt on both ranks.
         assert_eq!(fresh(&whole(1),5),expected[1]);
         drop(small);drop(cache);assert_eq!(engine.kept_prompts(),(0,0));
@@ -159,13 +166,13 @@ fn the_shared_cache_holds_kept_prompts_by_bytes_and_gives_back_the_least_recentl
     });
 }
 
-/// Step 3, memory: with the predictor loaded a kept prompt is charged the predictor layer's planes too (charged, not
-/// held: they live with a chat's open rows, `Factory::kept_charge`). A chat that starts from it, plain or strict with
+/// With the predictor loaded, a kept prompt pays only for its held state planes.
+/// Predictor planes stay with the live chat's open rows. A resumed chat, plain or strict with
 /// no depth, has the bits of a fresh read. Strict at depth 3 and default drafting from a kept prompt:
 /// `kept_prompts_under_default_drafting` below.
 #[test]
 #[allow(clippy::needless_range_loop)] // index loops keep the arithmetic order.
-fn a_kept_prompt_with_the_predictor_loaded_is_charged_the_layer_and_restores_the_same_bits() {
+fn a_kept_prompt_with_the_predictor_loaded_charges_only_held_planes_and_restores_the_same_bits() {
     let c=fixture::Checkpoint::new_with_predictor(80);
     let (a_tx,b_rx)=sync_channel(1);let (b_tx,a_rx)=sync_channel(1);
     std::thread::scope(|scope| {
@@ -179,13 +186,11 @@ fn a_kept_prompt_with_the_predictor_loaded_is_charged_the_layer_and_restores_the
         let fresh=|prompt:&[u32],count:usize| {let mut session=engine.session().unwrap();let mut logits=session.prefill(prompt).unwrap();let mut rows=Vec::new();
             for at in 0..count {let id=best(&logits);rows.push((id,bits(&logits)));if at+1<count {logits=Session::step(&mut session,id).unwrap();}}rows};
         let plain=spark_tp::admission_plan::StateChargePlan::new(checkpoint.description(),80).unwrap();
-        let mut layered=checkpoint.description().with_draft_layer().unwrap().expect("the fixture declares a predictor layer");layered.residual=checkpoint.description().residual;
-        let layered=spark_tp::admission_plan::StateChargePlan::new(&layered,80).unwrap();
         let prompt=vec![1u32,3,2,7,5,11,4,9,6,13,8,2,10];let extra=[12u32,1,14,3];let expected=fresh(&[prompt.as_slice(),extra.as_slice()].concat(),6);
         let mut first=engine.session().unwrap();first.prefill(&prompt).unwrap();let kept=first.fork().unwrap();drop(first);
-        let charge=layered.bytes(13).unwrap()+layered.append_reservation_bytes();
+        let charge=host_charge(checkpoint,13);
         assert_eq!(kept.retained_bytes(),Some(charge));assert_eq!(engine.kept_prompts(),(1,charge));
-        assert!(charge>plain.bytes(13).unwrap()+plain.append_reservation_bytes(),"the predictor layer's planes are charged");
+        assert!(charge<plain.bytes(13).unwrap()+plain.append_reservation_bytes(),"no parked predictor layer's planes are charged");
         // A plain turn from the kept prompt.
         let mut session=kept.fork().unwrap();let mut logits=session.prefill(&extra).unwrap();
         for at in 0..6 {let id=best(&logits);assert_eq!((id,bits(&logits)),expected[at],"plain token {at}");if at+1<6 {logits=Session::step(&mut session,id).unwrap();}}
@@ -203,8 +208,9 @@ fn a_kept_prompt_with_the_predictor_loaded_is_charged_the_layer_and_restores_the
 /// Step 3, review fault 2: one rank that cannot finish a keep (command 15) or a resume (command 16) refuses that one
 /// request on BOTH ranks. Before the fix the refusing rank marked the whole service failed (rank 0) or left its loop
 /// with an error (rank 1), and every live chat died. Now the ranks agree before either records anything
-/// (`Factory::kept_vote`): nothing is kept or opened on either rank, the kept prompt is as it was, the service is not
-/// marked failed, the chat beside goes on with the bits of a fresh read, and the next keep and resume work.
+/// (`Factory::kept_vote`): nothing is kept or opened on either rank, the service is not marked failed, the chat beside
+/// goes on with the bits of a fresh read, and the next keep and resume work. A prompt whose RESUME was refused is
+/// dropped on both ranks, so it is not tried again request after request; the chat it came from keeps it anew.
 /// Each rank refuses each command once here: the worker rank its work numbers 0 and 3, rank 0 the ones it arms.
 #[test]
 fn a_keep_or_a_resume_one_rank_refuses_is_refused_on_both_and_every_chat_goes_on() {
@@ -222,8 +228,7 @@ fn a_keep_or_a_resume_one_rank_refuses_is_refused_on_both_and_every_chat_goes_on
         let bits=|v:&[f32]|v.iter().map(|v|v.to_bits()).collect::<Vec<_>>();
         let fresh=|prompt:&[u32],count:usize| {let mut session=engine.session().unwrap();let mut logits=session.prefill(prompt).unwrap();let mut rows=Vec::new();
             for at in 0..count {let id=best(&logits);rows.push((id,bits(&logits)));if at+1<count {logits=Session::step(&mut session,id).unwrap();}}rows};
-        let plan=spark_tp::admission_plan::StateChargePlan::new(checkpoint.description(),80).unwrap();
-        let charge=plan.bytes(13).unwrap()+plan.append_reservation_bytes();
+        let charge=host_charge(checkpoint,13);
         let prompt=vec![1u32,3,2,7,5,11,4,9,6,13,8,2,10];let extra=vec![12u32,1,14];let other=vec![3u32,9,1,14,6,2,11];
         let expected=fresh(&[prompt.as_slice(),extra.as_slice()].concat(),6);let plain=fresh(&prompt,6);let beside=fresh(&other,8);
         // The chat beside: it takes one decode step after every refusal, and each has the bits of its fresh read.
@@ -241,13 +246,18 @@ fn a_keep_or_a_resume_one_rank_refuses_is_refused_on_both_and_every_chat_goes_on
         assert_eq!(engine.kept_prompts(),(0,0));goes_on("keep refused by rank 0");
         // The same keep now works on both ranks, and the chat it was refused for is untouched.
         assert!(live.can_fork());let kept=live.fork().unwrap();assert_eq!((engine.kept_prompts(),kept.kept_expanded_rows()),((1,charge),Some(13)));
-        // RESUME refused by the worker rank: rank 0 rebuilt the rows and opened nothing. The kept prompt is as it was.
+        // RESUME refused by the worker rank: rank 0 rebuilt the rows and opened nothing. Both ranks DROP the prompt: it
+        // restores nothing more (a prompt refused once is not tried again), and its drop on rank 0 sends no release.
         let refused=kept.fork().err().unwrap();assert!(refused.contains("the peer refused the kept prompt work"),"{refused}");
-        assert_eq!((engine.kept_prompts(),kept.kept_expanded_rows()),((1,charge),Some(13)));goes_on("resume refused by the worker rank");
-        // RESUME refused by rank 0: the worker rank rebuilt the rows and opened nothing.
+        assert!(!kept.can_fork() && kept.fork().is_err(),"a prompt whose resume was refused restores nothing more");
+        drop(kept);assert_eq!(engine.kept_prompts(),(0,0));goes_on("resume refused by the worker rank");
+        // The prompt is kept again from the chat that is still there. RESUME refused by rank 0: the worker rank rebuilt
+        // the rows and opened nothing, and both ranks drop the prompt again.
+        let kept=live.fork().unwrap();assert_eq!((engine.kept_prompts(),kept.kept_expanded_rows()),((1,charge),Some(13)));
         engine.refuse_kept_work(1);let refused=kept.fork().err().unwrap();assert!(refused.contains("refused by the test hook"),"{refused}");
-        assert_eq!((engine.kept_prompts(),kept.kept_expanded_rows()),((1,charge),Some(13)));assert!(kept.can_fork());goes_on("resume refused by rank 0");
-        // The kept prompt still restores, twice, and each turn from it has the bits of a fresh read.
+        assert!(!kept.can_fork());drop(kept);assert_eq!(engine.kept_prompts(),(0,0));goes_on("resume refused by rank 0");
+        // Kept once more, the prompt restores, twice, and each turn from it has the bits of a fresh read.
+        let kept=live.fork().unwrap();assert_eq!(engine.kept_prompts(),(1,charge));
         for turn in 0..2 {let mut session=kept.fork().unwrap();let mut logits=session.prefill(&extra).unwrap();
             for (at,row) in expected.iter().enumerate() {let id=best(&logits);assert_eq!(&(id,bits(&logits)),row,"turn {turn} token {at}");if at+1<6 {logits=Session::step(&mut session,id).unwrap();}}
             goes_on("a resumed turn");}
@@ -283,14 +293,13 @@ fn the_cache_bound_is_the_engine_cap_so_the_least_recently_used_prompt_makes_way
         let bits=|v:&[f32]|v.iter().map(|v|v.to_bits()).collect::<Vec<_>>();
         let fresh=|prompt:&[u32],count:usize| {let mut session=engine.session().unwrap();let mut logits=session.prefill(prompt).unwrap();let mut rows=Vec::new();
             for at in 0..count {let id=best(&logits);rows.push((id,bits(&logits)));if at+1<count {logits=Session::step(&mut session,id).unwrap();}}rows};
-        let plan=spark_tp::admission_plan::StateChargePlan::new(checkpoint.description(),80).unwrap();
-        let private=plan.bytes(10).unwrap()+plan.append_reservation_bytes();let vocab=engine.vocab_size();
+        let private=host_charge(checkpoint,10);let vocab=engine.vocab_size();
         let prompts=[vec![1u32,3,2,7,5,11,4,9,6,13],vec![2u32,6,4,1,15,3,8,12,5,9],vec![3u32,9,1,14,6,2,11,7,10,4]];let extra=[12u32,1,14];
         let keys=[SessionKey::generate().unwrap(),SessionKey::generate().unwrap(),SessionKey::generate().unwrap()];
         let whole=|chat:usize|[prompts[chat].as_slice(),extra.as_slice()].concat();
         let expected=(0..3).map(|chat|fresh(&whole(chat),5)).collect::<Vec<_>>();
         // One cache entry: the kept bytes and the cache's own notes. So the cache never counts less than the engine.
-        let entry=spark_serve::cache::publication_metadata_bytes(10,vocab,private,0,0).unwrap();assert!(entry>=private);
+        let entry=spark_serve::cache::publication_metadata_bytes(10,vocab,private,host_owner_count(checkpoint),0).unwrap();assert!(entry>=private);
         // THE SERVER'S POOL: one full session and two cache entries. The engine's cap is the pool less the full session.
         let full=engine.full_state_reservation_bytes();let pool=full+2*entry;let cap=engine.keep_within(pool);
         assert_eq!((cap,engine.kept_limit_bytes()),(2*entry,2*entry));assert!(3*private>cap,"a third kept prompt is past the engine's cap");
@@ -395,14 +404,13 @@ fn kept_prompts_give_way_least_recently_used_first_before_a_live_chat_is_admitte
         let bits=|v:&[f32]|v.iter().map(|v|v.to_bits()).collect::<Vec<_>>();
         let fresh=|prompt:&[u32],count:usize| {let mut session=engine.session().unwrap();let mut logits=session.prefill(prompt).unwrap();let mut rows=Vec::new();
             for at in 0..count {let id=best(&logits);rows.push((id,bits(&logits)));if at+1<count {logits=Session::step(&mut session,id).unwrap();}}rows};
-        let plan=spark_tp::admission_plan::StateChargePlan::new(checkpoint.description(),80).unwrap();
-        let private=plan.bytes(10).unwrap()+plan.append_reservation_bytes();let vocab=engine.vocab_size();
+        let private=host_charge(checkpoint,10);let vocab=engine.vocab_size();
         let prompts=[vec![1u32,3,2,7,5,11,4,9,6,13],vec![2u32,6,4,1,15,3,8,12,5,9]];let extra=[12u32,1,14];
         let keys=[SessionKey::generate().unwrap(),SessionKey::generate().unwrap()];
         let whole=|chat:usize|[prompts[chat].as_slice(),extra.as_slice()].concat();
         let expected=fresh(&whole(0),5);
         let long=(0..79).map(|at|1+(at*7%15) as u32).collect::<Vec<_>>();let long_expected=fresh(&long,2);
-        let entry=spark_serve::cache::publication_metadata_bytes(10,vocab,private,0,0).unwrap();
+        let entry=spark_serve::cache::publication_metadata_bytes(10,vocab,private,host_owner_count(checkpoint),0).unwrap();
         // THE POOL: one full-size chat, one small chat (13 prompt tokens and 5 answer tokens), and ONE kept prompt.
         let full=engine.full_state_reservation_bytes();let small=engine.request_reservation_bytes_for_prompt(13,18,false,None,false).unwrap();
         assert!(entry<=small && small<full);
@@ -435,38 +443,58 @@ fn kept_prompts_give_way_least_recently_used_first_before_a_live_chat_is_admitte
     });
 }
 
-/// Step 3, second review, fault 1. A resumed chat's decoder is prepared before the ranks vote, and with no other chat
-/// open that preparation talks to the other rank (the shared budget's collective). A failure there is a wire failure,
-/// or leaves the ranks waiting on different rings, so it must NOT be voted away as a clean refusal: the service stops
-/// loudly on both ranks. The test hook fails that preparation on one rank, as the failed collective would. Rank 0 is
-/// marked failed with that first error and opens no new chat; the worker rank leaves its loop with an error. The
-/// rebuild itself, which runs on one rank alone, is still voted (the test above).
-#[test]
-fn a_failure_where_a_resumed_chat_is_prepared_stops_the_service_on_both_ranks() {
-    for failing in [1u32,0] {
-        let c=fixture::Checkpoint::new_with_capacity(Dtype::Bf16,true,80);
-        let (a_tx,b_rx)=sync_channel(1);let (b_tx,a_rx)=sync_channel(1);
-        std::thread::scope(|scope| {
-            let checkpoint=&c.admission;
-            let worker=scope.spawn(move || {let split=Split::new(Host,Wire {topology:Topology {rank:1,parts:2},controller:false,tx:b_tx,rx:b_rx}).unwrap();
-                let factory=Factory::new(checkpoint,split,80,vec![0]).unwrap().with_prompt_keep();if failing==1 {factory.fail_resume_prepare(1);}
-                factory.worker().err()});
-            {
-                let split=Split::new(Host,Wire {topology:Topology {rank:0,parts:2},controller:true,tx:a_tx,rx:a_rx}).unwrap();
-                let engine=Factory::new(checkpoint,split,80,vec![0]).unwrap().with_prompt_keep();if failing==0 {engine.fail_resume_prepare(1);}
-                let prompt=vec![1u32,3,2,7,5,11,4,9,6,13,8,2,10];
-                let mut live=engine.session().unwrap();live.prefill(&prompt).unwrap();
-                let kept=live.fork().unwrap();assert_eq!(engine.kept_prompts().0,1);assert!(engine.fatal_error().is_none());
-                let error=kept.fork().err().expect("the resume fails");
-                assert!(!error.contains("the peer refused the kept prompt work"),"rank {failing}: the failure was voted away as a refusal: {error}");
-                assert_eq!(engine.fatal_error(),Some(error.clone()),"rank {failing}: rank 0 is marked failed with the first error");
-                assert_eq!(engine.session().err(),Some(error.clone()),"rank {failing}: no new chat opens on a service that failed");
-                assert!(kept.fork().is_err() && live.fork().is_err(),"rank {failing}: no keep and no resume after the failure");
-            }
-            let stopped=worker.join().unwrap();assert!(stopped.is_some(),"rank {failing}: the worker rank left its loop with an error");
-        });
-    }
+/// A RESUME THAT A RANK CANNOT START costs one cold read, never the service. Before a rank makes the resumed chat's
+/// decoder or touches the data ring, both ranks say whether each still holds the kept prompt and can open the chat
+/// (`Factory::kept_ready`). Three ways one rank is not ready: rank 0's own check fails, the worker rank's check fails,
+/// the worker rank has LOST the kept prompt (before this word existed it left its loop with "worker resume has no
+/// kept prompt", and until this change a failure here marked the whole service failed: every later chat died).
+/// In each case: the resume is refused with no failure recorded, both ranks forget this one prompt, the live slot
+/// comes back, the chat it was kept from decodes on with the bits of its fresh read, and LATER REQUESTS ARE SERVED:
+/// a cold read of the same prompt with fresh bits, a new keep of it, and a turn resumed from that new keep.
+fn a_resume_a_rank_cannot_start(case:u32) {
+    let c=fixture::Checkpoint::new_with_capacity(Dtype::Bf16,true,80);
+    let (a_tx,b_rx)=sync_channel(1);let (b_tx,a_rx)=sync_channel(1);
+    std::thread::scope(|scope| {
+        let checkpoint=&c.admission;
+        let worker=scope.spawn(move || {let split=Split::new(Host,Wire {topology:Topology {rank:1,parts:2},controller:false,tx:b_tx,rx:b_rx}).unwrap();
+            let factory=Factory::new(checkpoint,split,80,vec![0]).unwrap().with_prompt_keep();
+            match case {1=>factory.fail_resume_prepare(1),2=>factory.lose_kept_before_resume(1),_=>{}}
+            factory.worker().expect("the worker rank goes on after the refusal and stops only when it is told to");
+            assert_eq!(factory.kept_prompts(),(0,0),"case {case}: the worker rank holds no kept prompt at the end");});
+        let split=Split::new(Host,Wire {topology:Topology {rank:0,parts:2},controller:true,tx:a_tx,rx:a_rx}).unwrap();
+        let engine=Factory::new(checkpoint,split,80,vec![0]).unwrap().with_prompt_keep();if case==0 {engine.fail_resume_prepare(1);}
+        let best=|v:&[f32]|(0..v.len()).reduce(|a,b|if v[b]>v[a] {b} else {a}).unwrap() as u32;
+        let bits=|v:&[f32]|v.iter().map(|v|v.to_bits()).collect::<Vec<_>>();
+        let fresh=|prompt:&[u32],count:usize| {let mut session=engine.session().unwrap();let mut logits=session.prefill(prompt).unwrap();let mut rows=Vec::new();
+            for at in 0..count {let id=best(&logits);rows.push((id,bits(&logits)));if at+1<count {logits=Session::step(&mut session,id).unwrap();}}rows};
+        let prompt=vec![1u32,3,2,7,5,11,4,9,6,13,8,2,10];let extra=vec![12u32,1,14];
+        let plain=fresh(&prompt,6);let turn=fresh(&[prompt.as_slice(),extra.as_slice()].concat(),6);
+        let mut live=engine.session().unwrap();let mut logits=live.prefill(&prompt).unwrap();
+        let kept=live.fork().unwrap();assert_eq!(engine.kept_prompts().0,1);
+        // THE RESUME: refused, and nothing is recorded as a failure on rank 0.
+        let refused=kept.fork().err().expect("the resume is refused");
+        assert!(refused.contains("both ranks dropped it"),"case {case}: {refused}");
+        assert_eq!(engine.fatal_error(),None,"case {case}: the service is NOT marked failed");
+        // The prompt is dropped: it restores nothing more, and its drop sends no release to a rank that forgot it.
+        assert!(!kept.can_fork() && kept.fork().is_err(),"case {case}: a dropped prompt restores nothing");
+        drop(kept);assert_eq!(engine.kept_prompts(),(0,0),"case {case}: rank 0 holds no kept prompt");assert_eq!(engine.fatal_error(),None,"case {case}: the drop of a dropped prompt is no failure");
+        // A LATER COLD REQUEST IS SERVED, with the bits of a fresh read: the same prompt, and the whole turn.
+        assert_eq!(fresh(&prompt,6),plain,"case {case}: a cold read after the refusal");
+        assert_eq!(fresh(&[prompt.as_slice(),extra.as_slice()].concat(),6),turn,"case {case}: the turn, read cold after the refusal");
+        // The chat the prompt was kept from decodes on untouched.
+        for (at,row) in plain.iter().enumerate() {let id=best(&logits);assert_eq!(&(id,bits(&logits)),row,"case {case}: live chat token {at}");if at+1<6 {logits=Session::step(&mut live,id).unwrap();}}
+        // A NEW KEEP WORKS, and a turn resumed from it has the bits of the cold read.
+        let mut again=engine.session().unwrap();again.prefill(&prompt).unwrap();let kept=again.fork().unwrap();assert_eq!(engine.kept_prompts().0,1);
+        let mut resumed=kept.fork().expect("a resume after the refusal works");let mut logits=resumed.prefill(&extra).unwrap();
+        for (at,row) in turn.iter().enumerate() {let id=best(&logits);assert_eq!(&(id,bits(&logits)),row,"case {case}: resumed turn token {at}");if at+1<6 {logits=Session::step(&mut resumed,id).unwrap();}}
+        drop(resumed);drop(kept);drop(again);drop(live);assert_eq!((engine.kept_prompts(),engine.fatal_error()),((0,0),None));
+        engine.shutdown().unwrap();worker.join().unwrap();
+    });
 }
+#[test] fn a_resume_rank_0_is_not_ready_for_is_refused_and_later_requests_are_served() {a_resume_a_rank_cannot_start(0);}
+#[test] fn a_resume_the_worker_rank_is_not_ready_for_is_refused_and_later_requests_are_served() {a_resume_a_rank_cannot_start(1);}
+#[test] fn a_resume_of_a_prompt_the_worker_rank_lost_is_refused_and_later_requests_are_served() {a_resume_a_rank_cannot_start(2);}
+
 
 /// KEPT PROMPTS ARE PRIVATE TO THEIR CALLERS (step 2 reviews). The served scheduler over
 /// the real two-rank service, with the settings the text service uses under `--prompt-keep`:
@@ -524,9 +552,9 @@ fn a_served_kept_prompt_shows_a_stranger_no_count_and_no_hit_on_two_ranks() {
 
 /// A REAL failure inside a resume's own work, not the hook after it: rank 0's rebuild of the expanded rows fails at
 /// an append, as a refused device allocation would, after it shared the kept planes. That one request is refused on
-/// both ranks (the worker rank had built its rows and drops them), the service is not marked failed, and the kept
-/// prompt is whole. Then, as the scheduler does after a refused resume, the prompt is read COLD in a new session: it
-/// has the bits of a fresh read. The kept prompt still restores, and a chat that started from it decodes on with
+/// both ranks (the worker rank had built its rows and drops them), the service is not marked failed, and both ranks
+/// drop that kept prompt. Then, as the scheduler does after a refused resume, the prompt is read COLD in a new session:
+/// it has the bits of a fresh read. Kept again, the prompt restores, and a chat that started from it decodes on with
 /// fresh bits AFTER the kept prompt is given back on both ranks (it holds its own handles and its own rebuilt rows).
 #[test]
 fn a_rebuild_that_fails_on_one_rank_is_refused_on_both_and_a_chat_outlives_its_kept_prompt() {
@@ -555,10 +583,13 @@ fn a_rebuild_that_fails_on_one_rank_is_refused_on_both_and_a_chat_outlives_its_k
         let refused=kept.fork().err().unwrap();assert_eq!(refused,"watched device refused the expanded rows");compute.fail_extend.set(None);
         let events=compute.take();assert_eq!((events.first(),events.last()),(Some(&Event::Pause(true)),Some(&Event::Pause(false))),"recording is resumed after the failed rebuild: {events:?}");
         assert_eq!(engine.fatal_error(),None,"a rebuild one rank could not finish is a refusal, not a failure of the service");
-        assert_eq!(engine.kept_prompts(),before);assert!(kept.can_fork());
+        // Both ranks dropped the prompt: it restores nothing more, and its drop on rank 0 sends no release.
+        assert_eq!(engine.kept_prompts(),before);assert!(!kept.can_fork() && kept.fork().is_err());
+        drop(kept);assert_eq!((engine.kept_prompts(),engine.fatal_error()),((0,0),None));
         // The cold read the scheduler falls back to.
         assert_eq!(fresh(&whole,6),expected,"a cold read after a refused resume");
-        // The kept prompt restores, and the chat from it takes six tokens.
+        // The prompt is read and kept again, as that cold read's chat does. It restores, and the chat from it takes six tokens.
+        let mut again=engine.session().unwrap();again.prefill(&prompt).unwrap();let kept=again.fork().unwrap();drop(again);
         let mut turn=kept.fork().unwrap();let mut logits=turn.prefill(&extra).unwrap();
         for (at,row) in expected.iter().enumerate() {
             let id=best(&logits);assert_eq!(&(id,bits(&logits)),row,"token {at}");if at+1<expected.len() {logits=Session::step(&mut turn,id).unwrap();}
@@ -690,3 +721,106 @@ fn kept_prompts_under_default_drafting(force:bool) {
 fn default_requests_from_kept_prompts_give_the_plain_ids_on_two_ranks() {kept_prompts_under_default_drafting(false);}
 #[test]
 fn trials_from_kept_prompts_that_start_real_drafting_give_the_plain_ids_on_two_ranks() {kept_prompts_under_default_drafting(true);}
+
+/// KEPT PROMPTS WITH 2, 4 AND 8 LIVE CHATS, through the scheduler on two ranks, as the text service runs by default
+/// (predictor loaded, the server default strict at TRIAL_DEPTH, prompt keep on, private counts). The older test of
+/// 2, 4 and 8 chats (row_split.rs) never enters the cache path, and the tests above put at most two chats on kept
+/// prompts. EVERY CHAT HERE MUST REALLY START FROM ITS KEPT PROMPT: the reply's cached tokens, the server's own count
+/// of what it restored, must be the whole kept prompt; the token IDs alone would also pass if the chats read cold.
+/// Each group is a server of its own, so the cache holds only that group's prompts.
+/// - 2 and 4 chats: each chat's own prompt is kept, then their NEXT TURNS (the prompt and 5 new tokens) run at once.
+///   The cache has room for the prompts and the kept turns (4 and 4 of its 8 entries), so nothing is given back.
+/// - 8 chats: the 8 kept prompts fill the cache. First the 8 chats ask their kept prompt AGAIN at once: each starts at
+///   its end and reads no row, and nothing new is kept, so all 8 start from kept prompts whatever order they come in.
+///   Then their NEXT TURNS, and ALL 8 MUST START FROM THEIR KEPT PROMPTS. Each kept turn needs an entry, so the cache
+///   gives a prompt back for every turn it keeps: the least recently used one. Sent all in one instant, which chat
+///   still finds its prompt would follow the order of arrival. So the test sets the order: the prompts are asked
+///   again one after another (chat 0 first: its prompt is then the least recently used), and chat N's turn is sent
+///   when chat N-1 has given its first token, which comes after its prompt was read. The prompt the cache gives back
+///   for chat N's turn is then always chat N's own, already used. The turns are long enough to decode together.
+///
+/// EVERY answer must have the token IDs of the same request read plain with the cache off, alone.
+fn chats_from_distinct_kept_prompts(group:usize) {
+    use std::{io::{Read,Write},net::{TcpListener,TcpStream},sync::atomic::{AtomicBool,AtomicUsize,Ordering::SeqCst},time::Duration};
+    let listener=TcpListener::bind("127.0.0.1:0").unwrap();let address=listener.local_addr().unwrap();
+    let c=fixture::Checkpoint::new_with_predictor(144);
+    let (a_tx,b_rx)=sync_channel(1);let (b_tx,a_rx)=sync_channel(1);
+    struct Stop<'a>(&'a AtomicBool);impl Drop for Stop<'_> {fn drop(&mut self) {self.0.store(true,SeqCst);}}
+    let stop=AtomicBool::new(false);let batches=std::sync::Arc::new(AtomicUsize::new(0));
+    const TOKENS:usize=16;
+    // The 8 chats' next turns are longer, so the first still decodes when the last starts.
+    let turn_tokens=if group==8 {48} else {TOKENS};
+    // Cold reads of the next turns, first turns, next turns; for 8 chats also cold reads of the prompts, the prompts
+    // again at once, and the prompts again one after another.
+    let requests=if group==8 {6*group} else {3*group};
+    std::thread::scope(|scope| {
+        let (checkpoint,stop)=(&c.admission,&stop);let _stop=Stop(stop);
+        scope.spawn(move || {let split=Split::new(Host,Wire {topology:Topology {rank:1,parts:2},controller:false,tx:b_tx,rx:b_rx}).unwrap();
+            let factory=Factory::new(checkpoint,split,144,vec![0]).unwrap().with_predictor(3).unwrap().with_prompt_keep();factory.worker().unwrap();
+            assert_eq!(factory.kept_prompts(),(0,0),"the worker rank forgot every kept prompt when the server stopped");});
+        let counter=batches.clone();
+        scope.spawn(move || {let split=Split::new(Host,Batches(Wire {topology:Topology {rank:0,parts:2},controller:true,tx:a_tx,rx:a_rx},counter)).unwrap();
+            let engine=Factory::new(checkpoint,split,144,vec![0]).unwrap().with_predictor(3).unwrap().with_prompt_keep();
+            let mut limits=spark_tp::row_split::limits(144,96).unwrap();limits.next_mtp_depth=Some(engine.predictor_depth());
+            // Room for eight live chats and eight kept prompts: the cache is bound by its 8 entries here, not by bytes.
+            let pool=(1usize<<28).max(24*engine.full_state_reservation_bytes());let cap=engine.keep_within(pool);
+            let cache=spark_serve::cache::CacheLimits {entries:spark_tp::row_split::KEPT_PROMPTS,retained_bytes:cap,tokens_per_entry:144,logits_per_entry:engine.vocab_size(),idle_ttl:Duration::from_secs(300)};
+            let config=spark_serve::scheduler::Config {active:8,connections:32,prefill_chunk:4,foreground_rows:1,background_rows:1,active_bytes:pool,session_budget_bytes:pool,
+                draft:spark_serve::protocol::DraftMode::Strict,mtp_depth:spark_tp::row_split::TRIAL_DEPTH,draft_global_bank:false,prefix_cache:true,
+                sharing:spark_serve::scheduler::Sharing {private_counts:true,..Default::default()}};
+            spark_serve::scheduler::serve_requests(listener,&engine,None::<&spark_serve::tokenizer::ModelTokenizer>,&limits,&cache,&config,stop,"kept and many chats",requests).unwrap();
+            assert_eq!(engine.fatal_error(),None);engine.shutdown().unwrap();});
+        let ask=move|prompt:String,tokens:usize,mode:&str| {
+            let body=format!(r#"{{"prompt_token_ids":{prompt},"stream":true,"max_tokens":{tokens},"ignore_eos":true,"stream_options":{{"include_usage":true}}{mode}}}"#);
+            let mut stream=TcpStream::connect(address).unwrap();stream.set_read_timeout(Some(Duration::from_secs(300))).unwrap();
+            write!(stream,"POST /v1/completions HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",body.len()).unwrap();let mut reply=String::new();stream.read_to_string(&mut reply).unwrap();reply};
+        let ids=|reply:&str|reply.split("\"token_id\":").skip(1).map(|part|part.chars().take_while(char::is_ascii_digit).collect::<String>().parse::<u32>().unwrap()).collect::<Vec<_>>();
+        let cached=|reply:&str|reply.rsplit("\"cached_tokens\":").next().unwrap().chars().take_while(char::is_ascii_digit).collect::<String>().parse::<usize>().unwrap();
+        // Prompts that differ in their first token (6 tokens), and each chat's next turn (5 more).
+        let prompt=|chat:usize|format!("[{},5,1,7,2,9]",3+chat);let turn=|chat:usize|format!("[{},5,1,7,2,9,4,6,2,8,1]",3+chat);
+        let cold=r#","cache":false,"draft":"plain""#;
+        // THE REFERENCE: every request read alone, plain, with the cache off.
+        let want_turn=(0..group).map(|chat| {let reply=ids(&ask(turn(chat),turn_tokens,cold));assert_eq!(reply.len(),turn_tokens);reply}).collect::<Vec<_>>();
+        let want_prompt=if group==8 {(0..group).map(|chat| {let reply=ids(&ask(prompt(chat),TOKENS,cold));assert_eq!(reply.len(),TOKENS);reply}).collect::<Vec<_>>()} else {Vec::new()};
+        // The first turns, one after another: each is read fresh and kept at its prompt end.
+        for chat in 0..group {let first=ask(prompt(chat),4,"");assert_eq!((ids(&first).len(),cached(&first)),(4,0),"chat {chat}: {first}");}
+        // `at_once`: the requests of all chats together; each chat's reply.
+        let at_once=|texts:Vec<String>|texts.into_iter().map(|text|scope.spawn(move||ask(text,TOKENS,""))).collect::<Vec<_>>().into_iter().map(|chat|chat.join().unwrap()).collect::<Vec<_>>();
+        if group==8 {
+            // THE KEPT PROMPTS AGAIN, 8 AT ONCE: every chat starts at the end of its own kept prompt (6 of 6 tokens).
+            let before=batches.load(SeqCst);
+            for (chat,reply) in at_once((0..group).map(prompt).collect()).iter().enumerate() {
+                assert_eq!(cached(reply),6,"8 chats at once, chat {chat} did not start from its kept prompt: {reply}");
+                assert_eq!(ids(reply),want_prompt[chat],"8 chats at once from kept prompts, chat {chat}: the IDs of its cache-off read: {reply}");}
+            assert!(batches.load(SeqCst)>before,"8 chats from kept prompts shared batch steps");
+        }
+        // THE NEXT TURNS. 2 and 4 chats: all in one instant. 8 chats: in the order the test sets (see above): first the
+        // prompts again one after another, so chat 0's is the least recently used; then chat N's turn goes out when chat
+        // N-1 has given its first token.
+        let before=batches.load(SeqCst);
+        let replies=if group<8 {at_once((0..group).map(turn).collect())} else {
+            for chat in 0..group {let again=ask(prompt(chat),4,"");assert_eq!(cached(&again),6,"chat {chat}, its prompt again: {again}");}
+            let mut chats=Vec::new();
+            for chat in 0..group {
+                let (first_token,seen)=std::sync::mpsc::channel();let text=turn(chat);
+                chats.push(scope.spawn(move || {
+                    let body=format!(r#"{{"prompt_token_ids":{text},"stream":true,"max_tokens":{turn_tokens},"ignore_eos":true,"stream_options":{{"include_usage":true}}}}"#);
+                    let mut stream=TcpStream::connect(address).unwrap();stream.set_read_timeout(Some(Duration::from_secs(300))).unwrap();
+                    write!(stream,"POST /v1/completions HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",body.len()).unwrap();
+                    let (mut reply,mut piece,mut told)=(Vec::new(),[0u8;4096],false);
+                    loop {let read=stream.read(&mut piece).unwrap();if read==0 {break;}reply.extend_from_slice(&piece[..read]);
+                        if !told && reply.windows(11).any(|window|window==b"\"token_id\":") {told=true;first_token.send(()).unwrap();}}
+                    String::from_utf8(reply).unwrap()}));
+                seen.recv_timeout(Duration::from_secs(300)).unwrap_or_else(|_|panic!("chat {chat} gave no first token"));
+            }
+            chats.into_iter().map(|chat|chat.join().unwrap()).collect()};
+        for (chat,reply) in replies.iter().enumerate() {
+            assert_eq!(ids(reply),want_turn[chat],"{group} chats, chat {chat}: the IDs of its cache-off read: {reply}");
+            // The server restored the whole kept prompt for this chat, and read only the 5 new tokens.
+            assert_eq!(cached(reply),6,"{group} chats, chat {chat} did not start from its kept prompt: {reply}");}
+        assert!(batches.load(SeqCst)>before,"{group} chats shared batch steps");
+    });
+}
+#[test] fn two_chats_at_once_each_start_from_their_own_kept_prompt_with_the_ids_of_cache_off_reads() {chats_from_distinct_kept_prompts(2);}
+#[test] fn four_chats_at_once_each_start_from_their_own_kept_prompt_with_the_ids_of_cache_off_reads() {chats_from_distinct_kept_prompts(4);}
+#[test] fn eight_chats_at_once_each_start_from_their_own_kept_prompt_with_the_ids_of_cache_off_reads() {chats_from_distinct_kept_prompts(8);}

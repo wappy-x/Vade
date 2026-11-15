@@ -230,8 +230,26 @@ impl Directory {
 
 /// The whole environment of a command. Vade clears the parent environment
 /// and sets only these variables; `area` is the session build folder. The
-/// prompt shows this same list.
+/// prompt shows this same list, with the developer directory cached per process.
 pub(super) fn variables(area: &Path, toolchain: Option<&Path>) -> Vec<(&'static str, String)> {
+    variables_with(area, toolchain, developer_directory())
+}
+
+fn developer_directory() -> Option<&'static str> {
+    #[cfg(target_os = "macos")]
+    {
+        static DEVELOPER: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::new();
+        *DEVELOPER.get_or_init(|| {
+            let root = Path::new("/Library/Developer/CommandLineTools");
+            (root.join("usr/bin/git").is_file() && root.join("usr/lib/libxcrun.dylib").is_file())
+                .then_some("/Library/Developer/CommandLineTools")
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    { None }
+}
+
+fn variables_with(area: &Path, toolchain: Option<&Path>, developer: Option<&str>) -> Vec<(&'static str, String)> {
     // Incremental artifacts remain private and subject to the session's
     // retained-state limits; cap parallel compilers to bound CPU pressure.
     let jobs = std::thread::available_parallelism()
@@ -262,7 +280,37 @@ pub(super) fn variables(area: &Path, toolchain: Option<&Path>) -> Vec<(&'static 
         list.push(("RUSTC", root.join("bin/rustc").display().to_string()));
         list.push(("RUSTDOC", root.join("bin/rustdoc").display().to_string()));
     }
+    if let Some(value) = developer {
+        list.push(("DEVELOPER_DIR", value.into()));
+    }
     list
+}
+
+#[cfg(test)]
+mod environment_tests {
+    use super::*;
+
+    #[test]
+    fn developer_directory_is_optional_unique_and_last() {
+        for toolchain in [None, Some(Path::new("/toolchain"))] {
+            let without = variables_with(Path::new("<build>"), toolchain, None);
+            assert!(!without.iter().any(|(name, _)| *name == "DEVELOPER_DIR"));
+            let with = variables_with(Path::new("<build>"), toolchain, Some("/developer"));
+            assert_eq!(with.iter().filter(|(name, _)| *name == "DEVELOPER_DIR").count(), 1);
+            assert_eq!(with.last(), Some(&("DEVELOPER_DIR", "/developer".into())));
+            assert_eq!(&with[..with.len() - 1], without);
+            assert_eq!(with[..3].iter().map(|(name, _)| *name).collect::<Vec<_>>(), ["LANG", "PATH", "HOME"]);
+        }
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn developer_directory_is_never_set_outside_macos() {
+        for toolchain in [None, Some(Path::new("/toolchain"))] {
+            assert!(!variables(Path::new("<build>"), toolchain).iter().any(|(name, _)| *name == "DEVELOPER_DIR"));
+        }
+        assert!(!BuildSession::default().environment_words().iter().any(|word| word.starts_with("DEVELOPER_DIR=")));
+    }
 }
 
 #[cfg(target_os = "macos")]

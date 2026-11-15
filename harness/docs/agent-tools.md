@@ -16,7 +16,7 @@ search, read and patch files there. Under the default approval policy,
 shows the exact diff. On macOS it can also run commands in a sandbox; on Linux
 it has no command tool. A command's approval shows its arguments and sandbox
 settings, the folder and every environment variable, not the files it may
-change. Every command asks unless an allow-list rule matches its argv. `--approval auto` applies patches and runs commands without asking,
+change. A tiny fixed grammar of harmless read-only commands does not ask. Other commands ask unless an allow-list rule matches the argv. `--approval auto` applies patches and runs commands without asking,
 still inside the sandbox. Each request runs under fixed limits
 on rounds, calls and time, and a stopped request keeps its conversation, so
 `continue` picks up where it left off. The sections below give every limit and
@@ -170,7 +170,12 @@ output budget). Sources may be up to 4 MiB. Partial reads give the actual
 half-open range, the source size and the next offset. The offset must fall on a
 UTF-8 boundary, and a limit that ends inside a multibyte character stops before
 it. Whole reads of small files keep their plain text result. The
-hidden/credential path and directory-handle protections apply to every range.
+An explicit `workspace_read` of a common key, token, credential, shell-history,
+cloud, package-manager or environment-file name asks before it reads the file.
+Other hidden paths are refused. Search, line reads, symbols and manifests keep
+excluding these paths. Edits to them are refused. The directory-handle
+protections apply to every range. Name checks cannot find a secret stored in a
+file with an ordinary name. Keep secrets outside the workspace when possible.
 Whole-file local previews, project rules, skills and symbol scans keep their own
 independent read bounds. Limit errors name the actual size and the bound that
 applies.
@@ -279,32 +284,63 @@ session that still lists the tools. Shell commands still have no network
 access. Fetched text is source data, not instructions or permission to run
 another tool.
 
+Approval prompts use the same list for edits, commands, web requests, redirects,
+notes and outside tools. Line 1 says what Vade wants to do. A square or triangle
+marks the target. The risk text says what can go wrong. `Your turn.` comes
+on the same row as choice `1`; other numbers line up below it. `1` means Yes one time. `2` always
+means No. `3` means Yes until you close Vade. `4` means Yes always for the
+scope shown. Only choices the current policy supports appear. An empty answer
+never approves anything. Commands show the whole executed command, with shell quoting. Key `5` shows
+the argv JSON, timeout, execution folder, environment, scan exclusions, build
+environment and safety findings. File changes and outside-tool data also
+offer `5` for their exact details. The block is at most 64 terminal cells
+wide. Tags and project scope line up at the right edge. Long targets, risk
+sentences and choices wrap with their own indents.
+
+Every target row after the first starts with `│  `. The layout uses at least
+20 columns, even in a narrower window. A window too small for review shows
+`Make this window larger to answer.` and keeps the prompt open. Resizing
+never answers it. Use the displayed numbers; `y` also means `1` and `n`
+means `2`. Other letters and words do not answer. `/approve` and `/deny`
+still work. A raw answer key must be one character.
+
+File lists show whole names, wrapped as needed. They use up to four target
+rows before `and N more`, but always show the first name in full. Quotes
+make spaces and commas within a name distinct from separators. Commands
+use [shell word quoting](../../docs/shell-safety.md#the-prompt). Outside-tool
+prompts quote the tool and server separately, as `"create_issue" on "github"`.
+
+Red marks a risk of lost work or sent data. Amber marks smaller risks. The
+target and the key numbers take that color. The top line and the marks are
+bold Petrol. `Your turn.` is bold amber. Plain mode, redirected
+output and `NO_COLOR` omit color codes. Marks and words still show the risk.
+
 A web request sends text that the model wrote (a URL or a query) to another
 machine. Thus the approval policy controls both tools:
 
 - `--approval ask` states in plain words what the request sends, why it asks,
-  and what each answer does, then waits. `y` approves one request. `s`
-  approves that site, or all web searches, for the rest of the session. `a`
+  and what each answer does, then waits. `1` approves one request. `3`
+  approves that site, or all web searches, for the rest of the session. `4`
   approves it always: in this session and every later one. A site
   is a scheme with a host and port: an approval for `https://docs.example.org`
   does not cover `http://docs.example.org`. The port that the scheme implies
   counts as no port: `https://docs.example.org:443` is `https://docs.example.org`. A
-  new, resumed or forked session asks again, unless the answer was `a`.
+  new, resumed or forked session asks again, unless the answer was `4`.
 - `--approval auto` (or `--yes`) shows what it sends and does not wait.
-- `--approval never` denies each request, also to a site saved with `a`.
+- `--approval never` denies each request, also to a site saved with `4`.
 - A run that no person can answer (for example `--prompt`) does not send
-  the request, unless the site or web search was saved with `a`. The model
+  the request, unless the site or web search was saved with `4`. The model
   gets an `approval_required` result that names `--yes` and `--no-web`.
 
 In one sentence each:
 
 - To never be asked, start chat with `--yes` (or `--approval auto`).
-- To allow a site for this session, answer `s` at its prompt.
-- To allow it always, answer `a` at its prompt.
-- To take an `a` back, run `vade allowed list`, then
+- To allow a site for this session, answer `3` at its prompt.
+- To allow it always, answer `4` at its prompt.
+- To take an `4` back, run `vade allowed list`, then
   `vade allowed remove ENTRY` with the entry as the list shows it.
 
-An `a` answer is saved in `allowed.json` in the Vade home (`$VADE_HOME`, else
+An `4` answer is saved in `allowed.json` in the Vade home (`$VADE_HOME`, else
 `~/.vade`), never in the project: a project can come from a stranger. The
 file is written with mode 0600, and chat reads it at start and in each new
 session only when it is a regular file that you own and that no one else can
@@ -312,7 +348,7 @@ read or write. A web entry is the exact site key that the session list uses,
 in one spelling per site: no final dot on the name, no leading zero in the
 port, the short IPv6 form. A pattern or a path never loads. A model tool can
 write files in the workspace, and a project can ship hidden files, so chat
-does not use the file, and `a` cannot save, when the Vade home is anywhere
+does not use the file, and `4` cannot save, when the Vade home is anywhere
 inside the workspace, at any depth and under any name; it says so when it
 starts. A home path through a project folder is refused too, also through a
 link outside the workspace that points into it, and also when it names the
@@ -325,12 +361,12 @@ system resolves (`/System/Volumes/Data`, `/.vol`, letter case, links, `..`)
 is seen, and a name changed after the check changes nothing. Not seen: a
 hard-linked folder or a Linux bind mount of a folder below the workspace
 (each has its own `..`), and a disk whose inode numbers do not name one
-folder for sure (some network and FUSE disks). The `a` save checks the
+folder for sure (some network and FUSE disks). The `4` save checks the
 home again. Only the default `~/.vade` is exempt when the workspace is the
 user's `HOME` folder.
 Saved memory approval is off if the canonical workspace path is not UTF-8.
-Memory changes then need approval in each session, and `a` cannot save them.
-The notice after `a` gives a shell-quoted removal command with the selected
+Memory changes then need approval in each session, and `4` cannot save them.
+The notice after `4` gives a shell-quoted removal command with the selected
 `--vade-home`. A path with a character that the terminal does not show (or
 a home path that is not UTF-8) is left out of the command: for the project
 path the command is `vade allowed remove memory`, run in the project folder;
@@ -347,11 +383,11 @@ port on both sides (`http://docs.example.org:8080` to
 `https://docs.example.org:8080`). A port that is the default on one side only
 (`http://docs.example.org:443` to `https://docs.example.org`) asks. A name and its `www.` name (`docs.example` and
 `www.docs.example`) are two sites everywhere: for a direct fetch, for a
-redirect, for `s` and for a saved `a`. One rule for all four keeps each
+redirect, for `3` and for a saved `4`. One rule for all four keeps each
 question honest about the one host it names; treating the two names as one
 would need the question, the saved entry and `vade allowed list` to name both.
-A redirect from a name to its `www.` name therefore asks once; answer `s` or
-`a` for the `www.` name to stop it asking.
+A redirect from a name to its `www.` name therefore asks once; answer `3` or
+`4` for the `www.` name to stop it asking.
 A search follows a redirect only inside its provider's own domain; another
 redirect fails that try.
 
@@ -425,17 +461,18 @@ startup line and no automatic check. If the file changes, trust it again.
 There is no implicit shell: `/bin/sh -c SCRIPT` is explicit. Before any command
 runs, [shell safety](../../docs/shell-safety.md) classes it as safe, needs
 approval or blocked. It parses `sh -c` scripts into simple commands for this.
-In `ask`, every command waits for `y`, `s`, `p` or `n`, unless an allow-list
-rule matches its argv of plain literal words (word for word, with `<path>`
-slots for workspace paths); then it runs after preview. The
-allow lists are empty by default. The checker's safe class counts only with the
-experimental `VADE_SHELL_CHECKER=1`. In `auto`, every command that is not
-blocked runs inside the same OS sandbox without asking. Blocked commands never
-run.
+In `ask`, the fixed grammar below runs without a question when its classifier
+result is also safe. Every other command waits for `1`, `2`, and, when offered, `3` or `4`, unless
+an allow-list rule matches its argv of plain literal words (word for word, with
+`<path>` slots for workspace paths). The saved allow lists are empty by
+default. The checker's wider safe class counts only with the experimental
+`VADE_SHELL_CHECKER=1`. In `auto`, every command that is not blocked runs
+inside the same OS sandbox without asking. Blocked commands never run.
 
-The read-only list below picks the sandbox only; it never skips a prompt.
-These forms run in a read-only sandbox with fixed executables, with either
-the bare name or the listed system path:
+The fixed list below runs without a prompt under the default `ask` policy when
+the classifier also calls the exact request safe. These forms use a read-only
+sandbox and fixed executables, with either the bare name or the listed system
+path:
 
 | Command | Fixed executable | Accepted arguments |
 | --- | --- | --- |
@@ -443,20 +480,23 @@ the bare name or the listed system path:
 | `true` | `/usr/bin/true` | None |
 | `ls` | `/bin/ls` | Optional `-1` first, then zero or more workspace-relative paths |
 | `cat` | `/bin/cat` | One or more workspace-relative paths; no options |
+| `rg` | `rg` from the cleared execution path | One pattern, then zero or more workspace-relative paths; no options |
 | `git status` | `/usr/bin/git` | No option or `--short` |
-| `git diff` | `/usr/bin/git` | No option or `--stat` |
-| `git log` | `/usr/bin/git` | No options, `--oneline`, or `-n N` with N from 1 to 100; options cannot be combined |
+| `git diff --stat` | `/usr/bin/git` | Exactly `--stat` |
+| `git log --oneline` | `/usr/bin/git` | Exactly `--oneline` |
 
-Bare names resolve to these fixed executables, never through PATH. Path
+Bare names resolve to these fixed executables, except for `rg`, which uses the
+cleared execution path. Path
 arguments may be `.`; they cannot start with `-` or contain parent traversal or
 hidden or credential-related components. Other arguments do not get the read-only
-sandbox. Approval is the same for every command. An executable in the workspace, shell
+sandbox. Raw diffs and log patches ask because committed history can contain
+protected file content. An executable in the workspace, shell
 metacharacters, PATH tricks, a journal or an earlier approval cannot extend the
 allowlist.
 
 | Policy | Exact patch | Command on an allow list | Any other command | Blocked command |
 | --- | --- | --- | --- | --- |
-| `ask` (default) | Ask once | Execute after preview | Ask (`y`, `s`, `p` or `n`) | Refuse |
+| `ask` (default) | Ask once | Execute after preview | Ask (`1`, `2`, and, when offered, `3` or `4`) | Refuse |
 | `auto` (`--yes`) | Apply after preview | Execute after preview | Execute after preview | Refuse |
 | `never` | Deny | Deny | Deny | Refuse |
 
@@ -502,6 +542,14 @@ Network access and hard-link creation are denied. Commands cannot read other
 processes' arguments or environment (`process-info*`, `kern.procargs*`) or the
 hostname; the queries a program makes about itself at startup stay under the
 normal OS policy.
+
+The secret-path policy makes three promises. A command does not get the content
+of a protected file without your approval. It does not get entry names from
+inside a protected folder without your approval. It can see the protected file
+or folder name when it lists an ordinary parent folder or reports an access
+error. A name such as `.env` or `keys` is not itself treated as secret content.
+The native `workspace_list` tool still omits protected names as a convenience.
+That extra name filter is not a secrecy boundary.
 
 How we tested this: a compiled Rust fixture probes `KERN_PROCARGS2` directly
 against a parent with an otherwise-cleared environment and a synthetic marker. A
@@ -733,13 +781,13 @@ Do not save code structure, repo facts, secrets, or one-off details.
 These tools are on in native chat unless memory is off. Each later chat reads
 the notes with its instructions, so the approval policy controls both tools.
 `--approval ask` states what note changes, why it asks, and what each answer
-does, then waits: `y` for this change, `s` for note changes in this project
-for the rest of the session, `a` for note changes in this project always (saved
+does, then waits: `1` for this change, `3` for note changes in this project
+for the rest of the session, `4` for note changes in this project always (saved
 in `allowed.json` in the Vade home, as for web requests; `vade allowed remove
 memory` takes it back). A save and a delete share one answer. `--approval auto`
 shows what changed and does not wait. `--approval never` denies the change. A
 run that no person can answer does not change a note, unless this project was
-saved with `a`. Cards and library tools keep the tools off. See
+saved with `4`. Cards and library tools keep the tools off. See
 [project memory](memory.md) for the file format and switches.
 
 ## Conceptual references

@@ -295,6 +295,12 @@ impl Cluster {
             }),
         })))
     }
+    pub(super) fn plain_http_refusal(&self) -> Option<String> {
+        self.0.endpoints.iter().find_map(crate::http_policy::last_refusal)
+    }
+    pub(super) fn probe_refused(&self, index: usize) -> bool {
+        crate::http_policy::last_refusal(&self.0.endpoints[index]).is_some()
+    }
     fn state(&self) -> MutexGuard<'_, State> {
         self.0.state.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -378,6 +384,7 @@ impl Cluster {
             }
             // Unreachable or refusing (say, restarting): keys it holds may
             // still be good once it is back, so it stays eligible for them.
+            Err(error) if transport::resolve::capacity_timeout(&error) => {},
             Err(_) => self.mark_unreachable(index),
         }
     }
@@ -683,6 +690,11 @@ pub(super) struct Lease {
     completed: bool,
 }
 impl Lease {
+    pub(super) fn local_lookup_limit(&mut self) {
+        // No connection attempt ran. Local resolver pressure says nothing
+        // about the engine's health.
+        self.completed = true;
+    }
     pub(super) fn index(&self) -> usize {
         self.index
     }

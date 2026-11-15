@@ -39,8 +39,10 @@ pub(crate) enum WorkerEvent {
     ThreadReady(String),
     ToolApprovalClosed,
     ToolPreview {
+        prompt: Option<vade_harness::approval_prompt::Prompt>,
         title: String,
         detail: String,
+        details: Option<String>,
         reply: Option<super::approval::ApprovalReply>,
     },
     Steering {
@@ -129,6 +131,7 @@ impl Pending {
 }
 impl App {
     pub(crate) fn poll_worker(&mut self) -> io::Result<()> {
+        vade_harness::http_policy::interactive_result()?;
         let mut events = VecDeque::new();
         if let Some(pending) = &mut self.pending {
             for _ in 0..16 {
@@ -236,8 +239,10 @@ impl App {
                     self.dirty = true;
                 }
                 WorkerEvent::ToolPreview {
+                    prompt,
                     title,
                     detail,
+                    details,
                     reply,
                 } => {
                     if reply.as_ref().is_some_and(|reply| !reply.open()) {
@@ -257,10 +262,20 @@ impl App {
                     {
                         self.close_approval();
                         self.terminal.flush_stream()?;
-                        match self.terminal.approval_preview(&title, &detail) {
+                        let shown = if let Some(prompt) = &prompt {
+                            self.terminal.approval_prompt(&title, prompt, details.as_deref())
+                        } else { match details.as_deref() {
+                            Some(details) => self.terminal.approval_preview_with_details(&title, &detail, details),
+                            None => self.terminal.approval_preview(&title, &detail),
+                        } };
+                        match shown {
                             Ok(()) => {
                                 self.approval_reply = Some(reply.clone());
                                 self.approval_command = title == "Command";
+                                let choices = prompt.as_ref().map_or(detail.as_str(), |prompt| prompt.choices.as_str());
+                                self.approval_choices = choices.lines().fold(0, |mask, line| {
+                                    match line.trim_start().strip_prefix("Your turn.  ").unwrap_or(line.trim_start()).as_bytes() { [key @ b'1'..=b'5', b' ', b' ', ..] => mask | (1 << (key - b'1')), _ => mask }
+                                });
                                 self.approval_reach = matches!(title.as_str(), "Web request" | "Web redirect" | "Memory note");
                                 if !self.terminal.raw() {
                                     self.approval_presented();
@@ -784,10 +799,11 @@ impl App {
                                 },
                                 error_category(&error),
                             );
+                            let error_hint = error_hint(&error);
                             let hint = if self.config.mode.delegated() {
                                 ""
                             } else {
-                                error_hint(&error).trim_start()
+                                error_hint.trim_start()
                             };
                             self.warn(
                                 &what,
@@ -1033,9 +1049,10 @@ mod tests {
                     budget.with_cancellation(&cancel, || {
                         super::super::approval::request_tool_preview_with_budget(
                             &tx,
-                            vade_harness::coding_tools::Preview {
+                            vade_harness::coding_tools::Preview { prompt: None,
                                 title: "Patch preview",
                                 detail: "-old\n+new",
+                                details: None,
                                 approval_required: true,
                             },
                             &cancel,
@@ -1063,8 +1080,10 @@ mod tests {
             let (reply, rx) = mpsc::channel();
             assert!(
                 tx.fact(WorkerEvent::ToolPreview {
+                    prompt: None,
                     title: "Patch preview".into(),
                     detail: detail.into(),
+                    details: None,
                     reply: Some(super::super::approval::ApprovalReply::new(reply, None)),
                 })
                 .is_ok()
@@ -1072,12 +1091,48 @@ mod tests {
             app.poll_worker().unwrap();
             rx
         }
+        // The structured prompt used to return a resize error to the main loop.
+        let prompt = vade_harness::approval_prompt::Prompt {
+            what: "Vade wants to run a command".into(), object: "rm -rf build".into(),
+            risk: vade_harness::approval_prompt::Risk::Red, tag: "can delete files".into(),
+            scope: Some("this project".into()), sentences: vec!["This command deletes files.".into()],
+            choices: "1  Yes, one time\n2  No, do not run it".into(), files: Vec::new(),
+        };
+        let (reply, answer) = mpsc::channel();
+        tx.fact(WorkerEvent::ToolPreview {
+            detail: prompt.render(64, false), prompt: Some(prompt), title: "Command".into(), details: None,
+            reply: Some(super::super::approval::ApprovalReply::new(reply, None)),
+        }).unwrap();
+        app.poll_worker().unwrap();
+        for (rows, columns) in [(1, 10), (24, 80)] {
+            resize(rows, columns);
+            app.terminal.resized().unwrap();
+            app.terminal.editor("", false).unwrap();
+            assert!(app.approval_reply.is_some());
+            assert_eq!(answer.try_recv(), Err(mpsc::TryRecvError::Empty));
+            assert!(!app.pending.as_ref().unwrap().cancel.load(Ordering::Acquire));
+        }
+        app.terminal.approval_ready().unwrap();
+        app.line_input("/deny".into()).unwrap();
+        assert_eq!(answer.try_recv(), Ok(false));
+
         let diff = (0..2500)
             .map(|i| format!("-old-{i}\n+new-{i} 🦀\n"))
             .collect::<String>();
         assert_eq!(diff.lines().count(), 5000);
         let reply = preview(&mut app, &tx, &diff);
         assert!(app.approval_reply.is_some());
+        // Resizing must not answer, cancel the task, or escape the UI loop.
+        resize(1, 10);
+        app.terminal.resized().unwrap();
+        assert!(app.terminal.approval_ready().is_err());
+        assert!(app.approval_reply.is_some());
+        assert_eq!(reply.try_recv(), Err(mpsc::TryRecvError::Empty));
+        assert!(!app.pending.as_ref().unwrap().cancel.load(Ordering::Acquire));
+        resize(24, 80);
+        app.terminal.resized().unwrap();
+        assert!(app.approval_reply.is_some());
+        assert_eq!(reply.try_recv(), Err(mpsc::TryRecvError::Empty));
         app.terminal.approval_ready().unwrap();
         assert_eq!(reply.try_recv(), Err(mpsc::TryRecvError::Empty));
         app.line_input("/approve".into()).unwrap();
@@ -1116,13 +1171,15 @@ mod tests {
             assert!(approvals.take_not_shown());
             assert!(!approvals.take_not_shown());
         }
-        // A web request takes `s` (its target, for this session). It has no
+        // A web request takes `3` (its target, for this session). It has no
         // project list, so `/approve project` leaves the request pending.
         resize(24, 80);
         let (reply, answer) = mpsc::channel();
         tx.fact(WorkerEvent::ToolPreview {
+            prompt: None,
             title: "Web request".into(),
-            detail: "web_fetch [\"https://docs.invalid/a\"]".into(),
+            detail: "Vade wants to read this web page\nYour turn.\n1  Yes, one time\n2  No, leave it unread\n3  Yes, until you close Vade\n4  Yes, always for this website".into(),
+            details: None,
             reply: Some(super::super::approval::ApprovalReply::new(reply, None)),
         }).unwrap();
         app.poll_worker().unwrap();
@@ -1130,29 +1187,33 @@ mod tests {
         app.terminal.approval_ready().unwrap();
         app.line_input("/approve project".into()).unwrap();
         assert_eq!(answer.try_recv(), Err(mpsc::TryRecvError::Empty));
-        app.sent_line("s".into()).unwrap();
+        app.sent_line("3".into()).unwrap();
         assert_eq!(answer.try_recv(), Ok(true));
         assert_eq!(approvals.take_choice(), vade_harness::shell::permissions::Scope::Session);
-        // A redirect to another site asks in the same way and takes `s` too.
+        // A redirect to another site asks in the same way and takes `3` too.
         let (reply, answer) = mpsc::channel();
         tx.fact(WorkerEvent::ToolPreview {
+            prompt: None,
             title: "Web redirect".into(),
-            detail: "web_fetch [\"https://other.invalid/a\"]".into(),
+            detail: "Vade wants to follow this redirect\nYour turn.\n1  Yes, one time\n2  No, stop here\n3  Yes, until you close Vade".into(),
+            details: None,
             reply: Some(super::super::approval::ApprovalReply::new(reply, None)),
         }).unwrap();
         app.poll_worker().unwrap();
         assert!(app.approval_reach && !app.approval_command);
         app.terminal.approval_ready().unwrap();
-        app.sent_line("s".into()).unwrap();
+        app.sent_line("3".into()).unwrap();
         assert_eq!(answer.try_recv(), Ok(true));
         assert_eq!(approvals.take_choice(), vade_harness::shell::permissions::Scope::Session);
-        // `a` (always) needs a Vade home outside the workspace. Without one the
+        // `4` (always) needs a Vade home outside the workspace. Without one the
         // request stays pending and a notice says why.
         let ask = |title: &str| {
             let (reply, answer) = mpsc::channel();
             tx.fact(WorkerEvent::ToolPreview {
+                prompt: None,
                 title: title.into(),
-                detail: "web_fetch [\"https://docs.invalid/a\"]".into(),
+                detail: "Vade wants to read this web page\nYour turn.\n1  Yes, one time\n2  No, leave it unread\n3  Yes, until you close Vade\n4  Yes, always for this website".into(),
+                details: None,
                 reply: Some(super::super::approval::ApprovalReply::new(reply, None)),
             }).unwrap();
             answer
@@ -1160,7 +1221,7 @@ mod tests {
         let answer = ask("Web request");
         app.poll_worker().unwrap();
         app.terminal.approval_ready().unwrap();
-        app.sent_line("a".into()).unwrap();
+        app.sent_line("4".into()).unwrap();
         app.line_input("/approve always".into()).unwrap();
         assert_eq!(answer.try_recv(), Err(mpsc::TryRecvError::Empty));
         assert!(app.approval_reply.is_some());
@@ -1171,17 +1232,17 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let saving = Arc::new(vade_harness::shell::permissions::Approvals::for_workspace(&root, Some(&home), true).unwrap());
         app.approvals = Some(Arc::clone(&saving));
-        // A web request, a redirect and a memory note each take `a`.
+        // A web request, a redirect and a memory note each take `4`.
         for title in ["Web request", "Web redirect", "Memory note"] {
             let answer = ask(title);
             app.poll_worker().unwrap();
             assert!(app.approval_reach && !app.approval_command, "{title}");
             app.terminal.approval_ready().unwrap();
-            app.sent_line("a".into()).unwrap();
+            app.sent_line("4".into()).unwrap();
             assert_eq!(answer.try_recv(), Ok(true), "{title}");
             assert_eq!(saving.take_choice(), vade_harness::shell::permissions::Scope::Always, "{title}");
         }
-        // A command has no `a`: `/approve always` leaves it pending.
+        // A command has no always scope: `/approve always` leaves it pending.
         let answer = ask("Command");
         app.poll_worker().unwrap();
         assert!(app.approval_command && !app.approval_reach);

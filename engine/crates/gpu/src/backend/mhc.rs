@@ -100,6 +100,8 @@ impl<'a> Backend<'a> {
             "mhc_residual_rows"=>((shape.rows as usize*shape.wide()).div_ceil(256) as u32,256),
             "mhc_project_tile"=>(shape.rows.div_ceil(crate::prompt_admission::MHC_TOKENS as u32),256),
             "mhc_boundary_fused"=>(crate::mhc_params::FUSED_BLOCKS as u32,crate::mhc_params::FUSED_THREADS as u32),
+            "mhc_boundary_phase_rms"|"mhc_boundary_phase_dots"=>(shape.rows*crate::mhc_params::FUSED_BLOCKS as u32,crate::mhc_params::FUSED_THREADS as u32),
+            "mhc_boundary_phase_finish"=>(shape.rows,crate::mhc_params::FUSED_THREADS as u32),
             "mhc_boundary_dots"=>(shape.rows.checked_mul(u32::try_from(shape.coefficients()).map_err(|_|"mHC coefficient grid exceeds u32")?).ok_or("mHC coefficient grid exceeds u32")?,256),
             _=>(shape.rows,shape.prepare_threads()),
         };
@@ -119,6 +121,8 @@ impl<'a> Backend<'a> {
         // `chain_add_latency` probe is one warp whose binder passes a private,
         // checked 6-word plane and synchronizes before reading it. Launch
         // copies the live argument; error/drop cleanup drains referenced work.
+        // Phased boundaries use private scratch per row. Ordered launches replace
+        // the cross-block meetings. Each strip or final block writes one row only.
         unsafe {self.launch_flash(name,blocks,threads,&mut [parameter(args)])}
     }
     pub(super) fn mhc_combine_owned(&self, shape: Shape, vectors: [&DeviceVector<'_>;4]) -> Result<(),String> {

@@ -4,6 +4,7 @@ use spark_gpu_probe::{causal_ops::{Shape,Op},driver::{Backend,DeviceVector},prom
 #[path="production.rs"] mod production;
 #[path="prompt.rs"] mod prompt;
 #[path="grouped.rs"] mod grouped;
+#[path="chats.rs"] mod chats;
 type Result<T>=std::result::Result<T,String>;
 struct Case<'a> {layer:usize,shape:Shape,weight:DeviceVector<'a>,original:DeviceVector<'a>,latent:DeviceVector<'a>,query:DeviceVector<'a>,packed:DeviceVector<'a>,raw_weight:Vec<f32>,raw_latent:Vec<f32>,raw_query:Vec<f32>}
 fn open(root:&Path)->Result<CheckpointAdmission> {
@@ -141,6 +142,7 @@ pub fn run()->Result<()> {
         println!("SCOPE real_checkpoint_weights synthetic_BF16_activations local_heads parts=2 capacity_context=32768 standalone_component=true device_wire=false order=SUM-ORDER-v1");
         if args.get(4).is_some_and(|v|v=="prompt") {let cases=load(b,&checkpoint,limit)?;prompt::run(b,&cases,samples)?;drop(queue);b.synchronize()?;return Ok(());}
         if args.get(4).is_some_and(|v|v=="grouped") {let cases=load(b,&checkpoint,limit)?;grouped::run(b,&cases,samples)?;drop(queue);b.synchronize()?;return Ok(());}
+        if args.get(4).is_some_and(|v|v=="chats") {let cases=load(b,&checkpoint,limit)?;chats::run(b,&cases,samples)?;drop(queue);b.synchronize()?;return Ok(());}
         conformance(b)?;production::check(b,&checkpoint)?;let cases=load(b,&checkpoint,limit)?;
         for rows in [16usize,128,1041,2051] {twin(b,&cases[0],rows.min(cases[0].shape.rows as usize))?;}
         if args.get(4).is_some_and(|v|v=="recorded") {b.enable_resident_launches()?;println!("RECORDER enabled=true");}

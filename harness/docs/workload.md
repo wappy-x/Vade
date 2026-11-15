@@ -1,5 +1,7 @@
 # Native agent workload measurement
 
+HTTP links stay on this machine by default; see [network setup](../../docs/network-setup.md) for SSH tunnels and the explicit opt-in.
+
 `vade-harness workload` load-tests a chat-completions endpoint. It runs several
 agent conversations at once and measures two things:
 

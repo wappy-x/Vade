@@ -1,5 +1,7 @@
 # Other clients through the gateway
 
+HTTP links stay on this machine by default; see [network setup](../../docs/network-setup.md) for SSH tunnels and the explicit opt-in.
+
 This page shows how to use your own coding client with Vade.
 
 Setup can write a complete dedicated home for Claude Code, Codex, Hermes,

@@ -471,6 +471,7 @@ pub(super) fn cli(config: Config, mut json_file: std::fs::File, mut card_file: O
     let report = match run_engine(config) {
         Ok(report) => report,
         Err(error) => {
+            if crate::http_policy::refusal(&error).is_some() { return ExitCode::FAILURE; }
             crate::diagnostics::stderr_line(format_args!("vade: engine card setup failed ({error}); JSON is incomplete. Check the endpoint and model, then retry with a new --json path."));
             return ExitCode::FAILURE;
         }

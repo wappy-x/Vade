@@ -117,6 +117,27 @@ fn prompt_groups_keep_every_logit_and_recurrent_cache_bit_across_tile_tails() {
     }
 }
 #[test]
+fn prepared_initial_layout_keeps_fresh_values_and_position_specific_shapes() {
+    use engine_model::plan::layer::{LayerPlan,Topology};
+    let checkpoint=fixture::Checkpoint::new_with_head(Dtype::Bf16,true);
+    let decoder=Decoder::new(&checkpoint.admission,Host,8).unwrap();let prepared=decoder.prepared();
+    let mut poisoned=decoder.zero_state().unwrap();
+    for layer in &mut poisoned.layers {for value in layer.values_mut() {value.fill(3.25);}}
+    let reused=Decoder::from_prepared(&prepared,Host,8,0).unwrap();
+    for position in [0,1,4,0] {
+        let state=reused.zero_state_at(position).unwrap();assert_eq!(state.position,position);assert!(state.expanded.is_empty());
+        for (layer,values) in state.layers.iter().enumerate() {
+            let plan=LayerPlan::new(checkpoint.admission.description(),layer,position+1,Topology {rank:0,parts:1}).unwrap();
+            let inputs=plan.inputs.iter().filter(|b|b.name!="residual" && b.name!="local_slots").collect::<Vec<_>>();
+            assert_eq!(values.len(),inputs.len());for input in inputs {
+                let value=&values[&input.name];assert_eq!(value.len(),input.elements().unwrap());
+                assert!(value.iter().all(|x|x.to_bits()==0),"position={position} layer={layer} input={}",input.name);
+            }
+        }
+    }
+    assert!(poisoned.layers.iter().flat_map(|layer|layer.values()).flatten().all(|x|*x==3.25));
+}
+#[test]
 fn prepared_parameters_stay_bound_to_their_checkpoint() {
     // `from_prepared` takes no second checkpoint, so a mixed pair cannot be written.
     let (a,b)=(fixture::Checkpoint::new_with_head(Dtype::Bf16,true),fixture::Checkpoint::new_with_head(Dtype::F32,true));
@@ -367,6 +388,8 @@ impl spark_tp::bounded_decoder::Compute for Kept {
     fn gather_absorbed(&self,s:spark_gpu_probe::causal_ops::Shape,x:[Option<&Self::Value>;4],reserve:usize,expected:f32)->spark_tp::Result<Self::Value> {Host.gather_absorbed(s,x,reserve,expected)}
     fn latent_absorption(&self,name:&str,s:spark_gpu_probe::causal_ops::Shape,q:&Self::Value,l:&Self::Value,n:&Self::Value,slots:usize)->spark_tp::Result<Self::Value> {Host.latent_absorption(name,s,q,l,n,slots)}
     fn latent_absorption_rows(&self,name:&str,s:spark_gpu_probe::prompt_ops::Shape,q:&Self::Value,l:&Self::Value,n:&Self::Value)->spark_tp::Result<Self::Value> {Host.latent_absorption_rows(name,s,q,l,n)}
+    fn latent_absorption_chats(&self,name:&str,s:spark_gpu_probe::prompt_ops::Shape,g:&[spark_tp::bounded_decoder::ChatGather<'_,Self::Value>],stride:usize,
+        q:&Self::Value,n:&Self::Value)->spark_tp::Result<Option<Self::Value>> {Host.latent_absorption_chats(name,s,g,stride,q,n)}
     fn select_known(&self,ids:&Vec<f32>,count:&Vec<f32>,row:&[f32])->spark_tp::Result<()> {Host.select_known(ids,count,row)}
     fn prompt_end(&self)->spark_tp::Result<()> {Ok(())} fn prompt_seeds(&self)->bool {false}
     fn prepare_beside(&self,c:&engine_model::plan::admission::CheckpointAdmission,_:usize)->spark_tp::Result<()> {self.prepare(c)}

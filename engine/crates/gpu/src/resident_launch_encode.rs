@@ -38,6 +38,28 @@ pub(super) fn mx(p:crate::next_params::MxLayer)->Command {
 pub(super) fn mixed(p:crate::next_params::ResidentProjectionBatch,kind:Kind)->Command {
     let mut c=mx(p.layer);c.kind=kind as u32;fields!(c,crate::next_params::ResidentProjectionBatch,p,plain,round);c
 }
+pub(super) fn mx_rows(p:crate::next_params::MxProjection,kind:Kind)->Command {
+    let mut c=Command::new(kind);fields!(c,crate::next_params::MxProjection,p,weights,scales,input,output,rows,cols,tokens,input_bf16,round);c
+}
+pub(super) fn group_rows(p:crate::expert_ops::GroupArguments,kind:Kind)->Command {
+    let mut c=Command::new(kind);fields!(c,crate::expert_ops::GroupArguments,p,table,input,output,lut,count,units,words,stride);c
+}
+pub(super) fn route_rows(p:crate::device_route::BuildRows)->Command {
+    let mut c=device_route(p.build);c.kind=Kind::DeviceRouteRows as u32;
+    fields!(c,crate::device_route::BuildRows,p,tokens,stride);c
+}
+pub(super) fn prompt_rows(p:crate::prompt_ops::Arguments,kind:Kind)->Command {
+    use crate::prompt_ops::{Arguments,Shape};let mut c=Command::new(kind);
+    for (i,v) in p.input.into_iter().enumerate(){c.word(i,v);}
+    for (i,v) in p.lengths.into_iter().enumerate(){c.word(i+5,v);}
+    fields!(c,Arguments,p,weight,weights,output,units,words);
+    let mut s=Command::new(kind);s.put(core::mem::offset_of!(Shape,op),&(p.shape.op as u32).to_ne_bytes());
+    fields!(s,Shape,p.shape,tokens,heads,dim,taps,rows,cols,first,slots);
+    let inner=causal(crate::causal_ops::Arguments {input:[0;4],weight:0,output:0,shape:p.shape.inner});
+    let at=core::mem::offset_of!(crate::causal_ops::Arguments,shape);
+    s.put(core::mem::offset_of!(Shape,inner),&inner.payload[at..at+core::mem::size_of::<crate::causal_ops::Shape>()]);
+    c.put(core::mem::offset_of!(Arguments,shape),&s.payload[..core::mem::size_of::<Shape>()]);c
+}
 pub(super) fn prepare(p:crate::mhc_params::Prepare)->Command {
     use crate::mhc_params::{Prepare,Shape};let mut c=Command::new(Kind::Prepare);fields!(c,Prepare,p,input,weights,base,scale,normalized,coefficients,collapsed);
     let mut s=Command::new(Kind::Prepare);fields!(s,Shape,p.shape,rows,streams,hidden,iterations,rms_eps,eps);
@@ -53,8 +75,7 @@ pub(super) fn boundary(p:crate::mhc_params::Boundary,kind:Kind)->Command {
 }
 /// D1: the split chain's Boundary payload, then the strip copy, the scratch plane and the weight form.
 pub(super) fn fused(p:crate::mhc_params::FusedBoundary)->Command {
-    use crate::mhc_params::FusedBoundary;let mut c=boundary(p.boundary,Kind::MhcBoundaryFused);
-    fields!(c,FusedBoundary,p,strips,scratch,bf16,reserved);c
+    let mut c=Command::new(Kind::MhcBoundaryFused);c.put(0,&crate::mhc_params::fused_payload(p));c
 }
 pub(super) fn collapse(p:crate::mhc_params::Collapse)->Command {let mut c=Command::new(Kind::Collapse);fields!(c,crate::mhc_params::Collapse,p,input,coefficients,output,rows,streams,hidden);c}
 pub(super) fn combine(p:crate::mhc_params::Combine)->Command {let mut c=Command::new(Kind::Combine);fields!(c,crate::mhc_params::Combine,p,input,coefficients,block,output,rows,streams,hidden);c}
@@ -63,12 +84,54 @@ pub(super) fn elementwise(p:crate::kernel_params::ModelElementwise)->Command {le
 pub(super) fn copy(p:crate::kernel_params::HybridCopy)->Command {let mut c=Command::new(Kind::Copy);c.word(0,p.source as u64);c.word(1,p.destination as u64);fields!(c,crate::kernel_params::HybridCopy,p,words,padding,rows);c}
 #[cfg(test)] mod tests {
     use super::*;
+    #[test] fn row_payloads_keep_all_extents_bits_and_zero_padding() {
+        use core::mem::{offset_of,size_of};use crate::prompt_ops::{Arguments,Shape,Op};
+        let inner=crate::causal_ops::Shape {op:crate::causal_ops::Op::Prepare,heads:3,dim:7,taps:4,rows:2,cols:6,epsilon:-0.0,bound:-1.0};
+        let p=Arguments {input:[16,32,48,64,80],lengths:[96,112,128,144,160],weight:176,weights:192,output:208,units:224,words:240,
+            shape:Shape {op:Op::Wrapped,tokens:8,heads:3,dim:7,taps:4,rows:2,cols:6,first:11,slots:13,inner}};
+        let c=prompt_rows(p,Kind::RowPrepare);assert_eq!(c.kind,Kind::RowPrepare as u32);
+        for (i,v) in p.input.into_iter().chain(p.lengths).chain([p.weight,p.weights,p.output,p.units,p.words]).enumerate() {assert_eq!(u64_at(&c,i*8),v);}
+        let shape=offset_of!(Arguments,shape);assert_eq!(u32_at(&c,shape),Op::Wrapped as u32);
+        for (i,v) in [8,3,7,4,2,6,11,13].into_iter().enumerate(){assert_eq!(u32_at(&c,shape+4+i*4),v);}
+        let at=shape+offset_of!(Shape,inner);assert_eq!(u32_at(&c,at),inner.op as u32);
+        for (i,v) in [3,7,4,2,6,(-0.0f32).to_bits(),(-1.0f32).to_bits()].into_iter().enumerate(){assert_eq!(u32_at(&c,at+4+i*4),v);}
+        assert!(c.payload[size_of::<Arguments>()..].iter().all(|&v|v==0));
+        let p=crate::expert_ops::GroupArguments {table:16,input:32,output:48,lut:64,count:7,units:11,words:13,stride:17};
+        let c=group_rows(p,Kind::Fp8RowsMulti);for (i,v) in [16,32,48,64].into_iter().enumerate(){assert_eq!(u64_at(&c,i*8),v);}
+        for (i,v) in [7,11,13,17].into_iter().enumerate(){assert_eq!(u32_at(&c,32+i*4),v);}
+        assert!(c.payload[size_of::<crate::expert_ops::GroupArguments>()..].iter().all(|&v|v==0));
+        let p=crate::next_params::MxProjection {weights:16,scales:32,input:48,output:64,rows:123,cols:256,tokens:8,input_bf16:0,round:0};
+        let c=mx_rows(p,Kind::MxRows8);for (i,v) in [16,32,48,64].into_iter().enumerate(){assert_eq!(u64_at(&c,i*8),v);}
+        for (i,v) in [123,256,8,0,0].into_iter().enumerate(){assert_eq!(u32_at(&c,32+i*4),v);}
+        assert!(c.payload[52..].iter().all(|&v|v==0));
+        let build=crate::device_route::Build {table:16,ids:32,input:48,quantized:64,quantizers:80,projects:96,output:112,experts:1024,picks:8,phases:2,down:0,shared:1,raw:0};
+        let c=route_rows(crate::device_route::BuildRows {build,tokens:8,stride:17});
+        assert_eq!(c.payload[..size_of::<crate::device_route::Build>()],device_route(build).payload[..size_of::<crate::device_route::Build>()]);
+        assert_eq!(u32_at(&c,offset_of!(crate::device_route::BuildRows,tokens)),8);assert_eq!(u32_at(&c,offset_of!(crate::device_route::BuildRows,stride)),17);
+        assert!(c.payload[size_of::<crate::device_route::BuildRows>()..].iter().all(|&v|v==0));
+    }
+    #[test] fn row_entry_names_are_unique_and_keep_existing_kind_numbers() {
+        let mut kinds=std::collections::BTreeSet::new();let mut names=std::collections::BTreeSet::new();
+        for kind in Kind::ALL {assert!(kinds.insert(kind as u32));assert!(names.insert(kind.kernel()));}
+        for kind in Kind::ROWS {let direct=kind.kernel().strip_prefix("resident_launch_").unwrap();assert_eq!(Kind::row(direct),Some(kind));}
+        assert_eq!((Kind::ReduceTake as u32,Kind::MxRows2 as u32),(41,42));assert_eq!(Kind::row("unregistered_rows"),None);
+    }
     #[test] fn boundary_replay_keeps_deferred_planes_shape_and_shadow_bits() {
         use crate::mhc_params::{Boundary,Shape};
         let shape=Shape {rows:1,streams:4,hidden:4096,iterations:20,rms_eps:1e-6,eps:1e-5};
         let p=Boundary {input:16,previous_input:32,previous_coefficients:48,residual:64,weights:80,base:96,scale:112,
             mixing_normalized:128,coefficients:144,collapsed:160,norm_weight:176,norm_partials:192,output:208,shape,
             norm_epsilon:-0.0,norm_bf16:1,prefetch:224,prefetch_bytes:7<<20,prefetch_policy:1,prefetch_reserved:0};
+        // The bench uses this header size, these kind numbers and the production fused payload encoder.
+        assert_eq!(core::mem::size_of::<Command>(),1040);assert_eq!(core::mem::offset_of!(Command,payload),16);
+        assert_eq!([Kind::MhcBoundaryFused,Kind::MhcPhaseRms,Kind::MhcPhaseDots,Kind::MhcPhaseFinish].map(|k|k as u32),[38,61,62,63]);
+        for rows in [8,5,4,3,4,5,8] {for phase in 0..=3 {
+            let p=Boundary {shape:Shape {rows,..shape},..p};
+            let f=crate::mhc_params::FusedBoundary {boundary:p,strips:240,scratch:256,bf16:1,reserved:phase};let c=fused(f);
+            assert_eq!(c.payload[..160],boundary(p,Kind::MhcBoundaryFused).payload[..160]);
+            assert_eq!(u64_at(&c,160),240);assert_eq!(u64_at(&c,168),256);assert_eq!(u32_at(&c,176),1);assert_eq!(u32_at(&c,180),phase);
+            assert!(c.payload[184..].iter().all(|&b|b==0));
+        }}
         for kind in [Kind::MhcBoundaryRms,Kind::MhcBoundaryDots,Kind::MhcBoundaryFinish] {
             let c=boundary(p,kind);assert_eq!(c.kind,kind as u32);assert_eq!(c.reserved,[0;3]);
             let planes=(1..=13u64).flat_map(|i|(i*16).to_ne_bytes()).collect::<Vec<_>>();assert_eq!(&c.payload[..104],planes);

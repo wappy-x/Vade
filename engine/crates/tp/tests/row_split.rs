@@ -229,6 +229,10 @@ fn shared_chat_parser_keeps_plain_greedy_streaming_and_explicit_sampling() {
 thread_local! {
     /// The bytes `Prepared::rows_charge` was told on this thread. A test thread and a worker rank's thread each have their own.
     static CHARGED:std::cell::Cell<usize>=const {std::cell::Cell::new(0)};
+    // Host dispatch estimate. This counts the launch plan, not device execution.
+    static BOUNDARY_NODES:std::cell::Cell<usize>=const {std::cell::Cell::new(0)};
+    // Streams and hidden of the last boundary the launch plan counted.
+    static BOUNDARY_SHAPE:std::cell::Cell<(u32,u32)>=const {std::cell::Cell::new((0,0))};
 }
 struct Prepared {
     tx:std::sync::mpsc::Sender<()>,rx:std::sync::mpsc::Receiver<()>,calls:std::sync::Arc<std::sync::atomic::AtomicUsize>,
@@ -242,6 +246,8 @@ impl Compute for Prepared {
     fn gather_absorbed(&self,s:spark_gpu_probe::causal_ops::Shape,x:[Option<&Self::Value>;4],reserve:usize,expected:f32)->spark_tp::Result<Self::Value> {Host.gather_absorbed(s,x,reserve,expected)}
     fn latent_absorption(&self,name:&str,s:spark_gpu_probe::causal_ops::Shape,q:&Self::Value,l:&Self::Value,n:&Self::Value,slots:usize)->spark_tp::Result<Self::Value> {Host.latent_absorption(name,s,q,l,n,slots)}
     fn latent_absorption_rows(&self,name:&str,s:spark_gpu_probe::prompt_ops::Shape,q:&Self::Value,l:&Self::Value,n:&Self::Value)->spark_tp::Result<Self::Value> {Host.latent_absorption_rows(name,s,q,l,n)}
+    fn latent_absorption_chats(&self,name:&str,s:spark_gpu_probe::prompt_ops::Shape,g:&[spark_tp::bounded_decoder::ChatGather<'_,Self::Value>],stride:usize,
+        q:&Self::Value,n:&Self::Value)->spark_tp::Result<Option<Self::Value>> {Host.latent_absorption_chats(name,s,g,stride,q,n)}
     type Value=Vec<f32>;type Pass=<Host as Compute>::Pass;
     fn projects_complete_rows(&self)->bool {matches!(self.attention_probe.get(),6|7)}
     fn rows_charge(&self,bytes:usize) {CHARGED.with(|charged|charged.set(charged.get()+bytes));}
@@ -341,7 +347,11 @@ impl Compute for Prepared {
     fn mean(&self,x:&Vec<f32>,s:u32,h:u32)->Result<Vec<f32>> {Host.mean(x,s,h)}
     fn prompt(&self,s:spark_gpu_probe::prompt_ops::Shape,x:[Option<&Vec<f32>>;5],w:&[f32])->Result<Vec<f32>> {Host.prompt(s,x,w)}
     fn rows_norm(&self,name:&str,s:spark_gpu_probe::norm_boundary::NormShape,x:&Vec<f32>,m:usize,w:&[f32])->Result<Vec<f32>> {Host.rows_norm(name,s,x,m,w)}
-    fn rows_begin(&self,key:(usize,usize),p:&spark_tp::layer_operands::ResidualBlockOperands,x:&Vec<f32>,m:usize)->Result<(Self::Pass,Vec<f32>)> {Host.rows_begin(key,p,x,m)}
+    fn rows_begin(&self,key:(usize,usize),p:&spark_tp::layer_operands::ResidualBlockOperands,x:&Vec<f32>,m:usize)->Result<(Self::Pass,Vec<f32>)> {
+        let shape=p.mhc().shape();
+        BOUNDARY_SHAPE.with(|seen|seen.set((shape.streams,shape.hidden)));
+        BOUNDARY_NODES.with(|n|n.set(n.get()+spark_gpu_probe::mhc_params::boundary_launches(shape,m)));Host.rows_begin(key,p,x,m)
+    }
     fn rows_finish(&self,p:Self::Pass,x:&Vec<f32>,m:usize)->Result<Vec<f32>> {Host.rows_finish(p,x,m)}
 }
 
@@ -464,7 +474,7 @@ impl Exchange for Counted {
 /// Fewer riders than the floor (BATCH_PAIR_ROWS for two live chats, else BATCH_MIN_ROWS) take their own plain steps: same bits, no batch command.
 #[test]
 #[allow(clippy::needless_range_loop)] // index loops keep the chat order.
-fn batch_steps_serve_two_four_eight_chats_with_each_chats_own_ids() {
+fn batch_steps_serve_one_through_eight_chats_with_each_chats_own_ids() {
     use spark_serve::{BatchOutput,BatchRows,Predictions};
     use std::sync::atomic::Ordering::SeqCst;
     let c=fixture::Checkpoint::new_with_capacity(Dtype::Bf16,true,80);
@@ -486,12 +496,12 @@ fn batch_steps_serve_two_four_eight_chats_with_each_chats_own_ids() {
             for at in 0..24 {let id=best(&logits);ids.push(id);rows.push(bits(&logits));if at<23 {logits=session.step(id).unwrap();}}alone.push(ids);alone_bits.push(rows);}
         assert_eq!(sent.load(SeqCst),0,"a lone chat sends no batch command");
         let mut steps=0;
-        for count in [2usize,4,8] {
+        for count in 1..=8usize {
             let mut sessions=(0..count).map(|_|engine.session().unwrap()).collect::<Vec<_>>();
             let mut tokens=sessions.iter_mut().zip(&prompts).map(|(session,prompt)|best(&session.prefill(prompt).unwrap())).collect::<Vec<_>>();
             for chat in 0..count {assert_eq!(tokens[chat],alone[chat][0]);}
             for at in 1..24 {
-                let out=if at%5==0 {Some(at%count)} else {None};
+                let out=if count>1 && at%5==0 {Some(at%count)} else {None};
                 let inputs=tokens.iter().map(|&token|[token]).collect::<Vec<_>>();
                 let mut rows=sessions.iter_mut().zip(&inputs).enumerate().filter(|(chat,_)|Some(*chat)!=out)
                     .map(|(chat,(session,input))|BatchRows {session,tokens:&input[..],output:BatchOutput::All,greedy:chat%3!=1,top_k:0}).collect::<Vec<_>>();
@@ -512,6 +522,94 @@ fn batch_steps_serve_two_four_eight_chats_with_each_chats_own_ids() {
         assert_eq!(sent.load(SeqCst),steps,"each batch step is one command");assert!(steps>40);
         engine.shutdown().unwrap();worker.join().unwrap();
     });
+}
+
+/// Admission reserves the full retained scratch of the actual prepared boundary map.
+#[test]
+fn admission_charges_all_prepared_boundary_scratch_before_first_use() {
+    use engine_model::plan::layer::{LayerPlan,Kind};
+    let c=fixture::Checkpoint::new_with_predictor(80);let topology=Topology {rank:0,parts:1};
+    let expected=(0..c.admission.description().layers.len()).map(|layer| {
+        let plan=LayerPlan::new(c.admission.description(),layer,1,topology).unwrap();
+        plan.steps.iter().filter(|s|s.kind==Kind::MhcPrepare).count()
+    }).sum::<usize>();
+    let prepared=Decoder::new(&c.admission,Host,80).unwrap().prepared();
+    let (owners,bytes)=prepared.fused_boundary_scratch().unwrap();
+    assert!(owners>0);assert_eq!(owners,expected);assert_eq!(bytes,expected*50_304);
+    let (tx,rx)=sync_channel(1);let split=Split::new(Host,Wire {topology,controller:true,tx,rx}).unwrap();
+    let initial=spark_tp::row_split::sparse_service_charges(&c.admission,topology,80,false).unwrap().1;
+    let service=Factory::new(&c.admission,split,80,vec![0]).unwrap();
+    assert_eq!(service.workspace_reservation_bytes(),initial+bytes);
+    // A budget that funded only the old shared workspace is short by this explicit retained term.
+    assert!(spark_tp::row_split::admit_service_memory(0,service.workspace_reservation_bytes(),initial+bytes-1).is_err());
+    assert_eq!(spark_tp::row_split::admit_service_memory(0,service.workspace_reservation_bytes(),initial+bytes).unwrap(),initial+bytes);
+    let service=service.with_predictor(3).unwrap();assert_eq!(service.workspace_reservation_bytes(),initial+bytes);
+}
+
+/// Rows can pause, return, and move while their private states keep scalar bits.
+#[test]
+fn changing_cohorts_keep_logit_bits_and_the_boundary_launch_plan() {
+    let c=fixture::Checkpoint::new_with_capacity(Dtype::Bf16,true,80);
+    let (tx,rx)=std::sync::mpsc::channel();
+    let compute=Prepared {tx,rx,calls:Default::default(),batches:Default::default(),working:std::cell::Cell::new(false),attention_probe:std::cell::Cell::new(0),known:Default::default()};
+    let batch=Decoder::new(&c.admission,&compute,80).unwrap();let scalar=Decoder::new(&c.admission,Host,80).unwrap();
+    let mut actual=(0..8).map(|_|batch.zero_state().unwrap()).collect::<Vec<_>>();
+    let mut expected=(0..8).map(|_|scalar.zero_state().unwrap()).collect::<Vec<_>>();let mut tokens=[1u32;8];
+    let bits=|v:&[f32]|v.iter().map(|v|v.to_bits()).collect::<Vec<_>>();
+    for (step,width) in (1..=8).chain((1..8).rev()).chain(1..=8).enumerate() {
+        let chats=(0..width).map(|i|(i+step)%8).rev().collect::<Vec<_>>();
+        let rows=chats.iter().map(|&chat|(tokens[chat],&actual[chat])).collect::<Vec<_>>();
+        BOUNDARY_NODES.with(|n|n.set(0));
+        let outputs=compute.work(||batch.step_batch(&rows)).unwrap();
+        // This fixture's width is outside the phase sweep, so it keeps one fused entry per row.
+        let per_boundary=width;
+        BOUNDARY_NODES.with(|n|assert_eq!(n.get(),2*c.admission.description().layers.len()*per_boundary,"step={step} width={width}"));
+        for (&chat,(logits,id,next)) in chats.iter().zip(outputs) {
+            let (want,want_id,want_next)=scalar.step(tokens[chat],&expected[chat],|_,_|Ok(())).unwrap();
+            assert_eq!(id,want_id,"step={step} chat={chat}");assert_eq!(bits(&logits),bits(&want),"step={step} chat={chat}");
+            actual[chat]=next;expected[chat]=want_next;tokens[chat]=id;
+        }
+    }
+}
+
+/// Streams 4, hidden 4096 is inside `PHASE_SHAPES`. A cohort wider than 3 rows counts the
+/// three shared phase launches. Three rows counts one fused entry a row. One decoder holds
+/// the retained scratch charge across 4, then 8, then 3 chats at different positions.
+/// The host twin never runs the phase kernels: `Host::rows_begin` walks one row at a time
+/// and owns no scratch plane (`bounded_decoder/host.rs`).
+#[test]
+fn shared_phase_cohorts_match_one_chat_bits_on_the_retained_scratch() {
+    let c=fixture::Checkpoint::build_with(Dtype::Bf16,true,80,false,|d|{d.hidden=4096;d.residual.streams=4;});
+    let (tx,rx)=std::sync::mpsc::channel();
+    let compute=Prepared {tx,rx,calls:Default::default(),batches:Default::default(),working:std::cell::Cell::new(false),attention_probe:std::cell::Cell::new(0),known:Default::default()};
+    let batch=Decoder::new(&c.admission,&compute,80).unwrap();let scalar=Decoder::new(&c.admission,Host,80).unwrap();
+    let scratch=batch.prepared().fused_boundary_scratch().unwrap();
+    assert!(scratch.0>0,"a phase shape retains fused scratch");
+    assert_eq!(scratch.1,scratch.0*spark_gpu_probe::mhc_params::FUSED_SCRATCH_BYTES);
+    let mut actual=(0..8).map(|_|batch.zero_state().unwrap()).collect::<Vec<_>>();
+    let mut expected=(0..8).map(|_|scalar.zero_state().unwrap()).collect::<Vec<_>>();let mut tokens=[1u32;8];
+    let bits=|v:&[f32]|v.iter().map(|v|v.to_bits()).collect::<Vec<_>>();
+    let layers=c.admission.description().layers.len();
+    // Grow 4 to 8, then drop to 3. Nothing is cleared between steps. Chats sit at different positions.
+    for (step,width) in [4usize,5,6,7,8,3].into_iter().enumerate() {
+        let chats=(0..width).map(|i|(i+step*3)%8).rev().collect::<Vec<_>>();
+        let rows=chats.iter().map(|&chat|(tokens[chat],&actual[chat])).collect::<Vec<_>>();
+        BOUNDARY_NODES.with(|n|n.set(0));
+        let outputs=compute.work(||batch.step_batch(&rows)).unwrap();
+        let (streams,hidden)=BOUNDARY_SHAPE.with(|seen|seen.get());
+        assert_eq!((streams,hidden),(4,4096),"step={step} width={width}");
+        assert!(spark_gpu_probe::mhc_params::PHASE_SHAPES.contains(&(streams,hidden)));
+        // Wider than 3: three shared phase nodes. Three chats: one fused entry a row.
+        let per_boundary=if width>3 {3} else {width};
+        assert!(width<=3 || per_boundary<width,"step={step} stayed on one entry a row");
+        BOUNDARY_NODES.with(|n|assert_eq!(n.get(),2*layers*per_boundary,"step={step} width={width}"));
+        assert_eq!(batch.prepared().fused_boundary_scratch().unwrap(),scratch,"step={step} scratch charge moved");
+        for (&chat,(logits,id,next)) in chats.iter().zip(outputs) {
+            let (want,want_id,want_next)=scalar.step(tokens[chat],&expected[chat],|_,_|Ok(())).unwrap();
+            assert_eq!(id,want_id,"step={step} chat={chat}");assert_eq!(bits(&logits),bits(&want),"step={step} chat={chat}");
+            actual[chat]=next;expected[chat]=want_next;tokens[chat]=id;
+        }
+    }
 }
 
 /// The ranks agree on the smallest group any of them funds, charge it, and the lone chat's
@@ -914,7 +1012,7 @@ fn two_chats_keep_their_own_prompts_and_the_limits_refuse_without_stopping_the_s
         let mut live=[engine.session().unwrap(),engine.session().unwrap()];
         for chat in [1,0] {live[chat].prefill(&prompts[chat]).unwrap();}
         let kept=[live[0].fork().unwrap(),live[1].fork().unwrap()];drop(live);
-        assert_eq!(engine.kept_prompts().0,2);assert!(kept[0].retained_bytes().unwrap()>kept[1].retained_bytes().unwrap(),"a longer prompt holds more state");
+        assert_eq!(engine.kept_prompts().0,2);assert_eq!(kept[0].retained_bytes(),kept[1].retained_bytes(),"these prompts fit the same owner pages");
         assert_eq!(engine.kept_prompts().1,kept[0].retained_bytes().unwrap()+kept[1].retained_bytes().unwrap());
         // Their second turns run side by side, each from its own kept prompt.
         let mut live=[kept[0].fork().unwrap(),kept[1].fork().unwrap()];
@@ -1151,6 +1249,8 @@ impl RouteCharge {
 impl Compute for RouteCharge {
     type Value=Vec<f32>;type Pass=<Host as Compute>::Pass;
     fn mhc_row_launches(&self)->u64 {0}
+    fn latent_absorption_chats(&self,name:&str,s:spark_gpu_probe::prompt_ops::Shape,g:&[spark_tp::bounded_decoder::ChatGather<'_,Self::Value>],stride:usize,
+        q:&Self::Value,n:&Self::Value)->spark_tp::Result<Option<Self::Value>> {Host.latent_absorption_chats(name,s,g,stride,q,n)}
     fn memory_bytes(&self)->Option<(usize,usize,usize)> {let b=self.bytes.get();Some((b,b,0))}
     fn rows_charge(&self,bytes:usize) {self.charged.set(bytes);}
     fn rows_verify(&self,on:bool) {self.verify.set(on);}

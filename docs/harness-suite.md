@@ -1,5 +1,7 @@
 # Agent task suite
 
+HTTP links stay on this machine by default; see [network setup](network-setup.md) for SSH tunnels and the explicit opt-in.
+
 The agent task suite measures the Vade coding agent on mixed work, not on one
 kind of task. It has 22 tasks in 11 categories: edits in place, refactors
 over several files, bug fixes with a failing test, new features with tests,

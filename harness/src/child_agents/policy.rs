@@ -254,31 +254,12 @@ pub(crate) fn write_path(path: &str) -> Result<(), ToolError> {
         return Err(ToolError::Denied);
     }
     for part in path.split('/') {
-        let lower = part.to_ascii_lowercase();
         if part.is_empty()
             || part.starts_with('.')
             || !part
                 .bytes()
                 .all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c))
-            || matches!(
-                lower.as_str(),
-                "credentials"
-                    | "credentials.json"
-                    | "secrets"
-                    | "secrets.json"
-                    | "secrets.yaml"
-                    | "secrets.yml"
-                    | "id_rsa"
-                    | "id_dsa"
-                    | "id_ecdsa"
-                    | "id_ed25519"
-                    | "authorized_keys"
-                    | "known_hosts"
-                    | "netrc"
-            )
-            || [".pem", ".key", ".p12", ".pfx", ".keystore"]
-                .iter()
-                .any(|s| lower.ends_with(s))
+            || crate::secret_paths::secret_component_reason(part).is_some()
         {
             return Err(ToolError::Denied);
         }
@@ -296,4 +277,23 @@ pub(crate) fn overlaps(a: &str, b: &str) -> bool {
 
 fn invalid() -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, "invalid child tool scope")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn child_write_scope_uses_every_shared_secret_rule() {
+        for rule in crate::secret_paths::SECRET_PATH_RULES {
+            let component = match rule.match_kind {
+                crate::secret_paths::SecretPathMatch::Exact => rule.value.to_owned(),
+                crate::secret_paths::SecretPathMatch::Prefix => format!("{}synthetic", rule.value),
+                crate::secret_paths::SecretPathMatch::Suffix => format!("synthetic{}", rule.value),
+            };
+            let path = if rule.is_folder() { format!("{component}/made-up.txt") } else { component };
+            assert!(write_path(&path).is_err(), "{path}");
+        }
+        assert!(write_path("ordinary/made-up.txt").is_ok());
+    }
 }

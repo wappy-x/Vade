@@ -137,7 +137,8 @@ pub fn finite(logits:&[f32])->Result<()> {
     if logits.iter().all(|v|v.is_finite()){Ok(())}else{Err(OUTPUT_ERROR.into())}
 }
 pub fn finite_bytes(logits:&[u8])->Result<()> {
-    if logits.as_chunks::<4>().0.iter().all(|v|f32::from_le_bytes(*v).is_finite()){Ok(())}else{Err(OUTPUT_ERROR.into())}
+    let (words,tail)=logits.as_chunks::<4>();
+    if tail.is_empty()&&words.iter().all(|v|f32::from_le_bytes(*v).is_finite()){Ok(())}else{Err(OUTPUT_ERROR.into())}
 }
 
 #[cfg(test)]

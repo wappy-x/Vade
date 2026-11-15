@@ -296,8 +296,9 @@ The flags, request fields and per-key scope are in
   someone else used the cache. With private counts (the two-Spark GLM text
   service) another caller's counts, event lines and device bytes are not
   shown; the shared room remains. Where callers do not trust each other,
-  turn prompt reuse off (`--prefix-cache off`; for the two-Spark GLM text
-  service, run it with prompt keep off).
+  turn prompt reuse off (`--prefix-cache off`; the two-Spark GLM text
+  service keeps prompts by default and takes `--no-prompt-keep` on every
+  rank, which `vade up --cache-bytes 0` gives it).
 
 Shared memory:
 

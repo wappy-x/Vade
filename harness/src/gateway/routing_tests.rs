@@ -29,6 +29,21 @@ fn choose(cluster: &Cluster, key: &str) -> Lease {
         .ok()
         .unwrap()
 }
+
+#[test]
+fn local_lookup_limit_does_not_mark_a_healthy_engine_failed() {
+    let cluster = cluster(RoutingConfig::default());
+    let mut lease = choose(&cluster, "lookup");
+    let index = lease.index();
+    lease.start();
+    lease.local_lookup_limit();
+    drop(lease);
+    let stats = cluster.stats();
+    assert!(stats.endpoints[index].healthy);
+    assert!(!stats.endpoints[index].cooling_down);
+    assert_eq!(stats.endpoints[index].failures, 0);
+    assert_eq!(stats.endpoints[index].in_flight, 0);
+}
 #[test]
 fn execution_signature_separates_weights_tokenizer_template_and_context() {
     let (baseline, _) = Signature::parse(CAPS).unwrap();

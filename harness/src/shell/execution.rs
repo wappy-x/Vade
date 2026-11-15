@@ -55,22 +55,27 @@ pub(super) fn profile(
         );
     }
     let excluded_access = exclusions.access_denial();
-    let credential_paths = ascii_case_pattern(&format!(
-        "/({})(/|$)",
-        crate::tools::CREDENTIAL_NAMES
-            .iter()
-            .map(|n| n.replace('.', "\\."))
-            .collect::<Vec<_>>()
-            .join("|")
-    ));
-    let credential_extensions = ascii_case_pattern(&format!(
-        "\\.({})(/|$)",
-        crate::tools::CREDENTIAL_SUFFIXES
-            .iter()
-            .map(|s| s[1..].replace('.', "\\."))
-            .collect::<Vec<_>>()
-            .join("|")
-    ));
+    // Keep each sandbox regex short. The expanded case-insensitive form can
+    // exceed the macOS parser's string limit when the protected-name list grows.
+    let secret_paths = [crate::tools::SecretPathMatch::Exact, crate::tools::SecretPathMatch::Prefix, crate::tools::SecretPathMatch::Suffix]
+        .into_iter()
+        .flat_map(|match_kind| {
+            let values: Vec<String> = crate::tools::SECRET_PATH_RULES.iter()
+                .filter(|rule| rule.match_kind == match_kind)
+                .map(|rule| rule.value.replace('.', "\\."))
+                .collect();
+            values.chunks(8).map(|values| {
+                let values = values.join("|");
+                let regex = match match_kind {
+                    crate::tools::SecretPathMatch::Exact => format!("/({values})(/|$)"),
+                    crate::tools::SecretPathMatch::Prefix => format!("/({values})[^/]*(/|$)"),
+                    crate::tools::SecretPathMatch::Suffix => format!("/[^/]*({values})(/|$)"),
+                };
+                format!("#\"{}\"", ascii_case_pattern(&regex))
+            }).collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
     // First-party minimal policy, using the OS sandbox language (not copied
     // profiles). No default-allow fallback. .vade journals cannot be accessed.
     // Explicit foreign process-info/procargs denies are necessary: on this OS
@@ -95,7 +100,7 @@ pub(super) fn profile(
 (deny file-link)
 {excluded_access}
 (deny file-read-data file-write* (require-all (regex #"/\.[^/]+(/|$)") (require-not (require-any {private_reads}))))
-(deny file-read-data file-write* (regex #"{credential_paths}" #"{credential_extensions}"))
+(deny file-read-data file-write* (regex {secret_paths}))
 "#
     ))
 }

@@ -1162,10 +1162,15 @@ prompt took, and from that roughly how long it was. On this server
 caller. The two-Spark GLM text service hides those: it shows no count, no
 event line and no device byte figure of the cache on `/health`,
 `/v1/events` or in a reply; the shared room remains. Where callers do not
-trust each other, turn prompt reuse off: `--prefix-cache off` here, and for
-the two-Spark GLM text service run it with prompt keep off (it keeps
-prompts only when started with `--prompt-keep`; a build that keeps them by
-default has `--no-prompt-keep`).
+trust each other, turn prompt reuse off: `--prefix-cache off` here. The
+two-Spark GLM text service keeps prompts by default: start every rank of it
+with `--no-prompt-keep` (`vade up --cache-bytes 0` does that). That service's
+start line ends with the cache's room: `cache=true kept_cap_bytes=N
+largest_kept_prompt_tokens=M`, the byte cap and the longest prompt whose
+planned charge fits under it (the cache books a real prompt by the bytes its
+state holds on the device, so the real limit can differ). At a large context the room can be small. When the longest prompt is
+under 1,024 tokens the service prints one `TEXT PROMPT KEEP` line that says
+so; a smaller `--context` gives the cache room.
 
 **Saved conversations with a secret.** A client can also hold on to one
 conversation explicitly:

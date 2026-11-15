@@ -77,12 +77,34 @@ pub(crate) fn tool_label(name: &str, args: &vade_harness::json::Value) -> String
 }
 
 impl App {
+    /// Both input modes use the displayed numbers and only the y/n aliases.
+    pub(crate) fn approval_answer(&self, key: &str) -> Option<&'static str> {
+        match vade_harness::approval_prompt::answer_key(key) {
+            Some(1) => Some("/approve"),
+            Some(2) => Some("/deny"),
+            Some(3) if self.approval_choices & 4 != 0 => Some("/approve session"),
+            Some(4) if self.approval_command && self.approval_choices & 8 != 0 => Some("/approve project"),
+            Some(4) if self.approval_reach && self.approval_choices & 8 != 0 => Some("/approve always"),
+            _ => None,
+        }
+    }
+    pub(crate) fn answer_approval_key(&mut self, key: &str) -> std::io::Result<bool> {
+        if vade_harness::approval_prompt::answer_key(key) == Some(5) {
+            return self.terminal.show_approval_details();
+        }
+        if let Some(answer) = self.approval_answer(key) {
+            self.line_input(answer.into())?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
     pub(crate) fn close_approval(&mut self) -> Option<ApprovalReply> {
         let reply = self.approval_reply.take();
         if let Some(reply) = &reply {
             reply.close();
         }
         self.approval_shown = None;
+        self.approval_choices = 0;
         self.terminal.close_approval();
         reply
     }
@@ -122,7 +144,7 @@ impl App {
         {
             return Ok(false);
         }
-        self.notice("Approval still pending; draft retained. Press y or n on an empty line, or /approve, /deny; /cancel cancels the run and declines.")?;
+        self.notice("Approval still pending; draft retained. Press 1 or 2 on an empty line, or /approve, /deny; /cancel cancels the run and declines.")?;
         Ok(true)
     }
 }
@@ -238,19 +260,26 @@ impl ToolPreviews {
             }
         };
         let detail = match child {
-            Some(id) => format!(
-                "Child {id} · parent approval policy applies\n{}",
-                preview.detail
-            ),
+            Some(id) => match preview.detail.split_once('\n') {
+                Some((first, rest)) => format!("{first}\nThis request comes from child {id}; the parent approval policy applies.\n{rest}"),
+                None => format!("{}. This request comes from child {id}; the parent approval policy applies.", preview.detail.trim_end_matches('.')),
+            },
             None => preview.detail.to_owned(),
         };
+        let mut prompt = preview.prompt.cloned();
+        if let (Some(id), Some(prompt)) = (child, prompt.as_mut()) {
+            prompt.sentences.push(format!("This request comes from child {id}; the parent approval policy applies."));
+        }
+        let details = preview.details.map(str::to_owned);
         // Each tool already bounds its preview. Lifetime display volume must
         // never silently revoke an approval or cancel a long-running task.
         *bytes = detail.len();
         request_tool_preview_with_budget(
             &self.tx,
             coding_tools::Preview {
+                prompt: prompt.as_ref(),
                 detail: &detail,
+                details: details.as_deref(),
                 ..preview
             },
             cancel,
@@ -282,8 +311,10 @@ pub(crate) fn request_tool_preview_with_budget(
         }
         if tx
             .fact(WorkerEvent::ToolPreview {
+                prompt: preview.prompt.cloned(),
                 title: preview.title.into(),
                 detail: preview.detail.into(),
+                details: preview.details.map(str::to_owned),
                 reply: preview.approval_required.then(|| reply.clone()),
             })
             .is_ok()
@@ -366,9 +397,10 @@ mod tests {
         let (tx, rx) = interaction::lanes();
         let cancel = AtomicBool::new(false);
         assert!(tx.render(&"x".repeat(128 * 1024)));
-        let preview = || coding_tools::Preview {
+        let preview = || coding_tools::Preview { prompt: None,
             title: "Command",
             detail: "exact operation",
+            details: None,
             approval_required: false,
         };
         assert!(request_tool_preview(&tx, preview(), &cancel));

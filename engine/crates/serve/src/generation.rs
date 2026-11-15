@@ -195,6 +195,7 @@ impl<S: Session> Generation<S> {
     }
     pub fn prepare<E: Engine>(&mut self, engine: &E, prompt: &[u32], max_tokens: usize,
         row_cap: usize, chats: usize, allowed: impl Fn(u32) -> bool) -> Result<(Option<Work>, Vec<Event>), String> {
+        if let Some(spec) = &self.draft { spec.check_greedy_error()?; }
         let pos = self.state.tokens.len();
         if pos < prompt.len() {
             let end = (pos+row_cap).min(prompt.len());
@@ -282,7 +283,14 @@ impl<S: Session> Generation<S> {
                 self.state.tokens.len()+i+1, &allowed)
                 }).collect::<Option<Vec<_>>>()
         } else { None };
-        if matches!(&prediction, Predictions::Greedy(ids) if ids.iter().any(|&id| !allowed(id)))
+        let unmasked = self.state.session.reject_unmapped_greedy();
+        let invalid_greedy = matches!(&prediction, Predictions::Greedy(ids) if ids.iter().any(|&id| !allowed(id)));
+        // A draft checks only the consumed prefix, including its next choice.
+        // Rejected suffix rows and choices after EOS or the limit are unused.
+        if unmasked && invalid_greedy && !matches!(&work, Work::Draft(_)) {
+            return Err(spark_engine::draft::UNMAPPED_GREEDY.into());
+        }
+        if invalid_greedy && !unmasked
             || matches!(&prediction, Predictions::TopK(_)) && selected.is_none() {
             // Flash retains canonical verifier rows but cannot rewind below the
             // first verified token. Read those rows without replaying the target;
@@ -343,7 +351,7 @@ impl<S: Session> Generation<S> {
                     Predictions::Logits(rows) => {
                         spec.finish_exact(target, plan, &rows, stop, allowed)?
                     }
-                    Predictions::Greedy(ids) => spec.finish_greedy(target, plan, &ids, stop)?,
+                    Predictions::Greedy(ids) => spec.finish_greedy_filtered(target, plan, &ids, stop, allowed)?,
                     Predictions::TopK(rows) => {
                         if spec.sampled_verifier() {
                         spec.finish_speculative_top_k(target, plan, &rows, stop, allowed)?
@@ -398,13 +406,15 @@ impl<S: Session> Generation<S> {
         }
         let first = self.usage.completion_tokens == 0;
         let started = std::time::Instant::now();
+        let unmasked = state.session.reject_unmapped_greedy() && self.sampler.plain_greedy();
         let token = self.sampler.sample(
             &state.next_logits,
             &state.tokens,
             prompt.len(),
             prompt.len() + self.usage.completion_tokens,
-            allowed,
+            |id| unmasked || allowed(id),
         )?;
+        if unmasked && !allowed(token) { return Err(spark_engine::draft::UNMAPPED_GREEDY.into()); }
         if first && std::env::var("SPARK_PROFILE").as_deref() == Ok("1") {
             eprintln!("request_first_decode_profile sample_ms={:.3} device_step=false", started.elapsed().as_secs_f64()*1000.0);
         }
@@ -537,3 +547,7 @@ mod bounded_fallback_tests {
         assert_eq!(events,vec![Event::Token(1)]);assert_eq!(reads.get(),1);
     }
 }
+
+#[cfg(test)]
+#[path="generation_padding_tests.rs"]
+mod padding_tests;

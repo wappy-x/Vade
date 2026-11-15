@@ -45,6 +45,8 @@ impl Compute for Folding {
     fn gather_absorbed(&self,s:Shape,x:[Option<&V>;4],reserve:usize,expected:f32)->spark_tp::Result<V> {Host.gather_absorbed(s,x,reserve,expected)}
     fn latent_absorption(&self,name:&str,s:Shape,q:&V,l:&V,n:&V,slots:usize)->spark_tp::Result<V> {Host.latent_absorption(name,s,q,l,n,slots)}
     fn latent_absorption_rows(&self,name:&str,s:spark_gpu_probe::prompt_ops::Shape,q:&V,l:&V,n:&V)->spark_tp::Result<V> {Host.latent_absorption_rows(name,s,q,l,n)}
+    fn latent_absorption_chats(&self,name:&str,s:spark_gpu_probe::prompt_ops::Shape,g:&[spark_tp::bounded_decoder::ChatGather<'_,V>],stride:usize,q:&V,n:&V)
+        ->spark_tp::Result<Option<V>> {Host.latent_absorption_chats(name,s,g,stride,q,n)}
 }
 #[test]
 fn a_refused_stage_still_folds_the_routed_down_with_the_shared_row() {

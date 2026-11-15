@@ -167,6 +167,7 @@ impl Session {
                 Ok(())
             })();
             summary.released += usize::from(result.is_ok());
+            if result.as_ref().is_err_and(|error| crate::http_policy::refusal(error).is_some()) { break; }
         }
         summary
     }

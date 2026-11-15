@@ -345,6 +345,7 @@ fn replay_one(origin: &Origin, saved: &Saved, log: Option<&StatsLog>) -> io::Res
             &mut None,
         ).map(drop)
     });
+    if result.as_ref().is_err_and(|e| crate::http_policy::refusal(e).is_some()) { return result; }
     metrics.finish(result.is_ok());
     let line = metrics.json();
     if let Some(log) = log {
@@ -363,6 +364,7 @@ pub(super) fn replay(mut args: impl Iterator<Item = String>) -> io::Result<()> {
     let mut stats_path = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--allow-plain-http" => crate::http_policy::allow_plain_http(),
             "--upstream" => url = Some(argument(&mut args, "--upstream")?),
             "--stats" => stats_path = Some(argument(&mut args, "--stats")?),
             "--concurrency" => {
@@ -386,14 +388,17 @@ pub(super) fn replay(mut args: impl Iterator<Item = String>) -> io::Result<()> {
     if sessions.is_empty() {
         return Err(transport::invalid("no complete recorded sessions"));
     }
-    let stats = stats_path.as_deref().map(StatsLog::open).transpose()
-        .map_err(|error| io::Error::new(error.kind(), ReplayOutputFailure::StatisticsFile))?
-        .map(Arc::new);
+    let opened = stats_path.as_deref().map(StatsLog::open_tracked).transpose()
+        .map_err(|error| io::Error::new(error.kind(), ReplayOutputFailure::StatisticsFile))?;
+    let stats_created = opened.as_ref().is_some_and(|(_, created)| *created);
+    let stats = opened.map(|(log, _)| Arc::new(log));
     let queue = Arc::new(Mutex::new(VecDeque::from(sessions)));
     let failed = Arc::new(AtomicBool::new(false));
     let output_failed = Arc::new(AtomicUsize::new(0));
+    let refused = Arc::new(AtomicBool::new(false));
     let mut workers = Vec::new();
     for _ in 0..concurrency {
+        let refused = refused.clone();
         let (queue, failed, output_failed, origin, stats) =
             (queue.clone(), failed.clone(), output_failed.clone(), origin.clone(), stats.clone());
         workers.push(
@@ -401,7 +406,7 @@ pub(super) fn replay(mut args: impl Iterator<Item = String>) -> io::Result<()> {
                 .name("gateway-replay".into())
                 .spawn(move || {
                     loop {
-                        if output_failed.load(Ordering::Acquire) != 0 {
+                        if refused.load(Ordering::Acquire) || output_failed.load(Ordering::Acquire) != 0 {
                             break;
                         }
                         let session = queue.lock().unwrap_or_else(|p| p.into_inner()).pop_front();
@@ -409,10 +414,11 @@ pub(super) fn replay(mut args: impl Iterator<Item = String>) -> io::Result<()> {
                             break;
                         };
                         for saved in session {
-                            if output_failed.load(Ordering::Acquire) != 0 {
+                            if refused.load(Ordering::Acquire) || output_failed.load(Ordering::Acquire) != 0 {
                                 break;
                             }
                             if let Err(error) = replay_one(&origin, &saved, stats.as_deref()) {
+                                if crate::http_policy::refusal(&error).is_some() { refused.store(true, Ordering::Release); }
                                 if let Some(failure) = error.get_ref().and_then(|inner| inner.downcast_ref::<ReplayOutputFailure>()) {
                                     let _ = output_failed.compare_exchange(0, *failure as usize, Ordering::AcqRel, Ordering::Acquire);
                                 }
@@ -428,6 +434,11 @@ pub(super) fn replay(mut args: impl Iterator<Item = String>) -> io::Result<()> {
         if worker.join().is_err() {
             failed.store(true, Ordering::Relaxed);
         }
+    }
+    if refused.load(Ordering::Acquire) {
+        drop(stats);
+        if stats_created { fs::remove_file(stats_path.as_deref().unwrap())?; }
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "plain HTTP refused; replay stopped"));
     }
     if output_failed.load(Ordering::Acquire) != 0 {
         Err(io::Error::other(if output_failed.load(Ordering::Acquire) == 1 {

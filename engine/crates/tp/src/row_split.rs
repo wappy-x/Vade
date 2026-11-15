@@ -4,10 +4,17 @@ use engine_model::plan::{admission::CheckpointAdmission,layer::Topology};
 use spark_gpu_probe::{causal_ops::{Shape,Op},norm_boundary::NormShape};
 use std::{cell::{Cell,RefCell},collections::BTreeMap};
 mod batch;
+#[cfg(test)] mod validation_tests;
+mod kept_charge;
+#[cfg(test)] mod kept_charge_tests;
+#[cfg(test)] mod kept_admission_tests;
+#[cfg(all(test,target_os="linux"))] mod kept_device_tests;
+#[cfg(all(test,target_os="linux"))] mod kept_device_cache;
 /// In the row count of a prompt group command: this group ends its prompt (decode steps follow).
 const LAST_GROUP:u32=1<<31;
 /// Prompts a service keeps on each rank at once (`Session::fork`). As many as it runs chats.
 pub const KEPT_PROMPTS:usize=8;
+pub const LIVE_SESSIONS:usize=crate::bounded_decoder::BATCH_ROWS;
 pub trait Exchange {
     fn topology(&self)->Topology;
     fn gather(&mut self,local:&[f32],rows:usize)->Result<Vec<f32>>;
@@ -73,6 +80,8 @@ pub fn limits(context:usize,output:usize)->Result<spark_serve::Limits> {
 impl<C:Compute,E:Exchange> Compute for Split<C,E> {
     fn work<T>(&self,run:impl FnOnce()->Result<T>)->Result<T> {self.compute.work(run)}
     fn resident_weights_ready(&self)->bool {self.compute.resident_weights_ready()}
+    fn memo_summary(&self,c:&CheckpointAdmission)->Option<crate::projection_memo::Summary> {self.compute.memo_summary(c)}
+    fn freeze_memo(&self,p:crate::projection_memo::Plan)->Result<crate::projection_memo::Plan> {self.compute.freeze_memo(p)}
     // Forwarded by hand: a default here would print zeros for the device.
     fn capture_counts(&self)->[u64;4] {self.compute.capture_counts()}
     fn fatal_error(&self)->Option<String> {self.compute.fatal_error()}
@@ -80,6 +89,7 @@ impl<C:Compute,E:Exchange> Compute for Split<C,E> {
     fn vector_allocations(&self)->Option<(usize,usize)> {self.compute.vector_allocations()}
     fn vector_pool_counts(&self)->Option<(usize,usize,usize)> {self.compute.vector_pool_counts()}
     type Value=C::Value;type Pass=C::Pass;
+    fn state_allocations(&self,v:&C::Value,out:&mut Vec<(usize,usize)>)->bool {self.compute.state_allocations(v,out)}
     fn plan_cost(&self,name:&str,ns:u128) {self.compute.plan_cost(name,ns)}
     fn serving_trace(&self)->bool {self.compute.serving_trace()}
     fn profile_tick_begin(&self,tick:u64) {self.compute.profile_tick_begin(tick)}
@@ -97,6 +107,8 @@ impl<C:Compute,E:Exchange> Compute for Split<C,E> {
     fn has_latent_absorption(&self,name:&str)->bool {self.compute.has_latent_absorption(name)}
     fn latent_absorption(&self,name:&str,shape:Shape,query:&C::Value,latent:&C::Value,count:&C::Value,slots:usize)->Result<C::Value> {self.compute.latent_absorption(name,shape,query,latent,count,slots)}
     fn latent_absorption_rows(&self,name:&str,shape:spark_gpu_probe::prompt_ops::Shape,query:&C::Value,latent:&C::Value,selected:&C::Value)->Result<C::Value> {self.compute.latent_absorption_rows(name,shape,query,latent,selected)}
+    fn latent_absorption_chats(&self,name:&str,shape:spark_gpu_probe::prompt_ops::Shape,gathers:&[crate::bounded_decoder::ChatGather<'_,C::Value>],stride:usize,
+        query:&C::Value,selected:&C::Value)->Result<Option<C::Value>> {self.compute.latent_absorption_chats(name,shape,gathers,stride,query,selected)}
     fn planar_kda(&self,shape:Shape)->bool {self.compute.planar_kda(shape)}
     fn prepare(&self,c:&engine_model::plan::admission::CheckpointAdmission)->Result<()> {self.compute.prepare(c)}
     fn prepare_beside(&self,c:&engine_model::plan::admission::CheckpointAdmission,live:usize)->Result<()> {self.compute.prepare_beside(c,live)}
@@ -189,12 +201,15 @@ impl<C:Compute,E:Exchange> Compute for Split<C,E> {
 impl<C:Compute> Compute for &C {
     fn work<T>(&self,run:impl FnOnce()->Result<T>)->Result<T> {(**self).work(run)}
     fn resident_weights_ready(&self)->bool {(**self).resident_weights_ready()}
+    fn memo_summary(&self,c:&CheckpointAdmission)->Option<crate::projection_memo::Summary> {(**self).memo_summary(c)}
+    fn freeze_memo(&self,p:crate::projection_memo::Plan)->Result<crate::projection_memo::Plan> {(**self).freeze_memo(p)}
     fn capture_counts(&self)->[u64;4] {(**self).capture_counts()}
     fn fatal_error(&self)->Option<String> {(**self).fatal_error()}
     fn memory_bytes(&self)->Option<(usize,usize,usize)> {(**self).memory_bytes()}
     fn vector_allocations(&self)->Option<(usize,usize)> {(**self).vector_allocations()}
     fn vector_pool_counts(&self)->Option<(usize,usize,usize)> {(**self).vector_pool_counts()}
     type Value=C::Value;type Pass=C::Pass;
+    fn state_allocations(&self,v:&C::Value,out:&mut Vec<(usize,usize)>)->bool {(**self).state_allocations(v,out)}
     fn plan_cost(&self,name:&str,ns:u128) {(**self).plan_cost(name,ns)}
     fn serving_trace(&self)->bool {(**self).serving_trace()}
     fn profile_tick_begin(&self,tick:u64) {(**self).profile_tick_begin(tick)}
@@ -214,6 +229,8 @@ impl<C:Compute> Compute for &C {
     fn has_latent_absorption(&self,name:&str)->bool {(**self).has_latent_absorption(name)}
     fn latent_absorption(&self,name:&str,shape:Shape,query:&C::Value,latent:&C::Value,count:&C::Value,slots:usize)->Result<C::Value> {(**self).latent_absorption(name,shape,query,latent,count,slots)}
     fn latent_absorption_rows(&self,name:&str,shape:spark_gpu_probe::prompt_ops::Shape,query:&C::Value,latent:&C::Value,selected:&C::Value)->Result<C::Value> {(**self).latent_absorption_rows(name,shape,query,latent,selected)}
+    fn latent_absorption_chats(&self,name:&str,shape:spark_gpu_probe::prompt_ops::Shape,gathers:&[crate::bounded_decoder::ChatGather<'_,C::Value>],stride:usize,
+        query:&C::Value,selected:&C::Value)->Result<Option<C::Value>> {(**self).latent_absorption_chats(name,shape,gathers,stride,query,selected)}
     fn planar_kda(&self,shape:Shape)->bool {(**self).planar_kda(shape)}
     fn prepare(&self,c:&engine_model::plan::admission::CheckpointAdmission)->Result<()> {(**self).prepare(c)}
     fn prepare_beside(&self,c:&engine_model::plan::admission::CheckpointAdmission,live:usize)->Result<()> {(**self).prepare_beside(c,live)}
@@ -331,16 +348,17 @@ fn service_charges_owned(checkpoint:&CheckpointAdmission,topology:Option<Topolog
     let reservation=reservation.max(session);
     Ok((reservation,workspace))
 }
-#[derive(Clone,Copy)]
-struct KeptAccount {bytes:usize,limit:usize,faults:u64,prepare_faults:u64}
-impl KeptAccount {const fn new()->Self {Self {bytes:0,limit:usize::MAX,faults:0,prepare_faults:0}}}
-struct KeptSlot<V> {parked:Box<crate::bounded_decoder::Parked<V>>,_layout:[usize;6]}
-impl<V> KeptSlot<V> {fn new(parked:crate::bounded_decoder::Parked<V>)->Self {Self {parked:Box::new(parked),_layout:[0;6]}}}
+struct KeptAccount {owners:crate::bounded_decoder::owners::Ledger,limit:usize,faults:u64,prepare_faults:u64,lost_faults:u64}
+impl KeptAccount {const fn new()->Self {Self {owners:crate::bounded_decoder::owners::Ledger::new(),limit:usize::MAX,faults:0,prepare_faults:0,lost_faults:0}}}
+/// `gone`: the ranks found that one of them no longer holds this prompt (`Factory::kept_ready`). It restores nothing
+/// from then on, and its drop sends no release: the other rank has already forgotten it.
+struct KeptSlot<V> {parked:Box<crate::bounded_decoder::Parked<V>>,gone:std::cell::Cell<bool>,_layout:[usize;5]}
+impl<V> KeptSlot<V> {fn new(parked:crate::bounded_decoder::Parked<V>)->Self {Self {parked:Box::new(parked),gone:std::cell::Cell::new(false),_layout:[0;5]}}}
 impl<V> std::ops::Deref for KeptSlot<V> {type Target=crate::bounded_decoder::Parked<V>;fn deref(&self)->&Self::Target {&self.parked}}
 /// Independent request states advance in the controller scheduler order. The checkpoint and projection owners outlive all sessions.
 /// `tails`: for a service with the predictor loaded, each chat's last prompt groups (tokens and
 /// hidden rows, the fewest groups that hold PROMPT_TRAIL rows) until its first verify pass takes them.
-pub struct Factory<'f,C:Compute,E> {checkpoint:&'f CheckpointAdmission,split:Split<C,E>,context:usize,eos:Vec<u32>,prepared:crate::bounded_decoder::Prepared<'f>,reservation:usize,workspace:usize,resident:usize,
+pub struct Factory<'f,C:Compute,E> {checkpoint:&'f CheckpointAdmission,split:Split<C,E>,context:usize,eos:Vec<u32>,prepared:crate::bounded_decoder::Prepared<'f>,reservation:usize,workspace:usize,resident:usize,memo_admitted:bool,
     /// Rows of the prompt group a chat reads in while no other chat waits. `negotiate_prompt_group` sets it.
     group:usize,active:Cell<usize>,next_id:Cell<u64>,failed:Cell<bool>,failure:RefCell<Option<String>>,predictor:usize,charge_plan:crate::admission_plan::SessionChargePlan,with_layer:Option<crate::admission_plan::StateChargePlan>,tails:RefCell<BTreeMap<u64,Vec<(Vec<u32>,crate::bounded_decoder::OpenRows<C::Value>)>>>,
     /// DEFAULT DRAFTING. `trial_always`: test control. `trial_counts`: trials that started real drafting, real drafting that stopped, trials that gave up.
@@ -349,7 +367,7 @@ pub struct Factory<'f,C:Compute,E> {checkpoint:&'f CheckpointAdmission,split:Spl
     /// Print only: when the last served batch step ended (the SERVED BATCH line gives the time since then).
     batch_ended:Cell<Option<std::time::Instant>>,
     /// Whether sessions of this service can be forked (`with_prompt_keep`). Off: no prompt is kept, as before.
-    keep:bool,
+    keep:bool,#[cfg(test)] kept_tail:kept_charge::Tail,
     /// The prompts this rank keeps now, and the cold account of their bytes, byte cap, and test fault masks (`None` off).
     kept:Cell<usize>,kept_account:Cell<Option<Box<KeptAccount>>>}
 /// The worker rank's live sessions by number: decoder, committed state, open verify rows.
@@ -361,9 +379,10 @@ impl<'f,C:Compute,E:Exchange> Factory<'f,C,E> {
         let prepared=Decoder::new(checkpoint,&split,context as u64)?.prepared();
         let topology=split.sparse_topology();
         let (reservation,workspace)=sparse_service_charges(checkpoint,topology,context,split.resident_weights_ready())?;
+        let workspace=workspace.checked_add(prepared.fused_boundary_scratch()?.1).ok_or("boundary workspace charge overflow")?;
         if eos.is_empty() || eos.iter().any(|&id|u64::from(id)>=checkpoint.description().vocab) {return Err("service EOS set is invalid".into());}
         let resident=split.memory_bytes().map_or(0,|m|m.0);
-        Ok(Self {checkpoint,split,context,eos,prepared,reservation,workspace,resident,group:crate::bounded_decoder::PROMPT_GROUP,active:Cell::new(0),next_id:Cell::new(1),failed:Cell::new(false),batch_ended:Cell::new(None),failure:RefCell::new(None),predictor:0,charge_plan:crate::admission_plan::SessionChargePlan::for_sparse_heads(checkpoint.description(),topology,context)?,with_layer:None,tails:RefCell::new(BTreeMap::new()),trial_always:Cell::new(false),trial_counts:Cell::new([0;3]),answer_marker:Cell::new(None),keep:false,kept:Cell::new(0),kept_account:Cell::new(None)})
+        Ok(Self {checkpoint,split,context,eos,prepared,reservation,workspace,resident,memo_admitted:false,group:crate::bounded_decoder::PROMPT_GROUP,active:Cell::new(0),next_id:Cell::new(1),failed:Cell::new(false),batch_ended:Cell::new(None),failure:RefCell::new(None),predictor:0,charge_plan:crate::admission_plan::SessionChargePlan::for_sparse_heads(checkpoint.description(),topology,context)?,with_layer:None,tails:RefCell::new(BTreeMap::new()),trial_always:Cell::new(false),trial_counts:Cell::new([0;3]),answer_marker:Cell::new(None),keep:false,#[cfg(test)] kept_tail:kept_charge::Tail::new(checkpoint.description(),topology)?,kept:Cell::new(0),kept_account:Cell::new(None)})
     }
     /// Let the server's prompt cache fork this service's sessions (`Session::fork`). Every rank of the service
     /// makes the same call. Without it a session cannot be forked and no prompt is kept.
@@ -371,52 +390,104 @@ impl<'f,C:Compute,E:Exchange> Factory<'f,C,E> {
     #[cold] #[inline(never)]
     fn take_account(&self)->Box<KeptAccount> {match self.kept_account.take() {Some(account)=>account,None=>Box::new(KeptAccount::new())}}
     #[cold] #[inline(never)]
-    fn kept_bytes(&self)->usize {let slot=self.kept_account.take();let bytes=match &slot {Some(a)=>a.bytes,None=>0};self.kept_account.set(slot);bytes}
+    fn kept_bytes(&self)->usize {let slot=self.kept_account.take();let bytes=match &slot {Some(a)=>a.owners.bytes(),None=>0};self.kept_account.set(slot);bytes}
+    /// What one kept prompt of `tokens` tokens is PLANNED to cost on this rank, for the service's start line only: the
+    /// loose invoice of `kept_charge` (every state plane at that length, the append room, and the output of a short last
+    /// prompt group that the state can pin). The cache itself charges what a kept prompt's state really holds on the
+    /// device (`park_within`, the owner ledger), which this does not read: no prompt exists at start.
+    #[cold] #[inline(never)]
+    pub fn kept_prompt_bytes(&self,tokens:usize)->usize {
+        let Ok(tail)=kept_charge::Tail::new(self.checkpoint.description(),self.split.sparse_topology()) else {return usize::MAX;};
+        self.planned_charge(tokens as u64,&tail)
+    }
     /// The prompts this rank keeps now and the bytes they hold.
     #[cold] #[inline(never)]
     pub fn kept_prompts(&self)->(usize,usize) {let count=self.kept.get();(count,if count==0 {0} else {self.kept_bytes()})}
+    #[cfg(all(test,target_os="linux"))]
+    fn kept_owner_count(&self)->usize {let slot=self.kept_account.take();let count=slot.as_ref().map_or(0,|a|a.owners.owner_count());self.kept_account.set(slot);count}
     /// The byte cap of kept prompts: `pool` (the session pool the ranks agreed on) less one full session. So kept
     /// prompts alone can never take the room of a full-size chat, whatever the cache above counts. The cache's own
     /// rule is the finer one: it holds kept bytes inside what the live chats' reservations leave of the pool, and
     /// gives bytes back before a chat is admitted. Rank 0 decides every keep, so only its cap is read.
-    /// Returns the cap. The server gives the SAME number to its cache as the cache's byte bound: the cache counts
-    /// at least `kept_charge` for each kept prompt, so a keep the cache has room for is never refused here, and the
-    /// cache gives back its least recently used prompt before it asks for one more.
+    /// The server gives the same cap to its cache. Both count the parked state's owners.
+    /// The cache adds its metadata and gives back its least recently used prompt before a new keep.
     #[cold] #[inline(never)]
     pub fn keep_within(&self,pool:usize)->usize {let cap=pool.saturating_sub(self.reservation);let mut account=self.take_account();account.limit=cap;self.kept_account.set(Some(account));cap}
     /// The byte cap of kept prompts on this rank (`keep_within`).
     #[cold] #[inline(never)]
     pub fn kept_limit_bytes(&self)->usize {let slot=self.kept_account.take();let limit=match &slot {Some(a)=>a.limit,None=>usize::MAX};self.kept_account.set(slot);limit}
-    /// What a kept prompt of `position` tokens is charged on this rank: every plane of its state at that length and
-    /// the room behind its row buffers, which the kept handles keep alive. With the predictor loaded it is charged
-    /// the predictor layer's planes too, though a parked prompt does not hold them (they live with a chat's open
-    /// rows): an upper number, never under. Its expanded rows are dropped when it is kept (`park_state`), so they are
-    /// not in it. While the chat it was kept from lives, the two share these planes and both are charged: upper again.
+    /// The previous loose invoice, kept to compare the regression receipts. The start line reads the same sum
+    /// (`kept_prompt_bytes`).
+    #[cfg(test)]
     #[cold] #[inline(never)]
-    fn kept_charge(&self,position:u64)->usize {
+    fn kept_charge(&self,position:u64)->usize {self.planned_charge(position,&self.kept_tail)}
+    /// The loose invoice of a kept prompt of `position` tokens: the state planes at that length (with the predictor
+    /// layer's when it is loaded), the append room, and `tail`, the short-group output its state can pin.
+    #[cold] #[inline(never)]
+    fn planned_charge(&self,position:u64,tail:&kept_charge::Tail)->usize {
         let Ok(tokens)=usize::try_from(position) else {return usize::MAX;};let tokens=tokens.max(1);
-        match &self.with_layer {
+        let state=match &self.with_layer {
             Some(plan)=>{let Ok(b)=plan.bytes(tokens) else {return usize::MAX;};b.saturating_add(plan.append_reservation_bytes())},
-            None=>{let Ok(b)=self.charge_plan.state_bytes(tokens) else {return usize::MAX;};b.saturating_add(self.charge_plan.append_reservation_bytes())}}
+            None=>{let Ok(b)=self.charge_plan.state_bytes(tokens) else {return usize::MAX;};b.saturating_add(self.charge_plan.append_reservation_bytes())}};
+        state.saturating_add(tail.bytes(tokens))
     }
-    /// Whether one more kept prompt of `position` tokens stays under the byte cap. Checked on rank 0 before any command.
+    /// Whether another exact owner charge fits. Rank 0 checks before a command; both ranks check at park time.
     #[cold] #[inline(never)]
-    fn kept_fits(&self,position:u64)->bool {let Some(bytes)=self.kept_bytes().checked_add(self.kept_charge(position)) else {return false;};bytes<=self.kept_limit_bytes()}
+    fn kept_fits(&self,owners:&crate::bounded_decoder::owners::Owners)->bool {
+        let slot=self.kept_account.take();let fits=match &slot {
+            Some(a)=>a.owners.additional(owners).and_then(|n|a.owners.bytes().checked_add(n)).is_some_and(|n|n<=a.limit),
+            None=>owners.bytes()<usize::MAX};self.kept_account.set(slot);fits
+    }
+    #[cold] #[inline(never)]
+    #[cfg(test)]
+    fn parked_charge<V>(&self,state:&crate::bounded_decoder::Parked<V>)->usize {state.retained_bytes().unwrap_or(usize::MAX)}
+    #[cold] #[inline(never)]
+    fn state_charge(&self,state:&State<C::Value>)->Option<usize> {crate::bounded_decoder::state_owner_bytes(&self.split,state)}
+    #[cold] #[inline(never)]
+    fn park_within(&self,state:&State<C::Value>)->Result<crate::bounded_decoder::Parked<C::Value>> {
+        let parked=crate::bounded_decoder::park_state(&self.split,state)?;
+        let owners=parked.owners().ok_or("row split backend has no kept state owner metadata")?;
+        if !self.kept_fits(owners) {return Err("row split service has no bytes for one more kept prompt".into());}Ok(parked)
+    }
     /// Test only: bit `n` set means this rank's keep or resume number `n` from now ends refused, as a refused
     /// allocation at its end would. A server never calls it, so no keep or resume is refused by it.
     #[cold] #[inline(never)]
     pub fn refuse_kept_work(&self,which:u64) {let mut account=self.take_account();account.faults=which;self.kept_account.set(Some(account));}
     #[cold] #[inline(never)]
     fn take_kept_fault(&self)->bool {let Some(mut account)=self.kept_account.take() else {return false;};let fault=(account.faults&1).ne(&0);account.faults>>=1;self.kept_account.set(Some(account));fault}
-    /// Test only: bit `n` set means this rank's resume number `n` from now fails where the chat's decoder is prepared,
-    /// as a failed collective of the shared budget would. A server never calls it.
+    /// Test only: bit `n` set means this rank's resume number `n` from now is not ready where the rank checks, alone,
+    /// that it can open the chat (`kept_ready`): the rank refuses. A server never calls it.
     #[cold] #[inline(never)]
     pub fn fail_resume_prepare(&self,which:u64) {let mut account=self.take_account();account.prepare_faults=which;self.kept_account.set(Some(account));}
+    /// Test only: bit `n` set means the WORKER rank has lost the kept prompt that its resume number `n` from now asks
+    /// for (it forgets it just before it looks). A server never calls it.
+    #[cold] #[inline(never)]
+    pub fn lose_kept_before_resume(&self,which:u64) {let mut account=self.take_account();account.lost_faults=which;self.kept_account.set(Some(account));}
+    #[cold] #[inline(never)]
+    fn take_lost_fault(&self)->bool {let Some(mut account)=self.kept_account.take() else {return false;};let fault=(account.lost_faults&1).ne(&0);account.lost_faults>>=1;self.kept_account.set(Some(account));fault}
+    /// THE FIRST WORD OF A RESUME (command 16), before either rank makes the chat's decoder or touches the data ring.
+    /// Each rank checks alone what it needs to open the chat and sends one word, ready or not: `ready` is false when
+    /// this rank no longer holds the kept prompt, has no free session or number for the chat, or its own check failed.
+    /// Only when every rank is ready does the resume go on. If any rank is not, this returns false on EVERY rank:
+    /// each then forgets this one kept prompt, nothing was opened, the wire is in step, and the service is NOT
+    /// marked failed: the request reads its prompt cold. Before this word existed a worker rank that had lost the
+    /// prompt left its loop with an error and the whole service stopped. The outer error is the loud stop (the wire
+    /// failed, or the device reports a fatal error), as for `kept_vote`.
+    #[cold] #[inline(never)]
+    fn kept_ready(&self,ready:bool)->Result<bool> {
+        if let Some(error)=self.split.fatal_error() {return Err(error);}
+        let voters=self.split.topology.parts as usize;
+        let votes=self.split.exchange.borrow_mut().gather(&[f32::from(u8::from(ready))],voters)?;
+        let mut valid=votes.len().eq(&voters);let mut agreed=true;
+        for &vote in &votes {valid&=vote.eq(&0.0) || vote.eq(&1.0);agreed&=vote.eq(&1.0);}
+        if !valid {return Err("kept prompt readiness is invalid".to_owned());}
+        Ok(agreed)
+    }
     #[cold] #[inline(never)]
     fn resume_prepare_fault(&self)->Result<()> {
         let Some(mut account)=self.kept_account.take() else {return Ok(());};
         let fault=(account.prepare_faults&1).ne(&0);account.prepare_faults>>=1;self.kept_account.set(Some(account));
-        if fault {return Err("resume preparation failed by the test hook".into());}Ok(())
+        if fault {return Err("resume readiness refused by the test hook".into());}Ok(())
     }
     #[cold] #[inline(never)]
     fn resume_parked<'s>(&'s self,decoder:&Decoder<'f,&'s Split<C,E>>,parked:&crate::bounded_decoder::Parked<C::Value>)->Result<State<C::Value>> {
@@ -448,9 +519,9 @@ impl<'f,C:Compute,E:Exchange> Factory<'f,C,E> {
         Err(error)
     }
     #[cold] #[inline(never)]
-    fn keep_count(&self,position:u64) {let charge=self.kept_charge(position);self.kept.set(self.kept.get()+1);let mut account=self.take_account();account.bytes=account.bytes.saturating_add(charge);self.kept_account.set(Some(account));}
+    fn keep_count<V>(&self,state:&crate::bounded_decoder::Parked<V>) {self.kept.set(self.kept.get()+1);let mut account=self.take_account();account.owners.retain(state.owners().expect("parked owner metadata"));self.kept_account.set(Some(account));}
     #[cold] #[inline(never)]
-    fn release_count(&self,position:u64) {let charge=self.kept_charge(position);self.kept.set(self.kept.get().saturating_sub(1));let mut account=self.take_account();account.bytes=account.bytes.saturating_sub(charge);self.kept_account.set(Some(account));}
+    fn release_count<V>(&self,state:&crate::bounded_decoder::Parked<V>) {self.kept.set(self.kept.get().saturating_sub(1));let mut account=self.take_account();account.owners.release(state.owners().expect("parked owner metadata"));self.kept_account.set(Some(account));}
     /// Test control: a trial starts real drafting at its first closed shadow, whatever it matched. No server calls this.
     pub fn set_trial_always(&self) {self.trial_always.set(true);}
     /// DEFAULT DRAFTING: the token that ends an answer's think block. A trial makes its first shadow when the request's own
@@ -462,6 +533,7 @@ impl<'f,C:Compute,E:Exchange> Factory<'f,C,E> {
     /// Load the checkpoint's predictor layer on this rank and let requests ask for up to `depth`
     /// proposals a pass (mtp_depth). Every rank of the service makes the same call.
     pub fn with_predictor(mut self,depth:usize)->Result<Self> {
+        if self.memo_admitted {return Err("predictor preparation follows memo admission".into());}
         if !(1..=3).contains(&depth) {return Err("predictor depth is outside 1..=3".into());}
         let prepared={
             let mut decoder=Decoder::from_prepared(&self.prepared,&self.split,self.context as u64,self.active.get())?;
@@ -474,16 +546,33 @@ impl<'f,C:Compute,E:Exchange> Factory<'f,C,E> {
         let mut with_layer=self.checkpoint.description().with_draft_layer().map_err(|e|e.to_string())?.ok_or("checkpoint declares no predictor layer")?;
         with_layer.residual=self.checkpoint.description().residual;self.with_layer=Some(crate::admission_plan::StateChargePlan::new(&with_layer,self.context)?);
         self.reservation=self.prompt_state_reservation(self.context,self.context)?;
+        self.workspace=self.workspace.checked_sub(self.prepared.fused_boundary_scratch()?.1).and_then(|n|n.checked_add(prepared.fused_boundary_scratch().ok()?.1)).ok_or("predictor boundary workspace charge overflow")?;
         self.prepared=prepared;self.predictor=depth;self.resident=self.split.memory_bytes().map_or(self.resident,|m|m.0);Ok(self)
     }
     pub fn predictor_depth(&self)->usize {self.predictor}
+    /// All weights, including the optional predictor, are loaded before this call.
+    /// Group selection has already used the full allowance, so its shape stays fixed.
+    pub fn with_memo_bound(mut self)->Result<Self> {
+        if self.memo_admitted {return Err("memo startup charge is already set".into());}
+        if self.active.get()!=0 {return Err("memo admission requires no live session".into());}
+        let local=crate::projection_memo::record(self.split.memo_summary(self.checkpoint));
+        let count=local.len().checked_mul(self.split.topology.parts as usize).ok_or("memo record count overflow")?;
+        let records=self.split.exchange.borrow_mut().gather(&local,count)?;
+        if records.len()!=count {return Err("memo rank record count differs".into());}
+        let plan=crate::projection_memo::agree(&records,LIVE_SESSIONS)?;
+        let locked=self.split.freeze_memo(plan)?;
+        if locked!=plan {return Err("memo device capacity differs from its startup charge".into());}
+        self.workspace=crate::service_memory::with_memo_bound(self.workspace,locked)?;self.memo_admitted=true;
+        eprintln!("TEXT MEMO rank={} loaded={:?} chats={} bound_bytes={} released_bytes={}",self.split.topology.rank,locked.summary(),LIVE_SESSIONS,locked.bytes(),crate::projection_memo::FULL-locked.bytes());
+        Ok(self)
+    }
     /// Only one synchronous execution runs at a time. Charge its scratch once;
     /// each live request separately funds committed and unpublished state.
 pub fn workspace_reservation_bytes(&self)->usize {self.workspace}
     /// One prompt group on this rank, with its peak device bytes against what admission
     /// charged for the sessions now live. Printed for a refused group too.
     fn prompt_group(&self,decoder:&Decoder<'_,&Split<C,E>>,tokens:&[u32],old:&State<C::Value>,live:usize,id:u64,last:bool)->Result<(Vec<Vec<f32>>,State<C::Value>)> {
-        // Kept prompts hold state too. Without `--prompt-keep` nothing is kept and nothing cold is read.
+        // Kept prompts hold state too. With `--no-prompt-keep` nothing is kept and nothing cold is read.
         let kept_bytes=if self.keep {self.kept_bytes()} else {0};
         let charge=self.reservation.saturating_mul(live).saturating_add(self.resident).saturating_add(self.workspace).saturating_add(kept_bytes);
         // The group's spare buffers stay under what admission charged for the sessions now live (`group_pool_cap`).
@@ -515,6 +604,7 @@ pub fn workspace_reservation_bytes(&self)->usize {self.workspace}
     /// source, so those copies are charged too. Row bits do not depend on the group.
     /// Every rank calls this after the predictor is loaded and before the session pool is negotiated.
     pub fn negotiate_prompt_group(mut self,budget:usize)->Result<Self> {
+        if self.memo_admitted {return Err("prompt group selection follows memo admission".into());}
         use crate::bounded_decoder::{PROMPT_GROUP,PROMPT_GROUP_MAX};
         let resident=self.split.memory_bytes().map_or(self.resident,|m|m.0);
         let offer=crate::service_memory::largest_prompt_group(self.checkpoint,self.context,self.workspace,resident,self.reservation,budget)?;
@@ -561,15 +651,17 @@ pub fn workspace_reservation_bytes(&self)->usize {self.workspace}
         if self.active.get()!=0 {return Err("service shutdown has a live session".into());}
         // The other rank still holds every kept prompt and refuses to stop with one (command 0). So refuse here,
         // before the command: the caller drops its kept sessions first, as it ends its live ones first.
-        if self.kept.get()!=0 {return Err("service shutdown has a kept prompt".into());}self.split.command(0,0)
+        if self.kept.get()!=0 {return Err("service shutdown has a kept prompt".into());}
+        eprintln!("TEXT RELEASE rank={} active=0 kept=0 kept_bytes={}",self.split.topology.rank,self.kept_bytes());self.split.cost_report("shutdown");self.split.command(0,0)
     }
     pub fn worker(&self)->Result<()> {
         let mut sessions=BTreeMap::new();let mut kept=BTreeMap::<u64,Box<crate::bounded_decoder::Parked<C::Value>>>::new();
         loop {let mut words=[0;16];self.split.exchange.borrow_mut().command(&mut words)?;
             let code=u32::from_le_bytes(words[..4].try_into().unwrap());let token=u32::from_le_bytes(words[4..8].try_into().unwrap());let id=u64::from_le_bytes(words[8..].try_into().unwrap());
             match code {
-                0=>{if !sessions.is_empty() || !kept.is_empty() {return Err("worker stopped with live sessions or kept prompts".into());}return Ok(());},
-                1=>{if id==0 || sessions.contains_key(&id) || sessions.len()>=8 {return Err("worker session identity or capacity differs".into());}
+                0=>{if !sessions.is_empty() || !kept.is_empty() {return Err("worker stopped with live sessions or kept prompts".into());}
+                    eprintln!("TEXT RELEASE rank={} active=0 kept=0 kept_bytes={}",self.split.topology.rank,self.kept_bytes());self.split.cost_report("shutdown");return Ok(());},
+                1=>{if id==0 || sessions.contains_key(&id) || sessions.len()>=LIVE_SESSIONS {return Err("worker session identity or capacity differs".into());}
                     let decoder=Decoder::from_prepared(&self.prepared,&self.split,self.context as u64,sessions.len())?;let state=decoder.zero_state()?;sessions.insert(id,(decoder,Some(state),None::<Verify<C::Value>>));self.split.exchange.borrow_mut().complete()?;},
                 2|4|5|12=>{let live=sessions.len();self.split.work(|| {let (decoder,state,open)=sessions.get_mut(&id).ok_or("worker command has no session")?;
                     // A plain step of a session with open verify rows settles them first, as the controller does (Session::settle).
@@ -577,7 +669,7 @@ pub fn workspace_reservation_bytes(&self)->usize {self.workspace}
                     let state=state.as_mut().ok_or("worker session has open verify rows")?;
                     let last=code==5 && token&LAST_GROUP!=0;
                     let next=if code==5 {let rows=(token&(LAST_GROUP-1)) as usize;if rows==0 || rows>self.group {return Err("worker prompt group exceeds its bound".into());}
-                        let mut bytes=vec![0;rows*4];self.split.exchange.borrow_mut().command(&mut bytes)?;
+                        let mut bytes=vec![0;rows*4];self.split.exchange.borrow_mut().command_payload(&mut bytes)?;
                         let tokens=bytes.as_chunks::<4>().0.iter().map(|b|u32::from_le_bytes(*b)).collect::<Vec<_>>();self.prompt_group(decoder,&tokens,state,live,id,last)?.1
                     } else if code==12 {decoder.step_greedy(token,state,|_,_|Ok(()))?.1} else {decoder.step(token,state,|_,_|Ok(()))?.2};
                     self.split.exchange.borrow_mut().complete()?;*state=next;
@@ -602,7 +694,7 @@ pub fn workspace_reservation_bytes(&self)->usize {self.workspace}
                 // pass as the plain greedy step (`Verify::row_greedy`): the controller sends it only with no row carried.
                 6|8|14=>{self.split.work(|| {let (decoder,state,open)=sessions.get_mut(&id).ok_or("worker command has no session")?;
                     let tokens=if code!=6 {vec![token]} else {let rows=token as usize;if !(2..=crate::bounded_decoder::VERIFY_ROWS).contains(&rows) {return Err("worker verify pass exceeds its bound".into());}
-                        let mut bytes=vec![0;rows*4];self.split.exchange.borrow_mut().command(&mut bytes)?;
+                        let mut bytes=vec![0;rows*4];self.split.exchange.borrow_mut().command_payload(&mut bytes)?;
                         bytes.as_chunks::<4>().0.iter().map(|b|u32::from_le_bytes(*b)).collect::<Vec<_>>()};
                     if open.is_none() {let mut fresh=Verify::new(state.take().ok_or("worker session has no state")?);if self.predictor>0 {fresh.track_proposer();}*open=Some(fresh);}
                     if code==14 {open.as_mut().unwrap().row_greedy(decoder,token)?.ok_or("worker greedy pass has carried rows")?;} else {open.as_mut().unwrap().rows(decoder,&tokens)?;}
@@ -625,7 +717,7 @@ pub fn workspace_reservation_bytes(&self)->usize {self.workspace}
     fn kept_command<'s>(&'s self,code:u32,id:u64,sessions:&mut WorkerSessions<'f,'s,C,E>,kept:&mut BTreeMap<u64,Box<crate::bounded_decoder::Parked<C::Value>>>)->Result<()> {
         if code==17 {
             let Some(state)=kept.remove(&id) else {return Err("worker release has no kept prompt".into());};
-            self.release_count(state.position);drop(state);return self.split.exchange.borrow_mut().complete();
+            self.release_count(&state);drop(state);return self.split.exchange.borrow_mut().complete();
         }
         // The number follows the header at once: a bounded read (`Exchange::command_payload`), never the idle wait.
         let mut word=[0;8];self.split.exchange.borrow_mut().command_payload(&mut word)?;let new=u64::from_le_bytes(word);
@@ -633,18 +725,29 @@ pub fn workspace_reservation_bytes(&self)->usize {self.workspace}
             if new==0 || kept.contains_key(&new) || sessions.contains_key(&new) || kept.len()>=KEPT_PROMPTS {return Err("worker kept prompt identity or capacity differs".into());}
             let Some((_,Some(state),_))=sessions.get(&id) else {return Err("worker keep has no committed state".into());};
             // Both ranks agree before either records the prompt (`kept_vote`). A refusal records nothing here.
-            if let Ok(shared)=self.kept_vote(crate::bounded_decoder::park_state(&self.split,state))? {self.keep_count(shared.position);kept.insert(new,Box::new(shared));}
+            if let Ok(shared)=self.kept_vote(self.park_within(state))? {self.keep_count(&shared);kept.insert(new,Box::new(shared));}
             return self.split.exchange.borrow_mut().complete();
         }
-        if new==0 || sessions.contains_key(&new) || kept.contains_key(&new) || sessions.len()>=8 {return Err("worker session identity or capacity differs".into());}
+        // The first word (`kept_ready`): this rank still holds the prompt, has a free session and a free number for
+        // the chat. If it does not, or the controller does not, both ranks forget this one prompt and go on.
+        if self.take_lost_fault() && let Some(lost)=kept.remove(&id) {self.release_count(&lost);}
+        let refused=self.resume_prepare_fault().is_err();
+        let able=!refused && new!=0 && !sessions.contains_key(&new) && !kept.contains_key(&new) && sessions.len()<LIVE_SESSIONS && kept.contains_key(&id);
+        if !self.kept_ready(able)? {
+            if let Some(dropped)=kept.remove(&id) {self.release_count(&dropped);}
+            return self.split.exchange.borrow_mut().complete();
+        }
         let Some(parked)=kept.get(&id) else {return Err("worker resume has no kept prompt".into());};
         // The same rebuild of the expanded rows as the controller (`Decoder::resume_state`). Both ranks agree before
-        // either opens the session (`kept_vote`). A refusal drops the rebuilt rows here: the kept prompt stays as it was.
-        // The decoder is made outside the vote, as on the controller: a failure there stops this rank loudly.
-        self.resume_prepare_fault()?;
+        // either opens the session (`kept_vote`). A refusal drops the rebuilt rows here, and the kept prompt with them
+        // on both ranks (the controller marks its handle gone).
+        // The decoder is made outside the votes, as on the controller: a failure there stops this rank loudly.
         let decoder=Decoder::from_prepared(&self.prepared,&self.split,self.context as u64,sessions.len())?;
         let local=match self.resume_parked(&decoder,parked) {Ok(state)=>Ok((decoder,state)),Err(error)=>Err(error)};
-        if let Ok((decoder,state))=self.kept_vote(local)? {sessions.insert(new,(decoder,Some(state),None::<Verify<C::Value>>));}
+        match self.kept_vote(local)? {
+            Ok((decoder,state))=>{sessions.insert(new,(decoder,Some(state),None::<Verify<C::Value>>));},
+            Err(_)=>if let Some(dropped)=kept.remove(&id) {self.release_count(&dropped);},
+        }
         self.split.exchange.borrow_mut().complete()
     }
 }
@@ -679,7 +782,7 @@ impl<C:Compute,E:Exchange> spark_serve::Engine for Factory<'_,C,E> {
     fn profile_stream_output(&self,request:u64,tokens:usize,ns:u128) {eprintln!("SERVED OUTPUT request={request} completion_tokens={tokens} wall_ns={ns}");}
     #[allow(clippy::possible_missing_else)] // dense one-line guards.
     fn session(&self)->Result<Self::Session<'_>> {
-        if let Some(error)=self.failure_reason() {return Err(error);}if self.active.get()>=8 {return Err("row split service has no free session".into());}
+        if let Some(error)=self.failure_reason() {return Err(error);}if self.active.get()>=LIVE_SESSIONS {return Err("row split service has no free session".into());}
         let id=self.next_id.get();let next=id.checked_add(1).ok_or("session identity exhausted")?;self.next_id.set(next);self.active.set(self.active.get()+1);
         let result=(|| {let started=std::time::Instant::now();self.split.command_for(1,0,id)?;
             // The other sessions that are open now: the worker counts the same ones.
@@ -715,6 +818,8 @@ impl<C:Compute,E:Exchange> spark_serve::Engine for Factory<'_,C,E> {
     /// A request that drafts sends its rows as one verify pass.
     fn step_batch<'s>(&'s self,rows:&mut [spark_serve::BatchRows<'_,Self::Session<'s>>])->std::result::Result<Vec<spark_serve::Predictions>,spark_serve::BatchError> {
         use spark_serve::{BatchOutput,Session as _};
+        // Check every row's operation and limits before any chat changes state or sends a command.
+        for row in rows.iter() {row.session.validate_row(row.tokens,row.output).map_err(|message|spark_serve::BatchError {request:None,message})?;}
         // Chats in plain decode ride one batch step when there are enough of them to gain (`shared_decode_min`).
         // Each gets the ID (greedy) or the logits of its own plain step.
         // A request for one row with no row carried is such a step whatever the request asked. When a batch step
@@ -841,6 +946,23 @@ impl<C:Compute,E:Exchange> Session<'_,C,E> {
     /// its proposer gives no token): the request decodes by plain steps from now on. Nothing happens to a session
     /// that is not in its trial.
     fn end_trial(&mut self) {if self.phase==Phase::Trial {self.phase=Phase::Over;self.factory.trial_counted(2);}}
+    fn validate_row(&self,tokens:&[u32],output:spark_serve::BatchOutput)->Result<()> {
+        #[cfg(test)] validation_tests::VALIDATIONS.with(|count|count.set(count.get()+1));
+        if self.kept.is_some() {return Err("row split session only holds a kept prompt".into());}
+        match output {
+            spark_serve::BatchOutput::Last|spark_serve::BatchOutput::None=>{
+                if tokens.is_empty() {return Err("empty row split prompt".into());}
+                if self.state.is_none() {return Err("row split prompt has no state".into());}
+            },
+            spark_serve::BatchOutput::All=>{
+                // Plain All may be empty: its step iterator returns no rows and changes nothing.
+                if (self.strict || self.phase==Phase::Trial) && (tokens.is_empty() || tokens.len()>crate::bounded_decoder::VERIFY_ROWS) {return Err("row split verify pass exceeds its rows or vocabulary".into());}
+            },
+        }
+        let position=self.state.as_ref().map(|state|state.position).or_else(||self.open.as_ref().map(Verify::position));
+        if position.and_then(|p|p.checked_add(tokens.len() as u64)).is_none_or(|p|p>self.factory.context as u64)
+            || tokens.iter().any(|&token|u64::from(token)>=self.factory.checkpoint.description().vocab) {return Err("row split request exceeds vocabulary or context".into());}Ok(())
+    }
     /// A plain step of a session whose verify rows are open settles them first: its state is the state after
     /// every kept row. No work: no row may be carried. The worker settles on the same command (worker, worker_batch).
     pub(super) fn settle(&mut self)->Result<()> {
@@ -944,19 +1066,27 @@ impl<'a,C:Compute,E:Exchange> Session<'a,C,E> {
         let factory=self.factory;factory.failed.set(true);factory.split.command_for(15,0,self.id)?;
         let mut word=id.to_le_bytes();factory.split.exchange.borrow_mut().command_payload(&mut word)?;
         // Both ranks agree before either records the prompt (`Factory::kept_vote`).
-        let kept=factory.kept_vote(crate::bounded_decoder::park_state(&factory.split,state))?;
+        let kept=factory.kept_vote(factory.park_within(state))?;
         factory.split.exchange.borrow_mut().complete()?;factory.failed.set(false);Ok(kept)
     }
     #[cold] #[inline(never)]
-    fn send_resume(&self,id:u64,kept:&crate::bounded_decoder::Parked<C::Value>,started:std::time::Instant)->Result<std::result::Result<Self,String>> {
+    fn send_resume(&self,id:u64,kept:&KeptSlot<C::Value>,started:std::time::Instant)->Result<std::result::Result<Self,String>> {
         let factory=self.factory;factory.failed.set(true);factory.split.command_for(16,0,self.id)?;
         let mut word=id.to_le_bytes();factory.split.exchange.borrow_mut().command_payload(&mut word)?;
+        // FIRST the ranks agree that each still holds this prompt and can open the chat (`Factory::kept_ready`), before
+        // either makes a decoder or touches the data ring. If one cannot, both forget this one prompt and this request
+        // reads cold: nothing else changed, the service is whole.
+        if !factory.kept_ready(factory.resume_prepare_fault().is_ok())? {
+            kept.gone.set(true);factory.split.exchange.borrow_mut().complete()?;factory.failed.set(false);
+            return Ok(Err("a rank no longer holds this kept prompt or cannot open its chat: both ranks dropped it".into()));
+        }
         // The other sessions that are open now: the worker counts the same ones.
         // The kept prompt holds no expanded rows: both ranks build them again here, for this chat.
-        // The chat's decoder is made OUTSIDE the vote. With no other chat open its preparation runs a collective
-        // with the other rank (the shared budget, on the data ring). A failure there is a wire failure, or leaves
-        // the ranks waiting on different rings: the loud stop on both ranks, as for any session that opens.
-        factory.resume_prepare_fault()?;
+        // The chat's decoder is made OUTSIDE the votes, by the same call and with the same ending as for any session
+        // that opens (`Engine::session`). With no other chat open its preparation runs a collective with the other
+        // rank (the shared budget, on the data ring). A failure there is a wire failure, or leaves the ranks half way
+        // through that collective: voted away, the next collective would read the other rank's old words. So it is
+        // the loud stop on both ranks, as for a cold chat: the cache adds no stop here that a cold read does not have.
         let decoder=Decoder::from_prepared(&factory.prepared,&factory.split,factory.context as u64,factory.active.get()-1)?;
         // Only the rebuild is voted: it runs on this rank alone.
         let began=std::time::Instant::now();
@@ -968,12 +1098,14 @@ impl<'a,C:Compute,E:Exchange> Session<'a,C,E> {
             Ok((decoder,state))=>{
                 eprintln!("SERVED RESUME rank={} session={id} kept={} position={} active={} expanded_rows={} rebuild_seconds={rebuild:.9} seconds={:.9}",factory.split.topology.rank,self.id,state.position,factory.active.get(),kept.held_rows(),started.elapsed().as_secs_f64());
                 factory.split.trace_start();Ok(Self::fresh_session(factory,decoder,Some(state),id,None))},
-            Err(error)=>Err(error)})
+            // The ranks agreed that one of them could not build the chat's rows again. Both forget this prompt (the
+            // worker in `kept_command`): a prompt that was refused once is not tried again, request after request,
+            // and the cold read that follows may keep the prompt as one fresh entry.
+            Err(error)=>{kept.gone.set(true);Err(error)}})
     }
     #[cold] #[inline(never)]
     fn retained_bytes_kept(&self)->Option<usize> {
-        let position=match (&self.kept,&self.state) {(Some(kept),_)=>kept.position,(None,Some(state))=>state.position,(None,None)=>return None};
-        Some(self.factory.kept_charge(position))
+        match (&self.kept,&self.state) {(Some(kept),_)=>kept.retained_bytes(),(None,Some(state))=>self.factory.state_charge(state),(None,None)=>None}
     }
     // Cold and never inlined, with `release_kept`: a request forks and releases once, and the step code stays as it was.
     #[cold] #[inline(never)]
@@ -988,7 +1120,8 @@ impl<'a,C:Compute,E:Exchange> Session<'a,C,E> {
                 // A session that has read nothing holds no prompt: keeping it would take a slot and a charge for no token.
                 if state.position.eq(&0) {return Err("row split session has read no prompt to keep".into());}
                 // The byte cap (`keep_within`): the same clean refusal. The chat goes on and nothing is kept.
-                if !factory.kept_fits(state.position) {return Err("row split service has no bytes for one more kept prompt".into());}
+                let owners=crate::bounded_decoder::state_owners(&factory.split,state).ok_or("row split backend has no kept state owner metadata")?;
+                if !factory.kept_fits(&owners) {return Err("row split service has no bytes for one more kept prompt".into());}
                 // The kept session's owner is made before command 15: if it were refused, no rank would hold a prompt
                 // that nothing can release.
                 let decoder=Decoder::from_prepared_idle(&factory.prepared,&factory.split,factory.context as u64)?;
@@ -998,16 +1131,17 @@ impl<'a,C:Compute,E:Exchange> Session<'a,C,E> {
                 let kept=match factory.finish(self.send_keep(id,state))? {
                     Ok(kept)=>kept,
                     Err(error)=>{eprintln!("SERVED KEEP REFUSED rank={} session={} kept={id} error={error}",factory.split.topology.rank,self.id);return Err(error);}};
-                factory.keep_count(kept.position);
+                factory.keep_count(&kept);
                 eprintln!("SERVED KEEP rank={} session={} kept={id} position={} kept_prompts={} kept_bytes={} seconds={:.9}",factory.split.topology.rank,self.id,kept.position,factory.kept.get(),factory.kept_bytes(),started.elapsed().as_secs_f64());
                 Ok(Self::fresh_session(factory,decoder,None,id,Some(KeptSlot::new(kept))))
             },
             (Some(kept),None)=>{
-                if factory.active.get()>=8 {return Err("row split service has no free session".into());}
+                if kept.gone.get() {return Err("row split kept prompt was dropped by the ranks".into());}
+                if factory.active.get()>=LIVE_SESSIONS {return Err("row split service has no free session".into());}
                 factory.next_id.set(next);factory.active.set(factory.active.get()+1);let started=std::time::Instant::now();
                 let result=self.send_resume(id,kept,started);
-                // No session was opened unless both ranks were done. A refusal one rank made and both obeyed leaves the kept
-                // prompt as it was and the service whole: this one request reads its prompt fresh, or is refused.
+                // No session was opened unless both ranks were done. A refusal one rank made and both obeyed drops this one
+                // kept prompt on both ranks and leaves the service whole: this one request reads its prompt fresh, or is refused.
                 if !matches!(&result,Ok(Ok(_))) {factory.active.set(factory.active.get()-1);}
                 match factory.finish(result)? {
                     Ok(session)=>Ok(session),
@@ -1018,13 +1152,16 @@ impl<'a,C:Compute,E:Exchange> Session<'a,C,E> {
     }
     /// The drop of a kept prompt: both ranks forget it. It never counted as an active session.
     #[cold] #[inline(never)]
-    fn release_kept(&mut self,kept:KeptSlot<C::Value>) {let factory=self.factory;factory.release_count(kept.position);drop(kept);
+    fn release_kept(&mut self,kept:KeptSlot<C::Value>) {let factory=self.factory;factory.release_count(&kept);let gone=kept.gone.get();drop(kept);
+        // A prompt the ranks dropped together (`kept_ready`) is already forgotten by the other rank: no release goes out.
+        if gone {return;}
         if !factory.failed.get() {let result=factory.split.command_for(17,0,self.id).and_then(|()|factory.split.exchange.borrow_mut().complete());if let Err(error)=result {factory.remember(error);}}
         if factory.failed.get() {factory.split.exchange.borrow_mut().abort();}
     }
 }
 /// Exact verification for the server's speculator: every row is a prompt-path row, whose bits equal a plain step.
 impl<C:Compute,E:Exchange> spark_engine::draft::Target for Session<'_,C,E> {
+    fn reject_unmapped_greedy(&self)->bool {true}
     fn checkpoint(&self)->usize {self.open.as_ref().map(Verify::position).or(self.state.as_ref().map(|s|s.position)).unwrap_or(0) as usize}
     fn truncate(&mut self,position:usize)->Result<()> {self.keep(position)}
     fn step(&mut self,token:u32)->Result<Vec<f32>> {self.rows(&[token])?.pop().ok_or_else(||"verify pass has no row".into())}
@@ -1067,6 +1204,7 @@ impl<C:Compute,E:Exchange> spark_engine::draft::Target for Session<'_,C,E> {
     fn verify_costs(&self,_context:usize)->Option<spark_engine::draft::CostCurve> {self.measured_costs()}
 }
 impl<C:Compute,E:Exchange> spark_serve::Session for Session<'_,C,E> {
+    fn reject_unmapped_greedy(&self)->bool {true}
     fn configure_request(&mut self,r:&spark_serve::protocol::Request)->Result<()> {
         use spark_serve::protocol::DraftMode;
         if r.mtp_depth.is_some_and(|v|v>self.factory.predictor) || r.draft.is_some_and(|v|!matches!(v,DraftMode::Auto|DraftMode::Plain|DraftMode::Strict)) {return Err("row split service supports plain decoding, strict drafting, and mtp_depth up to its loaded predictor depth".into());}
@@ -1094,20 +1232,29 @@ impl<C:Compute,E:Exchange> spark_serve::Session for Session<'_,C,E> {
     }
     /// A live session forks where it holds a committed state of at least one token (the cache asks at the prompt's
     /// end and at the end of an answer that stopped). A kept session always forks.
-    fn can_fork(&self)->bool {self.factory.keep && !self.factory.failed.get() && (self.kept.is_some() || (matches!(&self.state,Some(state) if state.position>0) && self.open.is_none()))}
+    fn can_fork(&self)->bool {self.factory.keep && !self.factory.failed.get() && (self.kept.as_ref().is_some_and(|kept|!kept.gone.get()) || (matches!(&self.state,Some(state) if state.position>0) && self.open.is_none()))}
     /// The recurrent layers cannot be wound back: only the kept position itself restores. A live session
     /// restores nothing for another request; the kept copy of its prompt does.
-    fn can_fork_prefix(&self,position:usize)->bool {self.factory.keep && !self.factory.failed.get() && matches!(&self.kept,Some(kept) if kept.position==position as u64)}
-    fn checkpoint_reusable_tokens(&self,tokens:usize)->usize {match &self.kept {Some(kept)=>match usize::try_from(kept.position) {Ok(position) if position<=tokens=>position,_=>0},None=>tokens}}
+    fn can_fork_prefix(&self,position:usize)->bool {self.factory.keep && !self.factory.failed.get() && matches!(&self.kept,Some(kept) if kept.position==position as u64 && !kept.gone.get())}
+    fn checkpoint_reusable_tokens(&self,tokens:usize)->usize {match &self.kept {Some(kept)=>match usize::try_from(kept.position) {Ok(position) if position<=tokens && !kept.gone.get()=>position,_=>0},None=>tokens}}
     fn fork(&self)->Result<Self> {self.fork_inner()}
     fn fork_prefix(&self,position:usize)->Result<Self> {if !self.can_fork_prefix(position) {return Err("row split service restores only the end of a kept prompt".into());}self.fork_inner()}
-    /// What a kept prompt of this length is charged on a rank (`Factory::kept_charge`): the state planes, the
-    /// predictor layer's when it is loaded (charged, not held: an upper number), and the room behind the row buffers.
-    /// A live session answers what its kept copy would be charged: the cache asks before it forks. None without the
-    /// switch, as before.
+    /// Page-rounded owners of the state planes, once per owner within this holder.
+    /// Live sessions quote their current owners before a fork. Parked sessions return the saved exact sum.
+    /// The cache charges the allocation list once across all holders. Unknown identities stay private.
     fn retained_bytes(&self)->Option<usize> {if !self.factory.keep {return None;}self.retained_bytes_kept()}
-    /// Drop open rows of a strict request. The scheduler asks for this when a pass answered with a
-    /// token the tokenizer does not hold: it then runs the row again by `step`, which reads the logits.
+    fn retained_allocations(&self)->Option<Vec<(usize,usize)>> {
+        if !self.factory.keep {return None;}
+        match (&self.kept,&self.state) {
+            (Some(kept),_)=>kept.owners().map(|owners|owners.allocations().to_vec()),
+            (None,Some(state))=>crate::bounded_decoder::state_owners(&self.factory.split,state).map(|owners|owners.allocations().to_vec()),
+            _=>None}
+    }
+    fn retained_private_bytes(&self)->usize {match (&self.kept,&self.state) {
+        (Some(kept),_)=>kept.owners().map_or(0,|owners|owners.private_bytes()),
+        (None,Some(state))=>crate::bounded_decoder::state_owners(&self.factory.split,state).map_or(0,|owners|owners.private_bytes()),_=>0}}
+    fn retention_is_immutable(&self)->bool {self.kept.is_some()}
+    /// Drop open rows of a strict request. Plain recurrent state cannot rewind.
     fn truncate(&mut self,position:usize)->Result<()> {
         if !self.strict || self.open.is_none() {return Err("backend does not support prefix truncation".into());}
         self.keep(position)

@@ -77,7 +77,7 @@ impl<'a> Backend<'a> {
                 // The fill clears the whole output, so it must come before the first run writes. Runs of one operation take one kernel
                 // family (all fill or none do); a later run that asked for a fill would clear the runs before it: refuse, never corrupt.
                 if out!=output.device_address() {return Err("prompt row run needs a zero fill after an earlier run wrote".into());}
-                self.unrecorded(||self.zero_vector(&mut output))?;filled=true;
+                if self.resident_rows_active() {self.zero_vector(&mut output)?;} else {self.unrecorded(||self.zero_vector(&mut output))?;}filled=true;
             }
             if units==0 {continue;}
             let threads=shape.threads(units,(addresses[0]|addresses[1])&15==0).ok_or("prompt row thread overflow")?;

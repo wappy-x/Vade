@@ -9,12 +9,10 @@ impl<C:Compute,E:Exchange> Factory<'_,C,E> {
     /// `greedy`: no chat needs its logits; they come back empty (`Decoder::step_batch_greedy`).
     pub(super) fn batch_tokens(&self,sessions:&mut [&mut Session<'_,C,E>],tokens:&[u32],greedy:bool)->Result<Vec<(Vec<f32>,u32)>> {
         if let Some(error)=self.failure_reason() {return Err(error);}
-        let vocab=self.checkpoint.description().vocab;
         if sessions.len()!=tokens.len() || !(2..=crate::bounded_decoder::BATCH_ROWS).contains(&sessions.len()) {return Err("row split batch step exceeds its bound".into());}
+        // The sole caller, step_batch, validated every row before any chat changed state.
         // A drafting chat that rides the step settles its open verify rows first (Session::settle); the worker does the same.
         for session in sessions.iter_mut() {session.settle()?;}
-        let outside=|session:&Session<'_,C,E>,token:u32|session.state.as_ref().is_none_or(|s|s.position>=self.context as u64) || u64::from(token)>=vocab;
-        if sessions.iter().zip(tokens).any(|(session,&token)|outside(session,token)) {return Err("row split request exceeds vocabulary or context".into());}
         self.finish(self.split.work(|| {
             // Print only: the time since the last batch step ended (scheduler tick, sampling, stream writes, other work).
             let since=self.batch_ended.take().map_or(0.0,|at|at.elapsed().as_secs_f64());
@@ -31,7 +29,7 @@ impl<C:Compute,E:Exchange> Factory<'_,C,E> {
             for (session,(logits,best,next)) in sessions.iter_mut().zip(results) {session.state=Some(next);session.after_step=false;rows.push((logits,best));}
             self.failed.set(false);
             let ids=sessions.iter().map(|session|session.id).collect::<Vec<_>>();
-            eprintln!("SERVED BATCH rank={} rows={} sessions={ids:?} seconds={:.9} since_last_seconds={since:.9} mhc_fused_row_launches={}",self.split.topology.rank,rows.len(),started.elapsed().as_secs_f64(),self.split.mhc_row_launches());
+            eprintln!("SERVED BATCH rank={} rows={} sessions={ids:?} seconds={:.9} since_last_seconds={since:.9} mhc_fused_row_launches={} chat_attention_layers={}",self.split.topology.rank,rows.len(),started.elapsed().as_secs_f64(),self.split.mhc_row_launches(),crate::bounded_decoder::chat_attention_layers());
             self.batch_ended.set(Some(std::time::Instant::now()));
             self.split.cost_report("decode");Ok(rows)
         }))
@@ -41,7 +39,7 @@ impl<C:Compute,E:Exchange> Factory<'_,C,E> {
     pub(super) fn worker_batch(&self,sessions:&mut WorkerSessions<'_,C,E>,rows:usize)->Result<()> {
         if !(2..=crate::bounded_decoder::BATCH_ROWS).contains(&rows) {return Err("worker batch step exceeds its bound".into());}
         self.split.work(|| {
-            let mut bytes=vec![0;rows*12];self.split.exchange.borrow_mut().command(&mut bytes)?;
+            let mut bytes=vec![0;rows*12];self.split.exchange.borrow_mut().command_payload(&mut bytes)?;
             let chats=bytes.as_chunks::<12>().0.iter().map(|b|(u64::from_le_bytes(b[..8].try_into().unwrap()),u32::from_le_bytes(b[8..].try_into().unwrap()))).collect::<Vec<_>>();
             // Each chat's state leaves its session for the step: a chat named twice has none the second time.
             let mut held=Vec::with_capacity(rows);

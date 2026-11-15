@@ -27,6 +27,7 @@ const MAX_REVIEW_HISTORY_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_TRANSCRIPT_BYTES: usize = 1024 * 1024;
 const REVIEW_OUTPUT_HIDDEN: &str = "\n[later output hidden until approval closes]\n";
 const APPROVAL_VIEW_ERROR: &str = "Approval unavailable: the terminal cannot show the full preview at this size. Enlarge the terminal to view it in full; after a refusal, request the operation again. If it still does not fit, request smaller patches.";
+const APPROVAL_RESIZE_HINT: &str = "Make this window larger to answer.";
 
 /// The chat display: a bounded transcript above a fixed input dock in a raw
 /// terminal, or plain line output when the terminal is not interactive.
@@ -41,6 +42,10 @@ pub struct Terminal {
     interactive: bool,
     transcript: Transcript,
     approval_view: Option<Transcript>,
+    approval_hidden: Option<(String, String, String)>,
+    approval_layout: Option<crate::approval_prompt::Prompt>,
+    approval_columns: usize,
+    approval_prefix: String,
     answer_preview: String,
     answer_time: String,
     date: String,
@@ -88,6 +93,10 @@ impl Terminal {
             interactive,
             transcript: Transcript::default(),
             approval_view: None,
+            approval_hidden: None,
+            approval_layout: None,
+            approval_columns: 0,
+            approval_prefix: String::new(),
             answer_preview: String::new(),
             answer_time: String::new(),
             date: String::new(),
@@ -202,7 +211,7 @@ impl Terminal {
     /// `exact` commits cell-exact rows (approval previews): a word moved to
     /// the next row could read as a diff line of its own.
     fn retain_at(&mut self, text: &str, styled: bool, exact: bool) {
-        let width = self.width().saturating_sub(1).max(1);
+        let width = if exact && self.approval_layout.is_some() { self.width() } else { self.width().saturating_sub(1).max(1) };
         if !self.fullscreen {
             // Pre-wrapped at word boundaries: native soft wrap splits words.
             let text = text.replace('\t', "    ");
@@ -457,34 +466,94 @@ impl Terminal {
     /// trim, but cannot evict any of this view while an answer is pending.
     /// Size-only failures retain a paused view; acceptance must check readiness.
     pub fn approval_preview(&mut self, title: &str, detail: &str) -> io::Result<()> {
-        if title.len().saturating_add(detail.len()) > MAX_APPROVAL_BYTES {
+        self.approval_layout = None;
+        self.approval_hidden = None;
+        self.render_approval_preview(title, detail)
+    }
+    /// Show the decision text now and retain exact code or arguments for key 5.
+    pub fn approval_preview_with_details(&mut self, title: &str, detail: &str, details: &str) -> io::Result<()> {
+        self.approval_layout = None;
+        if title.len().saturating_add(detail.len()).saturating_add(details.len()).saturating_add(32) > MAX_APPROVAL_BYTES {
+            return Err(io::Error::other(
+                "Approval refused: preview exceeds the terminal's 256 KiB review limit. Request smaller patches to view every change in full.",
+            ));
+        }
+        if details.chars().any(preview_char_needs_escape) {
+            return Err(io::Error::other(
+                "Approval refused: preview contains characters the terminal would hide. Request an escaped, complete preview.",
+            ));
+        }
+        self.render_approval_preview(title, detail)?;
+        self.approval_hidden = Some((title.to_owned(), detail.to_owned(), details.to_owned()));
+        Ok(())
+    }
+    /// Render known parts at the terminal width. Validate plain text before adding color.
+    pub fn approval_prompt(&mut self, title: &str, prompt: &crate::approval_prompt::Prompt, details: Option<&str>) -> io::Result<()> {
+        let detail = prompt.render(self.width(), false);
+        if let Some(details) = details {
+            if title.len().saturating_add(detail.len()).saturating_add(details.len()).saturating_add(32) > MAX_APPROVAL_BYTES
+                || details.chars().any(preview_char_needs_escape) {
+                return Err(io::Error::other("Approval refused: exact details exceed the review limit or contain hidden characters."));
+            }
+        }
+        self.approval_columns = self.width().min(64);
+        self.approval_layout = Some(prompt.clone());
+        self.approval_hidden = None;
+        self.render_approval_preview(title, &detail)?;
+        self.approval_hidden = details.map(|details| (title.to_owned(), detail, details.to_owned()));
+        Ok(())
+    }
+    /// Reveal exact details without answering the pending approval.
+    pub fn show_approval_details(&mut self) -> io::Result<bool> {
+        let Some((title, detail, details)) = self.approval_hidden.clone() else { return Ok(false) };
+        self.render_approval_with_prefix(&title, &detail, &format!("Exact details:\n{details}\n"))?;
+        self.approval_hidden = None;
+        Ok(true)
+    }
+    fn render_approval_preview(&mut self, title: &str, detail: &str) -> io::Result<()> {
+        self.render_approval_with_prefix(title, detail, "")
+    }
+    fn render_approval_with_prefix(&mut self, title: &str, detail: &str, prefix: &str) -> io::Result<()> {
+        if title.len().saturating_add(detail.len()).saturating_add(prefix.len()) > MAX_APPROVAL_BYTES {
             return Err(io::Error::other(
                 "Approval refused: preview exceeds the terminal's 256 KiB review limit. Request smaller patches to view every change in full.",
             ));
         }
         if title.chars().any(preview_char_needs_escape)
             || detail.chars().any(preview_char_needs_escape)
+            || prefix.chars().any(preview_char_needs_escape)
         {
             return Err(io::Error::other(
                 "Approval refused: preview contains characters the terminal would hide. Request an escaped, complete preview.",
             ));
         }
+        let rendered = match &self.approval_layout {
+            Some(prompt) => format!("{prefix}{}", prompt.render(self.width(), self.color && self.raw())),
+            None => format!("{prefix}{detail}"),
+        };
+        let detail = rendered.as_str();
         let view = if self.raw() {
             let detail = if title == "Patch preview" {
                 render::diff(detail, self.color)
             } else {
                 detail.to_owned()
             };
-            let text = format!(
-                "{}\n{detail}\n{}\n",
-                render::style(title, "2", self.color),
-                render::approval(self.color)
-            );
-            let mut view = self.transcript.clone();
+            let text = if detail.lines().any(|line| render::plain(line).starts_with("Your turn.")) {
+                format!("{detail}\n")
+            } else {
+                format!("{}\n{detail}\n{}\n", render::style(title, "2", self.color), render::approval(self.color))
+            };
+            let mut view = self.approval_view.clone().unwrap_or_else(|| self.transcript.clone());
+            if self.approval_view.is_some() {
+                view.lines.truncate(view.review_start);
+                view.lines.push_back(String::new().into());
+                view.bytes = view.lines.iter().map(|line| line.len() + 1).sum();
+                view.logical_lines = view.lines.iter().map(|line| 1 + line.bytes().filter(|b| *b == b'\n').count()).sum();
+            }
             view.protected = true;
             view.review_start = view.lines.len().saturating_sub(1);
             view.width = 0;
-            view.append_review(&text, self.width().saturating_sub(1).max(1));
+            view.append_review(&text, if self.approval_layout.is_some() { self.width() } else { self.width().saturating_sub(1).max(1) });
             if view.row_limit {
                 return Err(io::Error::other(APPROVAL_VIEW_ERROR));
             }
@@ -492,16 +561,17 @@ impl Terminal {
             self.retain_at(&text, true, true);
             Some(view)
         } else {
-            self.note(title)?;
+            if !detail.lines().any(|line| line.starts_with("Your turn.")) { self.note(title)?; }
             if title == "Patch preview" {
                 self.diff(detail)?;
             } else {
                 self.line(detail)?;
             }
-            self.approval()?;
+            if !detail.lines().any(|line| line.starts_with("Your turn.")) { self.approval()?; }
             None
         };
         self.approval_view = view;
+        self.approval_prefix = prefix.into();
         if self.approval_view.is_some() {
             self.scroll = 0;
         }
@@ -510,8 +580,11 @@ impl Terminal {
     /// Recheck the current size at the acceptance boundary, even if a resize
     /// and an approval key arrive before the next frame is drawn.
     pub fn approval_ready(&mut self) -> io::Result<()> {
+        if self.approval_columns != self.width().min(64) && self.approval_layout.is_some() {
+            self.reflow_approval(self.width());
+        }
         let width = self.width().saturating_sub(1).max(1);
-        self.approval_ready_at(width, self.height())
+        self.approval_ready_at(if self.approval_layout.is_some() { self.width() } else { width }, self.height())
     }
     fn approval_ready_at(&mut self, width: usize, height: usize) -> io::Result<()> {
         if height < 3 {
@@ -530,6 +603,9 @@ impl Terminal {
         Ok(())
     }
     pub fn close_approval(&mut self) {
+        self.approval_layout = None;
+        self.approval_hidden = None;
+        self.approval_prefix.clear();
         if self.approval_view.take().is_some() {
             self.scroll = 0;
         }
@@ -546,7 +622,7 @@ impl Terminal {
         let Some(view) = &mut self.approval_view else {
             return false;
         };
-        view.reflow(width.saturating_sub(1).max(1));
+        view.reflow(if self.approval_layout.is_some() { width.max(1) } else { width.saturating_sub(1).max(1) });
         view.incomplete || view.rows.len().saturating_sub(view.history_rows) > height.saturating_sub(4)
     }
     // Output is retained independently of the dock. Clearing a prompt must
@@ -556,11 +632,30 @@ impl Terminal {
     }
 
     pub fn resized(&mut self) -> io::Result<()> {
+        self.reflow_approval(self.width());
         if self.raw() {
             self.screen.clear();
             self.screen_size = (0, 0);
         }
         Ok(())
+    }
+    fn reflow_approval(&mut self, width: usize) {
+        let Some(prompt) = &self.approval_layout else { return };
+        if self.approval_columns == width.min(64) { return }
+        // Replace only the frozen review, without committing a second prompt or
+        // dropping the exact details already opened with 5. A size failure pauses.
+        let text = format!("{}{}\n", self.approval_prefix, prompt.render(width, self.color && self.raw()));
+        if let Some(view) = &mut self.approval_view {
+            let mut next = view.clone();
+            next.lines.truncate(next.review_start);
+            next.lines.push_back(String::new().into());
+            next.bytes = next.lines.iter().map(|line| line.len() + 1).sum();
+            next.logical_lines = next.lines.iter().map(|line| 1 + line.bytes().filter(|b| *b == b'\n').count()).sum();
+            next.width = 0;
+            next.append_review(&text, width);
+            *view = next;
+        }
+        self.approval_columns = width.min(64);
     }
     pub fn scroll(&mut self, down: bool) {
         let page = self.height().saturating_sub(5).max(1);

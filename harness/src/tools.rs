@@ -4,10 +4,11 @@
 //! hidden files and common credential filenames are refused, including at leaf
 //! components. Results are local UI output, never automatic model context.
 use std::io;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 mod discovery;
 mod state;
 pub use state::{StateLocation, project_key};
+pub(crate) use crate::secret_paths::{SECRET_PATH_RULES, SecretPathMatch, allowed_component, approved_secret_read_component, approved_secret_read_parts, safe_parts, secret_component_reason, secret_path_reason, validate_approved_secret_path};
 
 pub const MAX_READ_BYTES: usize = 64 * 1024;
 pub const MAX_TEXT_BYTES: usize = 4 * 1024 * 1024;
@@ -131,6 +132,16 @@ impl Workspace {
 
     /// `read_range`; a set `cancel` flag stops PDF text extraction early.
     pub fn read_range_cancellable(&self, path: &str, offset: usize, limit: usize, cancel: &std::sync::atomic::AtomicBool) -> io::Result<String> {
+        self.read_range_cancellable_with(path, offset, limit, cancel, false)
+    }
+
+    /// Read one explicit secret-related path after the host approved it.
+    /// Other read and discovery calls keep the normal secret-path refusal.
+    pub(crate) fn read_range_cancellable_approved(&self, path: &str, offset: usize, limit: usize, cancel: &std::sync::atomic::AtomicBool) -> io::Result<String> {
+        self.read_range_cancellable_with(path, offset, limit, cancel, true)
+    }
+
+    fn read_range_cancellable_with(&self, path: &str, offset: usize, limit: usize, cancel: &std::sync::atomic::AtomicBool, approved_secret: bool) -> io::Result<String> {
         use std::io::{Read, Seek, SeekFrom};
         if !(1..=MAX_READ_BYTES).contains(&limit) {
             return Err(error(&format!(
@@ -138,7 +149,7 @@ impl Workspace {
             )));
         }
         let (mut file, stamp) = self
-            .open_snapshot(path)?
+            .open_snapshot_with(path, approved_secret)?
             .ok_or_else(|| error("No file exists at this path."))?;
         if stamp.directory {
             return Err(error("This path is a folder, not a file."));
@@ -372,15 +383,19 @@ impl Workspace {
         Ok(self.open_snapshot(path)?.map(|(_, stamp)| stamp))
     }
     fn open_snapshot(&self, path: &str) -> io::Result<Option<(std::fs::File, FileStamp)>> {
-        let parts = safe_parts(path)?;
+        self.open_snapshot_with(path, false)
+    }
+    fn open_snapshot_with(&self, path: &str, approved_secret: bool) -> io::Result<Option<(std::fs::File, FileStamp)>> {
+        let parts = if approved_secret { approved_secret_read_parts(path)? } else { safe_parts(path)? };
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
             use std::os::unix::fs::MetadataExt;
             let file = if parts.is_empty() {
                 self.dir.file_copy()?
             } else {
-                let (parent, leaf) = self.parent(&parts)?;
-                let Some(file) = parent.workspace_file(leaf)? else {
+                let (parent, leaf) = if approved_secret { self.approved_secret_parent(&parts)? } else { self.parent(&parts)? };
+                let file = if approved_secret { parent.approved_secret_file(leaf)? } else { parent.workspace_file(leaf)? };
+                let Some(file) = file else {
                     return Ok(None);
                 };
                 file
@@ -410,6 +425,9 @@ impl Workspace {
         &self,
         path: &str,
     ) -> io::Result<(anchored::Dir, Vec<String>, String, String)> {
+        if let Some(why) = secret_path_reason(path) {
+            return Err(error(&format!("Secret-path write refused: {why}. Vade does not replace keys, tokens, credentials, history or environment files.")));
+        }
         let parts = safe_parts(path)?;
         let Some((name, parents)) = parts.split_last() else {
             return Err(error("file path required"));
@@ -437,6 +455,9 @@ impl Workspace {
                 dir = dir.workspace_child(part)?;
             }
             let mut names = dir.names(MAX_LIST_ENTRIES)?;
+            // Convenience filter for the native list. The shell boundary can
+            // show a protected name in its ordinary parent's listing; content
+            // and entries inside a protected folder remain protected.
             names.retain(|name| allowed_component(name));
             names.sort();
             // Enumeration itself is capped, so a very large directory has a
@@ -457,6 +478,14 @@ impl Workspace {
         let mut dir = self.dir.duplicate()?;
         for part in &parts[..parts.len() - 1] {
             dir = dir.workspace_child(part)?;
+        }
+        Ok((dir, parts[parts.len() - 1]))
+    }
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn approved_secret_parent<'a>(&self, parts: &[&'a str]) -> io::Result<(anchored::Dir, &'a str)> {
+        let mut dir = self.dir.duplicate()?;
+        for part in &parts[..parts.len() - 1] {
+            dir = dir.approved_secret_child(part)?;
         }
         Ok((dir, parts[parts.len() - 1]))
     }
@@ -535,69 +564,6 @@ fn text_range(text: &str, offset: usize, limit: usize, source: u64) -> io::Resul
         end - offset,
         &text[offset..end]
     ))
-}
-
-pub(crate) const CREDENTIAL_NAMES: &[&str] = &[
-    "credentials",
-    "credentials.json",
-    "secrets",
-    "secrets.json",
-    "secrets.yaml",
-    "secrets.yml",
-    "id_rsa",
-    "id_dsa",
-    "id_ecdsa",
-    "id_ed25519",
-    "authorized_keys",
-    "known_hosts",
-    "netrc",
-    "service-account.json",
-    "service_account.json",
-];
-pub(crate) const CREDENTIAL_SUFFIXES: &[&str] = &[
-    ".pem",
-    ".key",
-    ".p12",
-    ".pfx",
-    ".keystore",
-    ".p8",
-    ".jks",
-    ".tfstate",
-    ".tfstate.backup",
-];
-
-pub(crate) fn allowed_component(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    name.is_ascii()
-        && !name.starts_with('.')
-        && !name.chars().any(char::is_control)
-        && !CREDENTIAL_NAMES.contains(&lower.as_str())
-        && !CREDENTIAL_SUFFIXES
-            .iter()
-            .any(|suffix| lower.ends_with(suffix))
-}
-
-pub(crate) fn safe_parts(path: &str) -> io::Result<Vec<&str>> {
-    if path.len() > 4096 || path.contains('\\') || path.chars().any(char::is_control) {
-        return Err(error("This is not a valid path inside the workspace. Use a relative path with forward slashes."));
-    }
-    let mut parts = Vec::new();
-    for component in Path::new(path).components() {
-        match component {
-            Component::CurDir => (),
-            Component::Normal(value) => {
-                let value = value.to_str().ok_or_else(|| error("This path is not valid UTF-8. Use a UTF-8 path."))?;
-                if !allowed_component(value) {
-                    return Err(error(
-                        "The agent does not open non-ASCII, hidden or credential-related paths.",
-                    ));
-                }
-                parts.push(value);
-            }
-            _ => return Err(error("Use a path relative to the workspace, without .. or a leading /. The agent cannot reach files outside the workspace.")),
-        }
-    }
-    Ok(parts)
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -888,13 +854,13 @@ pub(crate) mod anchored {
                 .map(Self)
                 .map_err(|_| error("This folder does not exist or is a symbolic link. The agent does not follow links."))
         }
-        fn verify_workspace_entry(&self, name: &str, file: &File) -> io::Result<()> {
-            if !super::allowed_component(name) {
+        fn verify_entry(&self, name: &str, file: &File, allowed: fn(&str) -> bool) -> io::Result<()> {
+            if !allowed(name) {
                 return Err(error(
                     "non-ASCII, hidden or credential-related paths are blocked",
                 ));
             }
-            self.exact_entry(name, Some(file.metadata()?.ino()), super::allowed_component)
+            self.exact_entry(name, Some(file.metadata()?.ino()), allowed)
         }
         /// Checking only the requested spelling is insufficient on folding
         /// filesystems: ASCII input can resolve to a non-ASCII entry too.
@@ -922,7 +888,12 @@ pub(crate) mod anchored {
         }
         pub(crate) fn workspace_child(&self, name: &str) -> io::Result<Self> {
             let child = self.child(name)?;
-            self.verify_workspace_entry(name, &child.0)?;
+            self.verify_entry(name, &child.0, super::allowed_component)?;
+            Ok(child)
+        }
+        pub(crate) fn approved_secret_child(&self, name: &str) -> io::Result<Self> {
+            let child = self.child(name)?;
+            self.verify_entry(name, &child.0, super::approved_secret_read_component)?;
             Ok(child)
         }
         /// Like `workspace_child`, but only an absent entry is `None`; links,
@@ -930,7 +901,7 @@ pub(crate) mod anchored {
         pub(crate) fn optional_workspace_child(&self, name: &str) -> io::Result<Option<Self>> {
             match self.open(name, DIRECTORY) {
                 Ok(file) => {
-                    self.verify_workspace_entry(name, &file)?;
+                    self.verify_entry(name, &file, super::allowed_component)?;
                     Ok(Some(Self(file)))
                 }
                 Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -956,14 +927,20 @@ pub(crate) mod anchored {
             self.workspace_child(name)
         }
         pub(crate) fn workspace_file(&self, name: &str) -> io::Result<Option<File>> {
-            if !super::allowed_component(name) {
+            self.file_with(name, super::allowed_component)
+        }
+        pub(crate) fn approved_secret_file(&self, name: &str) -> io::Result<Option<File>> {
+            self.file_with(name, super::approved_secret_read_component)
+        }
+        fn file_with(&self, name: &str, allowed: fn(&str) -> bool) -> io::Result<Option<File>> {
+            if !allowed(name) {
                 return Err(error(
                     "non-ASCII, hidden or credential-related paths are blocked",
                 ));
             }
             match self.open(name, NONBLOCK) {
                 Ok(file) => {
-                    self.verify_workspace_entry(name, &file)?;
+                    self.verify_entry(name, &file, allowed)?;
                     Ok(Some(file))
                 }
                 Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -1239,6 +1216,35 @@ mod tests {
             assert!(safe_parts(path).is_err(), "{path:?}");
         }
         assert_eq!(safe_parts("./src/main.rs").unwrap(), ["src", "main.rs"]);
+    }
+    #[test]
+    fn owner_review_secret_path_cases() {
+        let mut wrong = Vec::new();
+        for path in [
+            "token.txt", "access-token.json", "credentials.toml", "keys/signing", ".bash_history",
+            ".zsh_history", ".aws/config", ".azure/accessTokens.json", ".config/gcloud/credentials.db",
+            ".npmrc", ".pypirc", ".cargo/credentials.toml", ".docker/config.json", ".env.local",
+        ] {
+            if safe_parts(path).is_ok() { wrong.push(format!("WRONGLY HARMLESS: {path}")); }
+        }
+        for path in ["src/token.rs", "docs/credentials.md", "src/history.rs", "config/example.env", "package.json"] {
+            if safe_parts(path).is_err() { wrong.push(format!("WRONGLY DANGEROUS: {path}")); }
+        }
+        assert!(wrong.is_empty(), "{} owner secret path cases are wrong:\n{}", wrong.len(), wrong.join("\n"));
+    }
+    #[test]
+    fn an_approved_secret_read_is_explicit_and_writes_stay_refused() {
+        let f = Fixture::new();
+        fs::write(f.0.join("token.txt"), "FAKE_TEST_TOKEN").unwrap();
+        fs::create_dir_all(f.0.join(".config/gcloud")).unwrap();
+        fs::write(f.0.join(".config/gcloud/credentials.db"), "FAKE_CLOUD_CREDENTIAL").unwrap();
+        let w = f.workspace();
+        assert!(w.read_range("token.txt", 0, 64).is_err());
+        assert_eq!(w.read_range_cancellable_approved("token.txt", 0, 64, &std::sync::atomic::AtomicBool::new(false)).unwrap(), "FAKE_TEST_TOKEN");
+        assert_eq!(w.read_range_cancellable_approved(".config/gcloud/credentials.db", 0, 64, &std::sync::atomic::AtomicBool::new(false)).unwrap(), "FAKE_CLOUD_CREDENTIAL");
+        let error = match w.edit_parent("token.txt") { Ok(_) => panic!("secret write path accepted"), Err(error) => error.to_string() };
+        assert!(error.contains("Secret-path write refused") && error.contains("does not replace"), "{error}");
+        assert_eq!(fs::read_to_string(f.0.join("token.txt")).unwrap(), "FAKE_TEST_TOKEN");
     }
     #[test]
     #[cfg(any(target_os = "macos", target_os = "linux"))]

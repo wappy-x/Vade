@@ -1,15 +1,18 @@
 //! Native coding adapter. UI approvals are callbacks, never model-supplied flags.
+use crate::approval_prompt::{self, Risk};
 use crate::agent::{ToolError, ToolExecutor, ToolInvocation, WorkspaceTools, invalid_integer};
 use crate::json::{self, Value};
 use crate::shell::{self, ApprovalPolicy, CommandSpec, permissions::Scope, safety::Class};
 use crate::tools::Workspace;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// What the host shows before a tool runs: a title, the exact detail (for
-/// example a patch diff or argv) and whether approval is needed.
+/// What the host shows before a tool runs. Approval text stays plain. Exact
+/// code or arguments can stay behind the details key.
 pub struct Preview<'a> {
+    pub prompt: Option<&'a approval_prompt::Prompt>,
     pub title: &'static str,
     pub detail: &'a str,
+    pub details: Option<&'a str>,
     pub approval_required: bool,
 }
 /// The native coding tool executor: workspace reads and searches, patches and
@@ -120,7 +123,7 @@ pub fn definitions_with_web(reply_limit: usize, shell: bool, web: bool) -> Value
     };
     let Value::Array(extra) = json::parse(r#"[
       {"type":"function","function":{"name":"apply_patch","description":"Exact UTF-8 patch text ≤64 KiB/32 files; target and result files ≤4 MiB each. Markers: *** Begin Patch, *** Add File: path (+lines), *** Update File: path (optional *** Move to: path, then @@ with exact space/-/+ lines), *** Delete File: path (no body needed), *** End Patch. One enclosing plain/diff/patch code fence, annotated @@ headers and bare empty update context lines are accepted. Hunk numbers are ignored; old text still determines the target. Missing parent folders inside the workspace are created. Old text must match exactly and uniquely; a unique match that differs only in spaces or tabs is accepted and reported. Backslash No newline at end of file supported. Atomic per file; not a batch transaction. Add requires an absent file; Update requires an existing file. After a refused single-file Add, a retained correction may be offered: pass the JSON object {\"patch\":\"the exact header from the receipt\",\"retry\":true}; retry is a boolean, never an object. Supply only that header, optionally followed by a line ending, without re-emitting content. Retry still previews and checks the captured file state. Build after each patch. Approval policy applies.","parameters":{"type":"object","properties":{"patch":{"type":"string"},"retry":{"type":"boolean"}},"required":["patch"],"additionalProperties":false}}},
-      {"type":"function","function":{"name":"workspace_shell","description":"Supported only on macOS: Linux and other platforms return an unsupported_platform tool result without running commands. Use explicit argv. After an edit, check the changed component, inspect failure diagnostics and repair before completion. Read files with workspace_search, workspace_read_lines and workspace_read, not with cat/sed/head/tail/grep here. Run in workspace under macOS OS sandbox, no network, cleared environment, ≤64 KiB output. No implicit shell: for shell syntax explicitly request /bin/sh -c script; the script is checked like any command. timeout_ms 1–120000. In ask mode, every command asks unless the user's allow list names its exact argv. Commands such as rm -rf / are blocked in every mode. Bare names resolve to fixed system executables. Auto runs all other validated commands in this same OS sandbox and permits patches without asking; it never enables unsandboxed execution. Never denies all commands. Cancellation kills the process group. No credential or workspace hidden-file access. A private session directory supplies CARGO_TARGET_DIR, CARGO_HOME, TMPDIR, HOME and npm cache; Cargo is offline. Pre-existing target/node_modules stay inaccessible. Use cargo build --offline or cargo test --offline with the owner-selected Rust toolchain. Built binaries are at $CARGO_TARGET_DIR/debug/NAME, not target/debug; use cargo run --offline -q, or /bin/sh -c to expand that path. Do not retry unknown_outcome tools without inspecting state.","parameters":{"type":"object","properties":{"argv":{"type":"array","items":{"type":"string"}},"timeout_ms":{"type":"integer"}},"required":["argv","timeout_ms"],"additionalProperties":false}}}
+      {"type":"function","function":{"name":"workspace_shell","description":"Supported only on macOS: Linux and other platforms return an unsupported_platform tool result without running commands. Use explicit argv. After an edit, check the changed component, inspect failure diagnostics and repair before completion. Read files with workspace_search, workspace_read_lines and workspace_read, not with cat/sed/head/tail/grep here. Run in workspace under macOS OS sandbox, no network, cleared environment, ≤64 KiB output. No implicit shell: for shell syntax explicitly request /bin/sh -c script; the script is checked like any command. timeout_ms 1–120000. In ask mode, a tiny fixed grammar of harmless read-only commands runs without a prompt. Other commands ask unless the user's allow list names the exact argv. Commands such as rm -rf / are blocked in every mode. Bare names resolve to fixed system executables. Auto runs all other validated commands in this same OS sandbox and permits patches without asking; it never enables unsandboxed execution. Never denies all commands. Cancellation kills the process group. No credential or workspace hidden-file access. A private session directory supplies CARGO_TARGET_DIR, CARGO_HOME, TMPDIR, HOME and npm cache; Cargo is offline. Pre-existing target/node_modules stay inaccessible. Use cargo build --offline or cargo test --offline with the owner-selected Rust toolchain. Built binaries are at $CARGO_TARGET_DIR/debug/NAME, not target/debug; use cargo run --offline -q, or /bin/sh -c to expand that path. Do not retry unknown_outcome tools without inspecting state.","parameters":{"type":"object","properties":{"argv":{"type":"array","items":{"type":"string"}},"timeout_ms":{"type":"integer"}},"required":["argv","timeout_ms"],"additionalProperties":false}}}
     ]"#).expect("static tool schema") else { unreachable!() };
     // Native code reads stay inline; source discovery should not become a
     // chain of whole-file artifact pages. The generic read-only adapter keeps
@@ -593,21 +596,19 @@ where
                 // A note goes into the system prompt of every later chat, so
                 // the person sees what changes, why it matters, and what each answer does.
                 // A save and a delete share one reach: this project's notes.
-                let (what, why, once, deny) = match text {
+                let (what, why, deny) = match text {
                     Some(text) => (
-                        format!("Save project note {}: {}", shell::visible_text(key), shell::visible_text(text)),
-                        "every later chat in this project loads saved notes with its instructions, so a note planted by a file or page can steer future chats.",
-                        "save this note",
+                        approval_prompt::action("Vade wants to save this note for this project", &format!("{}: {}", shell::visible_text(key), shell::visible_text(text)), Risk::Amber, "affects future chats", Some("this project")),
+                        "Vade reads saved notes in every future chat in this project and obeys them.\nA harmful file or web page can trick Vade into saving a bad note.",
                         "leave project notes unchanged",
                     ),
                     None => (
-                        format!("Delete saved project note {}.", shell::visible_text(key)),
-                        "deleting a saved note removes a standing preference or rule that later chats in this project rely on.",
-                        "delete this note",
+                        approval_prompt::action("Vade wants to delete this note from this project", &shell::visible_text(key), Risk::Red, "removes a note", Some("this project")),
+                        "Future chats in this project will not have this note.",
                         "keep project notes unchanged",
                     ),
                 };
-                let prompt = ReachPrompt { title: "Memory note", what, why, once, deny, reach: Reach::Memory, refused: "Memory note not changed" };
+                let prompt = ReachPrompt { title: "Memory note", what, why: why.into(), deny, reach: Reach::Memory, refused: "Memory note not changed" };
                 if let Some(refusal) = self.approve_reach(&prompt, cancel)? {
                     return bounded(refusal, invocation.max_output_bytes);
                 }
@@ -767,6 +768,19 @@ where
             }
             "workspace_read" | "workspace_list" => {
                 let read = invocation.call.name == "workspace_read";
+                let path = invocation.arguments.get("path").and_then(Value::as_str)
+                    .ok_or(ToolError::InvalidArguments("path must be a string"))?;
+                let secret = read.then(|| crate::tools::secret_path_reason(path)).flatten();
+                if let Some(why) = secret {
+                    if let Err(error) = crate::tools::validate_approved_secret_path(path) {
+                        return bounded(format!("Read refused: {error}"), invocation.max_output_bytes);
+                    }
+                    let what = approval_prompt::action("Vade wants to read this file from this project", &shell::visible_text(path), Risk::Red, "private text enters chat", Some("this project"));
+                    let answers = approval_prompt::choices("leave it unread", None, None, None);
+                    if let Some(refusal) = self.approve("Secret file read", &what, why, (self.policy == ApprovalPolicy::Ask).then_some(answers.as_str()), None, "Secret file not read", "read it yourself outside chat", cancel)? {
+                        return bounded(refusal, invocation.max_output_bytes);
+                    }
+                }
                 if read && let Some(Value::Number(limit)) = invocation.arguments.get("limit") {
                     let limit = limit
                         .parse::<usize>()
@@ -782,7 +796,12 @@ where
                             .min(crate::artifacts::INLINE_BYTES)
                             .saturating_sub(p.len() + 512)
                             .max(1);
-                        Ok(match self.workspace.read_range_cancellable(p, offset, limit.min(source_cap), cancel) {
+                        let result = if secret.is_some() {
+                            self.workspace.read_range_cancellable_approved(p, offset, limit.min(source_cap), cancel)
+                        } else {
+                            self.workspace.read_range_cancellable(p, offset, limit.min(source_cap), cancel)
+                        };
+                        Ok(match result {
                             Ok(text) => format!("Path: {p}\n{text}"),
                             Err(error) => format!("Read refused: {error}"),
                         })
@@ -867,11 +886,22 @@ where
                     return Err(ToolError::OutputLimit);
                 }
                 let previewed = prepared.preview();
+                let paths = affected.iter().map(|path| shell::visible_text(path)).collect::<Vec<_>>().join(", ");
+                let mut what = approval_prompt::action(
+                    &format!("Vade wants to change {} {}", affected.len(), if affected.len() == 1 { "file" } else { "files" }),
+                    &paths, Risk::Red, "can overwrite or delete work", Some("this project"),
+                );
+                what.files = affected.clone();
+                let proposed = approval_prompt::finish(&what, "A wrong change can overwrite or delete your work.",
+                    &approval_prompt::choices("leave the files unchanged", None, None, Some("change")));
+                let asking = self.policy == ApprovalPolicy::Ask;
+                let shown = proposed.render(64, false);
                 if !(self.preview)(
-                    Preview {
-                        title: "Patch preview",
-                        detail: previewed.diff(),
-                        approval_required: self.policy == ApprovalPolicy::Ask,
+                    Preview { prompt: asking.then_some(&proposed),
+                        title: "Workspace change",
+                        detail: if asking { &shown } else { previewed.diff() },
+                        details: asking.then_some(previewed.diff()),
+                        approval_required: asking,
                     },
                     cancel,
                 ) {
@@ -894,9 +924,10 @@ where
                         // never enter model tool results, artifacts or the journal.
                         let detail = self.workspace.root().join(path).display().to_string();
                         if !(self.preview)(
-                            Preview {
+                            Preview { prompt: None,
                                 title,
                                 detail: &detail,
+                                details: None,
                                 approval_required: false,
                             },
                             cancel,
@@ -960,9 +991,10 @@ where
                     }
                 };
                 let _ = (self.preview)(
-                    Preview {
+                    Preview { prompt: None,
                         title: "Patch result",
                         detail: &result,
+                        details: None,
                         approval_required: false,
                     },
                     cancel,
@@ -1013,11 +1045,12 @@ where
                 }
                 spec.validate().map_err(|_| ToolError::InvalidArguments("argv must be nonempty and bounded; timeout_ms must be within the command limit"))?;
                 // The class decides who must agree. It never changes the sandbox.
-                // Every command asks unless a rule names its exact argv; the
-                // experimental checker's safe class counts only when it is on.
+                // The fixed harmless grammar does not ask. The experimental
+                // checker's wider safe class counts only when it is on.
                 let checker = self.approvals.is_some_and(shell::permissions::Approvals::checker);
-                let verdict = shell::policy::decide(&spec.argv, self.workspace.root(), checker);
+                let verdict = shell::policy::decide_fixed(&spec.argv, self.workspace.root(), checker, spec.allowlisted());
                 let reasons = verdict.reasons();
+                let shown_reasons = shell::visible_line(&reasons);
                 let id = invocation.call.id.as_str();
                 if verdict.class == Class::Blocked {
                     let _ = self.record_shell(id, &spec, &verdict, "blocked", &[]);
@@ -1042,11 +1075,8 @@ where
                 let suggested = shell::policy::rule_for(&spec.argv, &verdict).map(|rule| vec![rule]);
                 let safety = match &listed {
                     Some(rule) => format!("Safety: {}; allowed by {}", verdict.class.label(), listed_rules(std::slice::from_ref(rule)).join(", ")),
-                    None if needs_approval => format!(
-                        "Safety: needs approval: {reasons}. Answer y (once){}, or n (deny).",
-                        if suggested.is_some() && self.approvals.is_some() { ", s (this exact argv, for this session), p (this exact argv, in .vade/permissions.json)" } else { "" }
-                    ),
-                    None if ask => format!("Safety: needs approval: {reasons}; prompts are off (--yes or --approval auto)"),
+                    None if needs_approval => format!("Safety: needs approval: {shown_reasons}"),
+                    None if ask => format!("Safety: needs approval: {shown_reasons}; prompts are off (--yes or --approval auto)"),
                     None => "Safety: safe (read-only, build or test command)".into(),
                 };
                 // No clear before the prompt: the terminal records the reach of
@@ -1057,17 +1087,37 @@ where
                 let runs = if executed == spec.argv { String::new() } else { format!("Runs as: {}\n", shell::visible_json(&executed)) };
                 let ephemeral_session = shell::BuildSession::default();
                 let build_session = self.build_session.unwrap_or(&ephemeral_session);
+                let exact = format!(
+                    "{}\n{runs}Folder: {}\nEnvironment (only these; <build> is the session build folder): {}\nScan exclusions (no reads or writes, every depth): {}\nBuild environment: {}\n{safety}",
+                    spec.preview(),
+                    shell::visible_json(&[self.workspace.root().display().to_string()]),
+                    shell::visible_json(&build_session.environment_words()),
+                    self.shell_exclusions.describe(),
+                    build_session.description()
+                );
+                let mut risks = Vec::new();
+                for finding in verdict.findings.iter().filter(|finding| finding.class == Class::Ask && finding.reason != shell::policy::DEFAULT_REASON) {
+                    if !risks.contains(&finding.reason.as_str()) { risks.push(finding.reason.as_str()); }
+                }
+                let risk = if risks.is_empty() { "can change files or run project code that Vade cannot prove harmless".to_owned() } else { shell::visible_line(&risks.join("; ")) };
+                let saved_yes = suggested.is_some() && self.approvals.is_some();
+                let risk_color = approval_prompt::command_risk(&verdict, saved_yes);
+                let deletes = risks.iter().any(|reason| reason.contains("deletes files") || reason.contains("deletes untracked files") || reason.contains("deletes build output"));
+                let why = if deletes {
+                    "This command deletes files.\nYou cannot get deleted files back.".to_owned()
+                } else {
+                    format!("This command {risk}.\nIt can change or delete your work.")
+                };
+                let what = approval_prompt::action("Vade wants to run a command", &approval_prompt::command(&executed), risk_color,
+                    if deletes { "can delete files" } else if risk_color == Risk::Red { "can lose work or data" } else { "runs project code or changes files" }, Some("this project"));
+                let proposed = approval_prompt::finish(&what, &why, &approval_prompt::choices("do not run it",
+                    saved_yes.then_some("this exact command"), saved_yes.then_some("in this project (this exact command)"), Some("details")));
+                let shown = proposed.render(64, false);
                 if !(self.preview)(
-                    Preview {
+                    Preview { prompt: needs_approval.then_some(&proposed),
                         title: "Command",
-                        detail: &format!(
-                            "{}\n{runs}Folder: {}\nEnvironment (only these; <build> is the session build folder): {}\nScan exclusions (no reads or writes, every depth): {}\nBuild environment: {}\n{safety}",
-                            spec.preview(),
-                            shell::visible_json(&[self.workspace.root().display().to_string()]),
-                            shell::visible_json(&build_session.environment_words()),
-                            self.shell_exclusions.describe(),
-                            build_session.description()
-                        ),
+                        detail: if needs_approval { &shown } else { &exact },
+                        details: needs_approval.then_some(exact.as_str()),
                         approval_required: needs_approval,
                     },
                     cancel,
@@ -1121,9 +1171,10 @@ where
                 )
                 .map_err(|error| {
                     let _ = (self.preview)(
-                        Preview {
+                        Preview { prompt: None,
                             title: "Command error",
                             detail: &error.to_string(),
+                            details: None,
                             approval_required: false,
                         },
                         cancel,
@@ -1157,9 +1208,10 @@ where
                     }
                 }
                 let _ = (self.preview)(
-                    Preview {
+                    Preview { prompt: None,
                         title: "Command result",
                         detail: &result,
+                        details: None,
                         approval_required: false,
                     },
                     cancel,
@@ -1181,9 +1233,8 @@ enum Reach<'a> {
 }
 struct ReachPrompt<'a> {
     title: &'static str,
-    what: String,
-    why: &'static str,
-    once: &'static str,
+    what: approval_prompt::Prompt,
+    why: String,
     deny: &'static str,
     reach: Reach<'a>,
     refused: &'static str,
@@ -1197,15 +1248,16 @@ where
     /// in plain words. `never` denies the call. `Ok(Some(text))` is a refusal
     /// that the model can read: no one can answer in this run.
     #[allow(clippy::too_many_arguments)]
-    fn approve(&mut self, title: &'static str, what: &str, why: &str, answers: Option<&str>, refused: &str, remedy: &str, cancel: &AtomicBool) -> Result<Option<String>, ToolError> {
+    fn approve(&mut self, title: &'static str, what: &approval_prompt::Prompt, why: &str, answers: Option<&str>, details: Option<&str>, refused: &str, remedy: &str, cancel: &AtomicBool) -> Result<Option<String>, ToolError> {
         if self.policy == ApprovalPolicy::Never {
             return Err(ToolError::Denied);
         }
         if answers.is_some() && self.approvals.is_some_and(|approvals| !approvals.interactive()) {
             return Ok(Some(shell_refusal("approval_required", &format!("{refused}: it needs approval, and no one can approve it in this non-interactive run. Do not retry it; finish without it. The person who runs Vade can allow it with --yes, or {remedy}."))));
         }
-        let detail = answers.map_or_else(|| what.to_owned(), |answers| format!("{what}\nWhy this asks: {why}\nAnswer {answers}."));
-        if (self.preview)(Preview { title, detail: &detail, approval_required: answers.is_some() }, cancel) {
+        let prompt = answers.map(|answers| approval_prompt::finish(what, why, answers));
+        let detail = prompt.as_ref().unwrap_or(what).render(64, false);
+        if (self.preview)(Preview { prompt: prompt.as_ref(), title, detail: &detail, details: answers.and(details), approval_required: answers.is_some() }, cancel) {
             return Ok(None);
         }
         Err(if cancel.load(Ordering::Relaxed) { ToolError::Cancelled } else { ToolError::Denied })
@@ -1224,9 +1276,8 @@ where
         let prompt = if target == crate::web::SEARCH_TARGET {
             ReachPrompt {
                 title: "Web request",
-                what: format!("Search the web for {shown}."),
-                why: "this sends those search words to external search engines, which could leak workspace text if a file or page told the model what to search.",
-                once: "run this search once",
+                what: approval_prompt::action("Vade wants to search the web", &shown, Risk::Red, "sends search words", None),
+                why: "The search website receives these words.\nA harmful file or web page can trick Vade into searching for your private text.".into(),
                 deny: "refuse without sending anything",
                 reach: Reach::Web(&target),
                 refused: "Web request not sent",
@@ -1234,9 +1285,8 @@ where
         } else {
             ReachPrompt {
                 title: "Web request",
-                what: format!("Fetch web page {shown} from {target}."),
-                why: "a prompt in a file or page could hide workspace text inside the address and send it to that site.",
-                once: "send this request once",
+                what: approval_prompt::action("Vade wants to read this web page", &shell::visible_line(&sent), Risk::Red, "sends the full address", None),
+                why: "The website receives the full address.\nA harmful file or web page can trick Vade into putting your private text in the address.".into(),
                 deny: "refuse without sending anything",
                 reach: Reach::Web(&target),
                 refused: "Web request not sent",
@@ -1249,16 +1299,18 @@ where
     /// model put in the URL, so the new site needs its own approval.
     fn approve_redirect(&mut self, from: &str, to: &str, cancel: &AtomicBool) -> Result<(), ToolError> {
         let (Some(from), Some(target)) = (crate::web::site(from), crate::web::site(to)) else { return Err(ToolError::Denied) };
-        let downgraded = from.strip_prefix("https://").is_some_and(|host| target.strip_prefix("http://") == Some(host));
+        let downgraded = from.starts_with("https://") && target.starts_with("http://");
+        let different = from.split_once("://").map(|(_, site)| site) != target.split_once("://").map(|(_, site)| site);
         let prompt = ReachPrompt {
             title: "Web redirect",
-            what: format!("Follow redirect from {from} to {} on {target}.", shell::visible_text(to)),
-            why: if downgraded {
-                "following this redirect switches from HTTPS to unencrypted HTTP, exposing the address and reply on the network."
+            what: approval_prompt::action(&if different { format!("{from} sends Vade to a different website") } else { format!("{from} sends Vade to an address that is not encrypted (http, not https).") }, &shell::visible_line(to), Risk::Red, "sends the full address", None),
+            why: if downgraded && different {
+                format!("You approved {from}. You did not approve the new website. The new website receives the full address, which can contain your private text.\nOther people on the network can read the address and the reply.")
+            } else if downgraded {
+                "Other people on the network can read the address and the reply.".into()
             } else {
-                "an approved site can forward a link to an unapproved site and send text hidden in the address there."
+                format!("You approved {from}. You did not approve the new website.\nThe new website receives the full address. The address can contain your private text.")
             },
-            once: "follow this redirect once",
             deny: "stop the redirect without contacting that site",
             reach: Reach::Web(&target),
             refused: "Web redirect not followed",
@@ -1270,8 +1322,8 @@ where
         }
     }
     /// Ask for one web request or memory note unless the session, or the
-    /// saved approvals, already allow its reach. Keep an `s` answer for the
-    /// session and save an `a` answer in the Vade home. Only the terminal
+    /// saved approvals, already allow its reach. Keep choice 3 for the
+    /// session and save choice 4 in the Vade home. Only the terminal
     /// sets the reach of an answer (`Approvals::choose_for`); the model's
     /// arguments never do.
     fn approve_reach(&mut self, prompt: &ReachPrompt<'_>, cancel: &AtomicBool) -> Result<Option<String>, ToolError> {
@@ -1286,13 +1338,15 @@ where
             Reach::Web(target) => (format!("allow requests to {target}"), format!("Requests to the site {target}"), "Web approval", "turn the web tools off with --no-web"),
             Reach::Memory => ("allow note changes in this project".to_owned(), "Memory note changes in this project".to_owned(), "Memory approval", "turn project memory off with --no-memory"),
         };
-        let always = if self.approvals.is_some_and(|approvals| approvals.can_save(memory)) { ", a to allow them always" } else { "" };
-        let answers = if self.approvals.is_some() {
-            format!("y to {}, s to {session} for this session{always}, or n to {}", prompt.once, prompt.deny)
-        } else {
-            format!("y to {}, or n to {}", prompt.once, prompt.deny)
+        let scope = match prompt.reach {
+            Reach::Web(crate::web::SEARCH_TARGET) => "for web searches".to_owned(),
+            Reach::Web(target) => format!("for this website ({target})"),
+            Reach::Memory => "in this project (note changes)".to_owned(),
         };
-        if let Some(refusal) = self.approve(prompt.title, &prompt.what, prompt.why, ask.then_some(answers.as_str()), prompt.refused, remedy, cancel)? {
+        let answers = approval_prompt::choices(prompt.deny,
+            self.approvals.is_some().then_some(session.as_str()),
+            self.approvals.is_some_and(|approvals| approvals.can_save(memory)).then_some(scope.as_str()), None);
+        if let Some(refusal) = self.approve(prompt.title, &prompt.what, &prompt.why, ask.then_some(answers.as_str()), None, prompt.refused, remedy, cancel)? {
             return Ok(Some(refusal));
         }
         let Some(approvals) = self.approvals.filter(|_| ask) else { return Ok(None) };
@@ -1310,7 +1364,7 @@ where
             },
             _ => return Ok(None),
         };
-        let _ = (self.preview)(Preview { title, detail: &notice, approval_required: false }, cancel);
+        let _ = (self.preview)(Preview { prompt: None, title, detail: &notice, details: None, approval_required: false }, cancel);
         Ok(None)
     }
     /// Save the rules for the reach the person chose (session or project),
@@ -1330,7 +1384,7 @@ where
             },
             None => "This command cannot go on an allow list: a rule names one exact command whose words are plain letters, digits and - _ . , / : = + @, with no root, credentials or code sent into a shell. It was approved once.".into(),
         };
-        let _ = (self.preview)(Preview { title: "Allow list", detail: &notice, approval_required: false }, cancel);
+        let _ = (self.preview)(Preview { prompt: None, title: "Allow list", detail: &notice, details: None, approval_required: false }, cancel);
     }
     /// One journal record per approval decision; safe commands need none.
     fn record_shell(&mut self, id: &str, spec: &CommandSpec, verdict: &shell::safety::Verdict, decision: &str, rules: &[String]) -> std::io::Result<()> {

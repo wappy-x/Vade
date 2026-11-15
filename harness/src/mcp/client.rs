@@ -1,5 +1,5 @@
 //! One MCP server process: JSON-RPC 2.0, one message per line on stdin and stdout.
-use super::config::ServerSpec;
+use super::config::{self, ServerSpec, Source};
 use crate::json::{self, Value};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
@@ -107,9 +107,25 @@ pub struct Connection {
     pub info: ServerInfo,
 }
 
+fn check_launch(spec: &ServerSpec, root: &Path) -> Result<(), CallError> {
+    if spec.source != Source::Project { return Ok(()); }
+    // An unchanged program file is not read again; every script is.
+    let current = config::program_identity(spec, root, spec.program.as_ref().and_then(config::ProgramIdentity::known));
+    if let (Ok(current), Some(trusted)) = (&current, &spec.program) && current.binds_same(trusted) { return Ok(()); }
+    Err(CallError::Spawn(format!(
+        "the project program path or contents, or a bound argument file changed during start. The server was stopped. Check the files, then run vade mcp trust {} again",
+        spec.name
+    )))
+}
+
 impl Connection {
     /// Spawn the server and run `initialize` / `notifications/initialized`.
     pub fn start(spec: &ServerSpec, root: &Path, cancel: &AtomicBool) -> Result<Self, CallError> {
+        Self::start_with_spawn(spec, root, cancel, Command::spawn)
+    }
+
+    fn start_with_spawn(spec: &ServerSpec, root: &Path, cancel: &AtomicBool,
+        spawn: impl FnOnce(&mut Command) -> std::io::Result<Child>) -> Result<Self, CallError> {
         // Only ordinary runtime names pass from the chat; a server gets a
         // token only through its own `env` entry.
         const KEEP: &[&str] = &["HOME", "PATH", "TMPDIR", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "LC_CTYPE", "TERM"];
@@ -119,7 +135,15 @@ impl Connection {
         if inside(&directory) != Some(true) {
             return Err(CallError::Spawn("cwd is not a folder inside the workspace".into()));
         }
-        let mut command = Command::new(&spec.command);
+        if spec.source == Source::Project && (!spec.trusted || spec.program.is_none()) {
+            return Err(CallError::Spawn(format!(
+                "project server {} is not trusted yet. Check the command and files, then run vade mcp trust {}",
+                spec.name, spec.name
+            )));
+        }
+        let program = spec.program.as_ref().filter(|_| spec.source == Source::Project)
+            .map_or_else(|| spec.command.clone().into(), |identity| identity.path.clone());
+        let mut command = Command::new(program);
         command
             .args(&spec.args)
             .env_clear()
@@ -135,7 +159,16 @@ impl Connection {
             use std::os::unix::process::CommandExt;
             command.process_group(0);
         }
-        let mut child = command.spawn().map_err(|e| CallError::Spawn(e.kind().to_string()))?;
+        // Run the original files in place. Checks on both sides of spawn narrow
+        // the check/start gap, but cannot close it for a program that someone
+        // can rewrite at that instant. Files loaded later are not covered.
+        check_launch(spec, root)?;
+        let mut child = spawn(&mut command).map_err(|e| CallError::Spawn(e.kind().to_string()))?;
+        if let Err(error) = check_launch(spec, root) {
+            crate::process_group::kill_group(&mut child);
+            let _ = child.wait();
+            return Err(error);
+        }
         let stdout = child.stdout.take().expect("piped stdout");
         let stdin = child.stdin.take().expect("piped stdin");
         let (writer, lines) = mpsc::sync_channel(WRITE_QUEUE);
@@ -520,5 +553,38 @@ impl Redactor {
         let text = String::from_utf8_lossy(&self.shown);
         // A cut tail starts inside older output; drop that first, partial word.
         text.split_whitespace().skip(usize::from(self.cut)).collect::<Vec<_>>().join(" ")
+    }
+}
+
+#[cfg(all(test, unix))]
+mod launch_tests {
+    use super::*;
+
+    #[test]
+    fn changed_script_is_refused_before_and_after_spawn() {
+        let root = std::env::temp_dir().join(format!("vade-launch-check-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let script = root.join("server.sh");
+        std::fs::write(&script, "exec sleep 60\n").unwrap();
+        let entry = json::parse(r#"{"command":"/bin/sh","args":["server.sh"]}"#).unwrap();
+        let mut spec = config::parse_entry("checked", &entry, Source::Project).unwrap();
+        spec.trusted = true;
+        spec.program = Some(config::program_identity(&spec, &root, None).unwrap());
+        std::fs::write(&script, "exec sleep 61\n").unwrap();
+        let result = Connection::start_with_spawn(&spec, &root, &AtomicBool::new(false), |_| {
+            panic!("changed script must be refused before spawn")
+        });
+        assert!(matches!(result, Err(CallError::Spawn(message)) if message.contains("changed during start")));
+        std::fs::write(&script, "exec sleep 60\n").unwrap();
+        let mut pid = 0;
+        let result = Connection::start_with_spawn(&spec, &root, &AtomicBool::new(false), |command| {
+            let child = command.spawn()?;
+            pid = child.id();
+            std::fs::write(&script, "exec sleep 62\n")?;
+            Ok(child)
+        });
+        assert!(matches!(result, Err(CallError::Spawn(message)) if message.contains("server was stopped") && message.contains("vade mcp trust checked")));
+        assert!(!Command::new("/bin/kill").args(["-0", &pid.to_string()]).stderr(Stdio::null()).status().unwrap().success());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

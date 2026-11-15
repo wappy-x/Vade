@@ -7,6 +7,132 @@ A short revision such as `380d8e5` or a number such as PR 142 names a revision
 or pull request of the private development history. This repository does not
 hold them ([glossary](docs/GLOSSARY.md#ho), "Main `abc1234`").
 
+## v0.2.0-rc.19 - 2026-11-15
+
+This release makes the one-line installer safe against a cut-off download,
+keeps plain HTTP on the machine unless you allow it, hardens the agent's
+shell and approval prompts, and enables the GLM prompt cache with more room.
+GLM remains a diagnostic text service.
+
+Across tonight's merged trains, measured with GLM FP4-Local on two DGX
+Sparks, total decode rates changed from 51.73 to 55.78 tokens per second
+for eight chats, 42.12 to 43.68 for four chats, and 75.88 to 83.44 for eight
+copies of one chat. One chat changed from 24.39 to 24.30, inside the measured
+spread. The load-specific results below state what changed.
+
+New and changed:
+
+- **A cut-off installer download runs nothing (PR 190).** One brace group now
+  holds the whole installer, so the shell runs no line until it has read the
+  last one. Before, a download that stopped inside the last line could start
+  the installer without its arguments: a requested `--check` could become an
+  install. This held for every earlier installer. A file that lacks only its
+  final newline is still the whole program and runs as asked.
+- **No plain HTTP to another machine by default (PR 192).** Chat, the agent
+  and both gateways refuse a plain HTTP link to another machine and close the
+  connection before any request byte is sent. A link to this machine still
+  works. Use an SSH tunnel ([network setup](docs/network-setup.md)), or pass
+  `--allow-plain-http` to accept the risk.
+- **Shell and approval prompts (PR 177).** This fixes two errors of the
+  agent's shell classifier and four errors in its handling of secret paths.
+  One table of secret paths now serves direct reads, the classifier, Git
+  exclusions and the sandbox. Approval prompts have three short lines, and
+  `d` shows the details.
+- **Project helper programs (PR 161).** Trust for a project's MCP server binds
+  the exact config entry, its argument list, and the bytes of the program and
+  its script arguments. Vade checks them just before and just after it starts
+  the server, and stops it if one changed. Harness network waits have limits.
+- **Case-folding disks (PR 147).** The edit tool judges whether a disk folds
+  upper and lower case only from a folder on the same disk. Otherwise it says
+  that it cannot tell and asks for separate patches. Before, a parent disk's
+  answer could let one name overwrite another.
+- **Apple developer tools in the sandbox (PR 194).** On macOS the agent's
+  shell commands use the Command Line Tools when they are installed, so `git`
+  works in the sandbox when a full Xcode is selected.
+- **More room for the GLM prompt cache (PR 195, PR 149).** The text service
+  sizes its projection workspace from the loaded weights and gives the unused
+  part to the session pool, which funds chats and kept prompts. Each kept
+  prompt now counts every piece of device memory that it holds once.
+- **GLM prompt cache on by default (PR 122).** A new `vade up` keeps
+  prompts. Use `vade up --cache-bytes 0` to turn this off. Requests can send
+  `"cache":false` for a cold read. The train record measured the first token
+  of a kept second turn at 2.77 seconds, against 34.5 seconds cold, on two
+  DGX Sparks at context 32,768. These are first-token times for that load,
+  not decode rates. The cache default has a small one-chat cost below.
+- **GLM drafting stays opt-in.** Use `--mtp 3` with
+  `--diagnostic-unqualified-text` to load the predictor. On two DGX Sparks,
+  a 256-token greedy structured request with no drafting field ran at
+  30.431 tokens per second, against 24.288 plain. In a separate comparison
+  at context 16,384, loading the predictor reduced eight-chat throughput
+  from 55.892 to 37.353 tokens per second and eight copies of one chat from
+  83.788 to 45.468. The smaller chat pool could not fund all eight at once.
+  This concurrency cost is why drafting is not the default yet.
+- **A bare GLM start falls to context 32,768 (PR 218).** `vade up --sparks 2
+  --diagnostic-unqualified-text` with no `--context` asks for context 131,072
+  first. When the text service refuses that size for memory, `vade up` now
+  says so and starts with context 32,768, as its help text describes. Before,
+  it stopped at the refusal. A context that you name stays your choice.
+- **Earlier first token (PR 210).** The decoder reuses prepared initial-state
+  layouts between sessions. All 48 measured token ID lists matched main.
+  On two DGX Sparks, first-token times for one-chat requests capped at 256
+  output tokens changed from 839.0 to 785.3 milliseconds for prose, 879.8
+  to 824.2 for code, and 795.0 to 742.5 for structured output. Decode speeds
+  stayed inside the measured spread. A separate two-Spark comparison by
+  prompt size, in the order main, candidate, candidate, main, measured a
+  64-token prompt at 670.1 / 621.4 / 616.4 / 685.8 milliseconds and a
+  1,024-token prompt at 3,827.4 / 3,781.4 / 3,770.9 / 3,832.6. For a
+  16-token prompt, main measured 338.0 and 340.8 milliseconds; the candidate
+  had one sample at 288.5.
+- **More shared work for concurrent GLM chats (PR 206, PR 207).** The engine
+  folds all chat rows with one GPU launch per layer and groups absorbed
+  attention for five or more chats. Token IDs remain the same. The combined
+  train with the cache default, measured back to back on two DGX Sparks,
+  changed eight chats from 54.02 to 55.72 tokens per second in total, four
+  chats from 43.39 to 43.64, and eight copies of one chat from 81.09 to
+  83.32. One chat changed from 24.33 to 24.27 tokens per second. The 8K
+  first-token time changed from 32.28 to 32.35 seconds. These numbers compare
+  the whole train with the preceding main, not the two changes separately.
+- **Faster concurrent GLM chats (PR 167).** Four or more chats at once share
+  three ordered boundary phases a layer. Each chat keeps its own arithmetic,
+  and the token IDs are the same. Measured on two DGX Sparks with GLM
+  FP4-Local, two loads of the build before and two loads of this change, in
+  tokens per second in total: eight different chats 51.73 and 51.63 before,
+  53.85 and 54.05 after; four chats 42.12 and 42.06 before, 43.23 and 43.40
+  after; eight copies of one chat 75.88 and 75.68 before, 80.92 and 81.15
+  after. One chat and two chats did not change.
+- **Several chats, fewer GPU launches (PR 154).** Small multi-row decode
+  steps replay their row kernels through the resident recorder. The kernel
+  bodies, their arguments and the order of arithmetic are the same.
+- **Row checks before state changes (PR 148).** The engine rejects a bad row
+  of a chat batch before any chat in the batch changes state.
+- **A refused output slot (PR 150).** When the model's greedy choice is an
+  output slot that is no token, the request ends with the error
+  `invalid_model_output` (HTTP 422, or the same error in the stream). The
+  engine does not pick another token in its place.
+
+Checks:
+
+- **Cache documentation and served tests (PR 211, PR 212).** The notes
+  distinguish the GLM cache room from the FP4 prefix-cache rule and describe the cached
+  token count in each caller's reply. Served tests cover zero cache room
+  and changed sampling. Five more tests cover concurrent resumes, a lost
+  worker state, disabled cache and cancellation. These follow-ups change
+  no production behavior.
+- **Shared phase kernel coverage (PR 204, test only).** The row-split device
+  fixture now uses a width supported by the shared phase kernels. This makes
+  the existing device test enter that path. No production kernel changed.
+- **Hand-run CI jobs (PR 193).** Three of the hand-run jobs that failed on
+  GitHub's machines for `v0.2.0-rc.18` are fixed in the source. The engine
+  heartbeat tests use a test clock instead of real time. One CLI test no
+  longer needs a system `timeout` program. The hosted Linux engine job, which
+  has no `ptxas`, skips the tensor-core register check by an explicit switch;
+  a Spark build still runs that check.
+
+Not done yet, said plainly:
+
+- GLM remains a diagnostic text service (`--diagnostic-unqualified-text`).
+- Full cache-fill pressure loads remain unmeasured.
+
 ## v0.2.0-rc.18 - 2026-11-14
 
 This release fixes one Linux-only CLI test that failed in the public CI run
@@ -483,8 +609,11 @@ Release candidate. The public tree already carried every change listed under Unr
 
 ## Unreleased (v0.2.0)
 
+- The harness and gateway refuse plain HTTP to another machine by default. Use an SSH tunnel or explicitly accept the risk with `--allow-plain-http`.
+
 Version v0.2.0 is not released yet.
 
+- The text service sizes its projection cache from loaded weights. Chats and kept prompts can use the released memory.
 - The bounded decoder probe adds a causal text Factory and exact generated-ID receipts. Public GLM service admission remains closed.
 - The causal layer probe checks a complete dense KDA layer against fixed recipe bytes. Full GLM decode remains unavailable.
 - The stored checkpoint prefix probe joins embedding, attention mHC, and input norm. Complete GLM decode remains unavailable.

@@ -1,9 +1,8 @@
 //! The shell policy that Vade ships: every `workspace_shell` command needs
-//! approval, unless an allow-list rule names its exact argv and every word
-//! of that argv is a plain literal. The checker in `safety` still refuses
-//! the commands that it blocks, which only refuses more. Its safe class is
-//! advisory: it counts only when the experimental checker is on
-//! (`VADE_SHELL_CHECKER=1`).
+//! approval, unless an allow-list rule names its exact argv or a separately
+//! reviewed fixed grammar proves that it is harmless. The checker in `safety`
+//! still refuses the commands that it blocks. Its wider safe class counts only
+//! when the experimental checker is on (`VADE_SHELL_CHECKER=1`).
 //!
 //! A rule that a person writes in a permissions file can also hold
 //! `<path>` slots: each one matches one plain word that names a path inside
@@ -16,8 +15,9 @@ use std::path::Path;
 /// The environment switch for the experimental checker.
 pub const CHECKER_ENV: &str = "VADE_SHELL_CHECKER";
 
-/// The reason that every command gets under the default policy.
-pub const DEFAULT_REASON: &str = "every command needs approval unless an allow list names it";
+/// The reason that commands outside the fixed harmless grammar get under
+/// the default policy.
+pub const DEFAULT_REASON: &str = "this command is not in the fixed harmless command set";
 
 /// Longest argv that can become a rule.
 const MAX_RULE_WORDS: usize = 128;
@@ -28,12 +28,15 @@ pub fn checker_from(value: Option<&str>) -> bool {
     matches!(value, Some("1" | "on" | "experimental"))
 }
 
-/// The class of one argv. Blocked when the checker blocks it. Otherwise
-/// Ask, with the default reason first, unless the experimental checker is
-/// on and reads the command as safe.
 pub fn decide(argv: &[String], root: &Path, checker: bool) -> Verdict {
+    decide_fixed(argv, root, checker, false)
+}
+
+/// The class of one argv with a separate proof from the fixed harmless
+/// command grammar in [`crate::shell::CommandSpec`].
+pub fn decide_fixed(argv: &[String], root: &Path, checker: bool, fixed_safe: bool) -> Verdict {
     let mut verdict = safety::classify(argv, root);
-    if verdict.class == Class::Blocked || checker {
+    if verdict.class == Class::Blocked || checker || fixed_safe && verdict.class == Class::Safe {
         return verdict;
     }
     verdict.class = Class::Ask;
@@ -57,13 +60,10 @@ pub const PATH_SLOT: &str = "<path>";
 /// never goes on an allow list.
 pub fn private_word(word: &str) -> bool {
     let lower = word.to_ascii_lowercase();
-    let named = |name: &&str| lower.contains(&name.to_ascii_lowercase());
-    crate::tools::CREDENTIAL_NAMES.iter().any(named)
-        || super::safety::SECRET_DIRS.iter().any(named)
-        || lower.contains(super::permissions::FILE_NAME)
+    lower.contains(super::permissions::FILE_NAME)
         || lower.split(['/', '=', ':', '@', ',']).any(|part| {
             (part.starts_with('.') && part != "." && part != "..")
-                || crate::tools::CREDENTIAL_SUFFIXES.iter().any(|suffix| part.ends_with(suffix))
+                || crate::tools::SECRET_PATH_RULES.iter().any(|rule| rule.matches_attached(part))
         })
 }
 

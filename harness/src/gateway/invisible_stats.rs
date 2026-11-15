@@ -15,15 +15,27 @@ pub(super) const OPEN_FAILED: &str = "cannot open the --stats file";
 pub(super) struct StatsLog(Mutex<File>);
 impl StatsLog {
     pub(super) fn open(path: &str) -> io::Result<Self> {
+        Self::open_tracked(path).map(|(log, _)| log)
+    }
+    /// Track only a file this call creates, so refusal cleanup cannot remove
+    /// an existing statistics log (including one created by a racing opener).
+    pub(super) fn open_tracked(path: &str) -> io::Result<(Self, bool)> {
         let mut options = OpenOptions::new();
-        options.create(true).append(true);
+        options.create_new(true).append(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
         // Name the flag and keep the kind; the OS text alone names no file.
-        options.open(path).map(|file| Self(Mutex::new(file))).map_err(|error| io::Error::new(error.kind(), OPEN_FAILED))
+        match options.open(path) {
+            Ok(file) => Ok((Self(Mutex::new(file)), true)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                options.create_new(false);
+                options.open(path).map(|file| (Self(Mutex::new(file)), false))
+            }
+            Err(error) => Err(error),
+        }.map_err(|error| io::Error::new(error.kind(), OPEN_FAILED))
     }
     pub(super) fn write(&self, line: &str) -> io::Result<()> {
         let mut file = self.0.lock().unwrap_or_else(|p| p.into_inner());

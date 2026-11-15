@@ -29,6 +29,13 @@ for the saved session rules. The state directory keeps notes out of Git.
 The launcher has no generic harness command forwarding. There is no
 `vade memory` command. Use the file path above to inspect or edit notes.
 
+Note approval prompts show the key and text once, with `this project` at the
+right edge of the target row. Each risk sentence starts on its own indented
+row. Choice `1` shares the `Your turn.` row; the other numbers line up below it.
+Long text wraps within 64 terminal cells.
+Each target row after the first starts with `│  `, including a separate
+scope row. Windows narrower than 20 columns wrap a 20-column layout.
+
 ## Format and limits
 
 Each note is a Markdown list entry on its own line:
@@ -62,11 +69,11 @@ Notes do not grant tool permissions or change the approval policy. The
 `memory_save` tool takes `key` and `text`. The `memory_forget` tool takes
 `key`. Each returns `entries`, the entry count after the change. Each later
 chat reads the notes, so the approval policy controls both tools. With
-`--approval ask` each change asks first: `y` for this change, `s` for note
-changes in this project for the rest of the session, `a` for always (saved in
+`--approval ask` each change asks first: `1` for this change, `2` to leave notes unchanged, `3` for note
+changes in this project for the rest of the session, `4` for always (saved in
 `allowed.json` in the Vade home). `--approval auto` (or `--yes`) shows the
 change and does not wait. `--approval never` refuses it. A run that no person
-can answer changes no note unless this project was saved with `a`. See
+can answer changes no note unless this project was saved with `4`. See
 [project memory tools](agent-tools.md#project-memory-tools). The parent agent
 owns these tools. Child agents cannot change memory.
 

@@ -32,6 +32,30 @@ pub fn planes(token:usize,m:usize,picks:usize,rows:Rows,shared:Option<usize>)->R
     };
     Ok(Planes {picked:token*picks..(token+1)*picks,projected:token*each..(token+1)*each,own})
 }
+/// FOLD ROWS ONE LAUNCH: the shape of the ONE row-fold launch that folds every token of a batch step on this rank (the
+/// wrapped fold, `prompt_fold`), or None where each token keeps a launch of its own. `fold`: one token's fold with this
+/// rank's row count (`local`) and no round mark. `shared`: the words of the shared plane, when the fold has one.
+///
+/// One launch reads each plane token-major with no gap: the IDs and weights (`m * picks`), the projected rows
+/// (`m * picks * local`, one row a (token, pick): `planes` gives token t the range `t * picks * local..`, the same words
+/// the row fold reads for token t), and the shared plane in its own-rows form (`m * local`). The gathered shared plane
+/// (`m * rows.total`) holds a token's own words `rows.total` apart: that form keeps the launch a token.
+///
+/// The row fold reads a row word as it lies; the launch a token casts it to BF16 first (`FOLD_ROUNDS`). The projected
+/// rows of ROUTE ROWS are finished BF16 words (a column-tile table stores `round(sum)`; the launch refuses any other
+/// table), and the cast changes no finished word that is not a NaN. So both give the same word, by the same chain
+/// (`tests/rows_fold.rs` runs both host references on every token).
+///
+/// By shape only: a width or token count the device sweep does not hold (`prompt_admission::fast_kernel`) keeps the
+/// launch a token. One token keeps it too: the same launch count.
+pub fn one_launch(fold:spark_gpu_probe::causal_ops::Shape,m:usize,shared:Option<usize>,local:usize)->Option<spark_gpu_probe::prompt_ops::Shape> {
+    if !(2..=TOKENS).contains(&m) || fold.op!=spark_gpu_probe::causal_ops::Op::ExpertFold || fold.cols as usize!=local || (fold.taps!=0)!=shared.is_some()
+        || shared.is_some_and(|words|m.checked_mul(local)!=Some(words)) {return None;}
+    // The fold alone never reads `dim` (a decoder may leave a layer value there; the round mark is a `dim`): the row fold gets none.
+    spark_gpu_probe::prompt_ops::Shape::wrapped(spark_gpu_probe::causal_ops::Shape {dim:0,..fold},m).filter(|&shape|spark_gpu_probe::prompt_admission::fast_kernel(shape)==Some("prompt_fold"))
+}
+/// Fold launches of one routed layer of a batch step of `m` rows on one rank: 1 with `one_launch`, else one a token.
+pub fn launches(one:bool,m:usize)->usize {if one {1} else {m}}
 /// The folded rows of a fold, one a token in token order, held in place.
 pub struct Folded<T> {rows:[Option<T>;TOKENS],len:usize}
 impl<T> Default for Folded<T> {fn default()->Self {Self {rows:std::array::from_fn(|_|None),len:0}}}

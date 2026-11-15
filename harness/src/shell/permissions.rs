@@ -413,7 +413,7 @@ impl Always {
     fn open(root: &Path, home: &Path, trust: Option<&Trust>) -> Self {
         let source = Some((root.to_path_buf(), home.to_path_buf()));
         let project = root.canonicalize().ok().and_then(|root| root.to_str().map(str::to_owned));
-        let memory_note = project.is_none().then(|| "Saved memory approval is off: the canonical workspace path must be UTF-8. Memory changes need approval in each session, and a cannot save them.".to_owned());
+        let memory_note = project.is_none().then(|| "Saved memory approval is off: the canonical workspace path must be UTF-8. Memory changes need approval in each session, and saved approval is unavailable.".to_owned());
         let file = home.join(crate::saved_approvals::FILE_NAME);
         // A model tool can write in the workspace, so a file there could be
         // planted. The home is opened once and checked; the file is read
@@ -421,7 +421,7 @@ impl Always {
         let opened = match trust.ok_or_else(|| "the workspace folder cannot be checked".to_owned()).and_then(|trust| trust.open_home(home, false)) {
             Ok(opened) => opened,
             Err(reason) => {
-                let note = format!("{} is not used and a cannot save: {reason}. Web requests and memory notes ask each time.", file.display());
+                let note = format!("{} is not used and saved approval is unavailable: {reason}. Web requests and memory notes ask each time.", file.display());
                 return Self { source, note: Some(note), ..Self::default() };
             }
         };
@@ -520,7 +520,7 @@ impl Approvals {
         self.interactive.store(interactive, Ordering::Release);
     }
     /// Whether commands that the experimental checker reads as safe run
-    /// without approval. Off by default: every command asks.
+    /// without approval. Off by default: only the fixed harmless grammar skips approval.
     pub fn checker(&self) -> bool {
         self.checker.load(Ordering::Acquire)
     }
@@ -703,7 +703,7 @@ impl Approvals {
             }
             Scope::Project => &mut state.project,
             Scope::User => &mut state.user,
-            Scope::Always => return Err("a command cannot be saved with a; use s or p".into()),
+            Scope::Always => return Err("A command needs a session rule or a project rule.".into()),
         };
         let path = list.path.clone().ok_or("no file for this list")?;
         // The user list of a workspace: the Vade home is opened and checked

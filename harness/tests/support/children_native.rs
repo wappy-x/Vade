@@ -212,8 +212,15 @@ fn raw_child_edits_ask_parent_once_each_and_cancel_pending_or_queued_approvals()
             ],
         );
         ui.send(b"edit with two children\r");
-        let display = ui.until("Approval required", Duration::from_secs(4));
-        assert!(display.contains("Child child-"));
+        let display = ui.until("2  No,", Duration::from_secs(4));
+        assert!(display.contains("This request comes from child child-"), "{display}");
+        assert!(!display.contains("+++ a") && !display.contains("+++ b"));
+        let next_target = if display.contains("■  a") {
+            "■  b"
+        } else {
+            assert!(display.contains("■  b"));
+            "■  a"
+        };
         assert!(!workspace.0.join("a").exists() && !workspace.0.join("b").exists());
         if cancel {
             for _ in 0..2 {
@@ -221,18 +228,11 @@ fn raw_child_edits_ask_parent_once_each_and_cancel_pending_or_queued_approvals()
             }
             ui.send(b"/children cancel all\r");
         } else {
-            let next_file = if display.contains("+++ a") {
-                "+++ b"
-            } else {
-                "+++ a"
-            };
             ui.send(b"/approve\r");
             // Redrawing retained transcript rows is not a new approval.
-            let mut display = ui.until(next_file, Duration::from_secs(4));
-            if !display.contains("Approval required") {
-                display.push_str(&ui.until("Approval required", Duration::from_secs(4)));
-            }
-            assert!(display.contains("Child child-"));
+            let display = ui.until(next_target, Duration::from_secs(4));
+            assert!(display.contains("This request comes from child child-"), "{display}");
+            assert!(!display.contains("+++ a") && !display.contains("+++ b"));
             ui.send(b"/deny\r");
         }
         let finished = ui.until_any(

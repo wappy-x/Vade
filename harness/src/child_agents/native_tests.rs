@@ -283,10 +283,11 @@ fn leased_native_patch_still_requires_parent_approval_and_records_child_journal(
             "apply_patch",
             patch("*** Begin Patch\n*** Add File: output.txt\n+approved child edit\n*** End Patch"),
             Arc::new(move |_, preview, _| {
-                if preview.title == "Patch preview" {
+                if preview.title == "Workspace change" {
                     calls.fetch_add(1, Ordering::SeqCst);
                     assert_eq!(preview.approval_required, policy == ApprovalPolicy::Ask);
-                    assert!(preview.detail.contains("approved child edit"));
+                    let exact = preview.details.unwrap_or(preview.detail);
+                    assert!(exact.contains("approved child edit"));
                 }
                 approve
             }),
@@ -661,7 +662,7 @@ fn native_preflight_failure_receipt_is_preserved_without_uncertain_writes() {
         "apply_patch",
         patch("*** Begin Patch\n*** Update File: source\n@@\n-before\n+after\n*** End Patch"),
         Arc::new(move |_, preview, _| {
-            if preview.title == "Patch preview" {
+            if preview.title == "Workspace change" {
                 std::fs::write(&path, "concurrent change\n").unwrap();
             }
             true

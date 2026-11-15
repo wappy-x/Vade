@@ -16,8 +16,10 @@ use crate::expert_ops::{GroupArguments,GroupEntry,Op};
 /// Most tokens in one part this body takes (the layout of `group_unit` is the plain row-major one up to this).
 const MAX_TOKENS:usize=16;
 
-#[no_mangle]
-pub extern "ptx-kernel" fn fp8_rows_small(launch:GroupArguments) {project::<16,8,4,2>(launch)}
+#[export_name="fp8_rows_small"]
+pub extern "ptx-kernel" fn entry_fp8_rows_small(launch:GroupArguments) {fp8_rows_small(launch)}
+#[inline(always)]
+pub(crate) fn fp8_rows_small(launch:GroupArguments) {project::<16,8,4,2>(launch)}
 
 #[inline(always)]
 fn project<const R:usize,const QN:usize,const D:usize,const PF:usize>(launch:GroupArguments) {

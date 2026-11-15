@@ -132,7 +132,7 @@ fn page(command: &str) -> Option<Page<'static>> {
                 MTP, CONTEXT, OUTPUT,
                 ("--chats N", "Concurrent FP8 chats, 1..32 (controller)"),
                 ("--memory-bytes N", "Memory budget per rank, in bytes"),
-                ("--cache-bytes N", "FP8 retained prompt cache, in bytes; 0 disables it. Local FP4 accepts only 0"),
+                ("--cache-bytes N", "FP8 retained prompt cache, in bytes; 0 disables it. Local FP4 and --diagnostic-unqualified-text (whose prompt cache is on by default) accept only 0, which turns it off"),
                 ("--decode-fuse MODE", "on for one Spark by default; off disables the decode kernel chain"),
                 ("--diagnostic-unqualified-text", "Unqualified text diagnostics on loopback only; default off"),
                 ("--fast-prompts", "Older option, kept for scripts; it has no effect"),

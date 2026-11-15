@@ -97,6 +97,78 @@ pub(super) struct RequestPolicy<'a> {
     pub(super) on_connect_failed: Option<&'a dyn Fn()>,
 }
 
+pub(super) fn connect_deadline(deadline: Option<Instant>, now: Instant) -> Instant {
+    deadline.map_or(now + CONNECT_TIMEOUT, |at| at.min(now + CONNECT_TIMEOUT))
+}
+
+/// Open a checked socket. Lookup and connect share one deadline, and the
+/// plain-HTTP rule runs on the new socket before any caller can write to it.
+pub(crate) fn connect_fresh(endpoint: &Endpoint, deadline: Instant) -> io::Result<TcpStream> {
+    crate::http_policy::interactive_result()?;
+    let deadline = connect_deadline(Some(deadline), Instant::now());
+    connect_with(endpoint, deadline, resolve::addresses, TcpStream::connect_timeout)
+}
+
+fn connect_with(
+    endpoint: &Endpoint,
+    deadline: Instant,
+    lookup: impl FnOnce(&Endpoint, Instant) -> io::Result<Vec<std::net::SocketAddr>>,
+    mut connect: impl FnMut(&std::net::SocketAddr, Duration) -> io::Result<TcpStream>,
+) -> io::Result<TcpStream> {
+    let addresses = lookup(endpoint, deadline)?;
+    for address in addresses {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() { break; }
+        if let Ok(stream) = connect(&address, remaining) {
+            return crate::http_policy::check(stream, endpoint);
+        }
+    }
+    if Instant::now() >= deadline {
+        Err(io::Error::new(io::ErrorKind::TimedOut, "HTTP request deadline exceeded"))
+    } else {
+        Err(io::Error::new(io::ErrorKind::ConnectionRefused, "unable to connect to HTTP upstream"))
+    }
+}
+
+#[cfg(test)]
+mod connect_tests {
+    use super::*;
+
+    #[test]
+    fn lookup_and_connect_spend_one_shared_deadline() {
+        let endpoint = Endpoint::parse("http://lookup.invalid:80").unwrap();
+        let started = Instant::now();
+        let deadline = started + Duration::from_millis(160);
+        let mut tried = false;
+        let result = connect_with(&endpoint, deadline, |_, lookup_deadline| {
+            assert_eq!(lookup_deadline, deadline);
+            std::thread::sleep(Duration::from_millis(80));
+            Ok(vec!["127.0.0.1:80".parse().unwrap()])
+        }, |_, left| {
+            tried = true;
+            assert!(left <= Duration::from_millis(80), "connect reset the lookup budget: {left:?}");
+            std::thread::sleep(left);
+            Err(io::ErrorKind::TimedOut.into())
+        });
+        assert!(tried);
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn real_request_limits_lookup_to_five_seconds() {
+        let endpoint = Endpoint::parse("http://lookup.invalid:80").unwrap();
+        resolve::with_lookup(Box::new(|_, deadline| {
+            let left = deadline.saturating_duration_since(Instant::now());
+            assert!(left <= Duration::from_secs(5) && left > Duration::from_secs(4), "lookup budget: {left:?}");
+            Err(resolve::lookup_timeout("lookup.invalid", false))
+        }), || {
+            let result = request_pooled(&endpoint, b"{}", None, None, &ConnectionPool::default());
+            assert_eq!(result.err().unwrap().kind(), io::ErrorKind::TimedOut);
+        });
+    }
+}
+
 pub(crate) struct GatewayFailure {
     /// DNS/connect failed on a fresh socket, before any request bytes existed.
     /// Write/read errors and stale pooled connections are always uncertain.
@@ -220,6 +292,7 @@ pub(super) fn request_with_policy<'a>(
     pool: &ConnectionPool,
     policy: RequestPolicy<'_>,
 ) -> io::Result<Response<'a>> {
+    crate::http_policy::interactive_result()?;
     let deadline = policy.deadline;
     if !matches!(method, "GET" | "POST") || (method == "GET" && !body.is_empty()) {
         return Err(invalid("unsupported HTTP method or GET body"));
@@ -256,40 +329,13 @@ pub(super) fn request_with_policy<'a>(
     let socket = if let Some(socket) = pool.take(endpoint) {
         socket
     } else {
-        let attempt = (|| {
-            let addresses = resolve::addresses(endpoint, deadline)?;
-            let started = Instant::now();
-            let mut connected = None;
-            for address in addresses {
-                let mut remaining = CONNECT_TIMEOUT.saturating_sub(started.elapsed());
-                if let Some(at) = deadline {
-                    remaining = remaining.min(at.saturating_duration_since(Instant::now()));
-                }
-                if remaining.is_zero() {
-                    break;
-                }
-                if let Ok(stream) = TcpStream::connect_timeout(&address, remaining) {
-                    connected = Some(stream);
-                    break;
-                }
-            }
-            if deadline.is_some_and(|at| Instant::now() >= at) {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "HTTP request deadline exceeded",
-                ));
-            }
-            connected.ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::ConnectionRefused,
-                    "unable to connect to HTTP upstream",
-                )
-            })
-        })();
+        let attempt = connect_fresh(endpoint, connect_deadline(deadline, Instant::now()));
         match attempt {
             Ok(socket) => socket,
             Err(error) => {
-                if let Some(on_failed) = policy.on_connect_failed {
+                if !resolve::capacity_timeout(&error)
+                    && crate::http_policy::refusal(&error).is_none()
+                    && let Some(on_failed) = policy.on_connect_failed {
                     on_failed();
                 }
                 return Err(error);

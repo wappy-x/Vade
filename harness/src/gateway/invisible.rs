@@ -67,13 +67,13 @@ impl Origin {
     }
     fn connect_until(&self, deadline: Instant) -> io::Result<DeadlineStream<'static>> {
         // The deadline also bounds the name lookup, as in the core gateway.
-        for address in transport::resolve::addresses(&self.endpoint, Some(deadline))? {
+        for address in transport::resolve::addresses(&self.endpoint, deadline)? {
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 break;
             }
             if let Ok(stream) = TcpStream::connect_timeout(&address, left) {
-                return DeadlineStream::new(stream, None);
+                return DeadlineStream::new(crate::http_policy::check(stream, &self.endpoint)?, None);
             }
         }
         Err(io::Error::new(
@@ -85,6 +85,7 @@ impl Origin {
 
 /// Run the relay after credential options were configured, reporting failures.
 pub fn exit(args: impl Iterator<Item = String>) -> std::process::ExitCode {
+    crate::http_policy::begin_gateway();
     match cli(args) {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) if crate::auth::already_reported(&error) => std::process::ExitCode::FAILURE,
@@ -93,12 +94,13 @@ pub fn exit(args: impl Iterator<Item = String>) -> std::process::ExitCode {
             std::process::ExitCode::FAILURE
         }
         Err(error) => {
+            let hint = crate::diagnostics::error_hint(&error);
             crate::diagnostics::stderr_line(format_args!("vade-gateway: {}.{}",
                 crate::terminal::sanitize(&error.to_string()),
                 if matches!(error.kind(), io::ErrorKind::InvalidInput | io::ErrorKind::InvalidData) {
                     " Check vade-gateway --help for options and examples."
                 } else {
-                    crate::diagnostics::error_hint(&error)
+                    hint.as_ref()
                 }));
             std::process::ExitCode::FAILURE
         }
@@ -119,7 +121,7 @@ fn stats_hint(error: &io::Error) -> &'static str {
 /// `vade-gateway`: parse its arguments, then serve or replay until stopped.
 pub fn cli(args: impl Iterator<Item = String>) -> io::Result<()> {
     let args: Vec<_> = args.collect();
-    if args.iter().any(|arg| arg == "--help" || arg == "-h") {
+    if crate::http_policy::help_requested(&args) {
         return print_help(args.first().is_some_and(|arg| arg == "replay"));
     }
     let mut args = args.into_iter().peekable();
@@ -136,6 +138,7 @@ pub fn cli(args: impl Iterator<Item = String>) -> io::Result<()> {
     let refused = |message: &str| io::Error::new(io::ErrorKind::InvalidInput, message.to_owned());
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--allow-plain-http" => crate::http_policy::allow_plain_http(),
             "--upstream" => upstreams.push(argument(&mut args, "--upstream")?),
             "--stable-prefix" => flags.stable = true,
             "--affinity" => flags.affinity = true,
@@ -184,7 +187,9 @@ fn print_help(replay: bool) -> io::Result<()> {
             super::BROWSER_GUARD_HELP, super::sampling::DEFAULTS_JSON, super::sampling::SAMPLING_FIELDS, route::STICKY_TURN_LIMIT
         )
     };
-    crate::diagnostics::write_stdout(&(help + "Credentials: --api-key-file PATH or VADE_API_KEY_FILE; the flag overrides the environment.\nA configured key replaces incoming Authorization and X-Api-Key headers only on upstream requests.\nWithout a configured key, client credential headers pass through unchanged, except Authorization under --token.\n"))
+    crate::diagnostics::write_stdout(&(help + "--upstream URL: same machine only by default.
+  --allow-plain-http    Allow plain HTTP to another machine. Not encrypted: others on the network can read and change the chat and the API key.
+Credentials: --api-key-file PATH or VADE_API_KEY_FILE; the flag overrides the environment.\nA configured key replaces incoming Authorization and X-Api-Key headers only on upstream requests.\nWithout a configured key, client credential headers pass through unchanged, except Authorization under --token.\n"))
 }
 
 fn argument(args: &mut impl Iterator<Item = String>, option: &str) -> io::Result<String> {
@@ -200,6 +205,17 @@ fn serve(
     recorder: Option<Arc<Recorder>>,
     access: Arc<Access>,
 ) -> io::Result<()> {
+    serve_with_limit(incoming, runtime, stats, recorder, access, super::MAX_CONNECTIONS)
+}
+
+fn serve_with_limit(
+    incoming: impl Iterator<Item = io::Result<TcpStream>>,
+    runtime: Arc<Runtime>,
+    stats: Option<Arc<StatsLog>>,
+    recorder: Option<Arc<Recorder>>,
+    access: Arc<Access>,
+    max_connections: usize,
+) -> io::Result<()> {
     let active = Arc::new(AtomicUsize::new(0));
     for socket in incoming {
         let socket = match socket {
@@ -210,10 +226,10 @@ fn serve(
             }
         };
         // A peer that reset before this point has no address; drop only it.
-        if !socket.peer_addr().is_ok_and(|peer| peer.ip().is_loopback()) {
+        if !socket.peer_addr().is_ok_and(|peer| super::loopback(peer.ip())) {
             continue;
         }
-        if active.load(Ordering::Relaxed) >= super::MAX_CONNECTIONS {
+        if active.load(Ordering::Relaxed) >= max_connections {
             let _ = busy(socket, stats.as_deref());
             continue;
         }
@@ -251,6 +267,7 @@ fn busy(socket: TcpStream, log: Option<&StatsLog>) -> io::Result<()> {
         },
         503,
     );
+    reader.get_mut().prepare_error_write();
     let result = local_error(reader.get_mut(), messages, 503, "gateway busy");
     // A local refusal is not an upstream completion.
     metrics.finish(false);
@@ -377,14 +394,31 @@ fn forward(
     metrics: &mut Metrics,
     (recorder, recording): (Option<&Recorder>, &mut Option<Recording>),
 ) -> io::Result<()> {
+    forward_with_timeout(socket, runtime, access, metrics, (recorder, recording), super::REQUEST_RECEIVE_TIMEOUT)
+}
+
+fn forward_with_timeout(
+    socket: TcpStream,
+    runtime: &Runtime,
+    access: &Access,
+    metrics: &mut Metrics,
+    (recorder, recording): (Option<&Recorder>, &mut Option<Recording>),
+    receive_timeout: Duration,
+) -> io::Result<()> {
     let local = socket.local_addr()?;
     let mut client = BufReader::new(DeadlineStream::new(socket, None)?);
+    client.get_mut().bound_deadline(Instant::now() + receive_timeout);
     let mut messages = false;
     let mut request = match WireHead::read_noting(&mut client, |first| messages = super::messages_route(&String::from_utf8_lossy(first))) {
         Ok(request) => request,
         // A client that sent nothing gets nothing; any other bad head gets a 400.
         Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Err(error),
-        Err(_) => return refused(local_error(client.get_mut(), messages, 400, "invalid or oversized HTTP headers")),
+        Err(error) => {
+            let (status, message) = super::request_body_error(&error);
+            client.get_mut().prepare_error_write();
+            return refused(local_error(client.get_mut(), messages, status,
+                if status == 408 { &message } else { "invalid or oversized HTTP headers" }));
+        }
     };
     let messages = super::messages_route(&request.parsed.first);
     let parts: Vec<_> = request.parsed.first.split(' ').collect();
@@ -437,8 +471,10 @@ fn forward(
     let mut body = Vec::new();
     if let Err(error) = input.read_to_end(&mut body) {
         let (status, message) = super::request_body_error(&error);
+        input.reader.get_mut().prepare_error_write();
         return refused(super::write_error(input.reader.get_mut(), messages, status, &message));
     }
+    input.reader.get_mut().clear_deadline();
     metrics.request(&body);
     if method == "GET" && path.split('?').next() == Some("/health") && runtime.origins().len() > 1 {
         // Replicas answer as one engine; nothing is forwarded or replayed.
@@ -484,10 +520,16 @@ fn forward(
         // An untried upstream permits one more attempt while the client has seen nothing.
         failed.push(index);
         let alternate = || runtime.route(path, &request.parsed, &body, &failed);
+        if let Some(reason) = runtime.startup_refusal(index) {
+            return refused(local_error(client.get_mut(), messages, 502, reason));
+        }
         let origin = runtime.origin(index);
         let mut upstream = match origin.connect() {
             Ok(socket) => socket,
-            Err(_) => {
+            Err(error) => {
+                if let Some(reason) = crate::http_policy::refusal(&error) {
+                    return refused(local_error(client.get_mut(), messages, 502, reason));
+                }
                 if let Some(next) = alternate() {
                     (index, lease) = (next.index, Some(next));
                     continue;
@@ -519,7 +561,7 @@ fn forward(
         let untouched = sent.bytes == 0 && client.get_ref().check().is_ok();
         match delivered {
             Ok(false) => {}
-            Err(error) if retry && untouched && error.kind() != io::ErrorKind::TimedOut => {}
+            Err(error) if retry && untouched && crate::http_policy::refusal(&error).is_none() && error.kind() != io::ErrorKind::TimedOut => {}
             result => return result.map(drop),
         }
         drop(lease.take());
@@ -588,7 +630,8 @@ fn fan_out(
         }
     }
     let Some((reply, attempt, _)) = chosen else {
-        return refused(local_error(client.get_mut(), false, 502, "no upstream answered; request not replayed"));
+        let reason = runtime.origins().iter().find_map(|o| crate::http_policy::last_refusal(&o.endpoint));
+        return refused(local_error(client.get_mut(), false, 502, reason.as_deref().unwrap_or("no upstream answered; request not replayed")));
     };
     *metrics = attempt;
     if let Some((_, body)) = buffered(&reply) {
@@ -782,9 +825,10 @@ fn status(head: &Head) -> io::Result<u16> {
 }
 fn local_error(writer: &mut impl Write, messages: bool, code: u16, message: &str) -> io::Result<()> {
     let body = super::error_body(messages, code, message);
+    let retry = if matches!(code, 408 | 503) { "Retry-After: 1\r\n" } else { "" };
     write!(
         writer,
-        "HTTP/1.1 {code} Gateway Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "HTTP/1.1 {code} Gateway Error\r\nContent-Type: application/json\r\n{retry}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     )?;
     writer.flush()

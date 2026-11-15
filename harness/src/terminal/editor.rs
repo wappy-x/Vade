@@ -246,20 +246,12 @@ impl Editor {
     }
     /// The final-line approval shortcut requires freshly typed command bytes.
     /// Pasted/recalled multiline text cannot impersonate that shortcut.
-    /// A typed one-line draft that is only an answer key (y, n, s, p) answers
+    /// A typed one-line draft that is only an answer key (1 through 5) answers
     /// as its command; a pasted, recalled, or multiline key stays a draft.
     pub fn approval_command(&self) -> Option<(&str, usize)> {
         if !self.text.contains('\n') && self.typed.iter().all(|typed| *typed) {
-            let command = match self.text.trim() {
-                "y" | "Y" | "yes" | "Yes" => Some("/approve"),
-                "n" | "N" | "no" | "No" => Some("/deny"),
-                "s" | "S" => Some("/approve session"),
-                "p" | "P" => Some("/approve project"),
-                _ => None,
-            };
-            if let Some(command) = command {
-                return Some((command, 0));
-            }
+            let key = self.text.trim();
+            if crate::approval_prompt::answer_key(key).is_some() { return Some((key, 0)); }
         }
         let start = self.text.rfind('\n').map_or(0, |at| at + 1);
         let line = &self.text[start..];
@@ -561,10 +553,10 @@ mod approval_tests {
 
     #[test]
     fn only_a_typed_one_line_key_answers_an_approval() {
-        for (key, command) in [("y", "/approve"), ("n", "/deny"), ("s", "/approve session"), ("p", "/approve project")] {
+        for key in ["1", "2", "3", "4", "5", "y", "n"] {
             let mut typed = Editor::default();
             typed.insert(key);
-            assert_eq!(typed.approval_command(), Some((command, 0)));
+            assert_eq!(typed.approval_command(), Some((key, 0)));
             typed.remove_approval_command();
             assert!(typed.is_empty());
             let mut pasted = Editor::default();

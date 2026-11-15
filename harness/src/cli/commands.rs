@@ -28,8 +28,8 @@ pub(crate) const COMMANDS: &[Command] = &[
     Command::new("next", "", "Start the next held follow-up.", "Waits for active worker cleanup before starting queued work.", "Chat", "all", false),
     Command::new("queue-clear", "", "Discard queued follow-ups.", "Clears only unsent follow-ups.", "Chat", "all", false),
     Command::new("steer", "TEXT", "Send input to the active Codex turn.", "Separate receipts report acceptance, rejection or an unconfirmed outcome.", "Chat", "codex", false),
-    Command::new("approve", "[session|project]", "Approve the displayed operation.", "Same as pressing y on an empty line: authorizes only the pending exact edit or command. For a command, /approve session (key s) also allows matching commands for the rest of this session, and /approve project (key p) saves a rule to .vade/permissions.json.", "Workspace", "agent", true),
-    Command::new("deny", "", "Deny the pending operation.", "Same as pressing n on an empty line. Declines the displayed edit or command.", "Workspace", "agent", true),
+    Command::new("approve", "[session|project]", "Approve the displayed operation.", "Same as pressing 1 on an empty line: authorizes only the pending exact edit or command. For a command, /approve session (key 3) also allows matching commands for the rest of this session, and /approve project (key 4) saves a rule to .vade/permissions.json.", "Workspace", "agent", true),
+    Command::new("deny", "", "Deny the pending operation.", "Same as pressing 2 on an empty line. Declines the displayed edit or command.", "Workspace", "agent", true),
     Command::new("ls", "[PATH]", "List local workspace entries.", "Bounded listing inside the selected workspace; no model request.", "Workspace", "all", true),
     Command::new("read", "PATH", "Preview a local UTF-8 file.", "At most 64 KiB inside the workspace. Preview text is not added to model context.", "Workspace", "all", true),
     Command::new("children", "[on|off|cancel ID|all]", "Inspect or cancel native children.", "Enable before the first prompt. Child scope and approvals remain bounded by host grants.", "Workspace", "agent", false),
@@ -74,17 +74,7 @@ impl App {
     /// only a typed key on Enter, so a pasted or recalled key stays a draft.
     pub(crate) fn sent_line(&mut self, line: String) -> io::Result<()> {
         if self.approval_reply.is_some() && self.multiline.is_none() {
-            let answer = match line.trim() {
-                "y" | "Y" | "yes" | "Yes" => Some("/approve"),
-                "n" | "N" | "no" | "No" => Some("/deny"),
-                "s" | "S" if self.approval_command || self.approval_reach => Some("/approve session"),
-                "a" | "A" if self.approval_reach => Some("/approve always"),
-                "p" | "P" if self.approval_command => Some("/approve project"),
-                _ => None,
-            };
-            if let Some(answer) = answer {
-                return self.line_input(answer.into());
-            }
+            if self.answer_approval_key(line.trim())? { return Ok(()); }
         }
         self.line_input(line)
     }
@@ -96,6 +86,10 @@ impl App {
         if self.approval_reply.is_some() {
             match line.trim() {
                 text @ ("/approve session" | "/approve project" | "/approve always") => {
+                    let offered = if text == "/approve session" { 4 } else { 8 };
+                    if self.approval_choices & offered == 0 {
+                        return self.notice("That choice is not offered. Use a number shown in the prompt.");
+                    }
                     let scope = match text { "/approve session" => Scope::Session, "/approve project" => Scope::Project, _ => Scope::Always };
                     // A web request or a memory note has no project list; a
                     // command has no saved "always" reach.
@@ -103,15 +97,15 @@ impl App {
                     let fits = if self.approval_command { scope != Scope::Always } else { reach };
                     let Some(approvals) = self.approvals.clone().filter(|_| fits) else {
                         return self.notice(if self.approval_reach {
-                            "Press y, s, a or n, or send /approve, /approve session, /approve always or /deny."
+                            "Use the numbered choices shown in the prompt, or send /approve, /approve session, /approve always or /deny."
                         } else {
-                            "Only a command can go on an allow list. Press y or n, or send /approve or /deny."
+                            "Only a command can go on an allow list. Press 1 or 2, or send /approve or /deny."
                         });
                     };
                     // Nothing could be saved: the prompt stays open, and the notice says why.
                     if scope == Scope::Always && !approvals.can_save(false) {
                         let why = approvals.always_note().unwrap_or_else(|| "this chat has no Vade home to save it in.".into());
-                        return self.notice(&format!("Not saved: {why} Press y, s or n."));
+                        return self.notice(&format!("Not saved: {why} Press 1, 2 or 3."));
                     }
                     if let Err(error) = self.terminal.approval_ready() {
                         return self.notice(&error.to_string());
@@ -182,7 +176,7 @@ impl App {
                 _ => {
                     self.input.set(line);
                     return self.notice(
-                        "Approval still pending. Text retained in the editor; no follow-up queued. Clear it and press y or n, or send /approve or /deny; /cancel cancels the run and declines.",
+                        "Approval still pending. Text retained in the editor; no follow-up queued. Clear it and press 1 or 2, or send /approve or /deny; /cancel cancels the run and declines.",
                     );
                 }
             }

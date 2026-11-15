@@ -17,11 +17,13 @@ pub enum Kind {Causal=1,Expert,Plain,Mx,Round,Copy,Put,Take,Prepare,Collapse,Com
     /// The exact train uses 30 to 35 for its own kinds. These two follow them, so the two lines of work never share a number.
     AbsorbDense=36,AbsorbAttention=37,
     /// D1: the whole one-row mHC boundary in one launch (mhc_boundary_fused).
-    MhcBoundaryFused=38,
+    MhcPhaseRms=61,MhcPhaseDots=62,MhcPhaseFinish=63,MhcBoundaryFused=38,
     /// The pair split (D2). NvQuarters: the raw quarter accumulators of second matrices (nv_cols_q4 / q2 / q1; payload
     /// word NV_QUARTERS_WORD holds the quarters a row gets). QuarterFold: the fold inside each quarter and the join of an
     /// owner's quarters (nv_quarter_fold). ReduceTake: the take of the one sum exchange a sublayer (tp_reduce_take).
-    NvQuarters=39,QuarterFold=40,ReduceTake=41}
+    NvQuarters=39,QuarterFold=40,ReduceTake=41,
+    /// Original row kernels with indirect arguments. Their grids and arithmetic stay fixed.
+    MxRows2,MxRows4,MxRows8,MxRows8w,MixedRows,Fp8RowsSmall,Fp8RowsMulti,Fp8RowsFew,PlainRowsSmall,PromptRows,RowPrepare,RowGatedNorm,RowRoute,RowFold,RowPlace,RowPermute,RowSelect,TransposeSmem,DeviceRouteRows}
 /// The payload word of an NvQuarters command that holds the quarters a row gets (4, 2 or 1). It is the first word
 /// past the command's LaunchArguments (112 bytes).
 pub const NV_QUARTERS_WORD:usize=14;
@@ -35,8 +37,49 @@ pub const NV_QUARTERS_WORD:usize=14;
 impl Kind {
     /// One more than the largest kind number: the length of a table indexed by kind.
     pub const COUNT:usize={let mut count=0;let mut at=0;while at<Self::ALL.len() {let next=Self::ALL[at] as usize+1;if next>count {count=next;}at+=1;}count};
-    pub const ALL:[Self;42]=[Self::NvQuarters,Self::QuarterFold,Self::ReduceTake,Self::MhcBoundaryFused,Self::AbsorbDense,Self::AbsorbAttention,Self::MixedBf16,Self::PlainBatch,Self::CausalChain,Self::NormTail,Self::Pointwise,Self::ShadowSide,Self::PutJoin,Self::PutPlain,Self::ShadowPrefetch,Self::PutWide,Self::Causal,Self::Expert,Self::Plain,Self::Mx,Self::Round,Self::Copy,Self::Put,Self::Take,Self::Prepare,Self::Collapse,Self::Combine,Self::RmsPartials,Self::RmsApply,Self::Elementwise,Self::CopyWords,Self::ZeroWords,Self::Mixed,Self::NvStream,Self::CausalFast,Self::NvTile,Self::DeviceRoute,Self::TakeScatter,Self::PlainBf16,Self::MhcBoundaryRms,Self::MhcBoundaryDots,Self::MhcBoundaryFinish];
+    pub const ALL:[Self;64]=[Self::MhcPhaseRms,Self::MhcPhaseDots,Self::MhcPhaseFinish,Self::MxRows2,Self::MxRows4,Self::MxRows8,Self::MxRows8w,Self::MixedRows,Self::Fp8RowsSmall,Self::Fp8RowsMulti,Self::Fp8RowsFew,Self::PlainRowsSmall,Self::PromptRows,Self::RowPrepare,Self::RowGatedNorm,Self::RowRoute,Self::RowFold,Self::RowPlace,Self::RowPermute,Self::RowSelect,Self::TransposeSmem,Self::DeviceRouteRows,Self::NvQuarters,Self::QuarterFold,Self::ReduceTake,Self::MhcBoundaryFused,Self::AbsorbDense,Self::AbsorbAttention,Self::MixedBf16,Self::PlainBatch,Self::CausalChain,Self::NormTail,Self::Pointwise,Self::ShadowSide,Self::PutJoin,Self::PutPlain,Self::ShadowPrefetch,Self::PutWide,Self::Causal,Self::Expert,Self::Plain,Self::Mx,Self::Round,Self::Copy,Self::Put,Self::Take,Self::Prepare,Self::Collapse,Self::Combine,Self::RmsPartials,Self::RmsApply,Self::Elementwise,Self::CopyWords,Self::ZeroWords,Self::Mixed,Self::NvStream,Self::CausalFast,Self::NvTile,Self::DeviceRoute,Self::TakeScatter,Self::PlainBf16,Self::MhcBoundaryRms,Self::MhcBoundaryDots,Self::MhcBoundaryFinish];
+    pub const ROWS:[Self;19]=[Self::MxRows2,Self::MxRows4,Self::MxRows8,Self::MxRows8w,Self::MixedRows,Self::Fp8RowsSmall,Self::Fp8RowsMulti,Self::Fp8RowsFew,Self::PlainRowsSmall,Self::PromptRows,Self::RowPrepare,Self::RowGatedNorm,Self::RowRoute,Self::RowFold,Self::RowPlace,Self::RowPermute,Self::RowSelect,Self::TransposeSmem,Self::DeviceRouteRows,];
+    pub fn row(name:&str)->Option<Self> {match name {
+        "mx_rows_small2"=>Some(Self::MxRows2),
+        "mx_rows_small4"=>Some(Self::MxRows4),
+        "mx_rows_small8"=>Some(Self::MxRows8),
+        "mx_rows_small8w"=>Some(Self::MxRows8w),
+        "flash_resident_projection_bf16_rows"=>Some(Self::MixedRows),
+        "fp8_rows_small"=>Some(Self::Fp8RowsSmall),
+        "fp8_rows_multi"=>Some(Self::Fp8RowsMulti),
+        "fp8_rows_few"=>Some(Self::Fp8RowsFew),
+        "plain_rows_small"=>Some(Self::PlainRowsSmall),
+        "prompt_rows"=>Some(Self::PromptRows),
+        "prompt_prepare"=>Some(Self::RowPrepare),
+        "prompt_gated_norm"=>Some(Self::RowGatedNorm),
+        "prompt_route"=>Some(Self::RowRoute),
+        "prompt_fold"=>Some(Self::RowFold),
+        "prompt_place"=>Some(Self::RowPlace),
+        "prompt_permute"=>Some(Self::RowPermute),
+        "prompt_select_rows"=>Some(Self::RowSelect),
+        "transpose_smem"=>Some(Self::TransposeSmem),
+        "device_route_rows"=>Some(Self::DeviceRouteRows),
+        _=>None}}
     pub fn kernel(self)->&'static str {match self {
+        Self::MxRows2=>"resident_launch_mx_rows_small2",
+        Self::MxRows4=>"resident_launch_mx_rows_small4",
+        Self::MxRows8=>"resident_launch_mx_rows_small8",
+        Self::MxRows8w=>"resident_launch_mx_rows_small8w",
+        Self::MixedRows=>"resident_launch_flash_resident_projection_bf16_rows",
+        Self::Fp8RowsSmall=>"resident_launch_fp8_rows_small",
+        Self::Fp8RowsMulti=>"resident_launch_fp8_rows_multi",
+        Self::Fp8RowsFew=>"resident_launch_fp8_rows_few",
+        Self::PlainRowsSmall=>"resident_launch_plain_rows_small",
+        Self::PromptRows=>"resident_launch_prompt_rows",
+        Self::RowPrepare=>"resident_launch_prompt_prepare",
+        Self::RowGatedNorm=>"resident_launch_prompt_gated_norm",
+        Self::RowRoute=>"resident_launch_prompt_route",
+        Self::RowFold=>"resident_launch_prompt_fold",
+        Self::RowPlace=>"resident_launch_prompt_place",
+        Self::RowPermute=>"resident_launch_prompt_permute",
+        Self::RowSelect=>"resident_launch_prompt_select_rows",
+        Self::TransposeSmem=>"resident_launch_transpose_smem",
+        Self::DeviceRouteRows=>"resident_launch_device_route_rows",
         Self::AbsorbDense=>"resident_launch_absorb_dense",Self::AbsorbAttention=>"resident_launch_absorb_attention",
         Self::Causal=>"resident_launch_causal",Self::Expert=>"resident_launch_expert",Self::Plain=>"resident_launch_plain",Self::Mx=>"resident_launch_mx",
         Self::Round=>"resident_launch_round",Self::Copy=>"resident_launch_copy",Self::Pointwise=>"resident_launch_pointwise",Self::Put=>"resident_launch_put",Self::Take=>"resident_launch_take",
@@ -46,7 +89,7 @@ impl Kind {
         Self::MixedBf16=>"resident_launch_mixed_bf16",Self::PlainBatch=>"resident_launch_plain_batch",
         Self::NvStream=>"resident_launch_nv_stream",Self::CausalFast=>"resident_launch_causal_fast",Self::CausalChain=>"resident_launch_causal_chain",Self::NvTile=>"resident_launch_nv_tile",
         Self::DeviceRoute=>"resident_launch_device_route",Self::TakeScatter=>"resident_launch_take_scatter",Self::PutWide=>"resident_launch_put_wide",Self::PlainBf16=>"resident_launch_plain_bf16",
-        Self::MhcBoundaryRms=>"resident_launch_mhc_boundary_rms",Self::MhcBoundaryDots=>"resident_launch_mhc_boundary_dots",Self::MhcBoundaryFinish=>"resident_launch_mhc_boundary_finish",Self::MhcBoundaryFused=>"resident_launch_mhc_boundary_fused",
+        Self::MhcPhaseRms=>"resident_launch_mhc_phase_rms",Self::MhcPhaseDots=>"resident_launch_mhc_phase_dots",Self::MhcPhaseFinish=>"resident_launch_mhc_phase_finish",Self::MhcBoundaryRms=>"resident_launch_mhc_boundary_rms",Self::MhcBoundaryDots=>"resident_launch_mhc_boundary_dots",Self::MhcBoundaryFinish=>"resident_launch_mhc_boundary_finish",Self::MhcBoundaryFused=>"resident_launch_mhc_boundary_fused",
         Self::NvQuarters=>"resident_launch_nv_quarters",Self::QuarterFold=>"resident_launch_quarter_fold",Self::ReduceTake=>"resident_launch_reduce_take",
         Self::PutJoin=>"resident_launch_put_join",Self::PutPlain=>"resident_launch_put_plain",Self::ShadowPrefetch=>"resident_launch_shadow_prefetch",Self::ShadowSide=>"resident_launch_shadow_side",
     }}

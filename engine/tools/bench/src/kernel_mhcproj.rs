@@ -5,6 +5,7 @@
 use super::super::{Gpu, H, Result, ptr, sha256};
 use crate::mhc_params::{Boundary, Shape};
 use std::time::Instant;
+#[path="kernel_mhcphased.rs"] pub(crate) mod phased;
 const GUARD: [u8; 16] = [0x5a; 16];
 struct Rng(u64);
 impl Rng {

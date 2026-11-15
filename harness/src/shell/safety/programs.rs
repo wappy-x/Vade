@@ -352,14 +352,9 @@ impl Ctx {
             "dd" => {
                 for arg in &text {
                     if let Some(target) = arg.strip_prefix("of=") {
-                        if raw_disk(target) {
-                            self.add(Class::Blocked, format!("writes over a disk device: {target}"), display, false);
-                        } else if self.outside(target) {
-                            ask(self, &format!("writes outside the workspace: {target}"));
-                        }
+                        self.write_target(&Word { text: target.to_owned(), ..Word::default() }, display, "writes raw data to");
                     }
                 }
-                ask(self, "copies raw data with dd");
             }
             _ if name.starts_with("mkfs") || name.starts_with("newfs") || matches!(name, "fdisk" | "sfdisk" | "parted" | "gpt" | "wipefs" | "mkswap" | "fsck" | "format") => {
                 ask(self, "formats or partitions disks");
@@ -932,6 +927,9 @@ impl Ctx {
         // A short option cluster with `letter`, before any `-e` value in it.
         let short = |w: &Word, letters: &str| w.text.starts_with('-') && !w.text.starts_with("--") && w.text[1..].split('e').next().unwrap_or("").contains(|c| letters.contains(c));
         if args.iter().any(|w| w.text.starts_with("--in-place") || short(w, "iI")) {
+            for word in args {
+                self.block_secret_write(word.text.rsplit('=').next().unwrap_or(&word.text), display);
+            }
             return ask(self, "edits files in place");
         }
         if args.iter().any(|w| w.text.starts_with("--file") || short(w, "f")) {
@@ -1098,11 +1096,17 @@ impl Ctx {
                 let tail = read.dashdash.map_or(&rest[..0], |at| &rest[at + 1..]);
                 let sub = args[sub].text.as_str();
                 match sub {
-                    "test" | "t" | "bench" | "run" | "r" => {}
-                    "nextest" if read.operands.first().is_some_and(|&at| matches!(rest[at].text.as_str(), "run" | "r" | "list")) => {}
+                    "check" | "build" | "b" | "c" | "test" | "t" | "bench" | "run" | "r" | "doc" | "d"
+                    | "rustc" | "rustdoc" | "kernels" | "expand" => {
+                        ask(self, "runs workspace build scripts, procedural macros, tests or programs");
+                    }
+                    "nextest" if read.operands.first().is_some_and(|&at| matches!(rest[at].text.as_str(), "run" | "r" | "list")) => {
+                        ask(self, "runs workspace build scripts, procedural macros or tests");
+                    }
                     "nextest" => return ask(self, "runs a cargo command that is not on the safe list"),
                     "clippy" => {
                         self.options(tail, "-D= -W= -A= -F= --deny= --warn= --allow= --forbid= --cap-lints= --no-deps", GNU, display);
+                        ask(self, "runs workspace build scripts or procedural macros");
                     }
                     "fmt" => {
                         let Some(flags) = self.options(tail, "--check --edition= -v --verbose -q --quiet --color= -l --files-with-diff", GNU, display) else { return };
@@ -1152,6 +1156,9 @@ impl Ctx {
             _ => return self.add(Class::Ask, "runs a go command that is not on the safe list", display, plain_operands(rest)),
         };
         let Some(read) = self.options(rest, spec, mode, display) else { return };
+        if matches!(sub, "build" | "run" | "test" | "vet") {
+            self.add(Class::Ask, "runs project code or a compiler helper", display, plain_operands(rest));
+        }
         let outputs: Vec<&Word> = read.values(options::GO_WRITES).collect();
         if !outputs.is_empty() {
             let place = if outputs.iter().any(|w| self.outside(&w.text)) { " outside the workspace" } else { "" };

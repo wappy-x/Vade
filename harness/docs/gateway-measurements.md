@@ -1,5 +1,7 @@
 # Gateway measurements from 2026-10-20
 
+HTTP links stay on this machine by default; see [network setup](../../docs/network-setup.md) for SSH tunnels and the explicit opt-in.
+
 This page keeps an older record. Installed Codex talked to the engine on one
 Spark twice for every task: once directly, and once through `vade-gateway`. The
 point was to see what the gateway changes and what it costs. It describes the

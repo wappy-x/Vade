@@ -29,7 +29,8 @@ mod cancel;
 pub(crate) mod resolve;
 mod request;
 pub(crate) use request::{
-    ControlFanout, request_gateway_pooled, request_method_pooled, request_method_pooled_deadline,
+    ControlFanout, connect_fresh,
+    request_gateway_pooled, request_method_pooled, request_method_pooled_deadline,
     request_native_pooled, request_native_pooled_deadline, request_pooled,
 };
 use request::{RequestPolicy, gateway_response_idle, request_with_policy};
@@ -274,6 +275,12 @@ pub(crate) struct DeadlineStream<'a> {
 }
 
 impl<'a> DeadlineStream<'a> {
+    #[cfg(test)]
+    pub(crate) fn elapse_for_test(&mut self, elapsed: Duration) {
+        self.start -= elapsed;
+        self.progress -= elapsed;
+        self.deadline = self.deadline.map(|at| at - elapsed);
+    }
     pub(crate) fn new(stream: TcpStream, cancel: Option<&'a AtomicBool>) -> io::Result<Self> {
         // Accepted sockets can inherit listener flags on some platforms.
         stream.set_nonblocking(false)?;
@@ -350,6 +357,18 @@ impl<'a> DeadlineStream<'a> {
     }
     pub(crate) fn bound_deadline(&mut self, deadline: Instant) {
         self.deadline = Some(deadline);
+    }
+    pub(crate) fn clear_deadline(&mut self) {
+        self.deadline = None;
+    }
+    pub(crate) fn prepare_error_write(&mut self) {
+        let now = Instant::now();
+        self.progress = now;
+        self.idle_timeout = Duration::from_secs(2);
+        self.deadline = Some(now + Duration::from_secs(2));
+    }
+    pub(crate) fn set_idle_timeout(&mut self, timeout: Duration) {
+        self.idle_timeout = timeout;
     }
     fn poll_timeout(&self) -> Duration {
         let now = Instant::now();

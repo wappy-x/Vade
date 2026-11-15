@@ -72,7 +72,7 @@ The other commands:
 | Command | What it does |
 | --- | --- |
 | `vade mcp list` | Shows each server, its list (user or project), its state (enabled, disabled or not trusted) and its command. It shows environment variable names, not their values. |
-| `vade mcp test NAME` | Starts the server, does the handshake, lists its tools, resources and prompts, and stops it. Use it after you add a server. |
+| `vade mcp test NAME` | Starts a trusted server, does the handshake, lists its tools, resources and prompts, and stops it. For an untrusted project server, first run `vade mcp trust NAME`. |
 | `vade mcp remove NAME [--project]` | Removes the server from your user list, or from the project list with `--project`. |
 | `vade mcp trust NAME` | Lets a server from the project list start in chat. See [Project servers need your yes](#project-servers-need-your-yes). |
 | `vade tools` | Lists the native workspace and memory tools, then the tools of each server. The servers start for the list and stop at the end. `VADE_MEMORY=0` leaves out the memory tools. |
@@ -136,11 +136,113 @@ A project list comes with the project. If you clone a project, its
 does not start until you say yes with `vade mcp trust NAME`. Chat prints one
 line for each server that waits for your yes.
 
-Vade keeps the yes in your user list, under `trusted`, with a copy of the
-entry. If the project changes the entry (for example its command or its
-arguments), the yes no longer applies, and you must run `vade mcp trust NAME`
-again. `vade mcp add --project` records the yes for you, because you wrote the
-entry yourself.
+Vade keeps the yes in your user list, under `trusted`. Your yes covers this
+exact config entry, the program's path and bytes, and each script's path and
+bytes. Before every start, Vade checks that none of them changed. If the entry
+or a checked file changes, run `vade mcp trust NAME` again.
+`vade mcp add --project` records the yes for you, because you wrote the entry
+yourself. Project MCP programs run with your file and network access.
+
+`vade mcp trust NAME`, `vade mcp add --project`, `vade mcp test NAME` and
+`vade mcp list` show what is checked, one line each, and then what is not.
+`add` and `test` show it before anything starts:
+
+```text
+  program: /usr/local/bin/python3
+  script: /home/you/project/server.py
+  Not checked: files and folders that other arguments name, and any file the program loads after it starts.
+```
+
+### Which arguments are scripts
+
+An argument that names a regular file is a script when one of these is true:
+
+- The file starts with `#!`.
+- Its name ends in `.js`, `.mjs`, `.cjs`, `.ts`, `.py`, `.rb`, `.sh`, `.bash`,
+  `.zsh`, `.pl`, `.php` or `.lua`, in any letter case (`Server.PY` counts).
+- It is a link to a file with such a name.
+- The program is an interpreter, and this is the first argument that names a
+  regular file, or a later one without a data extension. The interpreters are
+  `sh`, `bash`, `dash`, `zsh`, `python`, `node`, `deno`, `bun`, `ruby`,
+  `perl`, `php`, `lua`, `tsx` and `ts-node`, also with a version at the end of
+  the name, such as `python3`, `python3.12` or `node22`. So `python3 server`
+  binds the bytes of `server`, also when that file is data, and
+  `python3 -W ignore server` binds both `ignore` and `server`.
+
+With an interpreter, every argument that names a file is checked, except a
+file after the first one that has a data extension, such as .json or .sqlite.
+The data extensions are `.json`, `.jsonl`, `.yaml`, `.yml`, `.toml`, `.ini`,
+`.cfg`, `.conf`, `.csv`, `.tsv`, `.txt`, `.log`, `.db`, `.sqlite`,
+`.sqlite3`, `.lock`, `.pid`, `.sock`, `.pem`, `.crt` and `.env`, in any letter
+case. For a link, both its own name and the name of the file it leads to need
+one. A file that starts with `#!` or has a script extension is a script
+anyway.
+
+Vade reads every script before every start. A program or script file larger
+than 1 GiB is refused.
+
+The other arguments are passed as written. The files and folders that they
+name are not checked: such a file can change, and it can appear after your
+yes. A file that appears after your yes needs a new yes only when it is a
+script by the rules above. With an interpreter, that is every new file that
+an argument names, unless it has a data extension and an earlier argument
+names a file.
+
+### Commands that load their code when they start
+
+Some commands name no code file, for example `npx -y pkg`, `uvx tool`,
+`python3 -m pkg`, `sh -c "..."` and `node .`. You can trust such a command.
+In place of script lines, Vade then shows:
+
+```text
+  code: not checked. This command loads its code when it starts. Your yes covers this exact command line and the program file only.
+```
+
+Vade shows this line when no argument is a script and the program is one of
+the interpreters above, or `npx`, `npm`, `pnpm`, `yarn`, `uv`, `uvx`, `pipx`
+or `cargo`. One changed character of the command line needs a new yes. The
+package, the module or the files that the command loads can change without
+one.
+
+### A command named env is refused
+
+`env` starts another program, and Vade would check only `env`. Chat prints:
+
+```text
+MCP: project server NAME did not start because its command is env, which starts another program that Vade cannot check. Name that program as the command, then run vade mcp trust NAME
+```
+
+`vade mcp trust NAME` refuses the entry for the same reason. Name the program
+as the command: change `"command": "env", "args": ["python3", "-m", "pkg"]`
+to `"command": "python3", "args": ["-m", "pkg"]`, and set variables in the
+entry's `env`.
+
+### How the program file is checked
+
+At your yes, Vade reads the program file and records its SHA-256 with the
+file's device, inode, size, modification time and change time. A program file
+inside the project (after links are followed) is read again at every check,
+because some volumes keep no reliable change time. A program file outside the
+project, such as a system `node`, is read again only when its resolved path
+changed, when the record has no saved values, or when one of these five values
+differs from the record. So a large system program does not slow every start. If the bytes are
+still the same, the server starts. Vade never writes the trust record at a
+start.
+
+Servers run from the original program path with the original arguments and
+working folder. Files run in place. Checks immediately before and after start
+narrow the gap but cannot close it if someone can rewrite a program at that
+instant. If a checked file differs at the check after start, Vade stops the
+server. A file changed and put back between the two checks is not caught.
+
+### A trust record from an older Vade
+
+An older Vade recorded the entry but no program. Nothing changed, but Vade
+has no program to compare, so the server waits for a new yes. Chat prints:
+
+```text
+MCP: project server NAME did not start because its trust record is from an older Vade and names no program. Check the command, then run vade mcp trust NAME
+```
 
 ## How the model sees the tools
 

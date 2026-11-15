@@ -16,7 +16,12 @@ use cli::{
 
 fn main() -> ExitCode {
     vade_harness::diagnostics::install_panic_hook("vade");
-    run_main(std::env::args().skip(1).collect())
+    let arguments: Vec<_> = std::env::args().skip(1).collect();
+    // Utility commands are interactive too. Gateway mode opts out after parsing,
+    // before any upstream connection can be made.
+    vade_harness::http_policy::begin_interactive();
+    let code = run_main(arguments);
+    vade_harness::http_policy::finish_interactive(code)
 }
 
 fn run_main(mut arguments: Vec<String>) -> ExitCode {
@@ -78,6 +83,7 @@ fn run_main(mut arguments: Vec<String>) -> ExitCode {
         return ExitCode::FAILURE;
     }
     if config.mode == Mode::Gateway {
+        vade_harness::http_policy::begin_gateway();
         let result = if config.upstreams.len() == 1 {
             gateway::run_with_access(&config.bind, &config.upstreams[0], config.access)
         } else {
@@ -106,6 +112,7 @@ fn run_main(mut arguments: Vec<String>) -> ExitCode {
     let result = App::new(config).and_then(|mut app| app.run());
     match result {
         Ok(code) => code,
+        Err(error) if vade_harness::http_policy::refusal(&error).is_some() => ExitCode::FAILURE,
         Err(error) if error.kind() == io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
         Err(error) => {
             vade_harness::diagnostics::stderr_line(format_args!("vade: {}", terminal::sanitize(&error.to_string())));

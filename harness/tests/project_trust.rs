@@ -182,7 +182,7 @@ fn a_shipped_vade_home_in_the_project_grants_nothing() {
         for note in [
             format!("{} not used ({reason}", root.join(".vade/permissions.json").display()),
             format!("{} is not used: {reason}", shipped.join("permissions.json").display()),
-            format!("{} is not used and a cannot save: {reason}", shipped.join("allowed.json").display()),
+            format!("{} is not used and saved approval is unavailable: {reason}", shipped.join("allowed.json").display()),
         ] {
             assert_eq!(shown.matches(&note).count(), 1, "{note}\n{shown}");
         }

@@ -161,6 +161,7 @@ pub struct Sampler {
     draws: usize,
 }
 impl Sampler {
+    pub fn plain_greedy(&self) -> bool { crate::draft::plain_greedy(self.options) }
     pub fn new(options: Sampling) -> Result<Self, String> {
         options.validate()?;
         Ok(Self { options, candidates: Vec::new(), counts: Vec::new(),

@@ -20,8 +20,10 @@ impl StepStore for Column {
         unsafe {*self.out.add(self.outputs+token*self.step)=value;}
     }
 }
-#[no_mangle]
-pub extern "ptx-kernel" fn prompt_rows(p:Arguments) {
+#[export_name="prompt_rows"]
+pub extern "ptx-kernel" fn entry_prompt_rows(p:Arguments) {prompt_rows(p)}
+#[inline(always)]
+pub(crate) fn prompt_rows(p:Arguments) {
     // SAFETY: The host validates Shape::lengths and passes those exact extents
     // here, with same-context contiguous owners that live through stream
     // completion. Inputs are immutable. The private output overlaps no input. It is zeroed earlier on the stream for every op

@@ -62,10 +62,11 @@ pub(crate) struct App {
     pub(crate) approvals: Option<Arc<vade_harness::shell::permissions::Approvals>>,
     /// The pending approval is for a command, so it may go on an allow list.
     pub(crate) approval_command: bool,
+    pub(crate) approval_choices: u8,
     /// The pending approval is for a web request, a redirect or a memory
-    /// note, so `s` approves its reach for this session and `a` saves it.
+    /// note, so `3` approves its reach for this session and `4` saves it.
     pub(crate) approval_reach: bool,
-    // When the current approval prompt first appeared; y/n is ignored for a
+    // When the current approval prompt first appeared; answer keys is ignored for a
     // short settle time so a key typed before reading it stays draft text.
     pub(crate) approval_shown: Option<std::time::Instant>,
     // Last journal name seen; shown while a worker holds the journal lock.
@@ -234,7 +235,7 @@ impl App {
         let approvals = if config.mode == Mode::Agent {
             let approvals = vade_harness::shell::permissions::Approvals::for_workspace(workspace.root(), vade_home.as_deref(), !quiet)
                 .map_err(|error| io::Error::other(format!("allow list {error}. Fix or remove that file; see docs/shell-safety.md.")))?;
-            // Every command asks unless VADE_SHELL_CHECKER turns on the
+            // Commands outside the fixed harmless grammar ask unless VADE_SHELL_CHECKER turns on the
             // experimental checker's safe class.
             approvals.set_checker(vade_harness::shell::policy::checker_from(std::env::var(vade_harness::shell::policy::CHECKER_ENV).ok().as_deref()));
             // A project file with no trust record, a user list or saved
@@ -268,6 +269,7 @@ impl App {
             approvals,
             approval_shown: None,
             approval_command: false,
+            approval_choices: 0,
             approval_reach: false,
             session_name: std::cell::RefCell::new(String::new()),
             build_session,

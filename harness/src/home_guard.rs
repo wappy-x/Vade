@@ -9,10 +9,8 @@ use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 
 /// Whether the shell sandbox denies writes at and under a workspace folder
-/// or file of this name: a hidden (dot) name, a credential name or a name
-/// with a credential suffix, in any ASCII case. This is the write rule of
-/// the sandbox profile (`shell/execution.rs`: the dot pattern and the
-/// patterns built from `tools::CREDENTIAL_NAMES` and `CREDENTIAL_SUFFIXES`).
+/// or file of this name: a hidden (dot) name or a secret path rule, in any
+/// ASCII case. This is the write rule of the shell sandbox profile.
 /// A macOS test runs real sandboxed writes for each such name and for others,
 /// so this function and the profile cannot drift apart: each name it calls
 /// denied must be denied by the sandbox. The sandbox may deny more (macOS
@@ -21,11 +19,8 @@ use std::path::{Component, Path, PathBuf};
 /// `--shell-exclude` are left out: they only add denials, so leaving them
 /// out makes the guard wider, never narrower.
 pub fn sandbox_denies_writes_in(name: &str) -> bool {
-    let bytes = name.as_bytes();
-    let ends_with = |suffix: &str| bytes.len() >= suffix.len() && bytes[bytes.len() - suffix.len()..].eq_ignore_ascii_case(suffix.as_bytes());
     (name.starts_with('.') && name.len() > 1)
-        || crate::tools::CREDENTIAL_NAMES.iter().any(|credential| credential.as_bytes().eq_ignore_ascii_case(bytes))
-        || crate::tools::CREDENTIAL_SUFFIXES.iter().any(|suffix| ends_with(suffix))
+        || crate::tools::secret_component_reason(name).is_some()
 }
 
 /// Whether `home` must not supply authority for this workspace. A project
@@ -534,13 +529,14 @@ mod tests {
             "vade-home".into(), "caf\u{e9}".into(), "\u{17f}ecrets".into(), "x.pem.d".into(), "pem".into(), "key".into(),
             ".hidden".into(), ".vade".into(), "a.b".into(), "secret".into(), "id_rsa.pub".into(),
         ];
-        for credential in crate::tools::CREDENTIAL_NAMES {
-            names.push((*credential).into());
-            names.push(credential.to_ascii_uppercase());
-        }
-        for suffix in crate::tools::CREDENTIAL_SUFFIXES {
-            names.push(format!("store{suffix}"));
-            names.push(format!("Store{}", suffix.to_ascii_uppercase()));
+        for rule in crate::tools::SECRET_PATH_RULES {
+            let name = match rule.match_kind {
+                crate::tools::SecretPathMatch::Exact => rule.value.to_owned(),
+                crate::tools::SecretPathMatch::Prefix => format!("{}local", rule.value),
+                crate::tools::SecretPathMatch::Suffix => format!("store{}", rule.value),
+            };
+            names.push(name.clone());
+            names.push(name.to_ascii_uppercase());
         }
         let mut script = String::new();
         for (index, name) in names.iter().enumerate() {

@@ -645,6 +645,7 @@ impl Model for NativeModel {
         let result = match result {
             Err(error)
                 if error.kind() == io::ErrorKind::TimedOut
+                    && !super::resolve::lookup_timed_out(&error)
                     && !cancel.load(Ordering::Relaxed)
                     && deadline.is_some_and(|at| Instant::now() >= at) =>
             {
@@ -663,6 +664,9 @@ impl Model for NativeModel {
             }
             result => result,
         };
+        if let Err(error) = &result && super::resolve::lookup_timed_out(error) {
+            self.contract.context.lookup_failure = Some(crate::diagnostics::error_hint(error).trim().to_owned());
+        }
         notify_progress(&self.progress, NativePhase::Idle);
         result
     }

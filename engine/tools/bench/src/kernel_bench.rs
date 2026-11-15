@@ -31,6 +31,8 @@ mod qsa_common;
 mod mhc_math;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod mhc_reference;
+mod byte_check;
+mod boundary_receipts;
 #[path = "gdn_cpu_proof.rs"]
 mod gdn_cpu_proof;
 #[path = "gdn_rows_bounds.rs"]
@@ -914,6 +916,17 @@ fn run() -> Result<()> {
             return cuda::order_gate::run(&candidate, &baseline, &mode);
             #[cfg(not(target_os = "linux"))]
             return Err(format!("device gate needs Linux with CUDA: {candidate} {baseline} {mode}"));
+        }
+        if flag == "--boundary-receipts" {return boundary_receipts::run(&args.collect::<Vec<_>>());}
+        if flag == "--checker-self-test" {return byte_check::self_test();}
+        if flag == "--mhc-phased" {
+            let base=args.next().ok_or("--mhc-phased needs base and candidate PTX paths")?;
+            let path=args.next().ok_or("--mhc-phased needs a candidate PTX path")?;
+            if args.next().is_some() {return Err("unexpected phased boundary argument".into());}
+            #[cfg(target_os="linux")]
+            return cuda::mhc_phased(&base,&path);
+            #[cfg(not(target_os="linux"))]
+            {let _=(base,path);return Err("phased boundary device check needs Linux and CUDA".into());}
         }
         if flag == "--mhc-bytes" {
             let path = args.next().ok_or("--mhc-bytes needs a PTX path")?;

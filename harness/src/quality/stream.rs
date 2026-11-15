@@ -41,7 +41,6 @@ pub struct ToolCall {
     pub name: String,
     pub arguments: String,
 }
-
 impl Reply {
     /// Output tokens per second over the whole request, when counted.
     pub fn end_to_end_tok_s(&self) -> Option<f64> {
@@ -277,30 +276,6 @@ fn remaining(started: Instant, deadline: Duration) -> io::Result<Duration> {
         })
 }
 
-/// Resolve one host inside the same elapsed budget as the whole request.
-/// Name resolution has no socket timeout, so it runs on its own thread and
-/// the caller stops waiting at the deadline.
-fn resolve(endpoint: &Endpoint, started: Instant, deadline: Duration) -> io::Result<std::net::SocketAddr> {
-    let target = format!("{}:{}", endpoint.host, endpoint.port);
-    let (sender, receiver) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let found = target
-            .to_socket_addrs()
-            .map(|mut addrs| addrs.next())
-            .map_err(|error| error.kind());
-        let _ = sender.send(found);
-    });
-    match receiver.recv_timeout(remaining(started, deadline)?) {
-        Ok(Ok(Some(address))) => Ok(address),
-        Ok(Ok(None)) => Err(json::invalid("endpoint host did not resolve")),
-        Ok(Err(kind)) => Err(io::Error::from(kind)),
-        Err(_) => Err(io::Error::new(
-            io::ErrorKind::TimedOut,
-            "quality-card request deadline passed",
-        )),
-    }
-}
-
 /// Send one streamed chat request and collect the whole reply. The Vade
 /// server streams with `Connection: close` and no chunked framing; a reply
 /// that uses chunked framing is refused rather than misread. Reading stops
@@ -312,10 +287,11 @@ pub fn send(
     auth_header: Option<&str>,
     deadline: Duration,
 ) -> io::Result<Reply> {
+    crate::http_policy::interactive_result()?;
     let started = Instant::now();
-    let address = resolve(endpoint, started, deadline)?;
-    let connect = Duration::from_secs(10).min(remaining(started, deadline)?);
-    let mut stream = TcpStream::connect_timeout(&address, connect)?;
+    // The typed authority names the upstream in a plain-HTTP refusal, as on main.
+    let target = crate::transport::Endpoint::parse(&format!("http://{}{}", endpoint.authority, endpoint.path))?;
+    let mut stream = crate::transport::connect_fresh(&target, started + deadline)?;
     let auth = auth_header.unwrap_or("");
     let request = format!(
         "POST {} HTTP/1.1\r\nHost: {}:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccept: text/event-stream\r\nConnection: close\r\n{auth}\r\n{body}",

@@ -49,7 +49,8 @@ fn first_arithmetic(calls:&[Call])->Option<Kind> {calls.iter().map(|call|call.gr
 fn arithmetic(kind:Kind)->bool {
     matches!(kind,Kind::AbsorbDense|Kind::AbsorbAttention
         |Kind::Causal|Kind::Expert|Kind::Plain|Kind::PlainBf16|Kind::Mx|Kind::Mixed|Kind::MixedBf16|Kind::PlainBatch|Kind::NvStream|Kind::CausalFast|Kind::CausalChain
-        |Kind::NvTile|Kind::DeviceRoute|Kind::NvQuarters)
+        |Kind::NvTile|Kind::DeviceRoute|Kind::NvQuarters|Kind::MxRows2|Kind::MxRows4|Kind::MxRows8|Kind::MxRows8w
+        |Kind::MixedRows|Kind::Fp8RowsSmall|Kind::Fp8RowsMulti|Kind::Fp8RowsFew|Kind::PlainRowsSmall|Kind::DeviceRouteRows)
 }
 fn zero_grid(zeros:&[(usize,u64,u32,bool)])->Option<Grid> {
     let longest=zeros.iter().map(|z|z.2).max()?;Some(Grid {kind:Kind::Copy,blocks:longest.div_ceil(128),rows:zeros.len() as u32,planes:1,threads:128,shared:0,lane:MAIN})
@@ -65,7 +66,7 @@ const STAGE_BASE:usize=COMMAND_BYTES+ZERO_BYTES;
 /// piece. Its rows read one zero source. The row table starts the stage area.
 const ZERO_ROWS:usize=crate::resident_launch::stage::ZERO_ROWS;const ZERO_WORDS:usize=1<<15;
 #[derive(Default)]
-pub(super) struct Recorder<'a> {enabled:bool,paused:bool,pub(super) failure:Option<String>,calls:Vec<Call>,pieces:BTreeMap<Vec<Grid>,Piece<'a>>,
+pub(super) struct Recorder<'a> {enabled:bool,paused:bool,rows:bool,row_pass:bool,pub(super) failure:Option<String>,calls:Vec<Call>,pieces:BTreeMap<Vec<Grid>,Piece<'a>>,
     stage:Option<DeviceVector<'a>>,staged:Vec<u8>,bells:Vec<(usize,std::sync::Arc<crate::tp_mailbox_host::Bell>,u64)>,
     zero_source:Option<DeviceVector<'a>>,zeros:Vec<(usize,u64,u32,bool)>,fresh:Vec<(u64,u64)>,fresh_at:u64,recorded:u64,
     // Fresh fills not yet placed (index, target, words); see `fuse_fresh_fills`. A proof run's poison words.
@@ -107,7 +108,8 @@ impl<'a> Backend<'a> {
         self.require_resident_stream()?;
         if !self.resident_queue_active() {return Err("resident launch recording requires an owned queue".into());}
         self.require_arm_kernels(&["resident_launch_causal","resident_launch_copy_words","resident_launch_zero_words"])?;
-        self.recorder.borrow_mut().enabled=true;Ok(())
+        let rows=self.require_arm_kernels(&Kind::ROWS.map(Kind::kernel)).is_ok();
+        let mut recorder=self.recorder.borrow_mut();recorder.rows=rows;recorder.enabled=true;Ok(())
     }
     /// Submit what is recorded and restart the feed count, as a real wait does, with no
     /// wait. Pieces keep the boundaries they had when the host read a value at this point.
@@ -120,6 +122,9 @@ impl<'a> Backend<'a> {
     /// Recording remains enabled while a prompt row pass pauses it.
     pub fn resident_launches_enabled(&self)->bool {self.recorder.borrow().enabled}
     pub fn resident_launches_active(&self)->bool {let r=self.recorder.borrow();r.enabled && !r.paused}
+    /// Row wrappers apply only to a pass with more than one input token. Scalar decode keeps its existing entries.
+    pub fn resident_row_pass(&self,rows:usize) {self.recorder.borrow_mut().row_pass=rows>1;}
+    pub(super) fn resident_rows_active(&self)->bool {let r=self.recorder.borrow();r.enabled && !r.paused && r.rows && r.row_pass}
     pub(super) fn disable_resident_launches(&self)->Result<(),String> {let result=self.flush_resident_launches();self.recorder.borrow_mut().enabled=false;result}
     pub fn resident_copy_counts(&self)->crate::resident_launch::CopyCounts {self.recorder.borrow().copies}
     /// Print only: pieces whose retained executable was updated in place for new launch grids (no new capture).
@@ -294,12 +299,20 @@ impl<'a> Backend<'a> {
     pub(super) unsafe fn record_resident_launch(&self,name:&str,grid:[u32;5],args:&[*mut c_void])->Result<bool,String> {
         if let Some(error)=self.fatal_error() {return Err(error);}
         if !self.resident_launches_active() {return Ok(false);}
+        let row=Kind::row(name).filter(|_|self.resident_rows_active());
         // SAFETY: launch_flash_grid's caller supplies this registered name's
         // original ABI pointers. These typed reads copy live argument values;
         // serializers copy numeric fields separately, never Rust padding. No
         // borrowed host pointer enters the retained command. Queue-owned GPU
         // operands survive all deferred submission and completion boundaries.
         let command=unsafe {match name {
+            _ if row.is_some()=>{let kind=row.unwrap();let command=match kind {
+                Kind::MxRows2|Kind::MxRows4|Kind::MxRows8|Kind::MxRows8w=>encode::mx_rows(args[0].cast::<crate::next_params::MxProjection>().read_unaligned(),kind),
+                Kind::MixedRows=>encode::mixed(args[0].cast::<crate::next_params::ResidentProjectionBatch>().read_unaligned(),kind),
+                Kind::DeviceRouteRows=>encode::route_rows(args[0].cast::<crate::device_route::BuildRows>().read_unaligned()),
+                Kind::Fp8RowsSmall|Kind::Fp8RowsMulti|Kind::Fp8RowsFew=>encode::group_rows(args[0].cast::<crate::expert_ops::GroupArguments>().read_unaligned(),kind),
+                _=>encode::prompt_rows(args[0].cast::<crate::prompt_ops::Arguments>().read_unaligned(),kind),
+            };Some((kind,command))},
             "latent_absorption"|"latent_absorption_scores"|"latent_absorption_values"=>{
                 let kind=if name=="latent_absorption" {Kind::AbsorbDense} else {Kind::AbsorbAttention};
                 let mut c=encode::causal(args[0].cast::<crate::causal_ops::Arguments>().read_unaligned());c.kind=kind as u32;Some((kind,c))},
@@ -328,6 +341,11 @@ impl<'a> Backend<'a> {
             "mhc_boundary_dots"=>Some((Kind::MhcBoundaryDots,encode::boundary(args[0].cast::<crate::mhc_params::Boundary>().read_unaligned(),Kind::MhcBoundaryDots))),
             "mhc_boundary_finish"=>Some((Kind::MhcBoundaryFinish,encode::boundary(args[0].cast::<crate::mhc_params::Boundary>().read_unaligned(),Kind::MhcBoundaryFinish))),
             "mhc_boundary_fused"=>Some((Kind::MhcBoundaryFused,encode::fused(args[0].cast::<crate::mhc_params::FusedBoundary>().read_unaligned()))),
+            "mhc_boundary_phase_rms"|"mhc_boundary_phase_dots"|"mhc_boundary_phase_finish"=>{
+                let mut p=args[0].cast::<crate::mhc_params::FusedBoundary>().read_unaligned();
+                p.reserved=match name {"mhc_boundary_phase_rms"=>1,"mhc_boundary_phase_dots"=>2,_=>3};
+                let kind=match p.reserved {1=>Kind::MhcPhaseRms,2=>Kind::MhcPhaseDots,_=>Kind::MhcPhaseFinish};
+                let mut c=encode::fused(p);c.kind=kind as u32;Some((kind,c))},
             "model_rms_partials"=>Some((Kind::RmsPartials,encode::rms(args[0].cast::<crate::kernel_params::ModelRms>().read_unaligned(),Kind::RmsPartials))),
             "model_rms_apply"=>Some((Kind::RmsApply,encode::rms(args[0].cast::<crate::kernel_params::ModelRms>().read_unaligned(),Kind::RmsApply))),
             "model_elementwise"=>Some((Kind::Elementwise,encode::elementwise(args[0].cast::<crate::kernel_params::ModelElementwise>().read_unaligned()))),
@@ -613,6 +631,17 @@ impl<'a> Backend<'a> {
 }
 #[cfg(test)] mod ramp_tests {
     use super::{part_limit,RAMP};
+    #[test] fn boundary_cohort_keys_keep_the_phase_grids_and_row_switch_distinct() {
+        use super::{Grid,Kind,MAIN,same_kernels};
+        let key=|rows:u32| {
+            let kinds=if rows>3 {vec![Kind::MhcPhaseRms,Kind::MhcPhaseDots,Kind::MhcPhaseFinish]} else {vec![Kind::MhcBoundaryFused;rows as usize]};
+            kinds.into_iter().map(|kind|Grid {kind,blocks:if kind==Kind::MhcPhaseFinish {rows} else if kind==Kind::MhcBoundaryFused {32} else {32*rows},rows:1,planes:1,threads:256,shared:0,lane:MAIN}).collect::<Vec<_>>()
+        };
+        let mut seen=std::collections::BTreeSet::new();
+        let hits=[8,5,4,3,4,5,8].map(|rows|!seen.insert(key(rows)));
+        assert_eq!(hits,[false,false,false,false,true,true,true]);
+        assert!(!same_kernels(&key(3),&key(4)));assert!(same_kernels(&key(4),&key(8)));
+    }
     /// An executable is updated in place only for a piece of the same kernels, block sizes and lanes; grids may differ.
     #[test] fn a_donor_piece_has_the_same_kernels_block_sizes_and_lanes() {
         use super::{same_kernels,Grid,Kind,MAIN,SIDE,JOIN};

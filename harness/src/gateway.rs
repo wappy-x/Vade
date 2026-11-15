@@ -24,6 +24,7 @@ pub use access::{Access, TOKEN_ENV};
 pub use routing::{Cluster, EndpointStats, RoutingConfig, RoutingStats};
 
 const MAX_CONNECTIONS: usize = 64;
+const REQUEST_RECEIVE_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_BIND: &str = "127.0.0.1:8787";
 const STATS_PATH: &str = "/_vade/gateway/stats";
 /// The shared field-presence sampling policy (engine-model `sampling_policy.rs`),
@@ -150,6 +151,10 @@ pub fn run_cluster_until(bind: &str, cluster: Cluster, stop: &AtomicBool) -> io:
 
 fn serve(bind: &str, upstream: Upstream, stop: Option<&AtomicBool>, access: Access) -> io::Result<()> {
     let listener = bind_loopback(bind)?;
+    serve_listener(listener, upstream, stop, access, MAX_CONNECTIONS)
+}
+
+fn serve_listener(listener: TcpListener, upstream: Upstream, stop: Option<&AtomicBool>, access: Access, max_connections: usize) -> io::Result<()> {
     let access = Arc::new(access);
     // The standalone gateway can sleep in accept instead of adding a polling
     // interval to every fresh connection. Embedded owners still poll for stop.
@@ -168,10 +173,10 @@ fn serve(bind: &str, upstream: Upstream, stop: Option<&AtomicBool>, access: Acce
         }
         match listener.accept() {
             Ok((socket, peer)) => {
-                if !peer.ip().is_loopback() {
+                if !loopback(peer.ip()) {
                     continue;
                 }
-                if active.load(Ordering::Relaxed) >= MAX_CONNECTIONS {
+                if active.load(Ordering::Relaxed) >= max_connections {
                     // A busy peer must not be allowed to hold the accept loop.
                     let _ = reject_busy(socket);
                     continue;
@@ -223,7 +228,7 @@ impl ProbeWorkers {
                     .spawn(move || {
                         while !cancel.load(Ordering::Relaxed) {
                             cluster.refresh(index, &cancel);
-                            if cancel.load(Ordering::Relaxed) {
+                            if cancel.load(Ordering::Relaxed) || cluster.probe_refused(index) {
                                 break;
                             }
                             thread::park_timeout(cluster.probe_interval());
@@ -277,11 +282,18 @@ fn bind_loopback(bind: &str) -> io::Result<TcpListener> {
     let addresses: Vec<_> = bind.to_socket_addrs()?.take(17).collect();
     if addresses.is_empty()
         || addresses.len() > 16
-        || addresses.iter().any(|address| !address.ip().is_loopback())
+        || addresses.iter().any(|address| !loopback(address.ip()))
     {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, LOOPBACK_ONLY));
     }
     TcpListener::bind(addresses.as_slice())
+}
+
+fn loopback(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(ip) => ip.is_loopback(),
+        std::net::IpAddr::V6(ip) => ip.is_loopback() || ip.to_ipv4_mapped().is_some_and(|ip| ip.is_loopback()),
+    }
 }
 
 fn messages_route(first: &str) -> bool {
@@ -310,6 +322,7 @@ fn reject_busy(socket: TcpStream) -> io::Result<()> {
 /// The OpenAI shape also carries `param` and `code`, as the OpenAI schema does.
 pub(crate) fn error_body(messages: bool, status: u16, message: &str) -> String {
     let kind = match status {
+        408 => "request_timeout",
         401 => "authentication_error",
         403 => "permission_error",
         404 => "not_found_error",
@@ -344,9 +357,10 @@ fn write_error(
     message: &str,
 ) -> io::Result<()> {
     let body = error_body(messages, status, message);
+    let retry = if matches!(status, 408 | 503) { "Retry-After: 1\r\n" } else { "" };
     write!(
         writer,
-        "HTTP/1.1 {status} Error\r\nX-Vade-Gateway: v1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "HTTP/1.1 {status} Error\r\nX-Vade-Gateway: v1\r\nContent-Type: application/json\r\n{retry}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
         body.len(),
         body
     )
@@ -358,11 +372,14 @@ fn reject(
     status: u16,
     message: &str,
 ) -> io::Result<()> {
+    reader.get_mut().prepare_error_write();
     write_error(reader.get_mut(), messages, status, message)
 }
 
 fn request_body_error(error: &io::Error) -> (u16, String) {
-    if transport::body_limit_exceeded(error) {
+    if error.kind() == io::ErrorKind::TimedOut {
+        (408, "request headers and body did not arrive before the deadline; send the request again".into())
+    } else if transport::body_limit_exceeded(error) {
         (413, format!("HTTP request body exceeds {} byte limit (8 MiB)", json::MAX_INPUT_BYTES))
     } else {
         (400, "invalid HTTP request framing or body".into())
@@ -400,19 +417,32 @@ fn handle_target(
     pool: &ConnectionPool,
     access: &Access,
 ) -> io::Result<()> {
+    handle_target_with_timeout(socket, upstream, cancel, pool, access, REQUEST_RECEIVE_TIMEOUT)
+}
+
+fn handle_target_with_timeout(
+    socket: TcpStream,
+    upstream: &Upstream,
+    cancel: Option<&AtomicBool>,
+    pool: &ConnectionPool,
+    access: &Access,
+    receive_timeout: Duration,
+) -> io::Result<()> {
     let local = socket.local_addr()?;
     let mut reader = BufReader::new(DeadlineStream::new(socket, cancel)?);
+    reader.get_mut().bound_deadline(Instant::now() + receive_timeout);
     let mut messages = false;
     let mut head = match transport::read_head_with_first(&mut reader, |first| {
         messages = messages_route(first)
     }) {
         Ok(head) => head,
-        Err(_) => {
+        Err(error) => {
+            let (status, message) = request_body_error(&error);
             return reject(
                 &mut reader,
                 messages,
-                400,
-                "invalid or oversized HTTP headers",
+                status,
+                if status == 408 { &message } else { "invalid or oversized HTTP headers" },
             );
         }
     };
@@ -515,6 +545,7 @@ fn handle_target(
         return reject(&mut body_reader.reader, messages, status, &message);
     }
     let mut reader = body_reader.reader;
+    reader.get_mut().clear_deadline();
     if method == "GET" {
         if !body.is_empty() {
             return reject(&mut reader, messages, 400, "GET body is unsupported");
@@ -556,6 +587,8 @@ fn handle_target(
     let (mut lease, body) = match prepare_dispatch(upstream, method, path, query, &head, &client_body) {
         Ok(prepared) => prepared,
         Err(routing::RouteError(status, message)) => {
+            if let Upstream::Cluster(cluster) = upstream
+                && let Some(reason) = cluster.plain_http_refusal() { return reject(&mut reader, messages, 502, &reason); }
             return reject(&mut reader, messages, status, &message);
         }
     };
@@ -592,6 +625,12 @@ fn handle_target(
             pool,
             reader.get_ref(),
         );
+        if let Err(failure) = &attempt
+            && transport::resolve::capacity_timeout(&failure.error)
+            && let Some(lease) = &mut lease
+        {
+            lease.local_lookup_limit();
+        }
         if let (Some(lease), Ok(response)) = (&mut lease, &attempt) {
             lease.status(response.status, response.head.get("retry-after"));
         }
@@ -600,6 +639,10 @@ fn handle_target(
             Err(failure) => failure.connect_failed,
         };
         reader.get_ref().check()?;
+        if let Err(failure) = &attempt
+            && let Some(reason) = crate::http_policy::refusal(&failure.error) {
+            return reject(&mut reader, messages, 502, reason);
+        }
         if refused && !retried && !cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
             if let (Upstream::Cluster(cluster), Some(old)) = (upstream, lease.as_mut()) {
                 let excluded = old.index();
@@ -665,6 +708,9 @@ fn handle_target(
         match attempt {
             Ok(response) => break response,
             Err(failure) => {
+                if failure.connect_failed || transport::resolve::capacity_timeout(&failure.error) {
+                    return reject(&mut reader, messages, 502, "the engine could not be reached; request was not sent");
+                }
                 if matches!(
                     failure.error.kind(),
                     io::ErrorKind::ConnectionAborted | io::ErrorKind::TimedOut
@@ -815,8 +861,7 @@ fn broadcast(
                 scope.spawn(move || {
                     let target = endpoint.gateway_route(suffix, request.query).ok()?;
                     let mut response = fanout
-                        .request(request.method, &target, request.body, request.head, cancel, pool)
-                        .ok()?;
+                        .request(request.method, &target, request.body, request.head, cancel, pool).ok()?;
                     let mut body = Vec::new();
                     response.body.read_to_end(&mut body).ok()?;
                     let succeeded = (200..300).contains(&response.status)
@@ -830,15 +875,15 @@ fn broadcast(
             .collect();
         calls.into_iter().map(|call| call.join().ok().flatten()).collect()
     });
+    reader.get_ref().check()?;
     let mut chosen: Option<ControlReply> = None;
     for (status, head, body, succeeded) in replies.into_iter().flatten() {
         if chosen.as_ref().is_none_or(|(_, _, _, done)| succeeded && !done) {
             chosen = Some((status, head, body, succeeded));
         }
     }
-    reader.get_ref().check()?;
     let Some((status, head, body, _)) = chosen else {
-        return reject(reader, messages, 502, "no upstream answered; request was not replayed");
+        return reject(reader, messages, 502, &cluster.plain_http_refusal().unwrap_or_else(|| "no upstream answered; request was not replayed".into()));
     };
     let no_body = matches!(status, 204 | 304);
     let framing = if no_body { String::new() } else { format!("Content-Length: {}\r\n", body.len()) };
@@ -896,6 +941,10 @@ fn relay_observed(
 mod cluster_tests;
 
 #[cfg(test)]
+#[path = "gateway/security_tests.rs"]
+mod security_tests;
+
+#[cfg(test)]
 #[path = "gateway_conformance.rs"]
 mod conformance;
 
@@ -925,6 +974,13 @@ mod tests {
                 .kind(),
             io::ErrorKind::Unsupported
         );
+    }
+
+    #[test]
+    fn mapped_ipv4_loopback_is_local() {
+        use std::net::{IpAddr, Ipv4Addr};
+        assert!(loopback(IpAddr::V6(Ipv4Addr::LOCALHOST.to_ipv6_mapped())));
+        assert!(!loopback(IpAddr::V6(Ipv4Addr::UNSPECIFIED.to_ipv6_mapped())));
     }
 
     #[test]

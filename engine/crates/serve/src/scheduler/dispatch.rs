@@ -1386,7 +1386,7 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
             }
             if let Some(error) = error {
                 engine_model::events::note_line("request_stopped", &format!("request stopped: {error}"));
-                let (kind, message) = if job.output_failed { (RequestError::Output, error.as_str()) }
+                let (kind, message) = if error == spark_engine::draft::UNMAPPED_GREEDY { (RequestError::Output, "The model chose an output slot that is not a token.") } else if job.output_failed { (RequestError::Output, error.as_str()) }
                     else if error.starts_with("Flash MoE routing rejected") || error.starts_with("MoE routing rejected") {
                         (RequestError::Generation, error.as_str())
                     }

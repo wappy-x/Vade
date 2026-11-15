@@ -7,7 +7,7 @@
 //! Then the same for row groups (the chats of a batched decode step): every shape at one row count
 //! of 2 to 8, and the model's shapes (four streams, 4,095 to 4,097 wide) at every count. There H is
 //! each row run alone as a one-row chain, so a row of a batch must have the bits of its own chat.
-//! D = the fused launch (mhc_boundary_fused): one launch at one row, one launch a row at 2 to 8 rows, every plane against K.
+//! D = the fused boundary: row entries or three ordered phases, every plane against K.
 #[cfg(target_os = "linux")]
 mod check {
     use std::{rc::Rc, sync::Arc};
@@ -128,7 +128,7 @@ mod check {
         compare("final combine after the host lane against kernels", shape, set, 3, "combined", &bits(b, &out_k)?, &bits(b, &out_f)?, tally)?;
         if link.queue().failed() { return Err("the host service failed".into()); }
         // D: the fused boundary, the same chain of three, every plane against the kernels, then the final combine.
-        // One launch at one row; one launch a row at 2 to FUSED_ROWS_MAX rows, as a chat step and a drafting check pass ask.
+        // Small cohorts use fused rows. Wider cohorts share the ordered phases.
         if n <= FUSED_ROWS_MAX && fused_admitted(one) {
             let fused = b.resident_mhc_boundary(one, norm, &weights, &base, &scale, &norm_weight)?.with_fused(&weights)?;
             let bf16 = fused.fused_bf16().ok_or("fused form missing")?;
@@ -144,9 +144,10 @@ mod check {
             }
             let out_d = b.vector(n * wide)?; d3.materialize(&block[2], &out_d)?; b.synchronize()?;
             compare("final combine after the fused launch against kernels", shape, set, 3, "combined", &bits(b, &out_k)?, &bits(b, &out_d)?, tally)?;
-            // The counters prove the path: three boundaries, one launch a row.
+            // The counters prove that the chain used the planned boundary nodes.
             let (launched, row_launched) = (spark_gpu_probe::driver::mhc_fused_launches() - launches, spark_gpu_probe::driver::mhc_fused_row_launches() - row_launches);
-            if launched != 3 * n as u64 || row_launched != if n > 1 { 3 * n as u64 } else { 0 } { return Err(format!("fused launch counters differ at {n} rows: launches={launched} row_launches={row_launched}")); }
+            let expected=3*spark_gpu_probe::mhc_params::boundary_launches(one,n) as u64;
+            if launched != expected || row_launched != if n > 1 { expected } else { 0 } { return Err(format!("fused launch counters differ at {n} rows: launches={launched} row_launches={row_launched}")); }
             if n == 1 { tally.fused_cases += 1; if bf16 { tally.fused_bf16_cases += 1; } }
             tally.fused_row_cases[n] += 1;
         }
@@ -195,7 +196,7 @@ mod check {
                         b.synchronize()?; let wall = std::time::Instant::now(); let begin = b.gpu_mark()?;
                         let mut pass = if arm == 2 { set[0].begin_rows_fused(source.clone(), rows)? } else { set[0].begin_rows(source.clone(), rows)? };
                         for i in 1..boundaries {
-                            // The fused arm runs with no CHAIN-SHADOW tail (it has none): one launch a row.
+                            // The fused arm runs its row entries or ordered phases with no CHAIN-SHADOW tail.
                             if arm == 2 { pass = set[i % sets].begin_after_rows_fused(pass, block.clone(), Rc::new(b.vector(rows * wide)?), rows)?;
                                 if let Some((from, to)) = &stage { b.copy_vector_range(from, &mut to.borrow_mut(), 0, 0, stage_words)?; } continue; }
                             let shadow = if shadow_blocks > 0 { let weight = &stand_ins[i % stand_ins.len()];
@@ -216,7 +217,7 @@ mod check {
                     } if last[0] != last[1] || last[0] != last[2] { return Err("the last output plane differs between the arms".into()); } }
                     println!("PASS the last output plane of the chain is bit-equal between the arms");
                     // The fused form inside a recorded stream, as a decode step runs it (D1's slope method): GPU marks right around 1, 2 and 4
-                    // back-to-back repeats of every boundary's launches (one launch a row). The slope over the repeat count is the cost of one
+                    // back-to-back repeats of every boundary's launches. The slope over the repeat count is the cost of one
                     // boundary's launches without the host's submission gap (the first repeat reads the boundary's weights cold, the others warm).
                     // The recorded chain must end in the bits of the eager one. A failure here is printed and fails the run.
                     let mut medians = Vec::new();
@@ -235,10 +236,12 @@ mod check {
                         println!("TIME fused_in_stream rows={rows} repeats={repeats} samples={} median_us={:.3} p10_us={:.3} p90_us={:.3}", ns.len(), us(ns.len() / 2), us(ns.len() / 10), us(ns.len() * 9 / 10));
                         medians.push(us(ns.len() / 2));
                     }
-                    // The phase stamps of the last launch (the last row of the last boundary; warm weights): first block start to the end of the norm.
-                    let stamps = fused[(boundaries - 1) % sets].fused_stamps()?;
-                    let (start, end) = ((0..FUSED_BLOCKS).map(|block| stamps[block * FUSED_STAMP_SLOTS]).filter(|&t| t != 0).min(), stamps[FUSED_BLOCKS * FUSED_STAMP_SLOTS]);
-                    if let Some(start) = start.filter(|&start| end > start) { println!("TIME fused_in_stream rows={rows} last_launch_span_us={:.3}", (end - start) as f64 / 1000.0); }
+                    // Only the fused row entry clears unused stamp slots. Separate phases do not give a whole-pass span.
+                    if spark_gpu_probe::mhc_params::boundary_launches(shape,rows)==rows {
+                        let stamps = fused[(boundaries - 1) % sets].fused_stamps()?;
+                        let (start, end) = ((0..FUSED_BLOCKS).map(|block| stamps[block * FUSED_STAMP_SLOTS]).filter(|&t| t != 0).min(), stamps[FUSED_BLOCKS * FUSED_STAMP_SLOTS]);
+                        if let Some(start) = start.filter(|&start| end > start) { println!("TIME fused_in_stream rows={rows} last_launch_span_us={:.3}", (end - start) as f64 / 1000.0); }
+                    }
                     for set in &fused { set.set_fused_timing(0)?; }
                     println!("TIME fused_in_stream rows={rows} one_boundary_us slope_2_1={:.3} slope_4_2={:.3} slope_4_1={:.3} bit_equal_to_eager=true",
                         medians[1] - medians[0], (medians[2] - medians[1]) / 2.0, (medians[2] - medians[0]) / 3.0);
@@ -250,8 +253,43 @@ mod check {
             })
         })
     }
+    fn phased_rows()->Result<(),String> {
+        use spark_gpu_probe::mhc_params::{PHASE_SHAPES,boundary_launches};
+        spark_gpu_probe::driver::with_backend(0,spark_gpu_probe::layer_ptx()?,usize::MAX,|b| {
+            let mut cases=0;let mut rng=Lcg(913);
+            for &(streams,hidden) in PHASE_SHAPES {for bf16 in [false,true] {for ty in [WeightType::F32,WeightType::Bf16] {for after in [false,true] {
+                let shape=Shape {rows:1,streams,hidden,iterations:20,rms_eps:1e-6,eps:1e-6};
+                let weights=(0..shape.wide()*shape.coefficients()).map(|_| {let w=rng.next()*0.05;if bf16 {spark_gpu_probe::bf16::rounded(w)} else {w}}).collect::<Vec<_>>();
+                let base=input(&mut rng,shape.coefficients(),0);let norm_weight=(0..hidden).map(|_| {let w=rng.next();if ty==WeightType::Bf16 {spark_gpu_probe::bf16::rounded(w)} else {w}}).collect::<Vec<_>>();
+                let owner=b.resident_mhc_boundary(shape,NormShape::new(hidden as usize,1e-6,ty)?,&weights,&base,&[0.01,0.02,0.03],&norm_weight)?.with_fused(&weights)?;
+                let queue=b.resident_queue()?;b.enable_resident_launches()?;
+                for rows in [8usize,5,4,3,4,5,8] {
+                    b.pause_resident_launches(true)?;
+                    let source=upload(b,&input(&mut rng,rows*shape.wide(),0))?;let block=upload(b,&input(&mut rng,rows*hidden as usize,0))?;
+                    let mut answers=Vec::new();
+                    for recorded in [false,true] {
+                        b.pause_resident_launches(!recorded)?;let before=spark_gpu_probe::driver::mhc_fused_launches();let stats=b.stats();
+                        let mut pass=owner.begin_rows_fused(source.clone(),rows)?;
+                        if after {pass=owner.begin_after_rows_fused(pass,block.clone(),Rc::new(b.vector(rows*shape.wide())?),rows)?;}
+                        b.synchronize()?;answers.push(planes(b,&pass,true)?);
+                        let want=(if after {2} else {1})*boundary_launches(shape,rows) as u64;
+                        if spark_gpu_probe::driver::mhc_fused_launches()-before!=want {return Err("boundary sequence launch count differs".into());}
+                        if recorded {
+                            use spark_gpu_probe::resident_launch::Kind;
+                            let now=b.stats();let count=[Kind::MhcBoundaryFused,Kind::MhcPhaseRms,Kind::MhcPhaseDots,Kind::MhcPhaseFinish].into_iter().map(|k|now.recorded_kinds[k as usize]-stats.recorded_kinds[k as usize]).sum::<u128>();
+                            if count!=u128::from(want) {return Err("boundary sequence did not record every boundary node".into());}
+                        }
+                    }
+                    if answers[0]!=answers[1] {return Err(format!("boundary eager and recorded words differ rows={rows} streams={streams} hidden={hidden}"));}cases+=1;
+                }
+                drop(queue);
+            }}}}
+            println!("BOUNDARY RECORDER SEQUENCE PASS cases={cases} rows=8,5,4,3,4,5,8 eager=recorded launch_counts=pass");Ok(())
+        })
+    }
     pub fn run() -> Result<(), String> {
         let args: Vec<String> = std::env::args().collect();
+        if args.get(1).is_some_and(|a|a=="phased-rows") {return phased_rows();}
         if args.get(1).is_some_and(|a| a == "time") {
             let number = |i: usize, default: usize| args.get(i).and_then(|v| v.parse().ok()).unwrap_or(default);
             return time(number(2, 2000).max(2), number(3, 90).max(1), number(4, 2), number(5, 0) as u32, number(6, 1).clamp(1, spark_gpu_probe::mhc_host_service::ROWS_MAX), number(7, 0));
@@ -297,7 +335,7 @@ mod check {
             if limit == usize::MAX && tally.fused_row_cases[2..].contains(&0) { return Err("the fused form did not run at every row count of 2 to 8".into()); }
             println!("PASS finite inputs: every plane of kernels, host math, service, full host lane and fused launch is bit-equal; final combine bit-equal");
             println!("PASS row groups: every row of 2 to 8 rows has the bits of its own one-row chain, on the kernels and on the host lane");
-            println!("PASS fused row groups: one fused launch a row, every plane of every row bit-equal to the kernels (cases by rows 2 to 8: {:?})", &tally.fused_row_cases[2..]);
+            println!("PASS fused row groups: planned row or phase launches, every plane of every row bit-equal to the kernels (cases by rows 2 to 8: {:?})", &tally.fused_row_cases[2..]);
             println!("PASS nonfinite inputs: the same words are nonfinite on both sides and every finite word is bit-equal (NaN payload bits may differ: nonfinite_differing_words above)");
             Ok(())
         })

@@ -48,6 +48,8 @@ pub trait Session {
     /// skips optional retention snapshots, not canonical replay or restored KV.
     fn set_cache_retention(&mut self, _retain: bool) {}
     fn disable_model_draft(&mut self) {}
+    /// Refuse an unmapped raw greedy winner instead of selecting a mapped alternative.
+    fn reject_unmapped_greedy(&self) -> bool { false }
     /// The session ended its drafting for this request (it will make no more proposals): the caller drops its
     /// speculator and goes on by plain decode. True once; `draft_target` is None from then on.
     fn draft_over(&mut self) -> bool { false }
@@ -129,6 +131,9 @@ pub trait Session {
     /// Shared physical allocation identities used to charge snapshots once.
     /// None retains the conservative per-session byte bound.
     fn retained_allocations(&self) -> Option<Vec<(usize, usize)>> { None }
+    /// Both pressure-release hooks leave this snapshot's owner list and private charge unchanged.
+    /// The cache can skip its allocation-list refresh on a decode pressure pass.
+    fn retention_is_immutable(&self) -> bool { false }
     /// Release turn-exclusive resources after completion snapshots are published.
     fn retire(&mut self) {}
     /// Private scratch/state bound in addition to enumerated shared allocations.

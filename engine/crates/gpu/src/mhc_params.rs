@@ -124,10 +124,21 @@ pub struct Boundary {
 /// strip-major weight copy and a scratch plane. Block k of the grid owns strip k of SUM-ORDER v1.
 /// `strips`: weight of row r at feature 256 p + 8 k + e sits at `fused_strip_index(shape, k, p, r, e)`
 /// (0 past the last feature); BF16 words when `bf16` is 1, FP32 words when 0. `scratch`:
-/// `FUSED_SCRATCH_WORDS` words; words 0 and 1 are meeting counters that are 0 between launches.
+/// `FUSED_SCRATCH_WORDS` words per row. The row entry shares one plane between ordered rows; the
+/// separate phases use one private plane per row. Words 0 and 1 are counters, zero between row entries.
 #[repr(C)]
 #[derive(Clone,Copy)]
 pub struct FusedBoundary {pub boundary:Boundary,pub strips:u64,pub scratch:u64,pub bf16:u32,pub reserved:u32}
+/// Explicit field encoding shared by the recorder and its device byte check. Padding stays zero.
+#[cfg(not(target_arch="nvptx64"))]
+pub fn fused_payload(p:FusedBoundary)->[u8;core::mem::size_of::<FusedBoundary>()] {
+    use core::mem::offset_of;
+    let mut bytes=[0;core::mem::size_of::<FusedBoundary>()];
+    macro_rules! put {($base:expr,$ty:ty,$value:expr,$($field:ident),+)=>{{let value=$value;$(let at=$base+offset_of!($ty,$field);let v=value.$field.to_ne_bytes();bytes[at..at+v.len()].copy_from_slice(&v);)+}}}
+    put!(0,Boundary,p.boundary,input,previous_input,previous_coefficients,residual,weights,base,scale,mixing_normalized,coefficients,collapsed,norm_weight,norm_partials,output,norm_epsilon,norm_bf16,prefetch,prefetch_bytes,prefetch_policy,prefetch_reserved);
+    put!(offset_of!(Boundary,shape),Shape,p.boundary.shape,rows,streams,hidden,iterations,rms_eps,eps);
+    put!(0,FusedBoundary,p,strips,scratch,bf16,reserved);bytes
+}
 pub const FUSED_BLOCKS:usize=32;
 pub const FUSED_THREADS:usize=256;
 /// Shared bytes for one strip's BF16 weights (periods x rows x 16 bytes); in the tail they hold the collapsed plane.
@@ -138,7 +149,8 @@ pub const FUSED_STRIP_WORDS:usize=576;
 pub const FUSED_SUMS:usize=2;
 /// Then, 8-byte aligned, the phase stamps of the last launch (%globaltimer ns): FUSED_STAMP_SLOTS a block, then
 /// one word for the end of the norm. Slots: 0 start, 1 residual, 2 RMS chain, 3 meeting 1 passed, 4 y and weights
-/// ready, 5 dot chains done; the last block also 6 rows joined, 7 Sinkhorn done. A slot a block does not reach is 0.
+/// ready, 5 dot chains done; the last block also 6 rows joined, 7 Sinkhorn done. Phase 0 clears unused slots.
+/// Separate phases write only the slots they reach and can leave older slots. They are not whole-pass timing data.
 pub const FUSED_STAMPS_AT:usize=(FUSED_SUMS+32+32*32).div_ceil(2)*2;
 pub const FUSED_STAMP_SLOTS:usize=8;
 pub const FUSED_SCRATCH_WORDS:usize=FUSED_STAMPS_AT+2*(32*FUSED_STAMP_SLOTS+1);
@@ -151,17 +163,23 @@ pub fn fused_admitted(s:Shape)->bool {
 pub fn fused_stage_fits(s:Shape)->bool {s.wide().div_ceil(256)*s.coefficients()*16<=FUSED_STAGE_BYTES}
 /// Word index of the strip-major copy (see FusedBoundary).
 pub const fn fused_strip_index(periods:usize,count:usize,strip:usize,period:usize,row:usize,element:usize)->usize {((strip*periods+period)*count+row)*8+element}
-/// The most rows of one fused boundary (the chats of a batched decode step, the rows of a drafting check pass):
-/// one `mhc_boundary_fused` launch a row, so a row has the bits of its own one-row launch.
+/// The most rows of one fused boundary, with private row planes and fixed per-row arithmetic.
 #[cfg(not(target_arch="nvptx64"))]
 pub const FUSED_ROWS_MAX:usize=8;
+/// The exact (streams, hidden) set of `kernel-bench --mhc-phased`. Other fused shapes keep row entries.
+pub const PHASE_SHAPES:&[(u32,u32)]=&[(1,1),(1,2),(2,17),(3,129),(4,1025),(4,4095),(4,4096),(4,4097)];
+pub fn phases_admitted(s:Shape)->bool {fused_admitted(Shape {rows:1,..s}) && (1..=8).contains(&s.rows) && PHASE_SHAPES.contains(&(s.streams,s.hidden))}
+/// Kernel nodes per boundary. Only swept shapes with wider cohorts use phases.
+pub fn boundary_launches(s:Shape,rows:usize)->usize {if rows>3 && phases_admitted(Shape {rows:rows as u32,..s}) {3} else {rows}}
+/// Retained scratch of one prepared fused owner, including all private row planes.
+#[cfg(not(target_arch="nvptx64"))]
+pub const FUSED_SCRATCH_BYTES:usize=4*FUSED_SCRATCH_WORDS*FUSED_ROWS_MAX;
 /// The arguments of row `row` of a fused boundary of several rows. `whole` names every plane at its row 0 with the
 /// one-row shape. Every plane a row owns is row-major (input, previous residual and coefficients, residual, mixing,
 /// coefficients, collapsed, norm partials, output), so the row's launch reads and writes only its own words of them.
 /// The parameters (base, scale, norm weight), the strip copy and the scratch plane are the same for every row;
 /// the rows' launches run one after another on the ordered stream, and the scratch counters rest at 0 between them.
-/// Host only: the kernel crate is built without it, so the kernel's code does not change.
-#[cfg(not(target_arch="nvptx64"))]
+/// The phased kernel also uses these offsets before selecting its private scratch.
 pub fn fused_row(whole:FusedBoundary,row:usize)->FusedBoundary {
     let p=whole.boundary;let shape=p.shape;let previous=p.previous_input!=0;
     let at=|words:usize|4*(row*words) as u64;
@@ -175,6 +193,16 @@ pub fn fused_row(whole:FusedBoundary,row:usize)->FusedBoundary {
 #[cfg(test)]
 mod fused_row_tests {
     use super::*;
+    #[test]
+    fn phases_admit_exactly_the_swept_tuples_and_count_their_nodes() {
+        for rows in 1..=10 {for streams in 1..=5 {for hidden in 1..=6401 {
+            let s=Shape {rows,streams,hidden,iterations:20,rms_eps:1e-6,eps:1e-6};
+            let swept=rows<=8 && PHASE_SHAPES.contains(&(streams,hidden));
+            assert_eq!(phases_admitted(s),swept);
+            assert_eq!(boundary_launches(s,rows as usize),if swept && rows>3 {3} else {rows as usize});
+        }}}
+        assert_eq!(FUSED_SCRATCH_BYTES,50_304);
+    }
     /// Planes laid out one after another with a gap; every plane holds `rows` rows.
     fn whole(shape:Shape,rows:usize,previous:bool)->(FusedBoundary,Vec<(u64,usize)>) {
         let (wide,count,hidden)=(shape.wide(),shape.coefficients(),shape.hidden as usize);let mut next=4096u64;

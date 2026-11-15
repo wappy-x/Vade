@@ -5,9 +5,20 @@ use engine_model::{plan::{admission::CheckpointAdmission,layer::{Kind,LayerPlan,
 use spark_gpu_probe::{causal_ops::{Shape,Op},norm_boundary::{NormShape,WeightType}};
 use std::{cell::RefCell,collections::BTreeMap,rc::Rc};
 #[path="bounded_decoder/parameters.rs"] mod parameters;
+// Tests build it on every host; outside a Linux `kernel-bench` build only its tests use it.
+#[cfg(any(test,all(target_os="linux",feature="kernel-bench")))]
+#[cfg_attr(not(all(target_os="linux",feature="kernel-bench")),allow(dead_code))]
+#[path="bounded_decoder/memo_proof.rs"] mod memo_proof;
 pub use parameters::{StaticParameters,ParameterCounts};
 use parameters::StaticParameterPlan;
+pub(crate) mod owners;
 pub const PROMPT_ROWS:usize=4;
+pub const MEMO_SLAB_ROWS:usize=64;
+/// Larger prompt groups copy their recurrent state prefix out of the row output. Every host reads it: the start
+/// line's planned charge of a kept prompt (`row_split::Factory::kept_prompt_bytes`) counts what a shorter group pins.
+pub(crate) const STATE_VIEW_ROWS:usize=256;
+#[cfg(any(target_os="linux",test))]
+pub(crate) fn copy_prompt_state(tokens:usize)->bool {tokens>STATE_VIEW_ROWS}
 fn need(ok:bool,why:&str)->Result<()> {if ok {Ok(())} else {Err(why.into())}}
 pub(crate) fn greedy_logits(logits:&[f32],words:usize)->Result<u32> {
     need(!logits.is_empty() && logits.len()==words && logits.iter().all(|value|value.is_finite()),"bounded logits extent or value differs")?;
@@ -45,6 +56,7 @@ mod asked;
 #[cfg_attr(not(target_os="linux"),allow(dead_code))]
 mod memo_batches;
 mod residual_plan;
+mod initial_state;
 /// Per-step allocation fields, with the names RESIDENT VERIFY prints: device vectors
 /// newly allocated between two cumulative counts (count, bytes). Print only.
 pub fn allocation_fields(before:Option<(usize,usize)>,now:Option<(usize,usize)>)->String {
@@ -87,10 +99,17 @@ pub(crate) fn selection_read(i:&engine_model::plan::description::PoolIndexerDesc
     row.dim=dim;row.taps=taps;row.rows=rows;row.cols=u32::from(i.select_tail);row.first=first;row.slots=slots;
     spark_gpu_probe::select_admission::known_selection(row).is_none()
 }
+/// One chat's Gather of an absorbed layer, as `gather_absorbed` takes it: its shape, its inputs, and the count that the
+/// selection rule gives for its context.
+pub type ChatGather<'a,V>=(Shape,[Option<&'a V>;4],f32);
 pub trait Compute {
     /// One ordered execution owns temporary buffers through state publication.
     fn work<T>(&self,run:impl FnOnce()->Result<T>)->Result<T> {run()}
     fn resident_weights_ready(&self)->bool {false}
+    fn memo_summary(&self,_:&CheckpointAdmission)->Option<crate::projection_memo::Summary> {None}
+    fn freeze_memo(&self,plan:crate::projection_memo::Plan)->Result<crate::projection_memo::Plan> {
+        if plan==crate::projection_memo::Plan::full() {Ok(plan)} else {Err("compute cannot enforce a projection memo bound".into())}
+    }
     /// Diagnostic: graph pieces captured under a new key, captured again under a key seen before, evicted, and updated in
     /// place for new launch grids, since the load. A recorded piece is keyed by the grids of its launches; captures that grow
     /// with every step name a grid that moves and has no retained executable to take it.
@@ -112,6 +131,9 @@ pub trait Compute {
     /// a backend that forgot it would read 0 in silence. A backend with no fused launches says 0 itself.
     fn mhc_row_launches(&self)->u64;
     type Value;type Pass;
+    /// Host metadata only. List every allocation this state plane keeps alive.
+    /// False means this backend cannot keep this plane without more work.
+    fn state_allocations(&self,_:&Self::Value,_:&mut Vec<(usize,usize)>)->bool {false}
     fn projects_complete_rows(&self)->bool {false}
     fn sparse_topology(&self)->Topology {Topology {rank:0,parts:1}}
     fn owned_expansion(&self,_:&str,_:&Self::Value,_:usize,_:crate::sparse_heads::Layout)->Result<Option<Self::Value>> {Ok(None)}
@@ -169,6 +191,13 @@ pub trait Compute {
     /// heads x slots words, so a decode step takes vectors of one size at every context (the decode reserve reuses by exact size).
     fn latent_absorption(&self,name:&str,shape:Shape,query:&Self::Value,latent:&Self::Value,count:&Self::Value,slots:usize)->Result<Self::Value>;
     fn latent_absorption_rows(&self,name:&str,shape:spark_gpu_probe::prompt_ops::Shape,query:&Self::Value,latent:&Self::Value,selected:&Self::Value)->Result<Self::Value>;
+    /// CHAT ROWS: the absorbed attention of a batch step's chats, one decode row each, as one row group of
+    /// `latent_absorption_rows` (`shape.tokens` chats, the verify pass's kernels: each row keeps SUM-ORDER v1).
+    /// `gathers[i]` is chat i's Gather as `gather_absorbed` takes it (shape, inputs, the count of the selection rule).
+    /// It writes its rows at row i x `stride` of one latent value; `selected` names those rows and chat i's count.
+    /// None: the caller runs the chats one by one. No default: a wrapper that dropped it would run one attention a chat.
+    fn latent_absorption_chats(&self,name:&str,shape:spark_gpu_probe::prompt_ops::Shape,gathers:&[ChatGather<'_,Self::Value>],
+        stride:usize,query:&Self::Value,selected:&Self::Value)->Result<Option<Self::Value>>;
     fn indirect_attention(&self,_shape:Shape,_parts:&[&Self::Value],_:&Self::Value)->Result<Option<Self::Value>> {Ok(None)}
     /// True when this compute runs the planar form of a KDA step or convolution (Op::StepPlanar, Op::ConvParts) for this shape: one
     /// launch whose result holds all heads' states then all outputs (or all convolution outputs then all histories), taken as two views.
@@ -335,9 +364,12 @@ pub fn share_state<C:Compute>(compute:&C,state:&State<C::Value>)->Result<State<C
 /// expanded rows: of those it keeps only how many rows each layer held, and in which layout. The expanded rows are
 /// pure projections of `latent_cache` rows, which a parked prompt keeps, so `Decoder::resume_state` builds the
 /// same words again. A parked prompt therefore holds its state planes and nothing else.
-pub struct Parked<V> {state:State<V>,held:BTreeMap<usize,(usize,crate::sparse_heads::Layout)>}
+pub struct Parked<V> {state:State<V>,held:BTreeMap<usize,(usize,crate::sparse_heads::Layout)>,owners:Option<owners::Owners>}
 impl<V> std::ops::Deref for Parked<V> {type Target=State<V>;fn deref(&self)->&State<V> {&self.state}}
 impl<V> Parked<V> {
+    /// Page-rounded owners of these planes, counted once within this holder.
+    pub fn retained_bytes(&self)->Option<usize> {self.owners.as_ref().map(owners::Owners::bytes)}
+    pub fn owners(&self)->Option<&owners::Owners> {self.owners.as_ref()}
     /// The most expanded rows any layer held when the prompt was parked: what a resume builds again for each such layer.
     #[cold] #[inline(never)]
     pub fn held_rows(&self)->usize {self.held.values().map(|held|held.0).max().unwrap_or(0)}
@@ -346,14 +378,69 @@ impl<V> Parked<V> {
 #[cold] #[inline(never)]
 pub fn park_state<C:Compute>(compute:&C,state:&State<C::Value>)->Result<Parked<C::Value>> {
     let held=state.expanded.iter().map(|(&layer,rows)|(layer,(rows.1,rows.2))).collect();
-    Ok(Parked {state:State {position:state.position,layers:share_layers(compute,state)?,expanded:BTreeMap::new()},held})
+    let state=State {position:state.position,layers:share_layers(compute,state)?,expanded:BTreeMap::new()};
+    let owners=state_owners(compute,&state);
+    Ok(Parked {state,held,owners})
+}
+/// No device read, launch, or synchronization. Expanded projections are excluded.
+#[cold] #[inline(never)]
+pub fn state_owner_bytes<C:Compute>(compute:&C,state:&State<C::Value>)->Option<usize> {
+    state_owners(compute,state).map(|owners|owners.bytes())
+}
+/// Cold cache quote or park only. The saved parked list serves all later reads.
+#[cold] #[inline(never)]
+pub fn state_owners<C:Compute>(compute:&C,state:&State<C::Value>)->Option<owners::Owners> {
+    let planes=state.layers.iter().map(BTreeMap::len).sum::<usize>();
+    let mut owners=Vec::with_capacity(planes.saturating_mul(2));
+    for value in state.layers.iter().flat_map(|planes|planes.values()) {if !compute.state_allocations(value,&mut owners) {return None;}}
+    Some(owners::Owners::new(owners))
+}
+#[cfg(test)]
+mod kept_owner_tests {
+    use super::*;
+    #[test]
+    fn each_owner_is_rounded_and_counted_once_per_holder() {
+        let owners=[(1,4097),(1,4097),(2,1),(3,0)];
+        assert_eq!(owners::Owners::new(owners.to_vec()).bytes(),12288);
+        let mut ledger=owners::Ledger::new();let owners=owners::Owners::new(owners.to_vec());
+        ledger.retain(&owners);ledger.retain(&owners);assert_eq!(ledger.bytes(),12288);
+        assert_eq!(owners::Owners::new(vec![(1,usize::MAX)]).bytes(),usize::MAX);
+    }
+    #[test]
+    fn parking_charges_plane_capacity_and_excludes_expanded_rows() {
+        let mut value=Vec::with_capacity(2048);value.push(0.0);
+        let layout=crate::sparse_heads::Layout::new(1,1,1,Topology {rank:0,parts:1}).unwrap();
+        let state=State {position:1,layers:vec![BTreeMap::from([("plane".into(),value)])],expanded:BTreeMap::from([(0,Expanded(Rc::new(vec![0.0;4096]),1,layout))])};
+        assert_eq!(state_owner_bytes(&Host,&state),Some(8192));
+        // The host copies only the used words; the device keeps owner metadata.
+        let parked=park_state(&Host,&state).unwrap();assert_eq!(parked.retained_bytes(),Some(4096));
+    }
+    #[test]
+    fn parked_decoder_does_not_clone_program_schedules() {
+        let checkpoint=host::shadow_fixture::Checkpoint::new_with_predictor(80);
+        let mut live=Decoder::new(&checkpoint.admission,Host,80).unwrap();live.enable_predictor().unwrap();let prepared=live.prepared();
+        assert!(!prepared.schedules.is_empty() && prepared.draft.is_some());
+        let idle=Decoder::from_prepared_idle(&prepared,&Host,80).unwrap();
+        assert_eq!(idle.schedules.borrow().capacity(),0);assert!(idle.draft_schedule.borrow().is_none());
+        assert!(Rc::ptr_eq(&idle.parameters,&prepared.parameters));assert!(Rc::ptr_eq(&idle.blocks,&prepared.blocks));
+        println!("KEPT HOST MEASURED schedule_clone_payload_bytes=0 idle_decoder_inline_bytes={}",std::mem::size_of_val(&idle));
+    }
 }
 /// Host copies of immutable parameters, shared by all sessions of one server.
 #[derive(Clone)]
 /// Immutable parameters of one checkpoint. They stay bound to it: a decoder built
 /// from them reads that checkpoint's weights and can read no other.
-pub struct Prepared<'f> {topology:Topology,checkpoint:&'f CheckpointAdmission,parameters:Rc<BTreeMap<String,Vec<f32>>>,static_parameters:Rc<StaticParameterPlan>,blocks:Rc<BTreeMap<(usize,usize),crate::layer_operands::ResidualBlockOperands>>,schedules:Vec<LayerSchedule>,draft:Option<(Rc<proposer::Draft>,LayerSchedule)>,verify_routes:usize}
-pub struct Decoder<'f,C:Compute> {checkpoint:&'f CheckpointAdmission,compute:C,capacity:u64,parameters:Rc<BTreeMap<String,Vec<f32>>>,static_parameters:Rc<StaticParameterPlan>,
+pub struct Prepared<'f> {topology:Topology,checkpoint:&'f CheckpointAdmission,parameters:Rc<BTreeMap<String,Vec<f32>>>,static_parameters:Rc<StaticParameterPlan>,initial_state:Rc<initial_state::Layouts>,blocks:Rc<BTreeMap<(usize,usize),crate::layer_operands::ResidualBlockOperands>>,schedules:Vec<LayerSchedule>,draft:Option<(Rc<proposer::Draft>,LayerSchedule)>,verify_routes:usize}
+impl Prepared<'_> {
+    /// Count the actual prepared owners that can retain fused scratch. Charge the full allocation even if an
+    /// owner is already resident or the compute lane does not use fused kernels. This is a conservative bound.
+    pub fn fused_boundary_scratch(&self)->Result<(usize,usize)> {
+        use spark_gpu_probe::mhc_params::{Shape,fused_admitted,FUSED_SCRATCH_BYTES};
+        let owners=self.blocks.values().filter(|p|fused_admitted(Shape {rows:1,..p.mhc().shape()})).count();
+        Ok((owners,owners.checked_mul(FUSED_SCRATCH_BYTES).ok_or("fused boundary scratch charge overflow")?))
+    }
+}
+pub struct Decoder<'f,C:Compute> {checkpoint:&'f CheckpointAdmission,compute:C,capacity:u64,parameters:Rc<BTreeMap<String,Vec<f32>>>,static_parameters:Rc<StaticParameterPlan>,initial_state:Rc<initial_state::Layouts>,
     blocks:Rc<BTreeMap<(usize,usize),crate::layer_operands::ResidualBlockOperands>>,schedules:RefCell<Vec<LayerSchedule>>,expanded_limit:std::cell::Cell<usize>,forced_union:std::cell::Cell<Option<usize>>,memo_seed:std::cell::Cell<bool>,
     /// For each layer, one plan a batch step's shared steps read (see batch.rs). Made at first use.
     batch_plans:RefCell<BTreeMap<usize,Rc<LayerPlan>>>,
@@ -409,9 +496,9 @@ impl<'f,C:Compute> Decoder<'f,C> {
         let name="model.language_model.norm.weight";parameters.insert(name.into(),plain(checkpoint,name)?);
         let parameters=Rc::new(parameters);let static_parameters=Rc::new(StaticParameterPlan::new(parameters.clone(),parameter_jobs)?);
         crate::startup::step("weights");
-        compute.prepare(checkpoint)?;Ok(Self {checkpoint,compute,capacity,parameters,static_parameters,blocks:Rc::new(blocks),schedules:RefCell::new(schedules),expanded_limit:std::cell::Cell::new(rows::RESERVED_ROWS),forced_union:std::cell::Cell::new(None),memo_seed:std::cell::Cell::new(false),batch_plans:RefCell::new(BTreeMap::new()),draft:None,draft_schedule:RefCell::new(None),verify_routes:std::cell::Cell::new(0),fold_links:(0..=checkpoint.description().layers.len()).map(|_|std::cell::Cell::new(None)).collect()})
+        compute.prepare(checkpoint)?;Ok(Self {checkpoint,compute,capacity,parameters,static_parameters,initial_state:Rc::new(initial_state::Layouts::default()),blocks:Rc::new(blocks),schedules:RefCell::new(schedules),expanded_limit:std::cell::Cell::new(rows::RESERVED_ROWS),forced_union:std::cell::Cell::new(None),memo_seed:std::cell::Cell::new(false),batch_plans:RefCell::new(BTreeMap::new()),draft:None,draft_schedule:RefCell::new(None),verify_routes:std::cell::Cell::new(0),fold_links:(0..=checkpoint.description().layers.len()).map(|_|std::cell::Cell::new(None)).collect()})
     }
-    pub fn prepared(&self)->Prepared<'f> {Prepared {topology:self.compute.sparse_topology(),checkpoint:self.checkpoint,parameters:self.parameters.clone(),static_parameters:self.static_parameters.clone(),blocks:self.blocks.clone(),schedules:self.schedules.borrow().clone(),draft:self.draft.clone().zip(self.draft_schedule.borrow().clone()),verify_routes:self.verify_routes.get()}}
+    pub fn prepared(&self)->Prepared<'f> {Prepared {topology:self.compute.sparse_topology(),checkpoint:self.checkpoint,parameters:self.parameters.clone(),static_parameters:self.static_parameters.clone(),initial_state:self.initial_state.clone(),blocks:self.blocks.clone(),schedules:self.schedules.borrow().clone(),draft:self.draft.clone().zip(self.draft_schedule.borrow().clone()),verify_routes:self.verify_routes.get()}}
     /// A new session without rereading immutable parameters.
     /// `live`: the sessions that already decode with this owner (0: the new session is alone).
     pub fn from_prepared(prepared:&Prepared<'f>,compute:C,capacity:u64,live:usize)->Result<Self> {
@@ -426,18 +513,30 @@ impl<'f,C:Compute> Decoder<'f,C> {
     /// so the ownership check there has already passed for this pair.
     pub(crate) fn from_prepared_idle(prepared:&Prepared<'f>,compute:C,capacity:u64)->Result<Self> {
         need(capacity>0 && capacity<=prepared.checkpoint.description().max_positions,"bounded decoder capacity exceeds the recipe")?;
-        Ok(Self::bound(prepared,compute,capacity))
+        // A parked holder never executes a schedule. A resumed live session
+        // gets its schedules from Prepared in from_prepared, as before.
+        Ok(Self {checkpoint:prepared.checkpoint,compute,capacity,parameters:prepared.parameters.clone(),static_parameters:prepared.static_parameters.clone(),initial_state:prepared.initial_state.clone(),blocks:prepared.blocks.clone(),schedules:RefCell::new(Vec::new()),expanded_limit:std::cell::Cell::new(rows::RESERVED_ROWS),forced_union:std::cell::Cell::new(None),memo_seed:std::cell::Cell::new(false),batch_plans:RefCell::new(BTreeMap::new()),draft:prepared.draft.as_ref().map(|d|d.0.clone()),draft_schedule:RefCell::new(None),verify_routes:std::cell::Cell::new(prepared.verify_routes),
+            // No kept links either: a holder runs no row pass, and `fold_links` in rows.rs finds them again when a slot is absent.
+            fold_links:Vec::new()})
     }
     fn bound(prepared:&Prepared<'f>,compute:C,capacity:u64)->Self {
-        Self {checkpoint:prepared.checkpoint,compute,capacity,parameters:prepared.parameters.clone(),static_parameters:prepared.static_parameters.clone(),blocks:prepared.blocks.clone(),schedules:RefCell::new(prepared.schedules.clone()),expanded_limit:std::cell::Cell::new(rows::RESERVED_ROWS),forced_union:std::cell::Cell::new(None),memo_seed:std::cell::Cell::new(false),batch_plans:RefCell::new(BTreeMap::new()),draft:prepared.draft.as_ref().map(|d|d.0.clone()),draft_schedule:RefCell::new(prepared.draft.as_ref().map(|d|d.1.clone())),verify_routes:std::cell::Cell::new(prepared.verify_routes),fold_links:(0..=prepared.checkpoint.description().layers.len()).map(|_|std::cell::Cell::new(None)).collect()}
+        Self {checkpoint:prepared.checkpoint,compute,capacity,parameters:prepared.parameters.clone(),static_parameters:prepared.static_parameters.clone(),initial_state:prepared.initial_state.clone(),blocks:prepared.blocks.clone(),schedules:RefCell::new(prepared.schedules.clone()),expanded_limit:std::cell::Cell::new(rows::RESERVED_ROWS),forced_union:std::cell::Cell::new(None),memo_seed:std::cell::Cell::new(false),batch_plans:RefCell::new(BTreeMap::new()),draft:prepared.draft.as_ref().map(|d|d.0.clone()),draft_schedule:RefCell::new(prepared.draft.as_ref().map(|d|d.1.clone())),verify_routes:std::cell::Cell::new(prepared.verify_routes),fold_links:(0..=prepared.checkpoint.description().layers.len()).map(|_|std::cell::Cell::new(None)).collect()}
     }
     pub fn zero_state(&self)->Result<State<C::Value>> {self.zero_state_at(0)}
     /// Zero state of the shape a chat has at this position. Position zero is a new chat; any
     /// other position is for memory tests, because zeros are not what a prompt leaves there.
     pub fn zero_state_at(&self,position:u64)->Result<State<C::Value>> {
-        let mut layers=Vec::new();for layer in 0..self.checkpoint.description().layers.len() {
-            let p=LayerPlan::new(self.checkpoint.description(),layer,position+1,Topology {rank:0,parts:1}).map_err(|e|e.to_string())?;let mut inputs=BTreeMap::new();
-            for b in p.inputs.iter().filter(|b|b.name!="residual" && b.name!="local_slots") {inputs.insert(b.name.clone(),self.compute.zeros(self.state_words(layer,b.elements().map_err(|e|e.to_string())?)?)?);}layers.push(inputs);
+        // Only immutable full-head names and extents are kept with this checkpoint. Every call still applies
+        // this compute owner's head layout and allocates fresh zeros. Diagnostic positions keep their own plans.
+        let layouts=self.initial_state.get(position,|| {
+            (0..self.checkpoint.description().layers.len()).map(|layer| {
+                let p=LayerPlan::new(self.checkpoint.description(),layer,position+1,Topology {rank:0,parts:1}).map_err(|e|e.to_string())?;
+                p.inputs.iter().filter(|b|b.name!="residual" && b.name!="local_slots")
+                    .map(|b|Ok((b.name.clone(),b.elements().map_err(|e|e.to_string())?))).collect::<Result<Vec<_>>>()
+            }).collect::<Result<Vec<_>>>()
+        })?;
+        let mut layers=Vec::with_capacity(layouts.len());for (layer,layout) in layouts.iter().enumerate() {
+            let mut inputs=BTreeMap::new();for (name,words) in layout {inputs.insert(name.clone(),self.compute.zeros(self.state_words(layer,*words)?)?);}layers.push(inputs);
         }Ok(State {position,layers,expanded:BTreeMap::new()})
     }
     /// No committed state changes until every decoder layer and the head succeed.
@@ -1000,7 +1099,8 @@ impl<'f,C:Compute> Decoder<'f,C> {
 }
 #[path="bounded_decoder/rows.rs"] mod rows;
 #[path="bounded_decoder/batch.rs"] mod batch;
-pub use batch::{BATCH_ROWS,BATCH_MIN_ROWS,BATCH_PAIR_ROWS,expert_union_counts};
+pub use batch::{BATCH_ROWS,BATCH_MIN_ROWS,BATCH_PAIR_ROWS,expert_union_counts,chat_attention_layers};
+pub use rows::absorbed_chat_words;
 pub use rows::{absorbed_group_words,full_memo_ballast,HeadRows,PROMPT_GROUP,PROMPT_GROUP_MAX,PROMPT_GROUP_CHECK,PROMPT_SHARED,ROW_STAGE_ROWS,RESERVED_ROWS,HELD_ROOM,POOL_ROOM,DECODE_RESERVE,DECODE_RETURNS,MEMO_KEEP,trims_spares_first,group_pool_cap,PROJECTION_MEMO_BYTES,expanded_bytes,group_workspace_bytes,group_workspace_bytes_for,OpenRows};
 mod indirect;
 #[path="bounded_decoder/projection_stage.rs"] mod projection_stage;
@@ -1011,6 +1111,7 @@ pub use proposer::{PROPOSER_HIDDEN,PredictorState};
 pub use verify::{Verify,CARRIED_ROWS,VERIFY_ROWS,TRAIL_ROWS,PROMPT_TRAIL,SEED_PASS_ROWS,SEED_ROOM,learned_pass_ms};
 #[path="bounded_decoder/host.rs"] mod host;
 pub use host::Host;
+#[cfg(test)] pub(crate) use host::shadow_fixture::Checkpoint as TestCheckpoint;
 #[cfg(target_os="linux")]
 #[path="bounded_decoder/device.rs"] mod device;
 #[cfg(all(target_os="linux",feature="kernel-bench"))]

@@ -3,6 +3,7 @@ use crate::sample::{Distribution, Sampler, Sampling, uniform};
 use std::collections::HashMap;
 use std::time::Instant;
 #[path = "draft_steps.rs"] mod steps; pub use steps::StepRule;
+#[path = "draft_validity.rs"] mod validity; pub use validity::UNMAPPED_GREEDY;
 type Result<T> = std::result::Result<T, String>;
 /// VADE_MTP_SAMPLED=1 (default off): verified sampled rows draw in parallel (sample_rows).
 fn parallel_rows() -> bool {
@@ -16,6 +17,8 @@ fn parallel_rows() -> bool {
 /// truncate(entry) restores it. Distributed truncation must be collective.
 /// Greedy ties choose the lowest token ID.
 pub trait Target {
+    /// Refuse an unmapped raw greedy winner instead of selecting a mapped alternative.
+    fn reject_unmapped_greedy(&self) -> bool { false }
     fn checkpoint(&self) -> usize;
     fn truncate(&mut self, position: usize) -> Result<()>;
     fn step(&mut self, token: u32) -> Result<Vec<f32>>;
@@ -431,6 +434,7 @@ pub struct Speculator {
     prompt_len: usize,
     next: u32,
     done: bool,
+    greedy_error: bool,
     skip_model: bool,
     lookup: Lookup,
     recycling: Recycling,
@@ -460,7 +464,7 @@ impl Speculator {
         Ok(Self { config, options, sampler, row_samplers: Vec::new(), presampled: None, history: prompt.to_vec(), prompt_len: prompt.len(),
             next, done: config.max_new == 0, skip_model: false, lookup: Lookup::default(),
             recycling, tail: Vec::new(), seed: Vec::new(),
-            control: Control::new(), steps: Default::default(), guard: Guard::default(), stats: Stats::default() })
+            control: Control::new(), steps: Default::default(), guard: Guard::default(), greedy_error: false, stats: Stats::default() })
     }
     pub fn history(&self) -> &[u32] { &self.history }
     /// Resume at the committed KV prefix with the already sampled pending token.
@@ -476,7 +480,7 @@ impl Speculator {
         if let Some(slot) = recycling.successors.get_mut(*history.last().unwrap() as usize) { *slot = next; }
         Ok(Self { config, options, sampler: Sampler::new(options)?, row_samplers: Vec::new(), presampled: None, history: history.to_vec(),
             prompt_len, next, done: false, skip_model: false, lookup: Lookup::default(), recycling,
-            tail: Vec::new(), seed: Vec::new(), control: Control::new(), steps: Default::default(), guard: Guard::default(), stats: Stats::default() })
+            tail: Vec::new(), seed: Vec::new(), control: Control::new(), steps: Default::default(), guard: Guard::default(), greedy_error: false, stats: Stats::default() })
     }
     /// A previously verified continuation is only a proposal. The target must
     /// verify it again, including when sampling options or the prefix change.
@@ -484,7 +488,7 @@ impl Speculator {
     pub fn tokens(&self) -> &[u32] { &self.history[self.prompt_len..] }
     pub fn is_done(&self) -> bool { self.done }
     /// Already-selected canonical target continuation; reading it never draws.
-    pub fn canonical_next(&self) -> Option<u32> { (!self.done).then_some(self.next) }
+    pub fn canonical_next(&self) -> Option<u32> { (!self.done && !self.greedy_error).then_some(self.next) }
     pub fn sampled_verifier(&self) -> bool { self.config.mode == Mode::Sampled }
     pub fn memory_bytes(&self) -> usize {
         self.history.capacity()*4 + self.lookup.memory_bytes() + self.recycling.memory_bytes()
@@ -545,6 +549,7 @@ impl Speculator {
     /// scheduler can share each draft step across all ready conversations.
     pub fn prepare_model(&mut self, target: &mut (impl Target + ?Sized), row_cap: usize, costs: Option<CostCurve>,
         stop: impl Fn(u32) -> bool, allowed: impl Fn(u32) -> bool) -> Result<Proposal> {
+        self.check_greedy_error()?;
         if self.sampled_verifier() && !target.speculative_model_draft() {
             return self.prepare_exact_filtered(row_cap.min(1), stop, allowed);
         }
@@ -697,6 +702,7 @@ impl Speculator {
     }
     pub fn prepare_exact_filtered(&mut self, row_cap: usize, stop: impl Fn(u32) -> bool,
         allowed: impl Fn(u32) -> bool) -> Result<Proposal> {
+        self.check_greedy_error()?;
         if row_cap == 0 || self.done { return Err("draft has no available rows".into()); }
         let row_cap = if self.sampled_verifier() { row_cap.min(1) } else { row_cap };
         let entry = self.history.len();
@@ -764,9 +770,10 @@ impl Speculator {
         let rows = self.presampled.take().filter(|(at, rows)| *at == entry && rows.len() == output.len()).map(|(_, rows)| rows)
             .or_else(|| (!plain_greedy(self.options) && output.len() > 1 && parallel_rows())
             .then(|| self.sample_rows(&plan.input, output, &allowed)));
-        self.finish_choices(target, plan, &predictions, target_ms, learn_ms, stop, |s, i| {
-            if plain_greedy(s.options) && predictions[i] != u32::MAX && allowed(predictions[i]) {
-                Ok(predictions[i])
+        let unmasked = target.reject_unmapped_greedy();
+        self.finish_choices(target, plan, &predictions, target_ms, learn_ms, &stop, |s, i| {
+            if plain_greedy(s.options) && predictions[i] != u32::MAX && (unmasked || allowed(predictions[i])) {
+                s.checked_greedy(predictions[i], unmasked, &stop, &allowed)
             } else if let Some(rows) = &rows { rows[i].clone() }
             else { s.sampler.sample(&output[i], &s.history, s.prompt_len, s.history.len(), &allowed) }
         })
@@ -811,17 +818,7 @@ impl Speculator {
     /// ID-only shared decode learns the observed best successor without logits.
     pub fn finish_greedy(&mut self, target: &mut (impl Target + ?Sized), plan: Proposal,
         output: &[u32], stop: impl Fn(u32) -> bool) -> Result<&[u32]> {
-        if !plain_greedy(self.options) { return Err("greedy result for sampled draft".into()); }
-        if output.len() != plan.input.len() { return Err("invalid prepared draft row count".into()); }
-        let target_ms = plan.elapsed_ms();
-        let learn = Instant::now();
-        for i in (0..output.len()).rev() {
-            if let Some(next) = self.recycling.successors.get_mut(plan.input[i] as usize) {
-                *next = output[i];
-            }
-        }
-        let learn_ms = learn.elapsed().as_secs_f64()*1000.0;
-        self.finish_choices(target, plan, output, target_ms, learn_ms, stop, |_, i| Ok(output[i]))
+        self.finish_greedy_filtered(target, plan, output, stop, |_| true)
     }
     /// Target samples are keyed at each proposed absolute position. Only the
     /// matching prefix commits; later choices and their hypothetical histories
@@ -917,6 +914,7 @@ impl Speculator {
         self.step_filtered(target, row_cap, stop, |_| true)
     }
     pub fn step_filtered(&mut self, target: &mut (impl Target + ?Sized), row_cap: usize, stop: impl Fn(u32) -> bool, allowed: impl Fn(u32) -> bool) -> Result<&[u32]> {
+        self.check_greedy_error()?;
         let entry = self.history.len();
         if target.checkpoint() != entry { return Err("target/history checkpoint mismatch".into()); }
         if row_cap == 0 || self.done { return Ok(&self.history[entry..]); }
@@ -990,10 +988,11 @@ impl Speculator {
         self.recycling.observe_contexts(&self.history[..entry], &input, &predictions);
         let mut learn_ms = learn_start.elapsed().as_secs_f64()*1000.0;
         let mut next = self.next;
+        let unmasked = target.reject_unmapped_greedy() && plain_greedy(self.options);
         for i in 0..input.len() {
             let row = &output[i];
-            let mut chosen = if plain_greedy(self.options) && predictions[i] != u32::MAX && allowed(predictions[i]) {
-                predictions[i]
+            let mut chosen = if plain_greedy(self.options) && predictions[i] != u32::MAX && (unmasked || allowed(predictions[i])) {
+                self.checked_greedy(predictions[i], unmasked, stop, allowed)?
             } else { self.sampler.sample(row, &self.history, self.prompt_len, self.history.len(), allowed)? };
             if self.config.mode == Mode::Fast && input.len() > 1 {
                 guarded += 1;
@@ -1007,7 +1006,8 @@ impl Speculator {
                     let learn_start = Instant::now();
                     self.recycling.observe(input[i], &exact);
                     learn_ms += learn_start.elapsed().as_secs_f64()*1000.0;
-                    chosen = self.sampler.sample(&exact, &self.history, self.prompt_len, self.history.len(), allowed)?;
+                    chosen = if unmasked {self.checked_greedy(crate::greedy_token(&exact)?,true,stop,allowed)?}
+                        else {self.sampler.sample(&exact, &self.history, self.prompt_len, self.history.len(), allowed)?};
                     next = chosen;
                     choices.push(chosen);
                     break;

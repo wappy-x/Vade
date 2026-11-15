@@ -88,7 +88,9 @@ jobs:
           cargo +1.99.0 --version
       - name: Build and stamp GPU kernels before host checks
         # Always run, including cache hits: regenerate PTX stamps for this source.
-        run: cargo +1.99.0 kernels
+        # GitHub's hosted Linux image has no ptxas. The opt-in skips only a missing
+        # compiler. If ptxas exists, the full register check still runs and can fail.
+        run: cargo +1.99.0 kernels ${{ runner.os == 'Linux' && '--allow-missing-ptxas' || '' }}
       - name: Compile tensor-parallel GPU kernels
         run: |
           RUSTFLAGS='-C target-cpu=sm_121 -C overflow-checks=off' \

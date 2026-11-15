@@ -33,7 +33,7 @@ impl<'a> PromptGroupAdmission<'a> {
     /// Call only after the released state and its spare buffers have drained.
     pub fn release(&mut self,id:u64)->Result<()> {
         if self.sessions.remove(&id).is_none() {return Err("session has no prompt admission credit".into());}
-        if self.sessions.is_empty() {self.group=None;}Ok(())
+        if self.sessions.is_empty() {self.group=None;self.workspace=0;}Ok(())
     }
     pub fn funded_bytes(&self)->Result<usize> {self.sessions.values().try_fold(self.resident.checked_add(self.workspace).ok_or("group funding overflow")?,|n,&v|n.checked_add(v).ok_or("group funding overflow")).map_err(str::to_owned)}
     pub fn live(&self)->usize {self.sessions.len()}

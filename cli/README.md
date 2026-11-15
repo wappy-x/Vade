@@ -880,7 +880,10 @@ Optional flags:
 - In FP8, `--cache-bytes N` sets the retained cache capacity through
   `FLASH_SERVE_KV_BYTES`, including `0` to turn retention off. Local FP4-Local
   supports only `--cache-bytes 0`, which it translates to its own prefix-cache
-  switch. A positive capacity is refused.
+  switch. A positive capacity is refused. With
+  `--diagnostic-unqualified-text` (the two-Spark text service, which keeps
+  prompts by default), `--cache-bytes 0` starts every rank with
+  `--no-prompt-keep`.
 - `--decode-fuse off|on` is on by default for one Spark. Use `off` to disable it.
   More Sparks default to off and refuse `on`. On one Spark, `on` runs decode
   steps of up to four rows as a chain of kernels: the next kernel starts while

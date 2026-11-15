@@ -1,4 +1,4 @@
-//! Approvals that the person saved with `a` (always) at a web or memory
+//! Approvals that the person saved with `4` (always) at a web or memory
 //! prompt: `allowed.json` in the Vade home. Each web entry is one exact
 //! site key (`web::site`: scheme, lower-case host and port) or the web search
 //! key; each memory entry is one project folder. A project folder can come
@@ -23,7 +23,7 @@ pub const HELP: &str = "\
 Usage: vade allowed [list | remove ENTRY] [--workspace DIR] [--vade-home DIR]
 
 In vade chat, a web request, a web search and a memory note change ask first.
-Answer y for once, s for the rest of the session, or a for always. An a answer
+Answer 1 for one time, 2 for No, 3 until you close Vade, or 4 for always. A 4 answer
 is saved here and applies in every later session until you remove it.
 
 Commands:
@@ -312,7 +312,7 @@ fn list(path: &Path, home: &Path) -> ExitCode {
     };
     let mut out = format!("Saved approvals: {}\n", sanitize(&path.to_string_lossy()));
     if saved.web.is_empty() && saved.memory.is_empty() {
-        out.push_str("None. Answer a at a web or memory prompt in vade chat to save one.\n");
+        out.push_str("None. Answer 4 at a web or memory prompt in vade chat to save one.\n");
     }
     for entry in &saved.web {
         out.push_str(&format!("{}\n", sanitize(entry)));

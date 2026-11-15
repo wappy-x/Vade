@@ -1,5 +1,7 @@
 # One Spark: a first answer through the gateway
 
+HTTP links stay on this machine by default; see [network setup](network-setup.md) for SSH tunnels and the explicit opt-in.
+
 This page takes one DGX Spark from installed to a first answer through the
 gateway. You run the commands on a controller. A controller is a second Linux
 or macOS computer that drives the Spark over SSH with the `vade` command.

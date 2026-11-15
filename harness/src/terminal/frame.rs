@@ -99,7 +99,10 @@ impl Terminal {
             self.transcript.reflow(cells.max(1));
         }
         if let Some(view) = &mut self.approval_view {
-            view.reflow(cells.max(1));
+            view.reflow(if self.approval_layout.is_some() { width.max(1) } else { cells.max(1) });
+            if view.incomplete || height < 3 {
+                return (vec![APPROVAL_RESIZE_HINT.into()], 0, 1);
+            }
         }
         let transcript = self.approval_view.as_ref().unwrap_or(&self.transcript);
         let status = if transcript.incomplete || (self.approval_view.is_some() && height < 3) {

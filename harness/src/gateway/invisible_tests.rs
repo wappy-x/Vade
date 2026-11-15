@@ -554,6 +554,85 @@ fn a_head_the_gateway_cannot_forward_gets_a_400_not_a_close_or_a_502() {
 }
 
 #[test]
+fn slow_request_bytes_hit_the_standalone_total_receive_deadline() {
+    let upstream = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let origin = Origin::parse(&format!("http://{}", upstream.local_addr().unwrap())).unwrap();
+    let runtime = Runtime::single(origin);
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let worker = thread::spawn(move || {
+        let socket = listener.accept().unwrap().0;
+        let mut metrics = Metrics::new(false);
+        let mut recording = None;
+        let _ = forward_with_timeout(socket, &runtime, &Access::default(), &mut metrics, (None, &mut recording), Duration::from_millis(120));
+    });
+    let mut client = TcpStream::connect(address).unwrap();
+    client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    for byte in b"GET" {
+        let _ = client.write_all(&[*byte]);
+        thread::sleep(Duration::from_millis(50));
+    }
+    let mut reply = String::new();
+    client.read_to_string(&mut reply).unwrap();
+    assert!(reply.starts_with("HTTP/1.1 408 ") && reply.contains("Retry-After: 1\r\n") && reply.contains("send the request again"), "{reply}");
+    worker.join().unwrap();
+    upstream.set_nonblocking(true).unwrap();
+    assert_eq!(upstream.accept().unwrap_err().kind(), io::ErrorKind::WouldBlock);
+}
+
+#[test]
+fn standalone_slow_body_uses_the_same_total_receive_deadline() {
+    let upstream = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let origin = Origin::parse(&format!("http://{}", upstream.local_addr().unwrap())).unwrap();
+    let runtime = Runtime::single(origin);
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let worker = thread::spawn(move || {
+        let socket = listener.accept().unwrap().0;
+        let mut metrics = Metrics::new(false);
+        let mut recording = None;
+        let _ = forward_with_timeout(socket, &runtime, &Access::default(), &mut metrics, (None, &mut recording), Duration::from_millis(120));
+    });
+    let mut client = TcpStream::connect(address).unwrap();
+    client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    client.write_all(format!("POST /v1/chat/completions HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nContent-Length: 3\r\n\r\na").as_bytes()).unwrap();
+    thread::sleep(Duration::from_millis(180));
+    let mut reply = String::new();
+    let _ = client.read_to_string(&mut reply);
+    assert!(reply.starts_with("HTTP/1.1 408 ") && reply.contains("send the request again"), "{reply}");
+    worker.join().unwrap();
+    upstream.set_nonblocking(true).unwrap();
+    assert_eq!(upstream.accept().unwrap_err().kind(), io::ErrorKind::WouldBlock);
+}
+
+#[test]
+fn standalone_slow_connections_stop_at_the_listener_limit() {
+    let upstream = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let origin = Origin::parse(&format!("http://{}", upstream.local_addr().unwrap())).unwrap();
+    let runtime = Arc::new(Runtime::single(origin));
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let worker = thread::spawn(move || {
+        serve_with_limit(listener.incoming().take(4), runtime, None, None, Arc::new(Access::default()), 3).unwrap();
+    });
+    let mut slow = Vec::new();
+    for _ in 0..3 {
+        let mut socket = TcpStream::connect(address).unwrap();
+        socket.write_all(b"G").unwrap();
+        slow.push(socket);
+        thread::sleep(Duration::from_millis(25));
+    }
+    let mut extra = TcpStream::connect(address).unwrap();
+    extra.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    extra.write_all(format!("GET /v1/models HTTP/1.1\r\nHost: {address}\r\n\r\n").as_bytes()).unwrap();
+    let mut reply = String::new();
+    extra.read_to_string(&mut reply).unwrap();
+    assert!(reply.starts_with("HTTP/1.1 503 ") && reply.contains("Retry-After: 1\r\n"), "{reply}");
+    drop(slow);
+    worker.join().unwrap();
+}
+
+#[test]
 fn a_head_that_fits_only_before_the_policy_lengthens_the_body_gets_a_400_with_its_policy() {
     let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
     let runtime = Runtime::new(&[format!("http://{}", upstream.local_addr().unwrap())], Flags { greedy: true, ..Flags::default() }).unwrap();
@@ -672,4 +751,63 @@ fn a_local_refusal_or_502_is_not_a_completion_in_stats_or_recordings() {
     }
     std::fs::remove_dir_all(dir).unwrap();
     std::fs::remove_file(stats).unwrap();
+}
+
+#[test]
+fn standalone_connection_refuses_before_writing_and_switch_allows() {
+    for allow in [false, true] {
+        crate::http_policy::tests::wire(allow, |url| {
+            let mut stream = Origin::parse(url)?.connect()?;
+            stream.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        });
+    }
+}
+
+#[test]
+fn standalone_refusal_is_502_and_logs_once() {
+    let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", upstream.local_addr().unwrap());
+    let runtime = Runtime::single(Origin::parse(&url).unwrap());
+    let (_, logs) = crate::http_policy::testing::remote(false, || {
+        for _ in 0..3 {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let client = thread::spawn(move || {
+                let mut c = TcpStream::connect(address).unwrap();
+                c.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                c.write_all(b"GET /v1/models HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+                let mut reply = String::new(); c.read_to_string(&mut reply).unwrap(); reply
+            });
+            let _ = handle(listener.accept().unwrap().0, &runtime, None, None);
+            let reply = client.join().unwrap();
+            assert!(reply.starts_with("HTTP/1.1 502") && reply.contains("--allow-plain-http"), "{reply}");
+            let mut bytes = Vec::new(); upstream.accept().unwrap().0.read_to_end(&mut bytes).unwrap(); assert!(bytes.is_empty());
+        }
+    });
+    assert_eq!(logs.len(), 1);
+    assert!(logs[0].contains("ssh -N -L"));
+}
+
+#[test]
+fn refused_clamp_probe_stays_a_502_until_restart() {
+    let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", upstream.local_addr().unwrap());
+    let (runtime, logs) = crate::http_policy::testing::remote(false, || {
+        Runtime::new(&[url], Flags { clamp: true, ..Flags::default() }).unwrap()
+    });
+    assert_eq!(logs.len(), 1);
+    let mut bytes = Vec::new(); upstream.accept().unwrap().0.read_to_end(&mut bytes).unwrap(); assert!(bytes.is_empty());
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let client = thread::spawn(move || {
+        let mut c = TcpStream::connect(address).unwrap();
+        c.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        c.write_all(b"GET /v1/models HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+        let mut reply = String::new(); c.read_to_string(&mut reply).unwrap(); reply
+    });
+    let _ = handle(listener.accept().unwrap().0, &runtime, None, None);
+    let reply = client.join().unwrap();
+    assert!(reply.starts_with("HTTP/1.1 502") && reply.contains("--allow-plain-http"), "{reply}");
+    upstream.set_nonblocking(true).unwrap();
+    assert_eq!(upstream.accept().unwrap_err().kind(), io::ErrorKind::WouldBlock);
 }

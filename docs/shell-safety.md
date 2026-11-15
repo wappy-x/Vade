@@ -1,5 +1,7 @@
 # Shell safety
 
+HTTP links stay on this machine by default; see [network setup](network-setup.md) for SSH tunnels and the explicit opt-in.
+
 The Vade agent runs commands with the `workspace_shell` tool. This page
 tells you what Vade does with each command, what the prompt shows, and how
 to let a set of commands run without a prompt. It is written for the
@@ -9,9 +11,9 @@ person who runs Vade and for the agent that asks to run commands.
 
 | You want | Do this |
 | --- | --- |
-| Approve one command | Answer `y` at the prompt. |
-| Approve the same exact command for the rest of the session | Answer `s`. |
-| Approve the same exact command in this project from now on | Answer `p`. It goes into `.vade/permissions.json`. |
+| Approve one command | Answer `1` at the prompt. |
+| Approve the same exact command for the rest of the session | Answer `3`. |
+| Approve the same exact command in this project from now on | Answer `4`. It goes into `.vade/permissions.json`. |
 | Allow a family of commands, such as `ls -la` on any workspace path | Write a rule with a `<path>` slot in a permissions file (see [Allow lists](#allow-lists)). |
 | Turn all prompts off | Start with `--yes`. Blocked commands stay blocked. |
 | Deny all commands | Start with `--approval never`. |
@@ -42,7 +44,54 @@ workspace: `cargo test` runs build scripts and tests, and a rule for
 
 ## The prompt
 
-The prompt shows exactly what will run:
+The prompt starts with `Vade wants to run a command`. It shows the whole
+executed command immediately, with shell quotes around words that need them.
+Key `5` shows the argv JSON, timeout, execution folder, environment, scan
+exclusions, build environment and safety findings. Nothing from that context
+is omitted. The risk text comes next. Choice `1` shares the `Your turn.` row;
+the other numbers line up below it.
+`2` always means No. An empty answer never approves anything.
+
+Use the numbers shown in the prompt. The only letter shortcuts are `y` for
+`1` and `n` for `2`. A raw key must be one character. Words such as `yes`
+do not answer. `/approve` and `/deny` still work.
+
+The layout uses 20 to 64 columns. A narrower terminal wraps the 20-column
+layout. Every target row after the first starts with `│  `, including a
+separate scope row. If the window cannot show the review, Vade displays
+`Make this window larger to answer.` and keeps waiting. Resizing does not
+answer or cancel the prompt.
+
+Command words with only letters, digits or `_@%+=:,./-` appear bare. Other
+printable words use single quotes. Words with a backslash, a single quote,
+a control or an invisible character, or a run of two or more spaces, use
+`$'...'` with these escapes only: `\\`, `\'`, `\n`, `\t`, `\r` and `\xHH`.
+An invisible or look-alike character appears as its UTF-8 bytes, and each
+space of a run appears as `\x20`. An empty word is `''`. The shown text means
+exactly the words that run, in bash (also the 3.2 that macOS ships) and zsh.
+The exact argv is also available with `5`.
+
+A square warns of lost work or data. A triangle warns of smaller risks. The
+target and the key numbers are bold red for a square and bold amber for a
+triangle. The top line and the marks are bold Petrol. `Your turn.` is bold amber.
+Plain mode, redirected output and `NO_COLOR` omit color codes.
+
+At 64 columns, a deleting command looks like this:
+
+```text
+Vade wants to run a command                     can delete files
+■  rm -rf build                                     this project
+      This command deletes files.
+      You cannot get deleted files back.
+----------------------------------------------------------------
+Your turn.  1  Yes, one time
+            2  No, do not run it
+            3  Yes, until you close Vade (this exact command)
+            4  Yes, always in this project (this exact command)
+            5  Show the exact details
+```
+
+The execution context under key `5` includes:
 
 | Line | What it shows |
 | --- | --- |
@@ -52,28 +101,27 @@ The prompt shows exactly what will run:
 | `Environment (only these ...)` | Every variable that the command gets. Vade clears your shell's environment and sets only this list. `<build>` is the session build folder. |
 | `Scan exclusions` | Folders that the command can neither read nor write, at every depth. |
 | `Build environment` | The build folder and the Rust toolchain that the command uses. |
-| `Safety:` | Why the command needs approval, and the answers you can give. |
+| `Safety:` | Why the command needs approval. |
 
 The answers:
 
 | Key | Command | Effect |
 | --- | --- | --- |
-| `y` | `/approve` | Run this command once. |
-| `s` | `/approve session` | Run it, and allow the same exact argv without a prompt for the rest of this session. |
-| `p` | `/approve project` | Run it, and save the same exact argv to `.vade/permissions.json`. |
-| `n` | `/deny` | Do not run it. The agent gets a denial. |
+| `1` | `/approve` | Run this command once. |
+| `2` | `/deny` | Do not run it. The agent gets a denial. |
+| `3` | `/approve session` | Run it, and allow the same exact argv without a prompt for the rest of this session. |
+| `4` | `/approve project` | Run it, and save the same exact argv to `.vade/permissions.json`. |
 
-`s` and `p` save only the exact argv. After `s` for `cargo test --offline`,
+`3` and `4` save only the exact argv. After `3` for `cargo test --offline`,
 the command `cargo test --offline` runs without a prompt, but
 `cargo test`, `cargo test --offline -p x` and
 `/bin/sh -c "cargo test --offline"` still ask. An Allow list notice after
 the answer says which rule was added, or why none was. Session rules end
 with the session: `/new`, resume, switch and fork start without them.
 
-`s` and `p` offer a rule only for a command whose words are all plain
+`3` and `4` offer a rule only for a command whose words are all plain
 (see [Rule words](#rule-words)) and that may go on a list (see
-[What never goes on a list](#what-never-goes-on-a-list)). For other
-commands, they approve once.
+[What never goes on a list](#what-never-goes-on-a-list)). Other commands show 1, 2 and 5.
 
 ## Allow lists
 
@@ -179,7 +227,7 @@ the whole workspace.
 ### What never goes on a list
 
 Some commands never run from a rule, even with plain words. A rule for
-them does not load, `s` and `p` approve them once only, and they always
+them does not load, `3` and `4` are not offered, so they always
 ask:
 
 - A word that names a hidden file, a credential file or a
@@ -201,12 +249,12 @@ it. Vade refuses a `.vade` folder or a permissions file that is a link, and
 a permissions file that is not a regular file. A file can hold at most 512
 rules and 64 KiB, and a rule at most 128 words.
 
-When you answer `p`, Vade reads the project file again, adds the rule and
+When you answer `4`, Vade reads the project file again, adds the rule and
 saves the file. It also records the new file as trusted, because you
 approved the rule. It adds no rule to a project file that is not trusted:
 the command is then approved once. From then on, Vade uses the file as it read it, also when
 the save fails, so a rule that you removed by hand no longer applies. Other
-edits by hand take effect at the next session start or the next `p`
+edits by hand take effect at the next session start or the next `4`
 answer. If the new file would not load or would pass a limit, Vade keeps
 the old file. Two sessions that save the same file at the same time take
 turns: Vade locks the file (`.permissions.json.lock` beside it) for the
@@ -232,7 +280,7 @@ input is not a terminal, Vade does not wait. Commands that a rule allows
 run. Every other command does not run, and the agent gets this tool error:
 
 ```json
-{"ok":false,"error":"approval_required","message":"Command not run: it needs approval (every command needs approval unless an allow list names it), and no one can approve it in this non-interactive run. ..."}
+{"ok":false,"error":"approval_required","message":"Command not run: it needs approval (this command is not in the fixed harmless command set), and no one can approve it in this non-interactive run. ..."}
 ```
 
 To let such a run use a command, add a rule for it, or pass `--yes`.
@@ -283,9 +331,9 @@ describes how it reads a command and its known gaps.
 
 ## Limits
 
-- The default policy asks before every command that no rule names, so it
-  does not depend on the checker reading a command correctly. The sandbox
-  is the security boundary.
+- The default policy asks before every command that no rule or fixed harmless
+  grammar names. The silent set stays small if the checker is wrong. The
+  sandbox is the security boundary.
 - The block check knows a fixed set of programs and forms. Some dangerous
   forms are not blocked and only ask, for example a disk write through
   `tee /dev/sd?`, a program name from a pattern (`/bin/ba* -c ...`) and

@@ -303,10 +303,8 @@ impl<'a> Backend<'a> {
             raw.extend_from_slice(&e.weight.to_le_bytes());raw.extend_from_slice(&e.scales.to_le_bytes());
             for v in [e.first,e.first_row,e.input_words,e.weight_bytes,e.scale_bytes,e.pad] {raw.extend_from_slice(&v.to_le_bytes());}raw}).collect::<Vec<_>>();
         if bytes.len()!=table.len()*std::mem::size_of::<GroupEntry>() {return Err("expert group table layout differs".into());}
-        let mut owner=self.vector(bytes.len().div_ceil(4))?;self.write_vector_bytes(&mut owner,&bytes)?;
-        // A direct clear before a direct launch, as in prompt_operation: no piece of one command.
-        let mut output=self.vector(total)?;self.unrecorded(||self.zero_vector(&mut output))?;
-        let mut args=GroupArguments {table:owner.device_address(),input:input.device_address(),output:output.device_address(),lut:lut.device_address(),count:table.len() as u32,units:units as u32,words:words as u32,stride:stride as u32};
+        let mut output=self.vector(total)?;
+        let mut args=GroupArguments {table:0,input:input.device_address(),output:output.device_address(),lut:lut.device_address(),count:table.len() as u32,units:units as u32,words:words as u32,stride:stride as u32};
         // NVFP4 rows of one layer run in shared-memory tiles when lane K's predicate admits them, same bytes.
         let tiles:Option<[u32;3]>=None;
         // FP8 rows likewise, behind lane K's own predicate, same bytes.
@@ -327,6 +325,18 @@ impl<'a> Backend<'a> {
         };
         if tile.is_some() {self.require_arm_kernels(&[kernel])?;}
         crate::prompt_launches::record(kernel);
+        // Keep this table with its command in the existing recorder. The upload
+        // and every replay use the same stream, before the next table write.
+        if self.resident_rows_active() {
+            if let (Some(kind),Some([x,y,z]))=(crate::resident_launch::Kind::row(kernel),tile) {
+                self.zero_vector(&mut output)?;
+                if self.record_resident_tabled(kind,[x,y,z,threads,shared],&bytes,|address|{
+                    args.table=address;crate::resident_launch_encode::group_rows(args,kind)
+                })? {return Ok(output);}
+            }
+        }
+        let mut owner=self.vector(bytes.len().div_ceil(4))?;self.write_vector_bytes(&mut owner,&bytes)?;args.table=owner.device_address();
+        self.unrecorded(||self.zero_vector(&mut output))?;
         // SAFETY: Each part's shape, raw owners, context, extents and input span
         // are checked above. The table bytes follow the repr(C) layout, checked
         // by size. Buffer::drop drains the stream before any owner is freed. The

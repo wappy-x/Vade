@@ -101,16 +101,16 @@ first token 1.5s · 23 tok/s · ctx 4.4k/32k · cached 4k/4.2k
 === tool approval (80 columns) ===
 Read src/main.rs
 Run: cargo test
-Approval required  y approve · n deny · or /approve /deny
-
-
-
-
-
-
-
-
-
+Vade wants to run a command                     can delete files
+■  rm -rf build                                     this project
+      This command deletes files.
+      You cannot get deleted files back.
+----------------------------------------------------------------
+Your turn.  1  Yes, one time
+            2  No, do not run it
+            3  Yes, until you close Vade (this exact command)
+            4  Yes, always in this project (this exact command)
+            5  Show the exact details
 
 
 

@@ -1,5 +1,7 @@
 # OpenAI-compatible API
 
+HTTP links stay on this machine by default; see [network setup](network-setup.md) for SSH tunnels and the explicit opt-in.
+
 Vade serves the OpenAI Chat Completions API, so most OpenAI clients work
 without code changes. Set the client's base URL to Vade, and set the model to
 the ID that `GET /v1/models` returns. This page tells you which routes and

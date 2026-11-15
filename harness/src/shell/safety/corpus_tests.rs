@@ -317,8 +317,8 @@ fn seventh_review_probes() {
         ("echo \"${x:-$'}\"; rm -rf /; echo \"'}\"", Blocked),
         ("cat ~/.{ssh,other}/id_rsa", Ask),
         // Plain forms.
-        ("cargo test 2>&1 | tail -50", Safe),
-        ("(cd engine && cargo check)", Safe),
+        ("cargo test 2>&1 | tail -50", Ask),
+        ("(cd engine && cargo check)", Ask),
         ("diff <(git show HEAD:a) a", Safe),
         ("n=$(wc -l < f); echo $n", Safe),
         ("for f in *.rs; do wc -l \"$f\"; done", Safe),
@@ -389,19 +389,19 @@ fn eighth_review_probes() {
         ("git log --oneline -n 20 --author me -- src", Safe),
         ("git diff --cached --stat; git status -sb", Safe),
         ("git branch --contains HEAD; git tag -l 'v*'", Safe),
-        ("cargo test -p vade-harness -- --nocapture", Safe),
-        ("cargo clippy --all-targets -- -D warnings", Safe),
+        ("cargo test -p vade-harness -- --nocapture", Ask),
+        ("cargo clippy --all-targets -- -D warnings", Ask),
         ("cargo fmt --all -- --check", Safe),
         ("sed -n '/start/,/end/p' f; sed 's/[0-9]*//g' f", Safe),
         ("printf '%s\\n' \"$x\"; printf '%5.2f %d\\n' 1.5 3", Safe),
         ("read -r line < f; echo \"$line\"", Safe),
-        ("set -euo pipefail; cargo test", Safe),
+        ("set -euo pipefail; cargo test", Ask),
         ("test -v HOME; [ \"$x\" = \"$y\" ]; [ -n \"$x\" ]", Safe),
         ("find . -name '*.rs' -newer Cargo.toml -exec grep -l foo {} +", Safe),
-        ("go test ./... -run TestX -count=1; go build ./...", Safe),
-        ("timeout 60 cargo test; exit 0", Safe),
+        ("go test ./... -run TestX -count=1; go build ./...", Ask),
+        ("timeout 60 cargo test; exit 0", Ask),
         ("rustc --print sysroot; openssl dgst -sha256 f", Safe),
-        ("env -u FOO cargo check", Safe),
+        ("env -u FOO cargo check", Ask),
     ] {
         check(format!("{script:?}"), sh(script), expected);
     }
@@ -490,8 +490,8 @@ const NINTH_SCRIPTS: &[(&str, Class)] = &[
     ("printf 'input xargs-marker' | xargs uniq --", Ask),
     ("awk '{print}' $f", Ask),
     ("find / -exec sh -c 'rm -rf /' \\;", Blocked),
-    ("RUST_BACKTRACE=1 NO_COLOR=1 cargo test; n=3; files=x; echo $n $files", Safe),
-    ("find . -name '*.rs' -exec wc -l {} +; timeout 60 cargo test -- --nocapture", Safe),
+    ("RUST_BACKTRACE=1 NO_COLOR=1 cargo test; n=3; files=x; echo $n $files", Ask),
+    ("find . -name '*.rs' -exec wc -l {} +; timeout 60 cargo test -- --nocapture", Ask),
     // Review of f29e33b.
     ("find . -exec xxd /dev/null + -exec true ';'", Ask),
     ("find . -exec sed -e s/a/b/ + -iname target.txt -exec true ';'", Ask),
@@ -650,8 +650,8 @@ fn default_policy_never_runs_a_review_input() {
     let verdict = crate::shell::policy::decide(&plain, Path::new(ROOT), false);
     assert_eq!((verdict.class, crate::shell::policy::rule_for(&plain, &verdict)), (Ask, Some(plain.clone())));
     assert!(verdict.reasons().starts_with(crate::shell::policy::DEFAULT_REASON));
-    // With the experimental checker on, its safe class counts.
-    assert_eq!(crate::shell::policy::decide(&plain, Path::new(ROOT), true).class, Safe);
+    // The fixed Cargo classification stays Ask with the experimental checker.
+    assert_eq!(crate::shell::policy::decide(&plain, Path::new(ROOT), true).class, Ask);
 }
 
 /// Review of 583ad99. Under the default policy each one asks; the checker
@@ -739,8 +739,8 @@ const FOURTEENTH_SCRIPTS: &[(&str, Class, bool)] = &[
     // Plain forms stay as they were.
     ("rm -rf /tmp/x*; rm -rf build{0..100}", Ask, true),
     ("cat ./{a,b}.txt; ls -l; git log --oneline -5", Safe, true),
-    ("echo x > /dev/null 2>&1; time -p cargo test", Safe, true),
-    ("go build -buildvcs=false ./...", Safe, true),
+    ("echo x > /dev/null 2>&1; time -p cargo test", Ask, true),
+    ("go build -buildvcs=false ./...", Ask, true),
     ("rm -rf ${dir:-..} ./* ~/x* *.o", Ask, true),
     ("shopt -s extglob; rm -rf /@(usr|x)", Ask, false),
     ("cat ${x,,} ${y/../z}; ls /dev/sd*", Safe, true),

@@ -6,7 +6,7 @@
 | --- | --- |
 | [`build.rs`](build.rs) | Fresh build state, separate from uninspected workspace artifacts. |
 | [`permissions.rs`](permissions.rs) | Allow lists of exact commands of plain words: this session (memory only), the project and the user. |
-| [`policy.rs`](policy.rs) | The shipped policy: every command asks unless a rule matches its argv (plain words, `<path>` slots); blocked commands never run. |
+| [`policy.rs`](policy.rs) | The shipped policy: a tiny fixed grammar skips prompts; other commands ask unless a rule matches the argv (plain words, `<path>` slots); blocked commands never run. |
 | [`safety.rs`](safety.rs) | The command checker: blocked, needs approval, or an experimental safe class that counts only with `VADE_SHELL_CHECKER=1`. Its `safety/` folder holds the lexer, the program table and the pattern matcher. |
 
 **Why a folder:** Rust keeps one module per file; this folder groups the modules that belong to `shell`.
@@ -24,6 +24,19 @@ repeat that check. Commands still have a maximum 120-second synchronous deadline
 a timed-out check is partial and needs a narrower approved command. There are no
 durable start/poll/cancel jobs in this module. CLI installation build supervisors
 are a separate lifecycle and cannot grant workspace sandbox permissions.
+
+On macOS, when Apple's Command Line Tools are installed, every command the shell
+tool runs gets `DEVELOPER_DIR=/Library/Developer/CommandLineTools`. Apple's `git`,
+`cc` and `xcrun` launchers then use the Command Line Tools, even when a full Xcode
+is selected for the system. The sandbox does not read the Xcode folder under
+`/Applications`. The approval prompt shows this variable with the others.
+Compiler versions inside the sandbox can differ from the ones in your terminal.
+Tools that need a full Xcode, such as `xcodebuild` and the iOS SDKs, do not work
+inside the sandbox, and `xcode-select -s` does not change that. Vade looks for
+the Command Line Tools once per run; after you install them, restart Vade.
+On a Mac with Xcode selected and no Command Line Tools, Apple's developer tools
+do not start inside the sandbox; `xcode-select --install` requests installation
+of the Command Line Tools.
 
 Output display truncation keeps bounded head and tail excerpts for stdout and
 stderr independently. It drains discarded bytes while the command continues,

@@ -87,7 +87,7 @@
                     ),
                     "tool approval" => format!(
                         "Read src/main.rs\nRun: cargo test\n{}\n",
-                        render::approval(true)
+                        crate::approval_prompt::layout_tests::command_sample().render(width, true)
                     ),
                     _ => "Vade\n\nHow can I help?\n".into(),
                 };
@@ -441,6 +441,54 @@
         );
     }
     #[test]
+    fn approval_details_stay_hidden_until_requested() {
+        let mut terminal = Terminal::open(true);
+        terminal.raw = true;
+        let prompt = crate::approval_prompt::layout_tests::command_sample();
+        terminal.approval_prompt("Command", &prompt, Some("argv=[\"tool\",\"arg\"]")).unwrap();
+        let shown = terminal.approval_view.as_ref().unwrap().rows.iter().map(|line| render::plain(line)).collect::<String>();
+        assert!(shown.contains("Vade wants to run a command") && !shown.contains("argv="));
+        assert!(terminal.show_approval_details().unwrap());
+        let shown = terminal.approval_view.as_ref().unwrap().rows.iter().map(|line| render::plain(line)).collect::<String>();
+        assert!(shown.contains("Exact details:") && shown.contains("argv=[\"tool\",\"arg\"]"));
+        assert!(shown.ends_with(&prompt.render(64, false).replace('\n', "")));
+        assert!(!terminal.show_approval_details().unwrap());
+    }
+    #[test]
+    fn structured_approval_keeps_all_64_cells_in_the_terminal_frame() {
+        let mut terminal = Terminal::open(true);
+        terminal.raw = true;
+        terminal.fullscreen = true;
+        let prompt = crate::approval_prompt::layout_tests::command_sample();
+        terminal.approval_prompt("Command", &prompt, None).unwrap();
+        let (frame, _, _) = terminal.frame_lines("", 0, "", "", "", "", "", 64, 24);
+        let rows: Vec<_> = frame.iter().map(|line| render::plain(line)).collect();
+        for expected in prompt.render(64, false).lines() {
+            assert!(rows.iter().any(|row| row == expected), "{expected:?}: {rows:?}");
+        }
+    }
+    #[test]
+    fn structured_approval_resize_pauses_and_restores_prompt_and_details() {
+        let mut terminal = Terminal::open(true);
+        terminal.raw = true;
+        terminal.fullscreen = true;
+        let prompt = crate::approval_prompt::layout_tests::command_sample();
+        terminal.approval_prompt("Command", &prompt, Some("argv=[\"tool\"]")).unwrap();
+        assert!(terminal.show_approval_details().unwrap());
+        terminal.reflow_approval(10);
+        assert!(terminal.approval_ready_at(10, 1).is_err());
+        let (frame, _, _) = terminal.frame_lines("", 0, "", "", "", "", "", 10, 1);
+        assert_eq!(frame, [APPROVAL_RESIZE_HINT]);
+        assert!(terminal.approval_view.is_some() && terminal.approval_layout.is_some());
+        terminal.reflow_approval(64);
+        terminal.approval_ready_at(64, 40).unwrap();
+        let (frame, _, _) = terminal.frame_lines("", 0, "", "", "", "", "", 64, 40);
+        let text = frame.join("\n");
+        assert!(text.contains("argv=[\"tool\"]"));
+        assert_eq!(text.matches("Vade wants to run a command").count(), 1);
+        for row in prompt.render(64, false).lines() { assert!(text.contains(row), "{row}"); }
+    }
+    #[test]
     fn review_appends_match_reflow_and_mirror_exhaustion_is_visible_once() {
         let mut terminal = Terminal::open(true);
         terminal.raw = true;
@@ -583,7 +631,7 @@
         let rows: Vec<String> = committed.split("\r\n").map(render::plain).collect();
         assert!(rows.iter().all(|row| render::width(row) <= cells));
         let start = rows.iter().position(|row| row == "Patch preview").unwrap() + 1;
-        let end = rows.iter().position(|row| render::approval(false) == *row).unwrap();
+        let end = rows.iter().position(|row| row == "Your turn.").unwrap();
         assert_eq!(rows[start..end].concat(), detail.replace('\n', ""));
         assert!(rows.contains(&" b".to_owned()) && rows.contains(&" d".to_owned()));
         assert!(!rows.iter().any(|row| row.starts_with("-removed") || row.starts_with("▌ d")));

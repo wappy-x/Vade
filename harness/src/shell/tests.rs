@@ -80,11 +80,8 @@
         for args in [
             vec!["git", "status"],
             vec!["git", "status", "--short"],
-            vec!["git", "diff"],
             vec!["git", "diff", "--stat"],
-            vec!["git", "log"],
             vec!["git", "log", "--oneline"],
-            vec!["git", "log", "-n", "1"],
         ] {
             let output = sandbox_git(&f, &args);
             assert_eq!(
@@ -102,19 +99,46 @@
             assert_eq!(git_snapshot(&f.0.join(".git")), before, "{args:?}");
         }
     }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn read_only_git_ignores_parent_developer_directory() {
+        const MARKER: &str = "VADE_CLT_PARENT_TEST";
+        const FAKE: &str = "/nonexistent/Fake.app/Contents/Developer";
+        // Give one test subprocess a parent override without changing the
+        // environment of other tests in this process.
+        if std::env::var_os(MARKER).is_none() {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "shell::tests::read_only_git_ignores_parent_developer_directory", "--nocapture"])
+                .env_clear()
+                .env(MARKER, "1")
+                .env("DEVELOPER_DIR", FAKE)
+                .output().unwrap();
+            assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            return;
+        }
+        assert_eq!(std::env::var("DEVELOPER_DIR").unwrap(), FAKE);
+        let f = git_fixture();
+        let output = sandbox_git(&f, &["git", "status"]);
+        assert_eq!(output.outcome, Outcome::Exited(Some(0)), "{}", output.render());
+        let output = run(&f.workspace(), &spec(&["/usr/bin/env"], 5000), 16 * 1024, &AtomicBool::new(false)).unwrap();
+        assert_eq!(output.outcome, Outcome::Exited(Some(0)), "{}", output.render());
+        let root = std::path::Path::new("/Library/Developer/CommandLineTools");
+        let expected = (root.join("usr/bin/git").is_file() && root.join("usr/lib/libxcrun.dylib").is_file())
+            .then_some("/Library/Developer/CommandLineTools");
+        let actual: Vec<_> = output.stdout.lines().filter_map(|line| line.strip_prefix("DEVELOPER_DIR=")).collect();
+        assert_eq!(actual, expected.into_iter().collect::<Vec<_>>());
+        assert_eq!(std::env::var("DEVELOPER_DIR").unwrap(), FAKE);
+    }
     #[test]
     #[cfg(target_os = "macos")]
     fn read_only_git_excludes_tracked_and_untracked_hidden_and_credential_paths() {
         let f = git_fixture();
-        let mut protected: Vec<String> = crate::tools::CREDENTIAL_NAMES
-            .iter()
-            .map(|name| (*name).to_owned())
-            .chain(
-                crate::tools::CREDENTIAL_SUFFIXES
-                    .iter()
-                    .map(|suffix| format!("fixture{suffix}")),
-            )
-            .collect();
+        let mut protected: Vec<String> = crate::tools::SECRET_PATH_RULES.iter().map(|rule| match rule.match_kind {
+            crate::tools::SecretPathMatch::Exact => rule.value.to_owned(),
+            crate::tools::SecretPathMatch::Prefix => format!("{}local", rule.value),
+            crate::tools::SecretPathMatch::Suffix => format!("fixture{}", rule.value),
+        }).collect();
         protected.extend([
             ".private".into(),
             ".private-dir/payload".into(),
@@ -155,7 +179,6 @@
         f.write("visible-new.rs", "fn visible_new() {}\n");
         for args in [
             vec!["git", "status", "--short"],
-            vec!["git", "diff"],
             vec!["git", "diff", "--stat"],
         ] {
             let output = sandbox_git(&f, &args);
@@ -169,12 +192,6 @@
             if args[1] == "status" {
                 assert!(
                     output.stdout.contains("visible-new.rs"),
-                    "{}",
-                    output.render()
-                );
-            } else if args.len() == 2 {
-                assert!(
-                    output.stdout.contains("visible_change"),
                     "{}",
                     output.render()
                 );
@@ -315,7 +332,7 @@
         let before = git_snapshot(&repository.0.join(".git"));
         for args in [
             vec!["git", "status", "--short"],
-            vec!["git", "diff"],
+            vec!["git", "diff", "--stat"],
             vec!["git", "log", "--oneline"],
         ] {
             let output = sandbox_git(&f, &args);
@@ -375,7 +392,7 @@
             );
         }
         let before = git_snapshot(&f.0.join(".git"));
-        for args in [vec!["git", "status", "--short"], vec!["git", "diff"]] {
+        for args in [vec!["git", "status", "--short"]] {
             let output = sandbox_git(&f, &args);
             assert_ne!(
                 output.outcome,
@@ -396,14 +413,14 @@
         std::fs::remove_file(f.0.join(".git/info/attributes")).unwrap();
         f.write("attributes", "source.rs filter=fixture\n");
         fixture_git(&f, &["config", "core.attributesFile", "attributes"]);
-        let output = sandbox_git(&f, &["git", "diff"]);
+        let output = sandbox_git(&f, &["git", "diff", "--stat"]);
         assert_eq!(
             output.outcome,
             Outcome::Exited(Some(0)),
             "{}",
             output.render()
         );
-        assert!(output.stdout.contains("modified"), "{}", output.render());
+        assert!(output.stdout.contains("source.rs"), "{}", output.render());
         assert!(!output.stderr.contains("filter"), "{}", output.render());
     }
     #[test]
@@ -448,10 +465,32 @@
     fn allowlist_is_exact_and_arguments_are_bounded() {
         assert!(spec(&["/bin/pwd"], 1000).allowlisted());
         for args in [
+            vec!["git", "status"],
+            vec!["git", "diff", "--stat"],
+            vec!["git", "log", "--oneline"],
+            vec!["cat", "./-ordinary"],
+        ] {
+            assert!(spec(&args, 1000).allowlisted(), "{args:?}");
+        }
+        for args in [
             vec!["pwd", ";"],
             vec!["cat", "../outside"],
+            vec!["cat", "-private"],
+            vec!["rg", "needle", "-private"],
+            vec!["rg", "--pre=./probe", "needle", "."],
+            vec!["rg", "needle", ".", "--pre=./probe"],
+            vec!["rg", "--pre-glob=*.txt", "needle", "."],
+            vec!["git", "diff"],
+            vec!["git", "log"],
+            vec!["git", "log", "-n", "1"],
+            vec!["git", "log", "-p"],
+            vec!["git", "diff", "--ext-diff"],
+            vec!["git", "log", "--exec=./probe"],
             vec!["git", "diff", "--output=changed"],
             vec!["git", "-c", "core.pager=unsafe", "log"],
+            vec!["git", "-c", "diff.external=./probe", "diff", "--stat"],
+            vec!["env", "RIPGREP_CONFIG_PATH=./probe", "rg", "needle", "."],
+            vec!["env", "PAGER=./probe", "git", "status"],
             vec!["/bin/pwd", ";"],
             vec!["/bin/sh", "-c", "pwd"],
             vec!["/bin/ls", "-la"],
@@ -461,6 +500,106 @@
         }
         assert!(spec(&[], 1000).validate().is_err());
         assert!(spec(&["/bin/pwd"], 120001).validate().is_err());
+    }
+    #[test]
+    fn every_secret_rule_keeps_content_read_arguments_out_of_the_fixed_set() {
+        for rule in crate::tools::SECRET_PATH_RULES {
+            let path = match rule.match_kind {
+                crate::tools::SecretPathMatch::Exact => rule.value.to_owned(),
+                crate::tools::SecretPathMatch::Prefix => format!("{}local", rule.value),
+                crate::tools::SecretPathMatch::Suffix => format!("fixture{}", rule.value),
+            };
+            for args in [
+                vec!["cat".to_owned(), path.clone()],
+                vec!["ls".to_owned(), path.clone()],
+                vec!["rg".to_owned(), "marker".to_owned(), path.clone()],
+                vec!["git".to_owned(), "diff".to_owned(), "--stat".to_owned(), path.clone()],
+                vec!["git".to_owned(), "log".to_owned(), "--oneline".to_owned(), path.clone()],
+            ] {
+                let command = CommandSpec { argv: args, timeout_ms: 1000 };
+                assert!(!command.allowlisted(), "{:?}", command.argv);
+            }
+        }
+    }
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn prompt_free_recursive_search_denies_protected_content_but_may_report_names() {
+        let f = Fixture::new();
+        let components: Vec<String> = crate::tools::SECRET_PATH_RULES.iter().map(|rule| match rule.match_kind {
+            crate::tools::SecretPathMatch::Exact => rule.value.to_owned(),
+            crate::tools::SecretPathMatch::Prefix => format!("{}local", rule.value),
+            crate::tools::SecretPathMatch::Suffix => format!("fixture{}", rule.value),
+        }).collect();
+        for (index, component) in components.iter().enumerate() {
+            let folder = f.0.join(format!("case-{index}/{component}"));
+            std::fs::create_dir_all(&folder).unwrap();
+            std::fs::write(folder.join("item"), format!("synthetic-search-marker protected-{index}\n")).unwrap();
+        }
+        f.write("visible.txt", "synthetic-search-marker visible\n");
+        let command = spec(&["rg", "synthetic-search-marker", "."], 5000);
+        assert!(command.allowlisted());
+        let output = run(&f.workspace(), &command, 64 * 1024, &AtomicBool::new(false)).unwrap();
+        // rg reports the sandbox denials and still returns allowed matches.
+        assert_eq!(output.outcome, Outcome::Exited(Some(2)), "{}", output.render());
+        assert!(output.stdout.contains("visible.txt") && output.stdout.contains(" visible"), "{}", output.render());
+        assert!(!output.stdout.contains("protected-") && !output.stderr.contains("protected-"), "recursive search exposed protected content");
+        assert!(output.stderr.contains("fish_history") && output.stderr.contains("gcloud"), "protected names may appear in access errors: {}", output.render());
+    }
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn prompt_free_parent_listing_allows_protected_names_by_design() {
+        let f = Fixture::new();
+        f.write("token.txt", "synthetic-protected-file-content");
+        std::fs::create_dir(f.0.join("gcloud")).unwrap();
+        f.write("gcloud/made-up-entry", "synthetic-protected-folder-content");
+        let list = run(&f.workspace(), &spec(&["ls", "-1", "."], 5000), 4096, &AtomicBool::new(false)).unwrap();
+        assert_eq!(list.outcome, Outcome::Exited(Some(0)), "{}", list.render());
+        assert!(list.stdout.contains("token.txt") && list.stdout.contains("gcloud"), "{}", list.render());
+        assert!(!list.stdout.contains("synthetic-protected"), "{}", list.render());
+        let search = run(&f.workspace(), &spec(&["rg", "synthetic", "."], 5000), 4096, &AtomicBool::new(false)).unwrap();
+        assert_eq!(search.outcome, Outcome::Exited(Some(2)), "{}", search.render());
+        assert!(search.stderr.contains("token.txt") && search.stderr.contains("gcloud"), "{}", search.render());
+        assert!(!search.stdout.contains("synthetic-protected") && !search.stderr.contains("synthetic-protected"), "{}", search.render());
+    }
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn every_protected_folder_hides_its_entries_from_quiet_tools_and_links() {
+        let rules: Vec<_> = crate::tools::SECRET_PATH_RULES.iter().filter(|rule| rule.is_folder()).collect();
+        assert!(!rules.is_empty());
+        for (index, rule) in rules.into_iter().enumerate() {
+            let f = Fixture::new();
+            let folder = f.0.join(rule.value);
+            std::fs::create_dir_all(&folder).unwrap();
+            let init = Command::new("/usr/bin/git")
+                .args(["init", "--quiet", "--initial-branch=main"])
+                .current_dir(&folder)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .stdin(Stdio::null())
+                .output()
+                .unwrap();
+            assert!(init.status.success(), "git fixture setup failed for {}", rule.value);
+            let entry = format!("made-up-entry-{index}");
+            std::fs::write(folder.join(&entry), "synthetic-protected-folder-content\n").unwrap();
+            let workspace = crate::tools::Workspace::new(&folder).unwrap();
+            for args in [
+                vec!["ls", "-1", "."],
+                vec!["rg", "synthetic-protected-folder-content", "."],
+                vec!["git", "status", "--short"],
+            ] {
+                let command = spec(&args, 5000);
+                assert!(command.allowlisted(), "{args:?}");
+                let output = run(&workspace, &command, 4096, &AtomicBool::new(false)).unwrap();
+                assert!(!output.stdout.contains(&entry) && !output.stderr.contains(&entry), "{} {args:?}: {}", rule.value, output.render());
+            }
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&folder, f.0.join("visible-alias")).unwrap();
+            let linked = run(&f.workspace(), &spec(&["ls", "-1", "visible-alias"], 5000), 4096, &AtomicBool::new(false));
+            assert!(linked.is_err(), "linked protected folder ran for {}", rule.value);
+            assert!(!linked.unwrap_err().to_string().contains(&entry), "linked protected folder exposed {entry}");
+        }
     }
     #[test]
     #[cfg(target_os = "macos")]
@@ -562,6 +701,26 @@
         for name in names {
             assert_eq!(f.read(name), "synthetic-private-file", "{name}");
         }
+        assert_eq!(f.read("allowed"), "okay");
+    }
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn sandbox_denies_computed_history_and_service_paths() {
+        let f = Fixture::new();
+        f.write("fish_history", "synthetic-history-marker");
+        std::fs::create_dir(f.0.join("gcloud")).unwrap();
+        f.write("gcloud/item", "synthetic-service-marker");
+        let script = "a=fish_; cat \"${a}history\"; printf changed > \"${a}history\"; b=gcl; cat \"${b}oud/item\"; printf changed > \"${b}oud/item\"; printf okay > allowed";
+        let out = run(
+            &f.workspace(),
+            &spec(&["/bin/sh", "-c", script], 3000),
+            4096,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert!(!out.stdout.contains("synthetic-history-marker") && !out.stdout.contains("synthetic-service-marker"), "{}", out.render());
+        assert_eq!(f.read("fish_history"), "synthetic-history-marker");
+        assert_eq!(f.read("gcloud/item"), "synthetic-service-marker");
         assert_eq!(f.read("allowed"), "okay");
     }
     #[test]

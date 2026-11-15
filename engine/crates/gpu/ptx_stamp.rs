@@ -140,10 +140,12 @@ pub fn stamp(root: &Path, ptx: &Path, variant: Variant) -> io::Result<()> {
 /// mx_rows_tile (384 threads): 160 registers fit one 12-warp block per SM (unbounded ptxas takes 200: no 384-thread block would launch).
 #[allow(dead_code)]
 // The project block can have 1024 threads; 64 registers allow that block to launch.
-const REGISTER_CAPS: [(&str, u32); 23] = [("mx_rows_tile", 160), ("resident_launch_mx", 40), ("mhc_boundary_project", 64),
+const REGISTER_CAPS: [(&str, u32); 24] = [("mx_rows_tile", 160), ("resident_launch_mx", 40), ("mhc_boundary_project", 64),
     // Absorbed attention values: 1024-thread blocks, eager and recorded (the recorded entry also holds the 128-thread
     // scores arm). 64 registers is the most a 1024-thread block can launch with; the driver takes 40 and 48 today.
     ("latent_absorption_values", 64), ("resident_launch_absorb_attention", 64),
+    // Recorded row selection uses the same 1024-thread bound.
+    ("resident_launch_prompt_select_rows", 64),
     ("flash_bf16_mma_latency", 128), ("flash_bf16_mma_latency_group", 128), ("gemm_fp8_block128", 128), ("fp8_routed_gate", 128), ("fp8_routed_up", 128),
     ("fp8_routed_down", 128), ("fp4_prefill_tc_down", 128), ("prefill_attention_swizzled_packed_bf16", 168),
     ("prefill_attention_swizzled_bf16", 168), ("prefill_attention_gqa4_fragments", 168), ("prefill_attention_gqa4_bf16", 168),

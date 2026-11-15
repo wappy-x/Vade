@@ -785,6 +785,7 @@ pub fn run_engine(config: Config) -> io::Result<EngineReport> {
     let mut probe_tokens = [0u64; 2];
     let mut calibration = Ok(());
     for (slot, sentences) in PROBE_SENTENCES.iter().enumerate() {
+        crate::http_policy::interactive_result()?;
         let prompt = needle_prompt(&NEEDLES[0], *sentences, false);
         match client.send(engine_body(&config, Some(NEEDLE_SYSTEM), &prompt, 1, Some(false), Vec::new())) {
             Ok(reply) => {
@@ -801,6 +802,7 @@ pub fn run_engine(config: Config) -> io::Result<EngineReport> {
 
     let mut needles = Vec::new();
     for needle in &NEEDLES {
+        crate::http_policy::interactive_result()?;
         note(format_args!("needle at {}", needle.label));
         let item = match &calibration {
             Ok(cal) => {
@@ -846,7 +848,9 @@ pub fn run_engine(config: Config) -> io::Result<EngineReport> {
     note(format_args!("JSON mode, {} requests", JSON_CASES.len() * 5));
     let mut json_items = Vec::new();
     for case in &JSON_CASES {
+        crate::http_policy::interactive_result()?;
         for source in 0..case.sources.len() {
+            crate::http_policy::interactive_result()?;
             let body = engine_body(
                 &config,
                 None,
@@ -867,6 +871,7 @@ pub fn run_engine(config: Config) -> io::Result<EngineReport> {
     note(format_args!("tool calls, {} requests", TOOL_CASES.len()));
     let mut tool_items = Vec::new();
     for case in &TOOL_CASES {
+        crate::http_policy::interactive_result()?;
         let body = engine_body(
             &config,
             Some(TOOL_SYSTEM),
@@ -893,6 +898,7 @@ pub fn run_engine(config: Config) -> io::Result<EngineReport> {
     };
     let mut cache = Vec::new();
     for index in 0..CACHE_PROMPTS {
+        crate::http_policy::interactive_result()?;
         let cold = cache_request(index, Some(false));
         if let Ok(reply) = &cold {
             learn(reply);
@@ -901,6 +907,7 @@ pub fn run_engine(config: Config) -> io::Result<EngineReport> {
         cache.push(CacheItem { index, cold: cold.ok(), prime: None, warm: None, error });
     }
     for item in &mut cache {
+        crate::http_policy::interactive_result()?;
         let prime = cache_request(item.index, Some(true));
         let warm = cache_request(item.index, Some(true));
         if item.error.is_none() {
@@ -916,6 +923,7 @@ pub fn run_engine(config: Config) -> io::Result<EngineReport> {
 
     let mut concurrency = Vec::new();
     for ((id, _), body) in CONCURRENCY_PROMPTS.iter().zip(concurrency_bodies) {
+        crate::http_policy::interactive_result()?;
         note(format_args!("concurrency {id}: one alone, then {CONCURRENT_COPIES} at once"));
         let alone = client.send(Ok(body.clone()));
         if let Ok(reply) = &alone {
@@ -943,6 +951,7 @@ pub fn run_engine(config: Config) -> io::Result<EngineReport> {
         concurrency.push(ConcurrencyItem { id, alone, copies });
     }
 
+    crate::http_policy::interactive_result()?;
     Ok(EngineReport {
         config,
         server: facts.unwrap_or_default(),

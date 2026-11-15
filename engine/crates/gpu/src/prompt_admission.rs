@@ -98,8 +98,15 @@ pub const FAST_THREADS:u32=128;
 fn route_admitted(i:CausalShape)->bool {
     i.heads==1 && i.dim==1 && i.taps==1 && i.rows==288 && i.cols==ROUTED as u32 && i.bound.is_finite() && i.bound>0.0
 }
-/// Wrapped `ExpertFold` of the model: 8 routed rows of 4096 plus the shared expert.
-fn fold_admitted(i:CausalShape)->bool {i.rows==ROUTED as u32 && i.cols==4096 && i.taps==1}
+/// The rows one rank of a pair owns of the model's 4096: the width of a fold made before its exchange (ROWS FOLD).
+pub const FOLD_LOCAL:u32=2048;
+/// Most tokens of a fold of `FOLD_LOCAL` rows: the chats of one batch step (`bounded_decoder::BATCH_ROWS`, pinned there).
+pub const FOLD_LOCAL_TOKENS:usize=8;
+/// Wrapped `ExpertFold` of the model: 8 routed rows of 4096 plus the shared expert. And the same fold of the `FOLD_LOCAL`
+/// rows one rank of a pair owns, for the 1 to `FOLD_LOCAL_TOKENS` chats of a batch step: each rank folds its own rows of
+/// every chat in ONE launch before the exchange (`rows_fold::one_launch`). The kernel takes any width (one thread a
+/// (token, feature) word); each width here is device-swept (`swept::fold_cases`).
+fn fold_admitted(i:CausalShape,tokens:usize)->bool {i.rows==ROUTED as u32 && i.taps==1 && (i.cols==4096 || i.cols==FOLD_LOCAL && tokens<=FOLD_LOCAL_TOKENS)}
 /// Head counts of the recurrent prompt kernels (Prepare, GatedNorm, convolution rows): the model's 64 heads on one box, and the
 /// 32 a rank owns when two ranks split them (`kda_heads`; the prompt path passes the local count). The kernels take any count;
 /// each count here is device-swept (`swept.rs RECURRENT_HEADS`). Four ranks (16 heads) join after their own sweep.
@@ -116,7 +123,7 @@ pub fn fast_kernel(s:Shape)->Option<&'static str> {
             Causal::Prepare if recurrent_heads(i.heads) && i.dim==128 && i.bound<0.0 && i.bound.is_finite()=>Some("prompt_prepare"),
             Causal::GatedNorm if recurrent_heads(i.heads) && i.dim==128 && i.epsilon>0.0 && i.epsilon.is_finite()=>Some("prompt_gated_norm"),
             Causal::Route if route_admitted(i)=>Some("prompt_route"),
-            Causal::ExpertFold if fold_admitted(i)=>Some("prompt_fold"),
+            Causal::ExpertFold if fold_admitted(i,s.tokens as usize)=>Some("prompt_fold"),
             _=>None}},
         Op::ConvRows if recurrent_heads(s.heads) && s.dim==128 && s.taps==4=>Some("prompt_conv"),
         _=>None,
@@ -258,7 +265,7 @@ mod tests {
                 let s=wrapped(Causal::Route,1,1,t as u32,r as u32,k as u32,0.0,2.5,tokens.max(1));
                 if tokens>0 && fast_kernel(s)==Some("prompt_route") {seen[3]+=1;assert!(route_list.contains(&(tokens,r,k,t)),"route {tokens} {r} {k} {t}");}
             }
-            for (r,k,t) in [(8usize,4096usize,1usize),(8,4096,0),(8,4000,1),(7,4096,1),(1,1,1),(8,128,1),(4,4096,1)] {
+            for (r,k,t) in [(8usize,4096usize,1usize),(8,4096,0),(8,4000,1),(7,4096,1),(1,1,1),(8,128,1),(4,4096,1),(8,2048,1),(8,2048,0),(7,2048,1),(8,1024,1),(8,2047,1),(8,2049,1)] {
                 let s=wrapped(Causal::ExpertFold,0,0,t as u32,r as u32,k as u32,0.0,0.0,tokens.max(1));
                 if tokens>0 && fast_kernel(s)==Some("prompt_fold") {seen[4]+=1;assert!(fold_list.contains(&(tokens,r,k,t)),"fold {tokens} {r} {k} {t}");}
             }
@@ -273,6 +280,11 @@ mod tests {
         // The test is not vacuous: every predicate admitted something, and each list is no larger than the admitted set plus the neighbours it also runs.
         assert!(seen[..7].iter().all(|&n|n>0),"{seen:?}");
         let sizes=GROUP_MAX+GROUP_BIG.len();assert_eq!(swept::GROUP_BIG,GROUP_BIG);
+        // The fold: the whole width at every group size, and a pair rank's own rows at the 1 to 8 chats of a batch step, no more.
+        assert_eq!((swept::FOLD_LOCAL,swept::FOLD_LOCAL_TOKENS),(FOLD_LOCAL as usize,FOLD_LOCAL_TOKENS));assert_eq!(fold_list.len(),sizes+FOLD_LOCAL_TOKENS);
+        for tokens in 1..=FOLD_LOCAL_TOKENS {let local=wrapped(Causal::ExpertFold,0,0,1,8,FOLD_LOCAL,0.0,0.0,tokens);
+            assert_eq!(fast_kernel(local),Some("prompt_fold"),"{tokens}");assert_eq!(fast_blocks(local),16*tokens as u32);}
+        for tokens in [FOLD_LOCAL_TOKENS+1,16,256,512] {assert_eq!(fast_kernel(wrapped(Causal::ExpertFold,0,0,1,8,FOLD_LOCAL,0.0,0.0,tokens)),None,"{tokens}");}
         assert_eq!(permute_list.len(),2*MOVE_MAX);assert_eq!(place_list.len(),2*MOVE_MAX);assert_eq!(prepare_list.len(),2*swept::RECURRENT_HEADS.len()*sizes);assert_eq!(conv_list.len(),swept::RECURRENT_HEADS.len()*sizes);assert_eq!(mhc_list.len(),sizes-127);
         for tokens in [257usize,511,513,1023,1025,2048] {assert!(!group_admitted(tokens),"{tokens}");}
         for tokens in GROUP_BIG {assert!(group_admitted(tokens));assert_eq!(fast_kernel(conv(tokens,64,128,4)),Some("prompt_conv"));assert!(mhc_tile_admitted(mhc(tokens as u32,4,4096)));}

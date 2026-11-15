@@ -26,6 +26,11 @@ pub fn live(o: &Opts) -> Result<u8, String> {
     // Removed on every return, so a failed run does not block the next one.
     let guard = RemoveOnDrop(fixed);
     let out = new_dir(out_arg)?;
+    let _output = crate::http_policy::RefusalOutput(out.clone());
+    // Check the real upstream before launching any client of the local proxy.
+    // Validate local destinations first, as for every other live-run failure.
+    let target = crate::transport::Endpoint::parse(endpoint).map_err(|e| e.to_string())?;
+    drop(crate::transport::connect_fresh(&target, std::time::Instant::now() + std::time::Duration::from_secs(5)).map_err(|e| e.to_string())?);
     let fixed = std::fs::canonicalize(&guard.0).map_err(|e| e.to_string())?;
     let version = Command::new(&o.harness).arg("--version").output().map(|x| String::from_utf8_lossy(&x.stdout).trim().to_string()).unwrap_or_else(|e| format!("unknown ({e})"));
     let mut all: Vec<Vec<TaskResult>> = Vec::new();
@@ -38,6 +43,7 @@ pub fn live(o: &Opts) -> Result<u8, String> {
             eprintln!("vade suite {} | run {k} | {} | start", date(), t.id);
             let r = run_task(o, dir, t.clone(), &run_dir.join("tasks").join(&t.id), Source::Upstream(addr.clone()), Some(&fixed));
             eprintln!("vade suite {} | run {k} | {} | {} | {}", date(), t.id, r.status, r.note);
+            crate::http_policy::interactive_result().map_err(|e| e.to_string())?;
             results.push(r);
         }
         let card = run_card(o, endpoint, model, &started, &version, &results);

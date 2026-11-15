@@ -759,53 +759,169 @@ fn unqualified_text_never_binds_a_remote_http_listener() {
     for value in ["0.0.0.0:18080","[::]:18080","192.0.2.1:18080"] {assert!(diagnostic_text_bind(value.parse().unwrap()).is_err());}
 }
 /// What the text service takes after REQUESTS. Its refusals print this list.
-pub const TEXT_OPTIONS:&str="the text service takes --diagnostic-unqualified-text, --mtp 0..3, --api-key-file PATH, --diagnostic-serving-trace and --prompt-keep, each one time";
+pub const TEXT_OPTIONS:&str="the text service takes --diagnostic-unqualified-text, --mtp 0..3, --api-key-file PATH, --diagnostic-serving-trace and one of --prompt-keep (the default) or --no-prompt-keep, each one time";
+/// Extract the diagnostic served API gate before normal option validation. Option values stay opaque.
+pub fn boundary_gate_options(args:&[String])->Result<(Option<std::path::PathBuf>,Vec<String>),String> {
+    let mut gate=None;let mut kept=Vec::new();let mut args=args.iter();
+    while let Some(arg)=args.next() {
+        if let Some(path)=arg.strip_prefix("--diagnostic-boundary-gate=") {
+            if gate.is_some() || path.is_empty() {return Err("boundary gate needs one nonempty output directory".into());}gate=Some(path.into());
+        } else {kept.push(arg.clone());if matches!(arg.as_str(),"--mtp"|"--api-key-file") && let Some(value)=args.next() {kept.push(value.clone());}}
+    }Ok((gate,kept))
+}
+#[test]
+fn boundary_gate_option_preserves_values_and_rejects_duplicate_or_empty_paths() {
+    let args=|s:&[&str]|s.iter().map(|s|s.to_string()).collect::<Vec<_>>();
+    let (path,kept)=boundary_gate_options(&args(&["--diagnostic-boundary-gate=receipts","--mtp","3"])).unwrap();
+    assert_eq!(path.unwrap(),std::path::PathBuf::from("receipts"));assert_eq!(kept,args(&["--mtp","3"]));
+    assert!(boundary_gate_options(&args(&["--diagnostic-boundary-gate="])).is_err());
+    assert!(boundary_gate_options(&args(&["--diagnostic-boundary-gate=a","--diagnostic-boundary-gate=b"])).is_err());
+    assert!(boundary_gate_options(&args(&["--api-key-file","--diagnostic-boundary-gate=a"])).unwrap().0.is_none());
+}
 /// The text service options after REQUESTS: the API key file, the predictor depth, the serving trace and prompt retention.
 /// An unknown option, or a second copy of one, stops the start with the list of what the service takes.
 pub fn text_options(args:&[String])->Result<(Option<std::path::PathBuf>,Option<usize>,bool,bool),String> {
-    let mut key=None;let mut mtp=None;let mut trace=false;let mut keep=false;let mut options=args.iter();
+    let mut key=None;let mut mtp=None;let mut trace=false;let mut keep=None;let mut options=args.iter();
     while let Some(option)=options.next() {match option.as_str() {
         "--diagnostic-unqualified-text"=>{},
         "--diagnostic-serving-trace" if !trace=>trace=true,
         "--api-key-file" if key.is_none()=>key=Some(std::path::PathBuf::from(options.next().ok_or("--api-key-file needs a path")?)),
         // Keep each finished prompt on both ranks and start later turns of the chat from it (the server's prompt cache).
-        // Off unless given: without it no prompt is kept and the served path is unchanged. Every rank gets the same option.
-        "--prompt-keep" if !keep=>keep=true,
+        // ON unless --no-prompt-keep is given: with that no prompt is kept and the served path is as it was before the
+        // cache existed. --prompt-keep is still read, so a start script that names it goes on working. The two names
+        // are one choice: a second one of either is refused. Every rank gets the same choice.
+        "--prompt-keep" if keep.is_none()=>keep=Some(true),
+        "--no-prompt-keep" if keep.is_none()=>keep=Some(false),
         "--mtp" if mtp.is_none()=>{let value=options.next().ok_or("--mtp needs a depth")?;mtp=Some(value.parse::<usize>().ok().filter(|depth|*depth<=3).ok_or("text service --mtp takes a depth of 0 to 3")?);},
         _=>return Err(format!("unsupported text service option: {option}; {TEXT_OPTIONS}")),
     }}
-    Ok((key,mtp,trace,keep))
+    Ok((key,mtp,trace,keep.unwrap_or(true)))
 }
-/// The prompt cache is one start switch, off unless `--prompt-keep` is given: the service forks no session, the
-/// cache holds zero bytes and the scheduler looks nothing up, as before the switch existed.
+/// THE ROOM OF THE PROMPT CACHE, for the start line. The cache is on by default, and at a large context its byte cap
+/// (the session pool less one full-size chat) can be small or zero: "cache=true" alone would tell a user the cache
+/// is on while it can keep almost nothing. `charge` is the PLANNED charge of a kept prompt of that many tokens
+/// (`Factory::kept_prompt_bytes` and the cache's own notes); it grows with the tokens. No prompt exists at start, so
+/// this is not the charge the cache books for a real prompt: that one is the bytes the prompt's state really holds on
+/// the device. This is the longest prompt, up to `context` tokens, whose planned charge fits under `cap`: 0 when not
+/// even one token fits.
+pub fn text_largest_kept_prompt(context:usize,cap:usize,charge:impl Fn(usize)->Option<usize>)->usize {
+    let fits=|tokens:usize|charge(tokens).is_some_and(|bytes|bytes<=cap);
+    if context==0 || !fits(1) {return 0;}
+    let (mut kept,mut over)=(1,context+1);
+    while over-kept>1 {let middle=kept+(over-kept)/2;if fits(middle) {kept=middle;} else {over=middle;}}
+    kept
+}
+/// The words the start line ends with: the cap in bytes and the longest prompt whose planned charge fits, in tokens.
+pub fn text_keep_room_words(cap:usize,largest:usize)->String {format!("kept_cap_bytes={cap} largest_kept_prompt_tokens={largest}")}
+/// One plain line at start when the cache is on and its longest prompt is under 1,024 tokens: what it means and
+/// what to do. `--context` is the option as `vade up` takes it.
+pub fn text_keep_room_notice(keep:bool,context:usize,cap:usize,largest:usize)->Option<String> {
+    (keep && largest<1024).then(||format!("the prompt cache is on, but at context {context} its room is {cap} bytes: the longest prompt whose planned charge fits in it has {largest} tokens, so it keeps little or nothing. A smaller context gives the cache room: start with a smaller --context (for example vade up --context 16384)"))
+}
 #[test]
-fn the_prompt_cache_is_off_without_its_switch() {
-    let values=|v:&[&str]|v.iter().map(|s|(*s).to_owned()).collect::<Vec<_>>();
-    assert!(!text_options(&[]).unwrap().3);
-    assert!(!text_options(&values(&["--diagnostic-unqualified-text","--mtp","3","--api-key-file","key.txt","--diagnostic-serving-trace"])).unwrap().3);
-    assert!(text_options(&values(&["--diagnostic-unqualified-text","--prompt-keep"])).unwrap().3);
-    let parser=include_str!("settings.rs");let parser_code=&parser[..parser.find("fn the_prompt_cache_is_off_without_its_switch").unwrap()];
-    assert!(parser_code.contains("let mut keep=false;") && parser_code.contains("\"--prompt-keep\" if !keep=>keep=true,"));
-    assert_eq!(parser_code.matches("keep=true").count(),1);
+fn the_start_line_gives_the_cache_room_and_a_small_room_gets_one_notice() {
+    // The charge of the device gate: 162,065,920 bytes and 38,400 a token, and the cache's own notes.
+    let charge=|tokens:usize|Some(162_065_920+38_400*tokens+4*tokens+619_520+(1+tokens/64)*160);
+    // Context 32,768 on the gate's pair: the cap was 261,410,138 bytes. The longest prompt that fits, to the token.
+    let largest=text_largest_kept_prompt(32_768,261_410_138,charge);
+    assert!(charge(largest).unwrap()<=261_410_138 && charge(largest+1).unwrap()>261_410_138,"{largest}");assert_eq!(largest,2_570);
+    assert_eq!(text_keep_room_words(261_410_138,largest),"kept_cap_bytes=261410138 largest_kept_prompt_tokens=2570");
+    // Room for more than the context: the whole context. No room, or not for one token: 0. A charge that cannot be told: 0.
+    assert_eq!(text_largest_kept_prompt(16_384,usize::MAX,charge),16_384);
+    for cap in [0,162_065_919,162_685_000] {assert_eq!(text_largest_kept_prompt(32_768,cap,charge),0,"{cap}");}
+    assert_eq!((text_largest_kept_prompt(32_768,usize::MAX,|_|None),text_largest_kept_prompt(0,usize::MAX,charge)),(0,0));
+    // THE NOTICE: only with the cache on and a longest prompt under 1,024 tokens. It names the flag as vade up takes it.
+    let notice=text_keep_room_notice(true,32_768,180_000_000,text_largest_kept_prompt(32_768,180_000_000,charge)).unwrap();
+    assert!(notice.contains("at context 32768") && notice.contains("180000000 bytes") && notice.contains("has 450 tokens") && notice.contains("vade up --context"),"{notice}");
+    assert!(text_keep_room_notice(true,32_768,0,0).unwrap().contains("has 0 tokens"));
+    for (keep,largest) in [(true,1_024),(true,2_570),(true,16_384),(false,0),(false,500)] {assert_eq!(text_keep_room_notice(keep,32_768,261_410_138,largest),None,"{keep} {largest}");}
+    // The service prints both, from the charge the cache itself uses, and nothing else follows from them.
     let source=include_str!("../bin/flash-serve/text.rs");let code=&source[..source.find("#[cfg(test)]").unwrap()];
-    assert!(code.contains("let (key,mtp,trace,keep)=super::settings::text_options(&args[9..])?;"));
-    assert_eq!(code.matches("keep=true").count(),0);
+    assert!(code.contains("let largest=if keep {super::settings::text_largest_kept_prompt(context,kept_cap,|tokens|spark_serve::cache::publication_metadata_bytes(tokens,engine.vocab_size(),engine.kept_prompt_bytes(tokens),0,0))} else {0};"));
+    assert!(code.contains("if let Some(notice)=super::settings::text_keep_room_notice(keep,context,kept_cap,largest) {eprintln!(\"TEXT PROMPT KEEP rank={rank} {notice}\");}"));
+    assert!(code.contains("cache={keep} {}\"") && code.contains("super::settings::text_keep_room_words(kept_cap,largest));"));
+    assert_eq!((code.matches("let largest=").count(),code.matches(",largest)").count()),(1,2),"the room is worked out once and only printed");
+}
+/// The line a rank prints at start when it keeps prompts although FLASH_SERVE_KV_BYTES=0 is in its environment. That
+/// variable is `vade up`'s "cache off" for the other services and this service does not read it (`vade up` gives this
+/// service --no-prompt-keep instead), so a rank started by hand would keep prompts with no word about it. The line
+/// changes nothing: the choice is the option's alone.
+pub fn text_cache_size_notice(keep:bool,cache_bytes:Option<usize>)->Option<&'static str> {
+    (keep && cache_bytes==Some(0)).then_some("FLASH_SERVE_KV_BYTES=0 is set, but the text service does not read it: PROMPTS ARE KEPT. To turn the prompt cache off, start every rank with --no-prompt-keep (vade up --cache-bytes 0 does that)")
+}
+#[test]
+fn a_cache_size_of_zero_in_the_environment_gets_one_line_and_changes_nothing() {
+    // Only the case that would surprise: the cache is on and the variable says 0.
+    let line=text_cache_size_notice(true,Some(0)).unwrap();assert!(line.contains("FLASH_SERVE_KV_BYTES=0") && line.contains("--no-prompt-keep") && line.contains("PROMPTS ARE KEPT"),"{line}");
+    for (keep,bytes) in [(true,None),(true,Some(1)),(true,Some(1<<30)),(false,Some(0)),(false,None)] {assert_eq!(text_cache_size_notice(keep,bytes),None,"{keep} {bytes:?}");}
+    // The service prints it and takes nothing else from the environment for this: `keep` is the parser's answer.
+    let source=include_str!("../bin/flash-serve/text.rs");let code=&source[..source.find("#[cfg(test)]").unwrap()];
+    assert!(code.contains("if let Some(notice)=super::settings::text_cache_size_notice(keep,spark_tp::flash_pool::Request::from_env().ok().and_then(|request|request.cache_bytes)) {eprintln!(\"TEXT PROMPT KEEP rank={rank} {notice}\");}"));
+    assert_eq!(code.matches("std::env::var").count(),0,"the text service itself reads no environment variable");
+    assert_eq!(code.matches("text_cache_size_notice").count(),1);assert_eq!(code.matches("keep=").count(),0);
+}
+/// The prompt cache is ON by default and `--no-prompt-keep` is its one off switch. With the off switch the service
+/// forks no session, the cache holds zero bytes and the scheduler looks nothing up, as before the cache existed:
+/// every use of the choice in the service is named below, and each one's off arm is the value main had without
+/// `--prompt-keep`.
+#[test]
+fn the_prompt_cache_is_on_unless_no_prompt_keep_is_given() {
+    let values=|v:&[&str]|v.iter().map(|s|(*s).to_owned()).collect::<Vec<_>>();
+    // On: no option at all, the other options alone, and the old switch.
+    assert!(text_options(&[]).unwrap().3);
+    assert!(text_options(&values(&["--diagnostic-unqualified-text","--mtp","3","--api-key-file","key.txt","--diagnostic-serving-trace"])).unwrap().3);
+    assert!(text_options(&values(&["--diagnostic-unqualified-text","--prompt-keep"])).unwrap().3);
+    // The gate extractor must preserve prompt retention and the parser's refusals.
+    for switches in [&[][..],&["--prompt-keep"],&["--no-prompt-keep"],&["--prompt-keep","--prompt-keep"],&["--prompt-keep","--no-prompt-keep"],&["--prompt-keep=1"]] {
+        let mut args=values(&["--diagnostic-unqualified-text","--mtp","3","--api-key-file","key.txt","--diagnostic-serving-trace"]);
+        args.extend(values(switches));let expected=text_options(&args);
+        for at in [0,args.len()] {
+            let mut with_gate=args.clone();with_gate.insert(at,"--diagnostic-boundary-gate=receipts".into());
+            let (gate,options)=boundary_gate_options(&with_gate).unwrap();
+            assert_eq!(gate,Some(std::path::PathBuf::from("receipts")));assert_eq!(options,args);
+            assert_eq!(text_options(&options),expected);
+        }
+    }
+    // Off: only the off switch, at any place among the options.
+    assert!(!text_options(&values(&["--no-prompt-keep"])).unwrap().3);
+    assert!(!text_options(&values(&["--diagnostic-unqualified-text","--mtp","3","--no-prompt-keep","--diagnostic-serving-trace"])).unwrap().3);
+    let parser=include_str!("settings.rs");let parser_code=&parser[..parser.find("fn the_prompt_cache_is_on_unless_no_prompt_keep_is_given").unwrap()];
+    assert!(parser_code.contains("let mut keep=None;") && parser_code.contains("\"--prompt-keep\" if keep.is_none()=>keep=Some(true),") && parser_code.contains("\"--no-prompt-keep\" if keep.is_none()=>keep=Some(false),"));
+    // One place sets the choice on, one sets it off, one gives the default.
+    assert_eq!(parser_code.matches("keep=Some(true)").count(),1);assert_eq!(parser_code.matches("keep=Some(false)").count(),1);
+    assert_eq!(parser_code.matches("Ok((key,mtp,trace,keep.unwrap_or(true)))").count(),1);assert_eq!(parser_code.matches("keep.unwrap_or(").count(),1);
+    let source=include_str!("../bin/flash-serve/text.rs");let code=&source[..source.find("#[cfg(test)]").unwrap()];
+    let extract=code.find("let (gate,options)=super::settings::boundary_gate_options(&args[9..])?;").unwrap();
+    let parse=code.find("let (key,mtp,trace,keep)=super::settings::text_options(&options)?;").unwrap();assert!(extract<parse);
+    // The service reads no cache size from its environment (the engine takes no new environment read): the off
+    // switch is the option, and `vade up` gives it to every rank for a cache size of 0 (cli state.rs engine_args).
+    assert!(!code.contains("FLASH_SERVE_KV_BYTES"));
+    // The service never sets the choice itself: it only reads what the parser gave.
+    assert_eq!(code.matches("keep=").count(),0);assert_eq!(code.matches("let keep").count(),0);assert_eq!(code.matches("mut keep").count(),0);
+    // NO FORK with the off switch: the engine is the plain one.
     assert!(code.contains("if keep {engine.with_prompt_keep()} else {engine}"));assert_eq!(code.matches(".with_prompt_keep()").count(),1);
-    // The cache's byte bound IS the engine's byte cap (zero without the switch): one number, so the cache never has
-    // room for a prompt the engine then refuses. The whole pool as the bound was review fault 1 of step 3.
+    // ZERO CACHE BYTES with the off switch. The cache's byte bound IS the engine's byte cap: one number, so the cache
+    // never has room for a prompt the engine then refuses. The whole pool as the bound was review fault 1 of step 3.
+    // NO LOOKUP with the off switch: `prefix_cache` is the choice, and the cache has main's one empty entry.
     assert!(code.contains("retained_bytes:kept_cap,") && !code.contains("retained_bytes:if keep {pool}") && code.contains("prefix_cache:keep,") && code.contains("cache={keep}"));
-    // With the switch the cache counters are private (`Sharing::private_counts`): /health, which asks no
-    // credential, shows no live count of another caller's kept prompts. Without the switch nothing changes.
+    assert!(code.contains("entries:if keep {spark_tp::row_split::KEPT_PROMPTS} else {1},"));
+    // With the cache on its counters are private (`Sharing::private_counts`): /health, which asks no
+    // credential, shows no live count of another caller's kept prompts. With the off switch nothing changes.
     assert!(code.contains("sharing:spark_serve::scheduler::Sharing {private_counts:keep,..Default::default()}"));
-    // The engine's byte cap is set with the switch, before either rank serves.
+    // The engine's byte cap is set with the choice, before either rank serves.
     let cap=code.find("let kept_cap=if keep {engine.keep_within(pool)} else {0};").unwrap();assert!(cap<code.find("if !engine.controller() {return engine.worker();}").unwrap());assert_eq!(code.matches("keep_within(").count(),1);
+    // The ranks compare the choice at start, so two ranks with different choices (or one build of before the
+    // default and one of after it, both started with no option) refuse each other.
+    assert!(code.contains("(context as u64|u64::from(keep)<<63|u64::from(keep)<<62)") && code.contains("if record[..72]!=records[..72] {return Err("));
+    // These are all the places that read the choice.
+    assert_eq!(code.matches("if keep ").count(),4);assert_eq!(code.matches("from(keep)").count(),2);assert_eq!(code.matches(":keep,").count(),2);assert_eq!(code.matches("{keep}").count(),1);
 }
 #[test]
 fn text_options_take_the_four_names_and_refuse_the_rest_with_the_list() {
     let values=|v:&[&str]|v.iter().map(|s|(*s).to_owned()).collect::<Vec<_>>();
     let (key,mtp,trace,keep)=text_options(&values(&["--diagnostic-unqualified-text","--mtp","3","--api-key-file","key.txt","--diagnostic-serving-trace"])).unwrap();
-    assert_eq!((key.as_deref(),mtp,trace,keep),(Some(std::path::Path::new("key.txt")),Some(3),true,false));
-    assert_eq!(text_options(&values(&["--diagnostic-unqualified-text"])).unwrap(),(None,None,false,false));
+    assert_eq!((key.as_deref(),mtp,trace,keep),(Some(std::path::Path::new("key.txt")),Some(3),true,true));
+    assert_eq!(text_options(&values(&["--diagnostic-unqualified-text"])).unwrap(),(None,None,false,true));
     assert_eq!(text_options(&values(&["--mtp","0"])).unwrap().1,Some(0));
     // Options of the Flash-Next service, and a second copy of an option, are refused with the list.
     for refused in [&["--allow-remote"][..],&["--fp4-local"],&["--decode-fuse","off"],&["--mtp","1","--mtp","1"],&["--diagnostic-serving-trace","--diagnostic-serving-trace"]] {
@@ -819,14 +935,21 @@ fn text_options_take_the_four_names_and_refuse_the_rest_with_the_list() {
     assert_eq!(text_options(&values(&["--api-key-file"])).unwrap_err(),"--api-key-file needs a path");
 }
 #[test]
-fn text_options_list_prompt_keep_and_refuse_unknown_options_with_the_list() {
+fn text_options_list_both_prompt_keep_names_and_refuse_two_of_them_with_the_list() {
     let values=|v:&[&str]|v.iter().map(|s|(*s).to_owned()).collect::<Vec<_>>();
-    assert!(TEXT_OPTIONS.contains("--prompt-keep"),"{TEXT_OPTIONS}");
+    for name in ["--prompt-keep","--no-prompt-keep"] {assert!(TEXT_OPTIONS.contains(&format!(" {name} ")) || TEXT_OPTIONS.contains(&format!(" {name},")),"{name}: {TEXT_OPTIONS}");}
     let (key,mtp,trace,keep)=text_options(&values(&["--diagnostic-unqualified-text","--prompt-keep","--mtp","2"])).unwrap();
     assert_eq!((key,mtp,trace,keep),(None,Some(2),false,true));
-    for refused in [&["--unknown-option"][..],&["--prompt-keep=1"],&["--prompt-keep","--prompt-keep"]] {
+    let (key,mtp,trace,keep)=text_options(&values(&["--diagnostic-unqualified-text","--no-prompt-keep","--mtp","2"])).unwrap();
+    assert_eq!((key,mtp,trace,keep),(None,Some(2),false,false));
+    // (the options, the one the refusal names). Both names at once are refused in either order, and so is a second
+    // copy of one name: the refusal names the second and ends with the list, which holds both names.
+    for (refused,named) in [(&["--unknown-option"][..],"--unknown-option"),(&["--prompt-keep=1"],"--prompt-keep=1"),(&["--no-prompt-keep=1"],"--no-prompt-keep=1"),
+        (&["--prompt-keep","--prompt-keep"],"--prompt-keep"),(&["--no-prompt-keep","--no-prompt-keep"],"--no-prompt-keep"),
+        (&["--prompt-keep","--no-prompt-keep"],"--no-prompt-keep"),(&["--no-prompt-keep","--prompt-keep"],"--prompt-keep"),
+        (&["--no-prompt-keep","--mtp","3","--diagnostic-unqualified-text","--prompt-keep"],"--prompt-keep")] {
         let error=text_options(&values(refused)).unwrap_err();
-        assert!(error.starts_with(&format!("unsupported text service option: {}; ",refused[0])) && error.ends_with(TEXT_OPTIONS) && error.contains("--prompt-keep"),"{error}");
+        assert!(error.starts_with(&format!("unsupported text service option: {named}; ")) && error.ends_with(TEXT_OPTIONS) && error.contains("--prompt-keep (the default) or --no-prompt-keep"),"{refused:?}: {error}");
     }
 }
 /// The drafting words of the text service start line. `default_depth` is the service's default for a request that names

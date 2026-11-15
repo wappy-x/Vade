@@ -37,7 +37,7 @@ pub extern "ptx-kernel" fn mx_rows_small8(p:MxProjection) {rows::<8,2,2>(p)}
 pub extern "ptx-kernel" fn mx_rows_small8w(p:MxProjection) {rows::<8,2,4>(p)}
 
 /// One block: 4 warps of `R` weight rows each, `T` tokens.
-fn rows<const T:usize,const DEPTH:usize,const R:usize>(p:MxProjection) {
+pub(crate) fn rows<const T:usize,const DEPTH:usize,const R:usize>(p:MxProjection) {
     // SAFETY: Only thread and block indices are read here. The block-size trap holds the grid contract; a warp whose first row is
     // past `rows`, or whose token tile is past `tokens`, returns as a whole before `wave` reads anything.
     let (first,token)=unsafe {

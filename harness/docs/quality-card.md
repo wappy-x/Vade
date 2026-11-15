@@ -1,5 +1,7 @@
 # Answer quality and exactness cost cards
 
+HTTP links stay on this machine by default; see [network setup](../../docs/network-setup.md) for SSH tunnels and the explicit opt-in.
+
 `vade-harness quality-card` runs one fixed set of prompts against a served
 model through the chat API and prints two cards in the RigMark card style:
 
