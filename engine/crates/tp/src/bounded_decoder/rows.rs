@@ -361,10 +361,10 @@ impl<'f,C:Compute> Decoder<'f,C> {
         Ok([self.compute.range(&open.hidden[0],row*h,h)?,self.compute.range(&open.hidden[1],row*h,h)?])
     }
     /// `keep`: 0 nothing, 1 the rows' hidden states, 2 also the recurrent layers' kept inputs.
-    /// One group with launch recording paused (PROVED-3): every rows op launches directly, and a new
-    /// row count or chunk position captures no graph pieces. Same commands, same order, same bits
-    /// (measured on the device wire: logits and every state plane equal). Recording resumes after,
-    /// also when the group fails.
+    /// Prompt groups keep launch recording paused (PROVED-3): a new row count or chunk position then
+    /// captures no graph pieces. Verification rows repeat a small bounded set of shapes, so they keep
+    /// the caller's recording state and let resident pieces replay. Both forms enqueue the same commands
+    /// in the same order. A prompt group's recording state is restored also when the group fails.
     /// Warm multi-row device route tables, descriptor scratch, and placement tables across all target routed layers
     /// for verify passes up to `max_rows` rows.
     pub fn warm_verify_routes(&self,max_rows:usize)->Result<()> {
@@ -386,14 +386,16 @@ impl<'f,C:Compute> Decoder<'f,C> {
         Ok(())
     }
     fn rows_pass(&self,tokens:&[u32],state:&State<C::Value>,head:HeadRows,keep:u8)->Result<(Vec<Vec<f32>>,State<C::Value>,Option<OpenRows<C::Value>>)> {
-        let was=self.compute.rows_unrecorded(true)?;
+        // A check is already inside the resident queue opened by `Compute::work`. Unlike prompt
+        // groups, its 2..=8-row shapes recur every cycle and can amortize retained pieces.
+        let paused=if keep==2 {None} else {Some(self.compute.rows_unrecorded(true)?)};
         self.compute.rows_verify(keep==2 && self.predictor_enabled() && (2..=self.verify_routes.get()).contains(&tokens.len()));
         let result=self.rows_pass_body(tokens,state,head,keep);
         self.compute.rows_verify(false);
         // A failed large group must end its extra spare capacity too. Keep the
         // original error if the device cannot synchronize for this cleanup.
         if result.is_err() && group_pool_cap(tokens.len()).is_some() {let _=self.compute.rows_keep();}
-        let restored=self.compute.rows_unrecorded(was);let value=result?;restored?;Ok(value)
+        let restored=paused.map_or(Ok(()),|was|self.compute.rows_unrecorded(was).map(|_|()));let value=result?;restored?;Ok(value)
     }
     fn rows_pass_body(&self,tokens:&[u32],state:&State<C::Value>,head:HeadRows,keep:u8)->Result<(Vec<Vec<f32>>,State<C::Value>,Option<OpenRows<C::Value>>)> {
         let c=self.checkpoint;let d=c.description();let m=tokens.len();

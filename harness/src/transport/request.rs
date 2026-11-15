@@ -137,22 +137,26 @@ mod connect_tests {
     #[test]
     fn lookup_and_connect_spend_one_shared_deadline() {
         let endpoint = Endpoint::parse("http://lookup.invalid:80").unwrap();
+        // The lookup takes a small part of the budget. On a loaded machine a sleep runs long,
+        // and a lookup that used the whole budget would skip the connect (seen on a hosted Mac
+        // with 80 ms of 160 ms).
+        let (budget, lookup_time) = (Duration::from_millis(800), Duration::from_millis(100));
         let started = Instant::now();
-        let deadline = started + Duration::from_millis(160);
+        let deadline = started + budget;
         let mut tried = false;
         let result = connect_with(&endpoint, deadline, |_, lookup_deadline| {
             assert_eq!(lookup_deadline, deadline);
-            std::thread::sleep(Duration::from_millis(80));
+            std::thread::sleep(lookup_time);
             Ok(vec!["127.0.0.1:80".parse().unwrap()])
         }, |_, left| {
             tried = true;
-            assert!(left <= Duration::from_millis(80), "connect reset the lookup budget: {left:?}");
+            assert!(left <= budget - lookup_time, "connect reset the lookup budget: {left:?}");
             std::thread::sleep(left);
             Err(io::ErrorKind::TimedOut.into())
         });
         assert!(tried);
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
-        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(started.elapsed() < CONNECT_TIMEOUT);
     }
 
     #[test]

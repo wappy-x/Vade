@@ -11,6 +11,8 @@ mod two_spark;
 mod groups;
 #[path = "tests/pairs.rs"]
 mod pairs;
+#[path = "tests/pair_draft.rs"]
+mod pair_draft;
 #[path = "tests/local_rank.rs"]
 mod local_rank;
 #[path = "tests/fake_hosts.rs"]
@@ -292,7 +294,8 @@ fn fp4_chains_cover_every_supported_size_and_preserve_owned_recovery() {
         for index in 0..count {
             let args = session.engine_args(index);
             assert_eq!(args[0], index.to_string()); assert_eq!(args[1], count.to_string());
-            assert!(!args.iter().any(|arg| arg == "--tensor-map" || arg == "--mtp"));
+            assert!(!args.iter().any(|arg| arg == "--mtp"), "{count}");
+            assert!(!args.iter().any(|arg| arg == "--tensor-map"));
             if index + 1 < count { assert_eq!(session.ranks[index].next, session.ranks[index + 1].listen); }
         }
         if count != 2 {
@@ -1490,3 +1493,5 @@ fn saved_logs_show_every_rank_of_the_last_run() {
     assert_eq!(last_run_logs(vec!["a.log".into(), "notes.log".into()]), [std::path::PathBuf::from("notes.log")]);
     assert!(last_run_logs(Vec::new()).is_empty());
 }
+
+#[path = "tests/deep_text.rs"] mod deep_text;

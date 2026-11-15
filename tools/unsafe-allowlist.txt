@@ -2353,6 +2353,7 @@ engine/crates/gpu/kernels	src/mhc_boundary_chain.rs	fn:resident_mhc_boundary_rms
 engine/crates/gpu/kernels	src/mhc_boundary_fused.rs	fn:resident_mhc_boundary_finish	block:1
 engine/crates/gpu/kernels	src/mx_rows_small.rs	fn:decode	block:1
 engine/crates/gpu/kernels	src/resident_causal_chain.rs	fn:resident_launch_causal_chain	block:1
+engine/crates/gpu/kernels	src/resident_causal_group.rs	fn:resident_launch_causal_group	block:1
 engine/crates/gpu/kernels	src/resident_norm_tail.rs	fn:resident_launch_norm_tail	block:1
 engine/crates/gpu/kernels	src/resident_pointwise.rs	fn:resident_launch_pointwise	block:1
 engine/crates/gpu/kernels	src/scores_rows_tile.rs	fn:scores_rows_tile_packed	block:1

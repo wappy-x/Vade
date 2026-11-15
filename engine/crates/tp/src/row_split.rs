@@ -4,6 +4,7 @@ use engine_model::plan::{admission::CheckpointAdmission,layer::Topology};
 use spark_gpu_probe::{causal_ops::{Shape,Op},norm_boundary::NormShape};
 use std::{cell::{Cell,RefCell},collections::BTreeMap};
 mod batch;
+mod draft_admission;
 #[cfg(test)] mod validation_tests;
 mod kept_charge;
 #[cfg(test)] mod kept_charge_tests;
@@ -183,6 +184,7 @@ impl<C:Compute,E:Exchange> Compute for Split<C,E> {
     fn warm_routed_rows(&self,steps:&[engine_model::plan::layer::Step],picks:usize,max_rows:usize)->Result<()> {self.compute.warm_routed_rows(steps,picks,max_rows)}
     fn rows_release(&self)->Result<()> {self.compute.rows_release()}
     fn rows_keep(&self)->Result<()> {self.compute.rows_keep()}
+    fn rows_return_lease(&self)->Result<()> {self.compute.rows_return_lease()}
     fn rows_unrecorded(&self,p:bool)->Result<bool> {self.compute.rows_unrecorded(p)}
     fn prompt_end(&self)->Result<()> {self.compute.prompt_end()}
     fn prompt_seeds(&self)->bool {self.compute.prompt_seeds()}
@@ -287,6 +289,7 @@ impl<C:Compute> Compute for &C {
     fn warm_routed_rows(&self,steps:&[engine_model::plan::layer::Step],picks:usize,max_rows:usize)->Result<()> {(**self).warm_routed_rows(steps,picks,max_rows)}
     fn rows_release(&self)->Result<()> {(**self).rows_release()}
     fn rows_keep(&self)->Result<()> {(**self).rows_keep()}
+    fn rows_return_lease(&self)->Result<()> {(**self).rows_return_lease()}
     fn rows_unrecorded(&self,p:bool)->Result<bool> {(**self).rows_unrecorded(p)}
     fn prompt_end(&self)->Result<()> {(**self).prompt_end()}
     fn prompt_seeds(&self)->bool {(**self).prompt_seeds()}
@@ -360,10 +363,12 @@ impl<V> std::ops::Deref for KeptSlot<V> {type Target=crate::bounded_decoder::Par
 /// hidden rows, the fewest groups that hold PROMPT_TRAIL rows) until its first verify pass takes them.
 pub struct Factory<'f,C:Compute,E> {checkpoint:&'f CheckpointAdmission,split:Split<C,E>,context:usize,eos:Vec<u32>,prepared:crate::bounded_decoder::Prepared<'f>,reservation:usize,workspace:usize,resident:usize,memo_admitted:bool,
     /// Rows of the prompt group a chat reads in while no other chat waits. `negotiate_prompt_group` sets it.
-    group:usize,active:Cell<usize>,next_id:Cell<u64>,failed:Cell<bool>,failure:RefCell<Option<String>>,predictor:usize,charge_plan:crate::admission_plan::SessionChargePlan,with_layer:Option<crate::admission_plan::StateChargePlan>,tails:RefCell<BTreeMap<u64,Vec<(Vec<u32>,crate::bounded_decoder::OpenRows<C::Value>)>>>,
+    group:usize,lease_extra:[usize;2],lease_rows:Cell<usize>,lease_bytes:Cell<usize>,active:Cell<usize>,next_id:Cell<u64>,failed:Cell<bool>,failure:RefCell<Option<String>>,predictor:usize,charge_plan:crate::admission_plan::SessionChargePlan,with_layer:Option<crate::admission_plan::StateChargePlan>,tails:RefCell<BTreeMap<u64,Vec<(Vec<u32>,crate::bounded_decoder::OpenRows<C::Value>)>>>,
     /// DEFAULT DRAFTING. `trial_always`: test control. `trial_counts`: trials that started real drafting, real drafting that stopped, trials that gave up.
     /// `answer_marker`: the token that ends an answer's think block; a trial makes its first shadow there (trial.rs).
     trial_always:Cell<bool>,trial_counts:Cell<[u32;3]>,answer_marker:Cell<Option<u32>>,
+    /// Test control: a request above TRIAL_DEPTH proposes its whole depth in every cycle (`set_deep_always`).
+    deep_always:Cell<bool>,
     /// Print only: when the last served batch step ended (the SERVED BATCH line gives the time since then).
     batch_ended:Cell<Option<std::time::Instant>>,
     /// Whether sessions of this service can be forked (`with_prompt_keep`). Off: no prompt is kept, as before.
@@ -382,7 +387,7 @@ impl<'f,C:Compute,E:Exchange> Factory<'f,C,E> {
         let workspace=workspace.checked_add(prepared.fused_boundary_scratch()?.1).ok_or("boundary workspace charge overflow")?;
         if eos.is_empty() || eos.iter().any(|&id|u64::from(id)>=checkpoint.description().vocab) {return Err("service EOS set is invalid".into());}
         let resident=split.memory_bytes().map_or(0,|m|m.0);
-        Ok(Self {checkpoint,split,context,eos,prepared,reservation,workspace,resident,memo_admitted:false,group:crate::bounded_decoder::PROMPT_GROUP,active:Cell::new(0),next_id:Cell::new(1),failed:Cell::new(false),batch_ended:Cell::new(None),failure:RefCell::new(None),predictor:0,charge_plan:crate::admission_plan::SessionChargePlan::for_sparse_heads(checkpoint.description(),topology,context)?,with_layer:None,tails:RefCell::new(BTreeMap::new()),trial_always:Cell::new(false),trial_counts:Cell::new([0;3]),answer_marker:Cell::new(None),keep:false,#[cfg(test)] kept_tail:kept_charge::Tail::new(checkpoint.description(),topology)?,kept:Cell::new(0),kept_account:Cell::new(None)})
+        Ok(Self {checkpoint,split,context,eos,prepared,reservation,workspace,resident,memo_admitted:false,group:crate::bounded_decoder::PROMPT_GROUP,lease_extra:[0;2],lease_rows:Cell::new(0),lease_bytes:Cell::new(0),active:Cell::new(0),next_id:Cell::new(1),failed:Cell::new(false),batch_ended:Cell::new(None),failure:RefCell::new(None),predictor:0,charge_plan:crate::admission_plan::SessionChargePlan::for_sparse_heads(checkpoint.description(),topology,context)?,with_layer:None,tails:RefCell::new(BTreeMap::new()),trial_always:Cell::new(false),trial_counts:Cell::new([0;3]),answer_marker:Cell::new(None),deep_always:Cell::new(false),keep:false,#[cfg(test)] kept_tail:kept_charge::Tail::new(checkpoint.description(),topology)?,kept:Cell::new(0),kept_account:Cell::new(None)})
     }
     /// Let the server's prompt cache fork this service's sessions (`Session::fork`). Every rank of the service
     /// makes the same call. Without it a session cannot be forked and no prompt is kept.
@@ -524,6 +529,10 @@ impl<'f,C:Compute,E:Exchange> Factory<'f,C,E> {
     fn release_count<V>(&self,state:&crate::bounded_decoder::Parked<V>) {self.kept.set(self.kept.get().saturating_sub(1));let mut account=self.take_account();account.owners.release(state.owners().expect("parked owner metadata"));self.kept_account.set(Some(account));}
     /// Test control: a trial starts real drafting at its first closed shadow, whatever it matched. No server calls this.
     pub fn set_trial_always(&self) {self.trial_always.set(true);}
+    /// Test control: while on, a request whose depth is above TRIAL_DEPTH proposes its whole depth in every cycle,
+    /// whatever its proposals kept (deeper.rs). A test model keeps few proposals, so its cycles would stay at
+    /// TRIAL_DEPTH and no deep chain or deep check pass would run. No server calls this.
+    pub fn set_deep_always(&self,on:bool) {self.deep_always.set(on);}
     /// DEFAULT DRAFTING: the token that ends an answer's think block. A trial makes its first shadow when the request's own
     /// steps give it (trial.rs THINK_WAIT). The controller sets it once, before it serves; the worker needs none.
     pub fn set_answer_marker(&self,token:u32) {self.answer_marker.set(Some(token));}
@@ -534,7 +543,7 @@ impl<'f,C:Compute,E:Exchange> Factory<'f,C,E> {
     /// proposals a pass (mtp_depth). Every rank of the service makes the same call.
     pub fn with_predictor(mut self,depth:usize)->Result<Self> {
         if self.memo_admitted {return Err("predictor preparation follows memo admission".into());}
-        if !(1..=3).contains(&depth) {return Err("predictor depth is outside 1..=3".into());}
+        if !(1..=spark_engine::draft::PREDICTOR_DEPTH_MAX).contains(&depth) {return Err(format!("predictor depth is outside 1..={}",spark_engine::draft::PREDICTOR_DEPTH_MAX));}
         let prepared={
             let mut decoder=Decoder::from_prepared(&self.prepared,&self.split,self.context as u64,self.active.get())?;
             decoder.enable_predictor()?;
@@ -562,7 +571,7 @@ impl<'f,C:Compute,E:Exchange> Factory<'f,C,E> {
         let plan=crate::projection_memo::agree(&records,LIVE_SESSIONS)?;
         let locked=self.split.freeze_memo(plan)?;
         if locked!=plan {return Err("memo device capacity differs from its startup charge".into());}
-        self.workspace=crate::service_memory::with_memo_bound(self.workspace,locked)?;self.memo_admitted=true;
+        self.workspace=crate::service_memory::with_memo_bound(self.workspace,locked)?;self.memo_admitted=true;self.init_prompt_lease_plan()?;
         eprintln!("TEXT MEMO rank={} loaded={:?} chats={} bound_bytes={} released_bytes={}",self.split.topology.rank,locked.summary(),LIVE_SESSIONS,locked.bytes(),crate::projection_memo::FULL-locked.bytes());
         Ok(self)
     }
@@ -574,13 +583,13 @@ pub fn workspace_reservation_bytes(&self)->usize {self.workspace}
     fn prompt_group(&self,decoder:&Decoder<'_,&Split<C,E>>,tokens:&[u32],old:&State<C::Value>,live:usize,id:u64,last:bool)->Result<(Vec<Vec<f32>>,State<C::Value>)> {
         // Kept prompts hold state too. With `--no-prompt-keep` nothing is kept and nothing cold is read.
         let kept_bytes=if self.keep {self.kept_bytes()} else {0};
-        let charge=self.reservation.saturating_mul(live).saturating_add(self.resident).saturating_add(self.workspace).saturating_add(kept_bytes);
+        let charge=self.reservation.saturating_mul(live).saturating_add(self.resident).saturating_add(self.workspace).saturating_add(self.lease_bytes.get()).saturating_add(kept_bytes);
         // The group's spare buffers stay under what admission charged for the sessions now live (`group_pool_cap`).
         self.split.rows_charge(charge);
         let whole=self.split.rows_peak_begin();decoder.set_memo_seed(last && self.split.prompt_seeds());
         // With the predictor loaded the group also keeps the hidden states of its last PROMPT_TRAIL rows (the predictor's
         // trail reads no earlier row), in storage of their own: 8 MB at most, whatever the group size.
-        let result=if self.predictor>0 {decoder.prefill_rows_hidden(tokens,old,crate::bounded_decoder::HeadRows::Last).and_then(|(logits,next,open)|{
+        let result=if decoder.predictor_enabled() {decoder.prefill_rows_hidden(tokens,old,crate::bounded_decoder::HeadRows::Last).and_then(|(logits,next,open)|{
                 let open=decoder.open_tail(open,crate::bounded_decoder::PROMPT_TRAIL)?;let kept=tokens.len().min(crate::bounded_decoder::PROMPT_TRAIL);
                 let mut tails=self.tails.borrow_mut();let groups=tails.entry(id).or_default();groups.push((tokens[tokens.len()-kept..].to_vec(),open));
                 while groups.len()>1 && groups[1..].iter().map(|group|group.0.len()).sum::<usize>()>=crate::bounded_decoder::PROMPT_TRAIL {groups.remove(0);}Ok((logits,next))})}
@@ -663,12 +672,12 @@ pub fn workspace_reservation_bytes(&self)->usize {self.workspace}
                     eprintln!("TEXT RELEASE rank={} active=0 kept=0 kept_bytes={}",self.split.topology.rank,self.kept_bytes());self.split.cost_report("shutdown");return Ok(());},
                 1=>{if id==0 || sessions.contains_key(&id) || sessions.len()>=LIVE_SESSIONS {return Err("worker session identity or capacity differs".into());}
                     let decoder=Decoder::from_prepared(&self.prepared,&self.split,self.context as u64,sessions.len())?;let state=decoder.zero_state()?;sessions.insert(id,(decoder,Some(state),None::<Verify<C::Value>>));self.split.exchange.borrow_mut().complete()?;},
-                2|4|5|12=>{let live=sessions.len();self.split.work(|| {let (decoder,state,open)=sessions.get_mut(&id).ok_or("worker command has no session")?;
+                2|4|5|12=>{let live=sessions.len();let result=self.split.work(|| {let (decoder,state,open)=sessions.get_mut(&id).ok_or("worker command has no session")?;
                     // A plain step of a session with open verify rows settles them first, as the controller does (Session::settle).
                     if state.is_none() && let Some(rows)=open.take() {if rows.carried()>0 {return Err("worker plain step has carried rows".into());}*state=Some(rows.settle(decoder)?);}
                     let state=state.as_mut().ok_or("worker session has open verify rows")?;
                     let last=code==5 && token&LAST_GROUP!=0;
-                    let next=if code==5 {let rows=(token&(LAST_GROUP-1)) as usize;if rows==0 || rows>self.group {return Err("worker prompt group exceeds its bound".into());}
+                    let next=if code==5 {let rows=(token&(LAST_GROUP-1)) as usize;if rows==0 || rows>self.current_prompt_group() {return Err("worker prompt group exceeds its bound".into());}
                         let mut bytes=vec![0;rows*4];self.split.exchange.borrow_mut().command_payload(&mut bytes)?;
                         let tokens=bytes.as_chunks::<4>().0.iter().map(|b|u32::from_le_bytes(*b)).collect::<Vec<_>>();self.prompt_group(decoder,&tokens,state,live,id,last)?.1
                     } else if code==12 {decoder.step_greedy(token,state,|_,_|Ok(()))?.1} else {decoder.step(token,state,|_,_|Ok(()))?.2};
@@ -676,18 +685,23 @@ pub fn workspace_reservation_bytes(&self)->usize {self.workspace}
                     // The prompt's last group is done and the state before it is gone: decode steps follow. The pool is trimmed
                     // now, on this rank as on the controller, off the first decode step.
                     if last {self.split.prompt_end()?;}Ok(())
-                })?;},
+                });let returned=self.return_prompt_lease();result?;returned?;},
+                26=>{self.return_prompt_lease()?;self.split.exchange.borrow_mut().complete()?;},
+                25=>{self.agree_prompt_lease(usize::try_from(id).map_err(|_|"prompt lease exceeds address space")?,sessions.len())?;self.split.exchange.borrow_mut().complete()?;},
                 3=>{self.tails.borrow_mut().remove(&id);if sessions.remove(&id).is_none() {return Err("worker drop has no session".into());}self.capture_report(id);self.split.exchange.borrow_mut().complete()?;},
                 // Command 13: one batch step. `token` is the row count; each row follows as a session ID and its input token.
                 13=>self.worker_batch(&mut sessions,token as usize)?,
                 // The same verify pass and the same kept prefix as the controller, so both ranks hold one state.
                 // Commands 9 to 11: a proposal chain of depth 1 to 3 after `token`. Commands 18 to 20: a trial
-                // lookback probe of depth 1 to 3 ending at `token`. Both seed the prompt tail on the first call,
+                // lookback probe of depth 1 to 3 ending at `token`. Commands 21 to PROPOSE_DEEP_LAST: a proposal
+                // chain of depth 4 and more (`propose_command`). All seed the prompt tail on the first call,
                 // so a short request that never proposes or probes never touches its prompt tail.
-                9..=11|18..=20=>{self.split.work(|| {let (decoder,_,open)=sessions.get_mut(&id).ok_or("worker command has no session")?;
+                9..=11|18..=PROPOSE_DEEP_LAST=>{self.split.work(|| {let (decoder,_,open)=sessions.get_mut(&id).ok_or("worker command has no session")?;
                     let open=open.as_mut().ok_or("worker proposal has no open rows")?;
+                    // A chain deeper than this rank's loaded predictor is a command the controller never sends.
+                    let depth=(if code<=11 {code-8} else {code-17}) as usize;if depth>self.predictor {return Err("worker proposal exceeds the loaded predictor depth".into());}
                     if let Some(groups)=self.tails.borrow_mut().remove(&id) {open.seed_trail(decoder,&groups)?;}
-                    if code<=11 {open.propose(decoder,token,(code-8) as usize)?;} else {open.probe(decoder,token,(code-17) as usize)?;}
+                    if (18..=20).contains(&code) {open.probe(decoder,token,depth)?;} else {open.propose(decoder,token,depth)?;}
                     self.split.exchange.borrow_mut().complete()
                 })?;},
                 // Command 8 is a pass of one row: its token rides in the command. Command 14 is the same
@@ -696,11 +710,18 @@ pub fn workspace_reservation_bytes(&self)->usize {self.workspace}
                     let tokens=if code!=6 {vec![token]} else {let rows=token as usize;if !(2..=crate::bounded_decoder::VERIFY_ROWS).contains(&rows) {return Err("worker verify pass exceeds its bound".into());}
                         let mut bytes=vec![0;rows*4];self.split.exchange.borrow_mut().command_payload(&mut bytes)?;
                         bytes.as_chunks::<4>().0.iter().map(|b|u32::from_le_bytes(*b)).collect::<Vec<_>>()};
-                    if open.is_none() {let mut fresh=Verify::new(state.take().ok_or("worker session has no state")?);if self.predictor>0 {fresh.track_proposer();}*open=Some(fresh);}
+                    if open.is_none() {let mut fresh=Verify::new(state.take().ok_or("worker session has no state")?);if decoder.predictor_enabled() {fresh.track_proposer();}*open=Some(fresh);}
                     if code==14 {open.as_mut().unwrap().row_greedy(decoder,token)?.ok_or("worker greedy pass has carried rows")?;} else {open.as_mut().unwrap().rows(decoder,&tokens)?;}
                     self.split.exchange.borrow_mut().complete()
                 })?;},
                 7=>{self.split.work(|| {let (decoder,_,open)=sessions.get_mut(&id).ok_or("worker command has no session")?;open.as_mut().ok_or("worker truncation has no open rows")?.truncate(decoder,u64::from(token))?;self.split.exchange.borrow_mut().complete()})?;},
+                draft_admission::PREDICTOR_MODE=>{self.split.work(|| {
+                    if token>1 {return Err("invalid predictor mode".into());}
+                    let (decoder,state,open)=sessions.get_mut(&id).ok_or("predictor mode has no session")?;
+                    draft_admission::set_mode(decoder,state,open,&self.prepared,token!=0)?;
+                    if token==0 {self.tails.borrow_mut().remove(&id);}
+                    self.split.exchange.borrow_mut().complete()
+                })?;},
                 // Commands 15 to 17: a kept prompt (`kept_command`). Out of this loop, so the step arms keep their code.
                 15..=17=>self.kept_command(code,id,&mut sessions,&mut kept)?,
                 _=>return Err("unknown row split service command".into()),
@@ -742,7 +763,9 @@ pub fn workspace_reservation_bytes(&self)->usize {self.workspace}
         // either opens the session (`kept_vote`). A refusal drops the rebuilt rows here, and the kept prompt with them
         // on both ranks (the controller marks its handle gone).
         // The decoder is made outside the votes, as on the controller: a failure there stops this rank loudly.
-        let decoder=Decoder::from_prepared(&self.prepared,&self.split,self.context as u64,sessions.len())?;
+        let mut decoder=Decoder::from_prepared(&self.prepared,&self.split,self.context as u64,sessions.len())?;
+        // A cached fork has not been configured or funded for drafting yet.
+        decoder.set_prepared_predictor(&self.prepared,false);
         let local=match self.resume_parked(&decoder,parked) {Ok(state)=>Ok((decoder,state)),Err(error)=>Err(error)};
         match self.kept_vote(local)? {
             Ok((decoder,state))=>{sessions.insert(new,(decoder,Some(state),None::<Verify<C::Value>>));},
@@ -752,9 +775,21 @@ pub fn workspace_reservation_bytes(&self)->usize {self.workspace}
     }
 }
 
+mod prompt_lease;
 mod gate;
 mod price;
 mod trial;
+mod deeper;
+/// The command of a proposal chain of `depth` tokens. Depths 1 to 3 keep commands 9 to 11. Commands 12 to 20 have
+/// other owners, so a deeper chain takes the commands after them: depth 4 is command 21, and the largest depth
+/// is PROPOSE_DEEP_LAST. The worker reads the depth back from the command, so both ranks run the same chain.
+fn propose_command(depth:usize)->u32 {if depth<=3 {8+depth as u32} else {17+depth as u32}}
+/// The command of the deepest proposal chain.
+const PROPOSE_DEEP_LAST:u32=17+spark_engine::draft::PREDICTOR_DEPTH_MAX as u32;
+// Commands 25 and 26 are the prompt lease (`prompt_lease.rs`): a deeper predictor must not reach them.
+const _:()=assert!(PROPOSE_DEEP_LAST<25,"deep proposal commands reach the prompt lease commands");
+// A check pass of the deepest proposal is one pass: its rows fit the pass bound.
+const _:()=assert!(spark_engine::draft::PREDICTOR_DEPTH_MAX>=3 && spark_engine::draft::PREDICTOR_DEPTH_MAX<crate::bounded_decoder::VERIFY_ROWS);
 use gate::Gate;pub use gate::Account;use trial::Trial;pub use trial::{TRIAL_DEPTH,TRIAL_START};
 /// DEFAULT DRAFTING: where a request that named no draft mode stands. Off: a plain or a strict request. Trial: it
 /// decodes by its own steps and makes shadows (trial.rs). Drafting: its trial started real drafting (`strict` is set).
@@ -776,6 +811,8 @@ pub struct Session<'a,C:Compute,E:Exchange> {factory:&'a Factory<'a,C,E>,decoder
     kept:Option<KeptSlot<C::Value>>}
 impl<C:Compute,E:Exchange> spark_serve::Engine for Factory<'_,C,E> {
     type Session<'a>=Session<'a,C,E> where Self:'a;
+    fn prepare_prompt_workspace(&self,available:usize)->Result<()> {self.prepare_prompt_lease(available)}
+    fn finish_prompt_workspace(&self)->Result<()> {self.cancel_prompt_lease()}
     fn profile_serving(&self)->bool {self.split.serving_trace()}
     fn profile_tick_begin(&self,tick:u64) {self.split.profile_tick_begin(tick)}
     fn profile_tick_end(&self) {self.split.profile_tick_end()}
@@ -798,7 +835,13 @@ impl<C:Compute,E:Exchange> spark_serve::Engine for Factory<'_,C,E> {
     fn eos_token_ids(&self)->&[u32] {&self.eos}
     fn session_reservation_bytes(&self)->Option<usize> {self.state_reservation(1).ok()}
     fn request_reservation_bytes(&self,tokens:usize)->Option<usize> {self.state_reservation(tokens).ok()}
-    fn request_reservation_bytes_for_prompt(&self,prompt:usize,tokens:usize,_plain:bool,_cached:Option<usize>,_retain:bool)->Option<usize> {self.prompt_state_reservation(prompt,tokens).ok()}
+    fn request_reservation_bytes_for_prompt(&self,prompt:usize,tokens:usize,plain:bool,_cached:Option<usize>,_retain:bool)->Option<usize> {
+        if tokens==0 || tokens>self.context || prompt>tokens {return None;}
+        if plain {self.charge_plan.request(prompt,tokens).ok()} else {self.prompt_state_reservation(prompt,tokens).ok()}
+    }
+    fn request_reservation_bytes_for_request(&self,prompt:usize,tokens:usize,plain:bool,cached:Option<usize>,retain:bool,request:&spark_serve::protocol::Request)->Option<usize> {
+        self.request_reservation_bytes_for_prompt(prompt,tokens,plain || !draft_admission::request_can_draft(request),cached,retain)
+    }
     fn reserve_foreground_slot(&self)->bool {false}
     fn shared_prompt_limit(&self)->usize {0}
     fn shared_prefill_batch(&self)->bool {true}
@@ -809,6 +852,7 @@ impl<C:Compute,E:Exchange> spark_serve::Engine for Factory<'_,C,E> {
     fn shared_prefill_rows(&self)->usize {crate::bounded_decoder::BATCH_ROWS*crate::bounded_decoder::PROMPT_GROUP}
     /// Proposed tokens are verified for one chat. More chats decode plain rows.
     fn single_chat_draft(&self)->bool {true}
+    fn discard_contended_draft(&self)->bool {true}
     fn lone_chat_rows(&self)->usize {crate::bounded_decoder::VERIFY_ROWS}
     /// One decode row a tick for each plain chat; `step_batch` joins them in one batch step when enough ride.
     fn shared_decode_rows(&self)->usize {crate::bounded_decoder::BATCH_ROWS}
@@ -862,10 +906,10 @@ impl<C:Compute,E:Exchange> Session<'_,C,E> {
     fn prompt(&mut self,tokens:&[u32],last:bool)->Result<Vec<f32>> {if let Some(error)=self.factory.failure_reason() {return Err(error);}
         // A session that only holds a kept prompt reads nothing. Refused here, before `finish`: the service stays whole.
         if self.kept.is_some() {return Err("row split session only holds a kept prompt".into());}
-        if tokens.is_empty() {return Err("empty row split prompt".into());}let factory=self.factory;factory.finish(factory.split.work(||self.prompt_inner(tokens,last)))}
+        if tokens.is_empty() {return Err("empty row split prompt".into());}let factory=self.factory;factory.finish(factory.split.work(||{let result=self.prompt_inner(tokens,last);let returned=factory.return_prompt_lease();let value=result?;returned?;Ok(value)}))}
     fn prompt_inner(&mut self,tokens:&[u32],last:bool)->Result<Vec<f32>> {
-        if tokens.is_empty() {return Err("empty row split prompt".into());}let mut logits=Vec::new();let groups=tokens.len().div_ceil(self.factory.group);
-        for (group,tokens) in tokens.chunks(self.factory.group).enumerate() {let last=last && group+1==groups;
+        if tokens.is_empty() {return Err("empty row split prompt".into());}let mut logits=Vec::new();let rows=self.factory.current_prompt_group();let groups=tokens.len().div_ceil(rows);
+        for (group,tokens) in tokens.chunks(rows).enumerate() {let last=last && group+1==groups;
             if self.factory.failed.get() {return Err("row split service previously failed".into());}
             let old=self.state.as_ref().ok_or("row split prompt has no state")?;
             if old.position.checked_add(tokens.len() as u64).is_none_or(|n|n>self.factory.context as u64)
@@ -978,7 +1022,7 @@ impl<C:Compute,E:Exchange> Session<'_,C,E> {
         let started=std::time::Instant::now();let factory=self.factory;if factory.failed.get() {return Err("row split service previously failed".into());}
         if self.open.is_none() {
             // The prompt tail stays in `factory.tails` until the first proposal or probe, so short answers never touch it.
-            let mut fresh=Verify::new(self.state.take().ok_or("row split session has no state")?);if factory.predictor>0 {fresh.track_proposer();}self.open=Some(fresh);}
+            let mut fresh=Verify::new(self.state.take().ok_or("row split session has no state")?);if self.decoder.predictor_enabled() {fresh.track_proposer();}self.open=Some(fresh);}
         let open=self.open.as_mut().unwrap();let (position,carried)=(open.position(),open.carried());
         if position.checked_add(tokens.len() as u64).is_none_or(|n|n>factory.context as u64) {return Err("row split verify pass exceeds context".into());}
         factory.failed.set(true);let picked=greedy && tokens.len()==1 && carried==0;
@@ -1009,7 +1053,7 @@ impl<C:Compute,E:Exchange> Session<'_,C,E> {
         if depth==0 || u64::from(next)>=factory.checkpoint.description().vocab {return Ok((Vec::new(),0.0));}
         // The layer runs now: the pass after it is not a steady step, whatever its row count.
         let (decoder,id)=(&self.decoder,self.id);self.after_step=false;
-        factory.finish((|| -> Result<(Vec<u32>,f64)> {factory.failed.set(true);factory.split.command_for(8+depth as u32,next,id)?;
+        factory.finish((|| -> Result<(Vec<u32>,f64)> {factory.failed.set(true);factory.split.command_for(propose_command(depth),next,id)?;
             let tokens=factory.split.work(||{if let Some(groups)=factory.tails.borrow_mut().remove(&id) {open.seed_trail(decoder,&groups)?;}open.propose(decoder,next,depth)})?;
             factory.split.exchange.borrow_mut().complete()?;factory.failed.set(false);Ok(tokens)})())
     }
@@ -1022,6 +1066,12 @@ impl<C:Compute,E:Exchange> Session<'_,C,E> {
         factory.finish((|| -> Result<Option<(usize,f64)>> {factory.failed.set(true);factory.split.command_for(17+depth as u32,best,id)?;
             let out=factory.split.work(||{if let Some(groups)=factory.tails.borrow_mut().remove(&id) {open.seed_trail(decoder,&groups)?;}open.probe(decoder,best,depth)})?;
             factory.split.exchange.borrow_mut().complete()?;factory.failed.set(false);Ok(Some(out))})())
+    }
+    /// The most proposals this request's next cycle makes: its whole depth up to TRIAL_DEPTH, and above it the depth
+    /// that its kept proposals set (deeper.rs).
+    fn cycle_depth(&mut self)->usize {
+        let most=self.depth.min(self.factory.predictor);let depth=self.gate.deeper.depth(most);
+        if self.factory.deep_always.get() {most} else {depth}
     }
     /// The proposer's account of this request so far.
     pub fn proposer_account(&self)->Account {self.gate.account()}
@@ -1087,7 +1137,8 @@ impl<'a,C:Compute,E:Exchange> Session<'a,C,E> {
         // rank (the shared budget, on the data ring). A failure there is a wire failure, or leaves the ranks half way
         // through that collective: voted away, the next collective would read the other rank's old words. So it is
         // the loud stop on both ranks, as for a cold chat: the cache adds no stop here that a cold read does not have.
-        let decoder=Decoder::from_prepared(&factory.prepared,&factory.split,factory.context as u64,factory.active.get()-1)?;
+        let mut decoder=Decoder::from_prepared(&factory.prepared,&factory.split,factory.context as u64,factory.active.get()-1)?;
+        decoder.set_prepared_predictor(&factory.prepared,false);
         // Only the rebuild is voted: it runs on this rank alone.
         let began=std::time::Instant::now();
         let local=match factory.resume_parked(&decoder,kept) {Ok(state)=>Ok((decoder,state)),Err(error)=>Err(error)};
@@ -1174,9 +1225,12 @@ impl<C:Compute,E:Exchange> spark_engine::draft::Target for Session<'_,C,E> {
     fn adaptive_model_depth(&self)->bool {true}
     // How deep the next proposal is (price.rs): a request of depth 2 or more proposes its whole depth or nothing, by
     // its own measured record or when the caller asks for the whole depth; a request of depth 1 takes the caller's depth.
+    // A request above TRIAL_DEPTH proposes the depth its kept proposals set (deeper.rs) or nothing, by the same record;
+    // for it the caller asks for the whole depth only with the request's own depth, not with the depth of this cycle.
     fn limit_model_depth(&mut self,depth:usize) {
-        let whole=self.depth.min(self.factory.predictor);
-        self.limit=match self.step_ms {Some(step)=>self.gate.pay.depth(whole,self.gate.begun(),depth,step),None=>depth};
+        let most=self.depth.min(self.factory.predictor);let whole=self.cycle_depth();
+        let pick=if most>trial::TRIAL_DEPTH && depth<most {depth.min(whole.saturating_sub(1))} else {depth};
+        self.limit=match self.step_ms {Some(step)=>self.gate.pay.depth(whole,self.gate.begun(),pick,step),None=>pick};
     }
     fn model_verify_ms(&self,rows:usize)->Option<f64> {
         if rows==0 {return None;}let cost=self.pass_cost(rows)?;
@@ -1191,11 +1245,13 @@ impl<C:Compute,E:Exchange> spark_engine::draft::Target for Session<'_,C,E> {
         // price moves with one slow pass (the same request drafted with 229 or with under 100 proposals, 2026-11-11):
         // it proposes its full depth in every cycle, and it stops for good when its own cycles lose (Gate::losing:
         // a score in tokens over its real cycles, no time). The request then decodes by plain steps (`draft_over`).
+        // With a predictor deeper than TRIAL_DEPTH the full depth of a cycle is the depth the kept proposals set
+        // (deeper.rs): TRIAL_DEPTH at first, deeper only while the deeper proposals are kept. It holds no time either.
         if self.phase==Phase::Drafting && self.gate.losing() {self.phase=Phase::Over;self.factory.trial_counted(1);let step=self.step_low.unwrap_or(0.0);
             eprintln!("SERVED DRAFT STOP rank={} session={} cycles={} score={} net_ms={:.1} step_ms={step:.1}",self.factory.split.topology.rank,self.id,self.gate.cycles(),self.gate.score(),self.gate.net_ms(step));}
         if self.phase==Phase::Over {return Ok(Some(spark_engine::draft::ModelProposal {tokens:Vec::new(),proposal_ms:0.0,catchup_ms:0.0}));}
         if !self.gate.allows(self.step_ms) {return Ok(Some(spark_engine::draft::ModelProposal {tokens:Vec::new(),proposal_ms:0.0,catchup_ms:0.0}));}
-        let limit=limit.min(if self.phase==Phase::Drafting {self.depth.min(self.factory.predictor)} else {self.limit});if limit==0 {return Ok(Some(spark_engine::draft::ModelProposal {tokens:Vec::new(),proposal_ms:0.0,catchup_ms:0.0}));}
+        let limit=limit.min(if self.phase==Phase::Drafting {self.cycle_depth()} else {self.limit});if limit==0 {return Ok(Some(spark_engine::draft::ModelProposal {tokens:Vec::new(),proposal_ms:0.0,catchup_ms:0.0}));}
         let entry=spark_engine::draft::Target::checkpoint(self) as u64;let waiting=self.open.as_ref().map_or(0,Verify::waiting)+self.factory.tail_rows(self.id);
         let started=std::time::Instant::now();let (tokens,waited)=self.propose(next,limit)?;let total=started.elapsed().as_secs_f64();
         if !tokens.is_empty() {self.gate.proposed((total-waited).max(0.0)*1000.0,waited*1000.0,entry,started,tokens.len(),waiting.saturating_sub(1));}
@@ -1215,8 +1271,19 @@ impl<C:Compute,E:Exchange> spark_serve::Session for Session<'_,C,E> {
         // "plain", a smaller depth, caps at or under TRIAL_START, and sampled requests decode by plain steps.
         let default=matches!(r.draft,None|Some(DraftMode::Auto)) && r.mtp_depth.is_some_and(|depth|depth>=trial::TRIAL_DEPTH) && r.max_tokens>trial::TRIAL_START as usize && spark_engine::draft::plain_greedy(r.sampling);
         self.strict=r.draft==Some(DraftMode::Strict);self.phase=if default {Phase::Trial} else {Phase::Off};self.trial=Trial::default();
-        self.depth=if self.strict {r.mtp_depth.unwrap_or(0)} else if default {trial::TRIAL_DEPTH} else {0};
-        if self.strict && !spark_engine::draft::plain_greedy(r.sampling) {return Err("strict drafting on the row split service requires greedy sampling".into());}Ok(())
+        // The whole depth of a request: the most proposals one of its cycles makes. A strict request and a request that
+        // names "auto" have their own mtp_depth. A request that omits both draft mode and depth (its mtp_depth is then the
+        // service's default, TRIAL_DEPTH) leaves the depth to the service: its trial probes at TRIAL_DEPTH, its real
+        // drafting starts there, and goes as deep as the loaded predictor while its deeper proposals are kept
+        // (deeper.rs). With a predictor of TRIAL_DEPTH that is TRIAL_DEPTH, as before.
+        self.depth=if self.strict {r.mtp_depth.unwrap_or(0)} else if !default {0} else if r.draft.is_none() && !r.mtp_depth_explicit {self.factory.predictor} else {r.mtp_depth.unwrap_or(trial::TRIAL_DEPTH)};
+        if self.strict && !spark_engine::draft::plain_greedy(r.sampling) {return Err("strict drafting on the row split service requires greedy sampling".into());}
+        self.predictor_mode(draft_admission::request_can_draft(r))
+    }
+    fn disable_model_draft(&mut self) {
+        self.end_trial();self.phase=Phase::Over;
+        // Keep strict until draft_over hands the speculator's pending canonical token back.
+        if let Err(error)=self.predictor_mode(false) {self.factory.remember(error);}
     }
     fn draft_target(&mut self)->Option<&mut dyn spark_engine::draft::Target> {if self.strict {Some(self)} else {None}}
     // DEFAULT DRAFTING: real drafting that a trial started has stopped: the scheduler drops its speculator.
@@ -1224,7 +1291,7 @@ impl<C:Compute,E:Exchange> spark_serve::Session for Session<'_,C,E> {
     fn step(&mut self,token:u32)->Result<Vec<f32>> {if self.strict || self.open.is_some() {return self.rows(&[token])?.pop().ok_or_else(||"verify pass has no row".into());}self.token(token,false)}
     fn prefill(&mut self,tokens:&[u32])->Result<Vec<f32>> {self.prompt(tokens,true)}
     fn prefill_advance(&mut self,tokens:&[u32])->Result<()> {self.prompt(tokens,false).map(|_|())}
-    fn prefill_chunk_size(&self,_:usize)->usize {self.factory.group}
+    fn prefill_chunk_size(&self,_:usize)->usize {self.factory.current_prompt_group()}
     fn prefill_chunk_min(&self)->usize {crate::bounded_decoder::PROMPT_SHARED}
     fn prefill_owns_chunks(&self)->bool {true}
     fn prefill_slice(&mut self,tokens:&[u32],final_chunk:bool,_budget:Option<std::time::Duration>,_prompt_end:usize)->Result<Option<Vec<f32>>> {

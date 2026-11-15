@@ -504,3 +504,5 @@ mod resident_launch_encode;
 mod resident_pointwise;
 #[cfg_attr(not(target_os="linux"),allow(dead_code))]
 mod resident_causal_chain;
+#[cfg_attr(not(target_os="linux"),allow(dead_code))]
+mod resident_causal_group;

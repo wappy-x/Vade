@@ -25,6 +25,7 @@ mod bus_shadow;
 mod resident_pointwise;
 mod resident_norm_tail;
 mod resident_causal_chain;
+mod resident_causal_group;
 #[path = "causal_ops.rs"]
 mod causal_operation;
 mod latent_absorption;

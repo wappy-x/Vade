@@ -23,7 +23,9 @@ pub enum Kind {Causal=1,Expert,Plain,Mx,Round,Copy,Put,Take,Prepare,Collapse,Com
     /// owner's quarters (nv_quarter_fold). ReduceTake: the take of the one sum exchange a sublayer (tp_reduce_take).
     NvQuarters=39,QuarterFold=40,ReduceTake=41,
     /// Original row kernels with indirect arguments. Their grids and arithmetic stay fixed.
-    MxRows2,MxRows4,MxRows8,MxRows8w,MixedRows,Fp8RowsSmall,Fp8RowsMulti,Fp8RowsFew,PlainRowsSmall,PromptRows,RowPrepare,RowGatedNorm,RowRoute,RowFold,RowPlace,RowPermute,RowSelect,TransposeSmem,DeviceRouteRows}
+    MxRows2,MxRows4,MxRows8,MxRows8w,MixedRows,Fp8RowsSmall,Fp8RowsMulti,Fp8RowsFew,PlainRowsSmall,PromptRows,RowPrepare,RowGatedNorm,RowRoute,RowFold,RowPlace,RowPermute,RowSelect,TransposeSmem,DeviceRouteRows,
+    /// One launch of 2 to 8 same-shape causal chains, or same-shape recurrent causal-fast calls. Each block row runs one member's own command.
+    CausalGroup=64}
 /// The payload word of an NvQuarters command that holds the quarters a row gets (4, 2 or 1). It is the first word
 /// past the command's LaunchArguments (112 bytes).
 pub const NV_QUARTERS_WORD:usize=14;
@@ -37,7 +39,7 @@ pub const NV_QUARTERS_WORD:usize=14;
 impl Kind {
     /// One more than the largest kind number: the length of a table indexed by kind.
     pub const COUNT:usize={let mut count=0;let mut at=0;while at<Self::ALL.len() {let next=Self::ALL[at] as usize+1;if next>count {count=next;}at+=1;}count};
-    pub const ALL:[Self;64]=[Self::MhcPhaseRms,Self::MhcPhaseDots,Self::MhcPhaseFinish,Self::MxRows2,Self::MxRows4,Self::MxRows8,Self::MxRows8w,Self::MixedRows,Self::Fp8RowsSmall,Self::Fp8RowsMulti,Self::Fp8RowsFew,Self::PlainRowsSmall,Self::PromptRows,Self::RowPrepare,Self::RowGatedNorm,Self::RowRoute,Self::RowFold,Self::RowPlace,Self::RowPermute,Self::RowSelect,Self::TransposeSmem,Self::DeviceRouteRows,Self::NvQuarters,Self::QuarterFold,Self::ReduceTake,Self::MhcBoundaryFused,Self::AbsorbDense,Self::AbsorbAttention,Self::MixedBf16,Self::PlainBatch,Self::CausalChain,Self::NormTail,Self::Pointwise,Self::ShadowSide,Self::PutJoin,Self::PutPlain,Self::ShadowPrefetch,Self::PutWide,Self::Causal,Self::Expert,Self::Plain,Self::Mx,Self::Round,Self::Copy,Self::Put,Self::Take,Self::Prepare,Self::Collapse,Self::Combine,Self::RmsPartials,Self::RmsApply,Self::Elementwise,Self::CopyWords,Self::ZeroWords,Self::Mixed,Self::NvStream,Self::CausalFast,Self::NvTile,Self::DeviceRoute,Self::TakeScatter,Self::PlainBf16,Self::MhcBoundaryRms,Self::MhcBoundaryDots,Self::MhcBoundaryFinish];
+    pub const ALL:[Self;65]=[Self::MhcPhaseRms,Self::MhcPhaseDots,Self::MhcPhaseFinish,Self::MxRows2,Self::MxRows4,Self::MxRows8,Self::MxRows8w,Self::MixedRows,Self::Fp8RowsSmall,Self::Fp8RowsMulti,Self::Fp8RowsFew,Self::PlainRowsSmall,Self::PromptRows,Self::RowPrepare,Self::RowGatedNorm,Self::RowRoute,Self::RowFold,Self::RowPlace,Self::RowPermute,Self::RowSelect,Self::TransposeSmem,Self::DeviceRouteRows,Self::NvQuarters,Self::QuarterFold,Self::ReduceTake,Self::MhcBoundaryFused,Self::AbsorbDense,Self::AbsorbAttention,Self::MixedBf16,Self::PlainBatch,Self::CausalChain,Self::NormTail,Self::Pointwise,Self::ShadowSide,Self::PutJoin,Self::PutPlain,Self::ShadowPrefetch,Self::PutWide,Self::Causal,Self::Expert,Self::Plain,Self::Mx,Self::Round,Self::Copy,Self::Put,Self::Take,Self::Prepare,Self::Collapse,Self::Combine,Self::RmsPartials,Self::RmsApply,Self::Elementwise,Self::CopyWords,Self::ZeroWords,Self::Mixed,Self::NvStream,Self::CausalFast,Self::NvTile,Self::DeviceRoute,Self::TakeScatter,Self::PlainBf16,Self::MhcBoundaryRms,Self::MhcBoundaryDots,Self::MhcBoundaryFinish,Self::CausalGroup];
     pub const ROWS:[Self;19]=[Self::MxRows2,Self::MxRows4,Self::MxRows8,Self::MxRows8w,Self::MixedRows,Self::Fp8RowsSmall,Self::Fp8RowsMulti,Self::Fp8RowsFew,Self::PlainRowsSmall,Self::PromptRows,Self::RowPrepare,Self::RowGatedNorm,Self::RowRoute,Self::RowFold,Self::RowPlace,Self::RowPermute,Self::RowSelect,Self::TransposeSmem,Self::DeviceRouteRows,];
     pub fn row(name:&str)->Option<Self> {match name {
         "mx_rows_small2"=>Some(Self::MxRows2),
@@ -87,7 +89,7 @@ impl Kind {
         Self::RmsPartials=>"resident_launch_rms_partials",Self::RmsApply=>"resident_launch_rms_apply",Self::NormTail=>"resident_launch_norm_tail",Self::Elementwise=>"resident_launch_elementwise",
         Self::CopyWords=>"resident_launch_copy_words",Self::ZeroWords=>"resident_launch_zero_words",Self::Mixed=>"resident_launch_mixed",
         Self::MixedBf16=>"resident_launch_mixed_bf16",Self::PlainBatch=>"resident_launch_plain_batch",
-        Self::NvStream=>"resident_launch_nv_stream",Self::CausalFast=>"resident_launch_causal_fast",Self::CausalChain=>"resident_launch_causal_chain",Self::NvTile=>"resident_launch_nv_tile",
+        Self::NvStream=>"resident_launch_nv_stream",Self::CausalFast=>"resident_launch_causal_fast",Self::CausalChain=>"resident_launch_causal_chain",Self::CausalGroup=>"resident_launch_causal_group",Self::NvTile=>"resident_launch_nv_tile",
         Self::DeviceRoute=>"resident_launch_device_route",Self::TakeScatter=>"resident_launch_take_scatter",Self::PutWide=>"resident_launch_put_wide",Self::PlainBf16=>"resident_launch_plain_bf16",
         Self::MhcPhaseRms=>"resident_launch_mhc_phase_rms",Self::MhcPhaseDots=>"resident_launch_mhc_phase_dots",Self::MhcPhaseFinish=>"resident_launch_mhc_phase_finish",Self::MhcBoundaryRms=>"resident_launch_mhc_boundary_rms",Self::MhcBoundaryDots=>"resident_launch_mhc_boundary_dots",Self::MhcBoundaryFinish=>"resident_launch_mhc_boundary_finish",Self::MhcBoundaryFused=>"resident_launch_mhc_boundary_fused",
         Self::NvQuarters=>"resident_launch_nv_quarters",Self::QuarterFold=>"resident_launch_quarter_fold",Self::ReduceTake=>"resident_launch_reduce_take",

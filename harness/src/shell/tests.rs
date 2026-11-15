@@ -521,10 +521,32 @@
             }
         }
     }
+    /// False on a Mac without ripgrep (a hosted test machine has none). The sandbox then cannot
+    /// start `rg` and exits 71, so a test of what `rg` may read has nothing to run.
+    #[cfg(target_os = "macos")]
+    fn rg_installed(f: &Fixture) -> bool {
+        let installed = tool_installed(f, "rg");
+        if !installed { eprintln!("ripgrep is not installed: the rg part of this test did not run"); }
+        installed
+    }
+    #[cfg(target_os = "macos")]
+    fn tool_installed(f: &Fixture, tool: &str) -> bool {
+        let probe = run(&f.workspace(), &spec(&[tool, "--version"], 5000), 4096, &AtomicBool::new(false)).unwrap();
+        !(probe.outcome == Outcome::Exited(Some(71)) && probe.stderr.contains(&format!("execvp() of '{tool}' failed")))
+    }
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_missing_tool_is_told_apart_from_a_tool_that_fails() {
+        let f = Fixture::new();
+        assert!(!tool_installed(&f, "a-tool-that-is-not-installed"));
+        // `ls --version` fails on a Mac, and ls is installed.
+        assert!(tool_installed(&f, "ls"));
+    }
     #[test]
     #[cfg(target_os = "macos")]
     fn prompt_free_recursive_search_denies_protected_content_but_may_report_names() {
         let f = Fixture::new();
+        if !rg_installed(&f) { return; }
         let components: Vec<String> = crate::tools::SECRET_PATH_RULES.iter().map(|rule| match rule.match_kind {
             crate::tools::SecretPathMatch::Exact => rule.value.to_owned(),
             crate::tools::SecretPathMatch::Prefix => format!("{}local", rule.value),
@@ -556,6 +578,7 @@
         assert_eq!(list.outcome, Outcome::Exited(Some(0)), "{}", list.render());
         assert!(list.stdout.contains("token.txt") && list.stdout.contains("gcloud"), "{}", list.render());
         assert!(!list.stdout.contains("synthetic-protected"), "{}", list.render());
+        if !rg_installed(&f) { return; }
         let search = run(&f.workspace(), &spec(&["rg", "synthetic", "."], 5000), 4096, &AtomicBool::new(false)).unwrap();
         assert_eq!(search.outcome, Outcome::Exited(Some(2)), "{}", search.render());
         assert!(search.stderr.contains("token.txt") && search.stderr.contains("gcloud"), "{}", search.render());

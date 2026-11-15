@@ -78,6 +78,9 @@ fn gathered_mixed(values:&[f32],rows:&[Rows])->Result<Vec<Vec<f32>>> {
 #[cfg(any(target_os="linux",test))]
 #[path="resident_weights/load_rows.rs"] mod load_rows;
 
+#[cfg(any(target_os="linux",test))]
+#[path="resident_weights/kda_plan.rs"] mod kda_plan;
+
 /// Bytes and matrices of the resident BF16 copy kept beside the FP32 copy (MEASURING FORM: on in code, no switch; the shipping ticket moves every reader to BF16 and drops the FP32 copies); printed in TEXT ADMISSION.
 pub static BF16_COPY_BYTES:std::sync::atomic::AtomicUsize=std::sync::atomic::AtomicUsize::new(0);
 pub static BF16_COPY_MATRICES:std::sync::atomic::AtomicUsize=std::sync::atomic::AtomicUsize::new(0);
@@ -99,6 +102,7 @@ mod device {
     use std::collections::{BTreeMap,BTreeSet};
     mod route_device;
     mod absorption;
+    mod tile_stream;
     mod projection_stage;
     mod row_stage;
     pub use projection_stage::{gather_stage,gather_stage_rounds,gather_stage_selected};
@@ -117,8 +121,10 @@ mod device {
     struct LoadTimings<'d> {payload:engine_model::plan::admission::UploadTimings,wait_ns:u128,convert_ns:u128,upload_ns:u128,mxfp8_ns:u128,mx_read_ns:u128,mx_bytes:u128,
         /// Row-major planes of the column-tile matrix in upload (codes, scales): two device scratch vectors that every
         /// such matrix of this load reuses. Dropped when the load ends.
-        tile_scratch:Option<(DeviceVector<'d>,DeviceVector<'d>)>}
-    pub struct Weights<'b,'d> {kda_local:BTreeSet<String>,matrices:BTreeMap<String,Matrix<'b,'d>>,embedding:Option<spark_gpu_probe::driver::Matrix<'d>>,
+        tile_scratch:tile_stream::Scratch<'d>,
+        /// The column-tile matrices that take a page-locked slab: read, but not yet queued for the device.
+        tiles:tile_stream::TileStream<'d>}
+    pub struct Weights<'b,'d> {kda_local:BTreeSet<String>,kda_plans:kda_plan::Plans,matrices:BTreeMap<String,Matrix<'b,'d>>,embedding:Option<spark_gpu_probe::driver::Matrix<'d>>,
         ring:Option<Ring>,mailbox:Option<&'b spark_gpu_probe::driver::TpMailbox<'d>>,mhc_host:Option<spark_gpu_probe::driver::MhcHostLink<'b,'d>>,sequence:u64,topology:Topology,identity:Option<usize>,cost:crate::resident_profile::Cost,timings:[[u128;3];5],lut:Option<DeviceVector<'d>>,exchange:Option<DeviceVector<'d>>,small:std::cell::Cell<bool>,deferring:std::rc::Rc<std::cell::Cell<bool>>,rounds:Vec<bool>,routes:BTreeMap<String,Option<route_device::Group<'d>>>,place_tables:BTreeMap<usize,(bool,DeviceVector<'d>)>,verify_rows:usize,collecting:std::rc::Rc<std::cell::Cell<bool>>,routed_layers:usize,
         /// PROJ-DELIVERY: plain projection stages may fork (off for a decode step that reads a selection back); stages forked
         /// and stages kept whole on the main stream by that rule, for the check tool's COUNTS.
@@ -187,7 +193,7 @@ mod device {
     impl<'b,'d> Weights<'b,'d> {
         pub fn new(ring:Option<Ring>,cost:bool)->Self {
             let topology=ring.as_ref().map_or(Topology {rank:0,parts:1},|r|Topology {rank:r.rank() as u32,parts:r.world() as u32});
-            Self {kda_local:BTreeSet::new(),matrices:BTreeMap::new(),embedding:None,ring,mailbox:None,mhc_host:None,sequence:0,topology,identity:None,cost:crate::resident_profile::Cost::new(cost),timings:[[0;3];5],lut:None,exchange:None,small:std::cell::Cell::new(false),deferring:std::rc::Rc::new(std::cell::Cell::new(false)),rounds:Vec::new(),routes:BTreeMap::new(),place_tables:BTreeMap::new(),verify_rows:0,collecting:std::rc::Rc::new(std::cell::Cell::new(false)),routed_layers:0,side_on:true,side_stages:[0;2]}
+            Self {kda_local:BTreeSet::new(),kda_plans:kda_plan::Plans::default(),matrices:BTreeMap::new(),embedding:None,ring,mailbox:None,mhc_host:None,sequence:0,topology,identity:None,cost:crate::resident_profile::Cost::new(cost),timings:[[0;3];5],lut:None,exchange:None,small:std::cell::Cell::new(false),deferring:std::rc::Rc::new(std::cell::Cell::new(false)),rounds:Vec::new(),routes:BTreeMap::new(),place_tables:BTreeMap::new(),verify_rows:0,collecting:std::rc::Rc::new(std::cell::Cell::new(false)),routed_layers:0,side_on:true,side_stages:[0;2]}
         }
         pub fn attach_mailbox(&mut self,mailbox:&'b spark_gpu_probe::driver::TpMailbox<'d>)->Result<()> {
             let physical=Topology {rank:self.topology.rank,parts:mailbox.layout().world.try_into().map_err(|_|"mailbox topology exceeds ABI")?};
@@ -246,16 +252,20 @@ mod device {
             // Readers run ahead while this thread uploads in name order: the same reads, uploads and order as one read at a time.
             let mut mark=std::time::Instant::now();
             let read=|index:usize|Matrix::read(c,&names[index],topology).map_err(|error|format!("{}: {error}",names[index]));
-            load_rows::streamed(&host_bytes(c,&names)?,workers,load_rows::HELD_BYTES,read,|index,payload| {
+            let sizes=host_bytes(c,&names)?;
+            // Copy threads fill the page-locked slabs of the column-tile matrices (`tile_stream`) beside the readers.
+            load_rows::with_stagers(load_rows::STAGERS,||load_rows::streamed(&sizes,workers,load_rows::HELD_BYTES,read,|index,payload| {
                 load.wait_ns+=mark.elapsed().as_nanos();let name=&names[index];
-                let matrix=Matrix::load(c,name,self.topology,b,payload,&mut load).map_err(|e|format!("{name}: {e}"))?;self.matrices.insert(name.clone(),matrix);
+                Matrix::load(c,name,self.topology,b,payload,&mut load,&mut self.matrices).map_err(|e|load_rows::at(name,e))?;
                 if index%256==0 {eprintln!("RESIDENT LOAD rank={} matrices={} allocated_bytes={}",self.topology.rank,index+1,b.allocated_bytes());
                     // Loading can exceed the normal exchange deadline. Keep peers
                     // together at bounded batches before any token transaction.
                     if let Some(ring)=self.ring.as_mut() {let wait=std::time::Instant::now();ring.barrier()?;barrier_ns+=wait.elapsed().as_nanos();}
                 }
                 mark=std::time::Instant::now();Ok(())
-            })?;
+            }))??;
+            // The matrices still in slabs go to the device; the slabs are freed. This is upload time.
+            let rest=std::time::Instant::now();load.tiles.finish(b,&mut load.tile_scratch,&mut self.matrices)?;load.upload_ns+=rest.elapsed().as_nanos();
             // The column-tile scratch goes before the last allocations are counted: the resident set has no trace of it.
             load.tile_scratch=None;b.synchronize()?;
             let embedding_started=std::time::Instant::now();let file=c.component_file(embedding_name).map_err(|e|e.to_string())?;let tensor=&file.header().tensors[embedding_name];
@@ -277,6 +287,7 @@ mod device {
                 eprintln!("RESIDENT LOAD WORK rank={} name={phase} nanoseconds={ns} aggregation=worker_sum_not_exclusive_wall",self.topology.rank);
             }
             eprintln!("RESIDENT LOAD PAYLOAD rank={} bytes={} mxfp8_bytes={} content_hashing_ns=0 total_ns={total_ns} workers={workers}",self.topology.rank,p.bytes,load.mx_bytes);
+            load.tiles.report(self.topology.rank,b);
             eprintln!("RESIDENT READY rank={} parts={} matrices={} matrix_bytes={bytes} allocated_bytes={} bf16_copy_bytes={} bf16_copy_matrices={} nv_tiled_matrices={} load_seconds={:.6}",self.topology.rank,self.topology.parts,self.matrices.len(),b.allocated_bytes(),BF16_COPY_BYTES.load(std::sync::atomic::Ordering::Relaxed),BF16_COPY_MATRICES.load(std::sync::atomic::Ordering::Relaxed),NV_TILED_MATRICES.load(std::sync::atomic::Ordering::Relaxed),started.elapsed().as_secs_f64());Ok(())
         }
         /// More matrices of the same checkpoint beside the loaded ones: the appended predictor
@@ -288,7 +299,8 @@ mod device {
             let mut seen=BTreeSet::new();let names=names.iter().filter(|name|!self.matrices.contains_key(*name) && seen.insert(*name)).cloned().collect::<Vec<_>>();
             let topology=self.topology;
             let read=|index:usize|Matrix::read(c,&names[index],topology).map_err(|error|format!("{}: {error}",names[index]));
-            load_rows::streamed(&host_bytes(c,&names)?,load_rows::readers(),load_rows::HELD_BYTES,read,|index,mut payload| {
+            let sizes=host_bytes(c,&names)?;
+            load_rows::with_stagers(load_rows::STAGERS,||load_rows::streamed(&sizes,load_rows::readers(),load_rows::HELD_BYTES,read,|index,mut payload| {
                 let name=&names[index];
                 // The appended layer's experts are stored without an activation scale: their source
                 // takes unquantized activations, and our NVFP4 kernels quantize them. The scale of
@@ -300,10 +312,11 @@ mod device {
                     let (other,_)=c.upload_rows_timed(&donor,0..1).map_err(|error|format!("{donor}: {error}"))?;
                     upload.input_scale=Some(other.input_scale.ok_or_else(||format!("{donor}: activation scale is absent"))?);borrowed+=1;
                 }
-                let matrix=Matrix::load(c,name,self.topology,b,payload,&mut load).map_err(|e|format!("{name}: {e}"))?;self.matrices.insert(name.clone(),matrix);loaded+=1;
+                Matrix::load(c,name,self.topology,b,payload,&mut load,&mut self.matrices).map_err(|e|load_rows::at(name,e))?;loaded+=1;
                 if loaded.is_multiple_of(128)&& let Some(ring)=self.ring.as_mut() {ring.barrier()?;}
                 Ok(())
-            })?;
+            }))??;
+            load.tiles.finish(b,&mut load.tile_scratch,&mut self.matrices)?;
             load.tile_scratch=None;
             if loaded>0 {b.synchronize()?;if let Some(ring)=self.ring.as_mut() {ring.barrier()?;}
                 eprintln!("RESIDENT PREDICTOR rank={} matrices={loaded} borrowed_activation_scales={borrowed} device_bytes={} allocated_bytes={} load_seconds={:.6}",self.topology.rank,b.allocated_bytes().saturating_sub(before),b.allocated_bytes(),started.elapsed().as_secs_f64());}
@@ -818,25 +831,32 @@ let mut bytes=vec![0;rows.total*4];
                 && u.scales[..rows.count*(cols/16)].iter().all(|&code|code&127!=127));
             Ok(Prepared {rows,cols,upload,timings,tiled,mx})
         }
-        fn load(c:&CheckpointAdmission,name:&str,t:Topology,b:&'b Backend<'d>,prepared:Prepared,load:&mut LoadTimings<'d>)->Result<Self> {
+        /// Uploads one read matrix. It enters `matrices` here, or later when it took a slab of the column-tile stream.
+        fn load(c:&CheckpointAdmission,name:&str,t:Topology,b:&'b Backend<'d>,prepared:Prepared,load:&mut LoadTimings<'d>,matrices:&mut BTreeMap<String,Self>)->Result<()> {
             let Prepared {rows,cols,upload,timings,tiled,mx}=prepared;
             load.payload.allocate_ns+=timings.allocate_ns;load.payload.read_ns+=timings.read_ns;load.payload.unpack_ns+=timings.unpack_ns;
             load.payload.validation_ns+=timings.validation_ns;load.payload.bytes+=timings.bytes;
-            let absorbed=match (absorption::shape(c,name,rows,cols)?,upload.as_ref()) {(Some(shape),Some(u))=>Some(absorption::load(b,shape,&u.weight)?),_=>None};
+            let absorbed_shape=absorption::shape(c,name,rows,cols)?;
+            if !tiled || absorbed_shape.is_some() {
+                load.tiles.drain(b,&mut load.tile_scratch,matrices)?;
+            }
+            let absorbed=match (absorbed_shape,upload.as_ref()) {(Some(shape),Some(u))=>Some(absorption::load(b,shape,&u.weight)?),_=>None};
             let storage=if let Some(u)=upload {
                 match u.storage {
                     WeightStorage::Mxfp8=>return Err("resident MXFP8 payload uses its existing arena loader".into()),
-                    _=>Self::upload(name,rows,cols,u,tiled,b,load,absorbed.is_some())?,
+                    _=>match Self::upload(name,rows,cols,u,tiled,b,load,absorbed.is_some(),matrices)? {Some(storage)=>storage,None=>return Ok(())},
                 }
             } else {
                 let (weight,scales,read_ns)=mx.ok_or("resident MXFP8 rows were not read")?;
                 let started=std::time::Instant::now();
                 let storage=Storage::Mx(Mxfp8Projection::matrix_rows(c,name,WeightType::F32,mx_topology(rows,t))?.load_dynamic_positive_zero_bytes(b,&weight,&scales)?);
                 load.mxfp8_ns+=started.elapsed().as_nanos();load.mx_read_ns+=read_ns;load.mx_bytes+=(weight.len()+scales.len()) as u128;storage
-            };Ok(Self {rows,cols,storage,absorbed})
+            };matrices.insert(name.to_owned(),Self {rows,cols,storage,absorbed});Ok(())
         }
-        fn upload(name:&str,rows:Rows,cols:usize,u:engine_model::plan::admission::UploadWeight,tiled:bool,b:&'b Backend<'d>,load:&mut LoadTimings<'d>,absorbed:bool)->Result<Storage<'b,'d>> {
-            Ok(match u.storage {
+        /// The storage of the matrix, or None when the column-tile stream took it (no absorbed form) and adds it to `matrices`.
+        #[allow(clippy::too_many_arguments)] // one matrix: its place, its planes and the state of the load
+        fn upload(name:&str,rows:Rows,cols:usize,u:engine_model::plan::admission::UploadWeight,tiled:bool,b:&'b Backend<'d>,load:&mut LoadTimings<'d>,absorbed:bool,matrices:&mut BTreeMap<String,Self>)->Result<Option<Storage<'b,'d>>> {
+            Ok(Some(match u.storage {
                     WeightStorage::Plain=>{
                         let mut s=spark_gpu_probe::causal_ops::Shape {op:spark_gpu_probe::causal_ops::Op::Project,heads:0,dim:0,taps:0,rows:0,cols:0,epsilon:0.0,bound:0.0};
                         s.rows=rows.count.try_into().map_err(|_|"resident rows exceed ABI")?;s.cols=cols.try_into().map_err(|_|"resident columns exceed ABI")?;
@@ -869,6 +889,12 @@ let mut bytes=vec![0;rows.total*4];
                                 let grid=cols.div_ceil(block[1] as usize);(cols,0,rows.count.div_ceil(block[0] as usize)*grid*4)},_=>unreachable!()};
                         s.lengths().ok_or("resident packed shape exceeds ABI")?;
                         let upload=std::time::Instant::now();
+                        if tiled && !absorbed && tile_stream::admits(rows.count*stride,scale_len) {
+                            // The planes take a page-locked slab and reach the same scratch vectors and the same kernel from there.
+                            load.tiles.stage(b,&mut load.tile_scratch,matrices,name,rows,cols,s,u,rows.count*stride,scale_start,scale_len)?;
+                            load.upload_ns+=upload.elapsed().as_nanos();return Ok(None);
+                        }
+                        load.tiles.drain(b,&mut load.tile_scratch,matrices)?;
                         let storage=if tiled {
                             // The row-major planes go to the two scratch vectors; one device kernel writes the column tiles
                             // into the final vectors (the bytes of expert_ops::nv_tile_codes_in_place and
@@ -885,7 +911,7 @@ let mut bytes=vec![0;rows.total*4];
                         } else {Storage::Packed {shape:s,weight:raw(b,&u.weight[..rows.count*stride])?,scales:raw(b,&u.scales[scale_start..scale_start+scale_len])?}};
                         load.upload_ns+=upload.elapsed().as_nanos();storage
                     },_=>return Err("resident storage is unsupported".into()),
-            })
+            }))
         }
     }
 }

@@ -14,7 +14,9 @@
 //! token IDs are the `token_id` of each streamed chunk. `token_ids_sha256` is
 //! the SHA-256 of the compact JSON array of the 66 ID arrays in receipt order:
 //! prose, code and structured runs; the cold, then the warm 8K runs; the C1,
-//! C2, C4 and C8 rounds and their streams.
+//! C2, C4 and C8 rounds and their streams. A GLM card also stores
+//! `served_default` (the same decode prompts with no `draft` and no
+//! `mtp_depth`). That key is not part of the 66 or the digest.
 use crate::evals::json::{self, object, Value};
 use std::{
     io::{BufRead, BufReader, Read, Write},
@@ -231,6 +233,17 @@ pub fn chat_payload(model: &str, system: &str, prompt: &str, max_tokens: i64, se
     payload
 }
 
+/// The served default for a GLM card row: the same body as [`chat_payload`] with the
+/// depth pin and any draft field removed. The published plain row stays pinned.
+/// These rows are stored under `served_default` and are not part of the 66-id digest.
+pub fn served_default_payload(model: &str, system: &str, prompt: &str, max_tokens: i64, seed: i64) -> Value {
+    let mut payload = chat_payload(model, system, prompt, max_tokens, seed, false);
+    if let Value::Object(fields) = &mut payload {
+        fields.retain(|(key, _)| key != "mtp_depth" && key != "draft");
+    }
+    payload
+}
+
 /// One cold or warm 8K prompt request body: the prompt is token IDs.
 pub fn prefill_payload(model: &str, tokens: &[i64], cache_salt: &str) -> Value {
     object(vec![
@@ -277,6 +290,26 @@ fn run_card(server: &Server, prompts: &Prompts, draft_plain: bool, card: &mut Va
             // Save each reply as it arrives, so a stopped card keeps the finished ones.
             decode.insert(name.clone(), object(vec![("runs", Value::Array(runs.clone()))]));
             card.insert("decode", decode.clone());
+        }
+    }
+    // GLM only: the same decode prompts with no draft field and no mtp_depth. Outside the 66.
+    if is_glm_model(&model) {
+        let mut served = object(vec![]);
+        for (name, prompt) in &prompts.workloads {
+            say(&format!("served_default/{name}: {DECODE_RUNS} runs"));
+            let mut runs = Vec::new();
+            for run in 1..=DECODE_RUNS {
+                stop()?;
+                let text = format!("Request nonce: {}\n\n{prompt}", nonce(&["decode", name, &run.to_string()]));
+                let mut row = server.stream("/v1/chat/completions", &served_default_payload(&model, &prompts.system, &text, DECODE_MAX_TOKENS, SEED))?;
+                let gate = if name == "structured" { structured_gate(&row) } else { visible_gate(&row) };
+                say(&format!("  {run}: {} tok/s, TTFT {:.3}s, {} tokens", row["decode_tokens_per_second"].as_f64().unwrap_or(0.0), row["ttft_seconds"].as_f64().unwrap_or(0.0), row["completion_tokens"].as_i64().unwrap_or(0)));
+                row.insert("run", run.into());
+                row.insert("completion_validation", match gate { Ok(()) => object(vec![("valid", true.into())]), Err(e) => object(vec![("valid", false.into()), ("error", e.into())]) });
+                runs.push(row);
+                served.insert(name.clone(), object(vec![("runs", Value::Array(runs.clone()))]));
+                card.insert("served_default", served.clone());
+            }
         }
     }
     say(&format!("prefill/{PREFILL_DEPTH}: {PREFILL_RUNS} cold/warm pairs"));

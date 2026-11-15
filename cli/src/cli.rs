@@ -118,6 +118,44 @@ impl Default for RunOptions {
     }
 }
 
+/// Why a text service that named no depth runs at depth 0. Nobody chose that depth: a later start tries the
+/// default depth again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DraftFall {
+    /// The model folder has no drafting layer.
+    NoLayer,
+    /// The default depth did not fit in free memory at this start.
+    Memory,
+}
+
+impl DraftFall {
+    /// The word in the session record.
+    pub fn word(self) -> &'static str {
+        match self { Self::NoLayer => "no_layer", Self::Memory => "memory" }
+    }
+    pub fn parse(word: &str) -> Result<Self, String> {
+        match word {
+            "no_layer" => Ok(Self::NoLayer),
+            "memory" => Ok(Self::Memory),
+            _ => Err(format!("The session record names an unknown draft_fall: {word}.")),
+        }
+    }
+    /// The line `vade up` prints before its second start.
+    pub fn line(self) -> &'static str {
+        match self {
+            Self::NoLayer => "This model has no drafting layer. Starting without drafting.",
+            Self::Memory => "Not enough free memory for drafting. Starting without drafting.",
+        }
+    }
+    /// The depth as status and the ready line show it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::NoLayer => "0 (off: this model has no drafting layer)",
+            Self::Memory => "0 (off: not enough free memory for drafting)",
+        }
+    }
+}
+
 /// Options for `vade up` and `vade launch`, after defaults are applied.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UpOptions {
@@ -150,6 +188,10 @@ pub struct UpOptions {
     /// The engine's decode_fuse option: Some(true) runs one Spark's decode steps as a chain.
     pub decode_fuse: Option<bool>,
     pub diagnostic_unqualified_text: bool,
+    /// Never set by a flag. `vade up` sets it for a second start, after the text service's default depth met a
+    /// model folder with no drafting layer or too little free memory: this start runs at depth 0, and the record
+    /// says that nobody asked for 0.
+    pub draft_fall: Option<DraftFall>,
 }
 
 impl Default for UpOptions {
@@ -175,6 +217,7 @@ impl Default for UpOptions {
             cache_bytes: None,
             decode_fuse: None,
             diagnostic_unqualified_text: false,
+            draft_fall: None,
         }
     }
 }
@@ -497,7 +540,7 @@ fn parse_up(args: &[&str]) -> Result<UpOptions, String> {
             }
             "--hosts" => options.hosts = ssh_targets(value).ok_or(HOSTS)?,
             "--mtp" => {
-                options.mtp = number(value, flag, 0, 3)?;
+                options.mtp = number(value, flag, 0, if args.contains(&"--diagnostic-unqualified-text") {7} else {3})?;
                 options.mtp_explicit = true;
             },
             "--context" => options.context = number(value, flag, 4096, 262144)?,
@@ -523,12 +566,12 @@ fn parse_up(args: &[&str]) -> Result<UpOptions, String> {
     if !seen.contains("--mtp") {
         match std::env::var("MTP") {
             Ok(value) => {
-                options.mtp = number(&value, "MTP", 0, 3)?;
+                options.mtp = number(&value, "MTP", 0, if options.diagnostic_unqualified_text {7} else {3})?;
                 options.mtp_explicit = true;
             },
             Err(std::env::VarError::NotPresent) => {}
             Err(std::env::VarError::NotUnicode(_)) => {
-                return Err("Set MTP to a whole number from 0 to 3.".into());
+                return Err(format!("Set MTP to a whole number from 0 to {}.", if options.diagnostic_unqualified_text {7} else {3}));
             }
         }
     }
@@ -818,6 +861,27 @@ mod tests {
         for args in ["up --fp8", "up --fp8-legacy"] {
             let Command::Up(fp8) = cli(args).unwrap().command else { panic!("{args}") };
             assert_eq!((fp8.mtp, fp8.mtp_explicit), (2, false), "{args}");
+        }
+    }
+    #[test]
+    fn deep_mtp_is_only_for_the_text_service() {
+        for depth in 4..=7 {
+            for args in [format!("up --mtp {depth} --diagnostic-unqualified-text"),format!("up --diagnostic-unqualified-text --mtp {depth}")] {
+                let Command::Up(options)=cli(&args).unwrap().command else {panic!("{args}")};
+                assert_eq!(options.mtp,depth);assert!(options.mtp_explicit);
+            }
+            for model in ["", "--fp4-local", "--fp8"] {assert!(cli(&format!("up {model} --mtp {depth}")).is_err());}
+        }
+        assert!(cli("up --diagnostic-unqualified-text --mtp 8").is_err());
+        const CASE:&str="VADE_TEST_DEEP_MTP";
+        if std::env::var_os(CASE).is_none() {
+            let output=std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact","cli::tests::deep_mtp_is_only_for_the_text_service","--nocapture"])
+                .env(CASE,"1").env("MTP","7").output().unwrap();
+            assert!(output.status.success(),"{}{}",String::from_utf8_lossy(&output.stdout),String::from_utf8_lossy(&output.stderr));
+        } else {
+            let Command::Up(options)=cli("up --diagnostic-unqualified-text").unwrap().command else {panic!()};
+            assert_eq!(options.mtp,7);assert!(cli("up --fp8").is_err());assert!(cli("up --fp4-local").is_err());
         }
     }
     #[test]

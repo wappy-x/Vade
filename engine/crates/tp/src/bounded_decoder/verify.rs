@@ -7,7 +7,8 @@ use crate::Result;
 pub const CARRIED_ROWS:usize=8;
 /// Largest number of new rows in one pass.
 pub const VERIFY_ROWS:usize=16;
-/// Kept rows that may wait for the predictor layer's cache. Older ones leave a gap in it.
+/// Kept rows that may wait for the predictor layer's cache. Older ones leave a gap in it. The check pass of a
+/// proposal deeper than 3 has more rows than this: such a proposal leaves room for every row of its own pass (`propose`).
 pub const TRAIL_ROWS:usize=4;
 /// Last prompt rows that start the predictor layer's cache of a chat. Each runs the cache half
 /// of the layer once before the first proposal, so the bound is also the most a request pays
@@ -149,7 +150,10 @@ impl<V> Verify<V> {
         if self.trail.is_empty() || depth==0 {return Ok((Vec::new(),0.0));}
         let (cache,waited)=self.catch_up(decoder,self.trail.len()-1)?;
         let (tokens,after)=decoder.propose_after(&self.trail[self.trail.len()-1].1,next,depth,cache.as_ref())?;
-        self.predictor=Some(after);self.trail.clear();self.trail_cap=TRAIL_ROWS;self.plane=None;Ok((tokens,waited))
+        // The pass that checks this proposal has up to `depth`+1 rows, and each kept one waits here for the next
+        // proposal. With less room a deep pass would push its own first rows off the trail and leave a gap in the
+        // layer's cache at every cycle. Up to depth 3 this is TRAIL_ROWS, as before. Both ranks get the same depth.
+        self.predictor=Some(after);self.trail.clear();self.trail_cap=TRAIL_ROWS.max(depth+1);self.plane=None;Ok((tokens,waited))
     }
     /// Check what a proposal of `depth` tokens `depth` rows back on the trail would have matched against the kept
     /// tokens that followed it (ending at `best`), stopping the chain on the first wrong token. The rows before that

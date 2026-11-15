@@ -700,7 +700,7 @@ sha256sum "$destination/flash-serve" "$destination/flash.ptx" "$destination/vade
             // A group restarts under its own VADE_GROUP.
             let group = self.config.group.as_ref().map(|group| format!("VADE_GROUP={} ", group.name)).unwrap_or_default();
             crate::output::line(format_args!(
-                "Running engine kept. Restart when ready:\n  {group}vade down\n  {group}vade up --hosts {}{}{} --context {} --output {}{}{}{}{}{}",
+                "Running engine kept. Restart when ready:\n  {group}vade down\n  {group}vade up --hosts {}{}{} --context {} --output {}{}{}{}{}{}{}",
                 options.hosts.join(","),
                 if options.replicas { format!(" --replicas {}{}", options.hosts.len() / options.replica_sparks.max(1), if options.replica_sparks > 1 { " --pairs" } else { "" }) } else { String::new() },
                 if options.mtp_explicit { format!(" --mtp {}", options.mtp) } else { String::new() },
@@ -716,7 +716,9 @@ sha256sum "$destination/flash-serve" "$destination/flash.ptx" "$destination/vade
                 },
                 options.memory_bytes.map(|bytes| format!(" --memory-bytes {bytes}")).unwrap_or_default(),
                 options.cache_bytes.map(|bytes| format!(" --cache-bytes {bytes}")).unwrap_or_default(),
-                if options.fp4_local { " --fp4-local" } else { " --fp8" }
+                if options.fp4_local { " --fp4-local" } else { " --fp8" },
+                // The text checkpoint starts only with its own flag: a restart without it is refused.
+                if options.diagnostic_unqualified_text { " --diagnostic-unqualified-text" } else { "" }
             ))?;
         } else {
             crate::output::line(format_args!("Start the new build: {}", self.start_command()))?;

@@ -278,6 +278,12 @@ pub trait Engine {
     fn shared_prefill_max_tokens(&self) -> usize { usize::MAX }
     /// Canonical independent prompt tiles; zero keeps the serial long path.
     fn shared_prefill_chunk_rows(&self) -> usize { 0 }
+    /// Before one serial prompt slice: pool bytes left after live and retired
+    /// states, retained cache and request holds. Zero forbids borrowing.
+    /// Return borrowed allocations before the prefill call returns.
+    fn prepare_prompt_workspace(&self, _available: usize) -> Result<(), String> { Ok(()) }
+    /// Return an unused offer when a socket, cancellation or error skips prefill.
+    fn finish_prompt_workspace(&self) -> Result<(), String> { Ok(()) }
     /// Keep one admission slot free of background requests for interactive work.
     fn reserve_foreground_slot(&self) -> bool { true }
     /// Fund the complete output allowance before admitting a chat.
@@ -340,6 +346,11 @@ pub trait Engine {
     /// The default preserves the existing reservation for every other engine.
     fn request_reservation_bytes_for_prompt(&self, _prompt: usize, tokens: usize, plain: bool, cached: Option<usize>, retain: bool) -> Option<usize> {
         self.request_reservation_bytes_with_retention(tokens, plain, cached, retain)
+    }
+    /// Request options can rule out optional model work before admission. The default keeps
+    /// the existing invoice; adapters may use the resolved request to fund only eligible work.
+    fn request_reservation_bytes_for_request(&self, prompt: usize, tokens: usize, plain: bool, cached: Option<usize>, retain: bool, _request: &protocol::Request) -> Option<usize> {
+        self.request_reservation_bytes_for_prompt(prompt,tokens,plain,cached,retain)
     }
     /// Conservative session allocation bound, including spare KV capacity and transient work.
     /// None disables reusable sessions for backends without an audited bound.

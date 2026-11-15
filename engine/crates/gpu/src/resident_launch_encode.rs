@@ -16,7 +16,7 @@ fn expert_arguments(p:crate::expert_ops::Arguments)->Command {
     c.put(base,&s.payload[..core::mem::size_of::<Shape>()]);c
 }
 pub(super) fn expert(p:crate::expert_ops::LaunchArguments)->Command {let mut c=expert_arguments(p.single);fields!(c,crate::expert_ops::LaunchArguments,p,batch,count);c}
-pub(super) fn causal_fast(p:crate::causal_ops::Arguments)->Command {let mut c=causal(p);c.kind=Kind::CausalFast as u32;c}
+pub(crate) fn causal_fast(p:crate::causal_ops::Arguments)->Command {let mut c=causal(p);c.kind=Kind::CausalFast as u32;c}
 pub(super) fn nv_stream(p:crate::expert_ops::LaunchArguments)->Command {let mut c=expert(p);c.kind=Kind::NvStream as u32;c}
 pub(super) fn nv_tile(p:crate::expert_ops::LaunchArguments)->Command {let mut c=expert(p);c.kind=Kind::NvTile as u32;c}
 /// The pair split's raw quarter launch: the expert payload, and the quarters a row gets in the word after it.

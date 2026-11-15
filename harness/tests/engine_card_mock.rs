@@ -189,6 +189,7 @@ fn handle(stream: TcpStream, state: &State) {
     let base = (fnv(&user) % 50_000) as u32;
     let mut ids: Vec<u32> = (0..4).map(|i| base + i).collect();
     let mut hold = false;
+    let mut serial_copy = false;
     if body.get("tools").is_some() {
         let index = state.tool_count.fetch_add(1, Ordering::SeqCst);
         let case = TOOL_CASES.iter().find(|case| case.prompt == user).expect("known tool prompt");
@@ -236,6 +237,7 @@ fn handle(stream: TcpStream, state: &State) {
         let seen = arrivals.entry(user.clone()).or_insert(0);
         *seen += 1;
         hold = *seen > 1 && !mock.serial;
+        serial_copy = *seen > 1 && mock.serial;
         state.arrived.notify_all();
         drop(arrivals);
         if mock.batch_differs && running >= 5 {
@@ -273,6 +275,12 @@ fn handle(stream: TcpStream, state: &State) {
     );
     stream.write_all(tail.as_bytes()).expect("write tail");
     stream.flush().expect("flush");
+    if serial_copy {
+        // The card times the overlap at the client. The serial lock is held until this copy's
+        // client thread has read the tail, so the next copy's first token cannot be read first.
+        // Without the wait a busy machine saw the whole serial group as overlapped.
+        thread::sleep(CLIENT_READ_MARGIN);
+    }
 }
 
 /// Serve until `stop`, one thread per connection so copies run together.

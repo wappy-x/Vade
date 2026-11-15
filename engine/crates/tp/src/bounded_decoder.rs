@@ -303,6 +303,8 @@ pub trait Compute {
     fn rows_release(&self)->Result<()> {Ok(())}
     /// After a prompt group: keep its spares within the pool's normal room (default: release).
     fn rows_keep(&self)->Result<()> {self.rows_release()}
+    /// Return a temporary prompt workspace and report actual spare ownership.
+    fn rows_return_lease(&self)->Result<()> {self.rows_keep()}
     /// Pause (true) or resume (false) launch recording around a prompt rows pass; returns the
     /// previous paused value. A compute that records nothing ignores it.
     fn rows_unrecorded(&self,_pause:bool)->Result<bool> {Ok(false)}
@@ -497,6 +499,12 @@ impl<'f,C:Compute> Decoder<'f,C> {
         let parameters=Rc::new(parameters);let static_parameters=Rc::new(StaticParameterPlan::new(parameters.clone(),parameter_jobs)?);
         crate::startup::step("weights");
         compute.prepare(checkpoint)?;Ok(Self {checkpoint,compute,capacity,parameters,static_parameters,initial_state:Rc::new(initial_state::Layouts::default()),blocks:Rc::new(blocks),schedules:RefCell::new(schedules),expanded_limit:std::cell::Cell::new(rows::RESERVED_ROWS),forced_union:std::cell::Cell::new(None),memo_seed:std::cell::Cell::new(false),batch_plans:RefCell::new(BTreeMap::new()),draft:None,draft_schedule:RefCell::new(None),verify_routes:std::cell::Cell::new(0),fold_links:(0..=checkpoint.description().layers.len()).map(|_|std::cell::Cell::new(None)).collect()})
+    }
+    /// Toggle already prepared predictor metadata; no weights or device scratch are allocated.
+    /// The caller first drops this session's predictor state and growing held rows when disabling.
+    pub(crate) fn set_prepared_predictor(&mut self,prepared:&Prepared<'f>,enabled:bool) {
+        self.draft=prepared.draft.as_ref().filter(|_|enabled).map(|draft|draft.0.clone());
+        *self.draft_schedule.borrow_mut()=prepared.draft.as_ref().filter(|_|enabled).map(|draft|draft.1.clone());
     }
     pub fn prepared(&self)->Prepared<'f> {Prepared {topology:self.compute.sparse_topology(),checkpoint:self.checkpoint,parameters:self.parameters.clone(),static_parameters:self.static_parameters.clone(),initial_state:self.initial_state.clone(),blocks:self.blocks.clone(),schedules:self.schedules.borrow().clone(),draft:self.draft.clone().zip(self.draft_schedule.borrow().clone()),verify_routes:self.verify_routes.get()}}
     /// A new session without rereading immutable parameters.

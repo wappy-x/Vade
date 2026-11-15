@@ -32,7 +32,18 @@ memory of the conversation. It grows with every token.</dd>
 <dd>Reusing the KV cache of a prompt beginning that was read before.</dd>
 <dt>Speculative decoding</dt>
 <dd>Proposing several tokens cheaply and checking them in one pass of the model.
-Vade's flags call it drafting.</dd>
+Vade's flags call it drafting. The two-Spark GLM text service
+(<code>vade up --sparks 2 --diagnostic-unqualified-text</code>) loads
+predictor depth 3 when <code>--mtp</code> and <code>MTP</code> are unset; with
+a model that has no drafting layer, or with too little free memory for it,
+<code>vade up</code> then starts it without drafting.
+<code>--mtp 0</code> and <code>MTP=0</code> turn drafting off.
+<code>--mtp 1</code> to <code>--mtp 7</code> load that depth. When the loaded depth is 3 or more, a
+greedy request of more than 64 tokens that names no drafting field is tried
+with drafting and keeps it only when it is faster. At a loaded depth of 1 or
+2 such a request decodes plain. A sampled request, a short request,
+<code>mtp_depth</code> 0, 1 or 2 with no <code>draft</code> field and several
+chats at once decode plain.</dd>
 <dt>Loopback</dt>
 <dd>An address only programs on this Spark can reach, such as
 <code>localhost</code>.</dd>

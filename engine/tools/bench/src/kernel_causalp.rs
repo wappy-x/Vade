@@ -7,6 +7,7 @@ const GUARD: [u8; 16] = [0x5a; 16];
 #[allow(dead_code, clippy::duplicate_mod)] #[path = "../../../crates/gpu/src/swept.rs"] mod swept;
 const POOL_CHANNELS: u32 = 25;
 #[path = "kernel_stepdirect.rs"] mod stepdirect;
+#[path = "kernel_causalgroup.rs"] mod causalgroup;
 struct Rng(u64);
 impl Rng {
     fn next(&mut self) -> u64 { self.0 ^= self.0 << 13; self.0 ^= self.0 >> 7; self.0 ^= self.0 << 17; self.0 }
@@ -85,9 +86,9 @@ fn admitted(s: Shape) -> bool {
         CONV => matches!(h, 1 | 2 | 3 | 8 | 17 | 63 | 64 | 65) && matches!(d, 1 | 3 | 32 | 127 | 128 | 129) && matches!(s.taps, 2..=5),
         MXFP8 | MXFP8_POSITIVE_ZERO => r <= 2 && (matches!(k, 32 | 64 | 96 | 128 | 160 | 1024 | 2048 | 4096 | 8192 | 12288 | 16384) || k % 4096 == 0 && k > 16384 && k <= 1024 * 12288),
         KEY_NORM => matches!(d, 1 | 2 | 5 | 31 | 32 | 33 | 64 | 100 | 127 | 128 | 129 | 255 | 1023 | 1024),
-        POOL_SCORES => matches!(d, 1 | 2 | 31 | 32 | 33 | 127 | 128 | 255 | 256) && matches!(h, 1 | 2 | 3 | 31 | 32 | 33 | 63 | 64 | 65 | 100 | 128) && r <= 4096,
+        POOL_SCORES => matches!(d, 1 | 2 | 31 | 32 | 33 | 127 | 128 | 255 | 256) && matches!(h, 1 | 2 | 3 | 31 | 32 | 33 | 63 | 64 | 65 | 100 | 128) && r <= 8192,
         SOFTMAX => matches!(h, 1 | 2 | 3 | 32 | 33 | 64 | 65 | 100 | 128) && (1..=4096).contains(&r),
-        GATHER => matches!(d, 1 | 3 | 32 | 33 | 512 | 1024) && (1..=16384).contains(&r) && (1..=4096).contains(&k),
+        GATHER => matches!(d, 1 | 3 | 32 | 33 | 512 | 1024) && (1..=32768).contains(&r) && (1..=4096).contains(&k),
         POOL_CHANNELS => swept::POOL_CHANNEL_DIMS.contains(&d) && swept::POOL_CHANNEL_TAPS.contains(&(s.taps as usize)) && (1..=swept::POOL_CHANNEL_ROWS_MAX).contains(&r),
         _ => false,
     }
@@ -99,6 +100,9 @@ fn fast_geometry(s: Shape, units: usize) -> (u32, u32) {
 fn launch_causal(g: &Gpu, f: H, a: &mut Arguments, geometry: (u32, u32)) -> Result<()> { g.launch(f, [geometry.0, 1, 1], geometry.1, 0, &mut [ptr(a)]) }
 fn launch_replay(g: &Gpu, f: H, table: u64, geometry: (u32, u32)) -> Result<()> { let (mut t, mut i) = (table, 0u64); g.launch(f, [geometry.0, 1, 1], geometry.1, 0, &mut [ptr(&mut t), ptr(&mut i)]) }
 fn median(mut v: Vec<f64>) -> f64 { v.sort_by(|a, b| a.partial_cmp(b).unwrap()); v[v.len() / 2] }
+fn first_difference(expected: &[u8], actual: &[u8]) -> Option<usize> {
+    expected.iter().zip(actual).position(|(a, b)| a != b).or_else(|| (expected.len() != actual.len()).then_some(expected.len().min(actual.len())))
+}
 /// Table entry for `resident_launch_causal` (kind 1): 1040 bytes, payload = the 80-byte Arguments.
 fn command(a: &Arguments, kind: u32) -> Vec<u8> {
     let mut c = vec![0u8; 1040]; c[..4].copy_from_slice(&kind.to_le_bytes());
@@ -133,6 +137,7 @@ pub(crate) fn run(base_path: &str, candidate_path: &str, mode: &str) -> Result<(
     let (base_replay, cand_replay, cand_fast_replay) = (g.function(ma, "resident_launch_causal")?, g.function(mb, "resident_launch_causal")?, g.function(mb, "resident_launch_causal_fast")?);
     let started = Instant::now();
     if mode == "step-direct" {return stepdirect::run(&mut g,ma,mb);}
+    if mode == "group" {return causalgroup::run(&mut g,ma,mb);}
     if mode == "select-bytes" || mode == "select-time" {
         let (base_sel, cand_sel) = (g.function(ma, "prompt_rows")?, g.function(mb, "prompt_select_rows")?);
         select_screen(&mut g, base_sel, cand_sel, mode == "select-time")?;
@@ -152,7 +157,7 @@ pub(crate) fn run(base_path: &str, candidate_path: &str, mode: &str) -> Result<(
         println!("CAUSALP DONE elapsed_s={:.1}", started.elapsed().as_secs_f64()); return Ok(());
     }
     let shape = |op: u32, heads: usize, dim: usize, rows: usize| Shape { op, heads: heads as u32, dim: dim as u32, taps: 0, rows: rows as u32, cols: 0, epsilon: if op == GATED_NORM { 1e-6 } else { 0.0 }, bound: if op == PREPARE { -5.0 } else { 0.0 } };
-    if mode == "bytes" || mode == "bytes-b" || mode == "bytes-c" || mode == "bytes-d" || mode == "bytes-e" || mode == "bytes-f" || mode == "bytes-k" {
+    if mode == "bytes" || mode == "bytes-b" || mode == "bytes-c" || mode == "bytes-d" || mode == "bytes-e" || mode == "bytes-f" || mode == "bytes-k" || mode == "long-bytes" {
         let mut specs: Vec<(Shape, usize)> = vec![];
         let hs = [1usize, 2, 3, 4, 5, 31, 32, 33, 63, 64, 65, 100, 127, 128, 129]; let ds = [1usize, 2, 5, 31, 32, 33, 64, 100, 127, 128, 129, 255, 1023, 1024];
         for op in [PREPARE, GATED_NORM] { for &h in &hs { for &d in &ds { if h * d <= 140000 && (h < 100 || [1usize, 128, 1024].contains(&d)) { specs.push((shape(op, h, d, 0), 0)); } } } }
@@ -179,6 +184,16 @@ pub(crate) fn run(base_path: &str, candidate_path: &str, mode: &str) -> Result<(
             if r * d > 1_000_000 && ![1usize, 2051, 4097].contains(&k) { continue; }
             let counts: &[usize] = if r * d > 1_000_000 { &[k / 2, k] } else { &[0usize, 1, k / 2, k, k + 5] };
             for &c in counts { let mut s = shape(GATHER, 0, d, r); s.cols = k as u32; specs.push((s, c)); } } } }
+        // LONG: the beginning and end of every measured 96-token decode window, plus the context limit and one-past
+        // admission boundaries. The model has pool=4, budget=2,048 and keeps the 0..=3-row tail.
+        for &r in &[16usize, 39, 512, 535, 2048, 2071, 4096, 4119, 8000, 8023, 8192, 8193] {
+            specs.push((shape(POOL_SCORES, 32, 128, r), 0));
+        }
+        for &context in &[64usize, 159, 2048, 2143, 8192, 8287, 16384, 16479, 32000, 32095, 32768, 32769] {
+            let mut s = shape(GATHER, 0, 512, context); s.cols = context.min(2051) as u32;
+            let count = if context <= 2048 { context } else { 2048 + context % 4 };
+            specs.push((s, count));
+        }
         // PoolChannels (READ-SPLIT): the swept lists of swept.rs and nothing else; heads 0 and 64 (not read), values just outside every list keep the original entry.
         for &d in &swept::POOL_CHANNEL_DIMS { for &t in &swept::POOL_CHANNEL_TAPS { for &r in &swept::pool_channel_rows(t) {
             if r * d > 700_000 && ![1usize, 4096, 16384].contains(&r) { continue; }
@@ -186,10 +201,17 @@ pub(crate) fn run(base_path: &str, candidate_path: &str, mode: &str) -> Result<(
         for &(d, t, r) in &[(128usize, 4usize, 16385usize), (130, 4, 100), (128, 6, 100), (127, 4, 4097), (4096, 4, 3), (128, 130, 400), (128, 9, 77)] {
             specs.push((Shape { op: POOL_CHANNELS, heads: 0, dim: d as u32, taps: t as u32, rows: r as u32, cols: 0, epsilon: 0.0, bound: 0.0 }, 0)); }
         let (mut comparisons, mut bytes) = (0u64, 0u64);
+        let mut wrong_control_checked = false;
         let kinds: [(u32, u32); 8] = [(0, 0), (5, 5), (2, 2), (1, 1), (4, 0), (6, 8), (8, 3), (3, 3)];
         let which = match mode { "bytes-b" => 1, "bytes-c" => 2, "bytes-d" => 3, "bytes-e" => 4, "bytes-f" => 5, "bytes-k" => 6, _ => 0 };
         for (n, (s, count)) in specs.iter().enumerate() {
-            if which != match s.op { CONV | KEY_NORM | MXFP8 | MXFP8_POSITIVE_ZERO => 6, POOL_CHANNELS => if s.taps < 100 { 4 } else { 5 }, SOFTMAX => 1, GATHER => if s.rows as usize * s.dim as usize > 1_000_000 { 3 } else { 2 }, _ => 0 } { continue; }
+            if mode == "long-bytes" {
+                let context = s.rows as usize;
+                let long_pool = s.op == POOL_SCORES && s.heads == 32 && s.dim == 128 && [16usize, 39, 512, 535, 2048, 2071, 4096, 4119, 8000, 8023, 8192, 8193].contains(&context);
+                let long_gather = s.op == GATHER && s.dim == 512 && [64usize, 159, 2048, 2143, 8192, 8287, 16384, 16479, 32000, 32095, 32768, 32769].contains(&context)
+                    && s.cols as usize == context.min(2051) && *count == if context <= 2048 { context } else { 2048 + context % 4 };
+                if !long_pool && !long_gather { continue; }
+            } else if which != match s.op { CONV | KEY_NORM | MXFP8 | MXFP8_POSITIVE_ZERO => 6, POOL_CHANNELS => if s.taps < 100 { 4 } else { 5 }, SOFTMAX => 1, GATHER => if s.rows as usize * s.dim as usize > 1_000_000 { 3 } else { 2 }, _ => 0 } { continue; }
             let big = s.heads as usize * s.dim as usize > 20000 && s.op != POOL_SCORES && s.op != SOFTMAX && s.op != GATHER || (s.op == STEP_LAYOUT || s.op == STEP_COLUMNS) && s.heads > 17;
             for (ki, &(ik, wk)) in kinds.iter().enumerate() {
                 if big && ki > 3 { continue; }
@@ -232,14 +254,22 @@ pub(crate) fn run(base_path: &str, candidate_path: &str, mode: &str) -> Result<(
                 }
                 for (arm, y) in outs.iter().enumerate().skip(1) {
                     let reference = if arm == 4 { &outs[3] } else { &outs[0] };
-                    if reference != y { return Err(format!("CAUSALP BYTE FAIL arm={arm} op={} heads={} dim={} rows={} eps={} bound={} patterns={ik},{wk} first_diff_byte={:?}", s.op, s.heads, s.dim, s.rows, s.epsilon, s.bound, reference.iter().zip(y).position(|(p, q)| p != q))); }
+                    if let Some(diff) = first_difference(reference, y) { return Err(format!("CAUSALP BYTE FAIL arm={arm} op={} heads={} dim={} rows={} eps={} bound={} patterns={ik},{wk} first_diff_byte={diff}", s.op, s.heads, s.dim, s.rows, s.epsilon, s.bound)); }
                     if y[..16] != GUARD || y[y.len() - 16..] != GUARD { return Err(format!("CAUSALP guard changed arm={arm} op={} heads={} dim={}", s.op, s.heads, s.dim)); }
+                    if !wrong_control_checked {
+                        let mut wrong = y.clone(); wrong[16] ^= 1;
+                        let Some(diff) = first_difference(reference, &wrong) else { return Err("CAUSALP wrong control was not detected".into()); };
+                        if diff != 16 { return Err(format!("CAUSALP wrong control first difference moved to byte {diff}")); }
+                        println!("CAUSALP WRONG CONTROL PASS op={} rows={} first_diff_byte={diff}", s.op, s.rows);
+                        wrong_control_checked = true;
+                    }
                     comparisons += 1; bytes += (units * words * 4) as u64;
                 }
                 g.clear()?;
             }
             if n % 50 == 0 { println!("CAUSALP spec {n}/{} ok comparisons={comparisons} elapsed_s={:.1}", specs.len(), started.elapsed().as_secs_f64()); }
         }
+        if !wrong_control_checked { return Err("CAUSALP wrong control did not run".into()); }
         println!("CAUSALP BYTES PASS specs={} comparisons={comparisons} output_bytes={bytes} digest={} elapsed_s={:.1}", specs.len(), sha256::digest(format!("{comparisons}{bytes}").as_bytes()), started.elapsed().as_secs_f64());
     }
     if mode == "time" {

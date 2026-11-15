@@ -8,7 +8,7 @@ use spark_gpu_probe::causal_ops::{Op,Shape};
 #[allow(dead_code,reason="the shared fixture has more forms than this test uses")]
 #[path="support/attention_checkpoint.rs"] mod fixture;
 type V=Vec<f32>;
-/// The host compute as a device with its exchange attached: a batch step of 3 to 8 chats keeps its picks on the device
+/// The host compute as a device with its exchange attached: a batch step of 2 to 8 chats keeps its picks on the device
 /// (`routes_rows`) and folds its rows (`folds_rows`). The routed projections themselves are refused (the default), so the
 /// row pass makes the middle on the host path, in (token, pick) order. Each fold stage is checked and counted. `answer`
 /// true answers it with zeros, false refuses it (the caller keeps the two steps).
@@ -35,7 +35,7 @@ impl Compute for Folding {
     type Value=V;type Pass=<Host as Compute>::Pass;
     fn mhc_row_launches(&self)->u64 {0}
     fn rows_greedy(&self,_:&Self::Value,_:usize)->spark_tp::Result<Option<Vec<u32>>> {Ok(None)}
-    fn routes_rows(&self,m:usize)->bool {(3..=BATCH_ROWS).contains(&m)}
+    fn routes_rows(&self,m:usize)->bool {(2..=BATCH_ROWS).contains(&m)}
     fn latent_absorption_chats(&self,name:&str,s:spark_gpu_probe::prompt_ops::Shape,g:&[spark_tp::bounded_decoder::ChatGather<'_,Self::Value>],stride:usize,
         q:&Self::Value,n:&Self::Value)->spark_tp::Result<Option<Self::Value>> {Host.latent_absorption_chats(name,s,g,stride,q,n)}
     fn folds_rows(&self,m:usize)->bool {self.flags.set(self.flags.get()+1);!self.closed && self.routes_rows(m)}
@@ -97,7 +97,7 @@ fn states<C:Compute<Value=V>>(decoder:&Decoder<'_,C>,prompts:&[&[u32]])->Vec<Sta
 fn a_batch_step_folds_its_routed_down_rows_at_the_fold_step_or_keeps_both_steps() {
     let c=fixture::Checkpoint::new_with_head(Dtype::Bf16,true);let bits=|v:&[f32]|v.iter().map(|v|v.to_bits()).collect::<Vec<_>>();
     let routed=c.admission.description().layers.iter().filter(|layer|matches!(layer.ffn,engine_model::shapes::Ffn::Experts(_))).count();assert!(routed>0);
-    // Three chats at three positions: the fewest that ride the row forms (two chats alone take the plain step's path).
+    // Three chats at three positions. Two chats ride the row forms too (`ROUTED_CHATS` is 1): the cohorts below start at two.
     let prompts:[&[u32];3]=[&[1],&[7,2],&[3,4,5]];let tokens=[2u32,5,1];
     let plain=Decoder::new(&c.admission,Host,8).unwrap();
     let expected=states(&plain,&prompts).iter().zip(tokens).map(|(state,token)|bits(&plain.step(token,state,|_,_|Ok(())).unwrap().0)).collect::<Vec<_>>();
@@ -123,12 +123,14 @@ fn a_batch_step_folds_its_routed_down_rows_at_the_fold_step_or_keeps_both_steps(
         assert_eq!((answered.with_shared.get(),answered.kept.get(),answered.flags.get()),(routed,if local {routed} else {0},routed));
         for (chat,(got,want)) in actual.iter().zip(&expected).enumerate() {assert_ne!(got,want,"chat {chat}: the folded output was not used");}
     }
-    // Cohorts of 3 to 8 chats at eight positions, the chats rotating through the slots: every routed layer is still ONE
+    // Cohorts of 2 to 8 chats at eight positions, the chats rotating through the slots: every routed layer is still ONE
     // stage of all rows, each chat keeps the bits of its own step, and the stage's launch plan at the model's shape is
-    // ONE fold launch a routed layer on a rank, for any row count (it was one a row).
+    // ONE fold launch a routed layer on a rank, for any row count (it was one a row). A cohort of two is what a served
+    // pair of different chats runs on a device: its picks stay there and its down rows fold before the exchange. With
+    // the routed span run once a chat (`ROUTED_CHATS` 2) no fold stage is asked at two rows and this loop fails there.
     let prompts:[&[u32];8]=[&[1],&[7,2],&[3,4,5],&[6],&[2,2,7,1],&[5,3],&[4],&[1,6,6]];let tokens=[2u32,5,1,7,3,6,4,2];
     let alone=states(&plain,&prompts).iter().zip(tokens).map(|(state,token)|bits(&plain.step(token,state,|_,_|Ok(())).unwrap().0)).collect::<Vec<_>>();
-    for n in 3..=8usize {
+    for n in 2..=8usize {
         let compute=Folding {local:true,..Folding::default()};
         let decoder=Decoder::new(&c.admission,&compute,8).unwrap();let held=states(&decoder,&prompts);
         let chats=(0..n).map(|slot|(slot*3+n)%8).collect::<Vec<_>>();

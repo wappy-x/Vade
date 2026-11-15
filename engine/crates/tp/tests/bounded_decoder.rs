@@ -529,16 +529,21 @@ fn predictor_layer_proposes_without_touching_plain_decoding() {
         let (logits,chosen,next,hidden)=decoder.step_hidden(token,&b,|_,_|Ok(())).unwrap();b=next;
         assert_eq!(bits(&logits),bits(&expected),"a decoder with the predictor loaded steps the same bits");
         // Proposals are tokens of the vocabulary, the same on every call, with and without the cache.
-        for depth in 1..=3 {let first=decoder.propose(&hidden[1],chosen,depth).unwrap();assert_eq!(first.len(),depth);assert!(first.iter().all(|&t|t<vocab));
-            assert_eq!(decoder.propose(&hidden[1],chosen,depth).unwrap(),first);}
+        // Every depth up to the largest: a deeper chain starts with the tokens of every shallower one.
+        let largest=spark_engine::draft::PREDICTOR_DEPTH_MAX;let whole=decoder.propose(&hidden[1],chosen,largest).unwrap();assert_eq!(whole.len(),largest);
+        for depth in 1..=largest {let first=decoder.propose(&hidden[1],chosen,depth).unwrap();assert_eq!(first.len(),depth);assert!(first.iter().all(|&t|t<vocab));
+            assert_eq!(decoder.propose(&hidden[1],chosen,depth).unwrap(),first);assert_eq!(first,whole[..depth],"depth {depth} is a prefix of depth {largest}");}
+        assert!(decoder.propose(&hidden[1],chosen,largest+1).is_err(),"a chain past the largest depth is refused");
         let (cached,after)=decoder.propose_after(&hidden[1],chosen,2,seen.as_ref()).unwrap();assert_eq!(cached.len(),2);
         assert_eq!(decoder.propose_after(&hidden[1],chosen,2,seen.as_ref()).unwrap().0,cached,"the cache is not changed by a proposal");
         assert!(decoder.propose_after(&hidden[1],chosen,0,seen.as_ref()).unwrap().0.is_empty());
         // The served form reads no logits: the head's own pick is the scored form's first largest logit, at every depth.
-        for depth in 1..=3 {for cache in [None,seen.as_ref()] {let (tokens,scores,_)=decoder.propose_scored(&hidden[1],chosen,depth,cache).unwrap();
+        for depth in 1..=largest {for cache in [None,seen.as_ref()] {let (tokens,scores,_)=decoder.propose_scored(&hidden[1],chosen,depth,cache).unwrap();
             assert_eq!(scores.len(),depth);assert_eq!(decoder.propose_after(&hidden[1],chosen,depth,cache).unwrap().0,tokens,"depth {depth}");}}
         // A row that only brings the cache up (depth 0, the cache half of the layer) leaves the cache a proposal leaves.
         assert_eq!(decoder.propose_after(&hidden[1],chosen,3,state_only.as_ref()).unwrap().0,decoder.propose_after(&hidden[1],chosen,3,seen.as_ref()).unwrap().0);
+        // The cache after a proposal is the cache with this one position, whatever the depth of the chain was.
+        assert_eq!(decoder.propose_after(&hidden[1],chosen,largest,seen.as_ref()).unwrap().1.rows(),after.rows());
         state_only=Some(decoder.propose_after(&hidden[1],chosen,0,state_only.as_ref()).unwrap().1);seen=Some(after);
     }
     assert!(decoder.propose(&decoder.zero_state().unwrap().layers[0].values().next().unwrap().clone(),vocab,1).is_err(),"a token outside the vocabulary is refused");
@@ -632,6 +637,39 @@ fn one_pass_seeds_the_predictor_cache_with_the_bits_of_the_row_by_row_form() {
         for row in at+1..rows.len()-1 {after=decoder.propose_after(&rows[row].1,rows[row+1].0,0,Some(&after)).unwrap().1;}
         let (want_next,_)=decoder.propose_after(&rows[rows.len()-1].1,best,3,Some(&after)).unwrap();
         assert_eq!(chat.propose(&decoder,best,3).unwrap().0,want_next);
+    }
+}
+/// A proposal deeper than 3 leaves trail room for every row of its own check pass (`Verify::propose`). Every kept row
+/// of a deep pass then waits for the predictor layer, and the next proposal runs on a cache with no gap: the proposal
+/// of the row-by-row cache. Up to depth 3 the room is TRAIL_ROWS, as before.
+#[test]
+fn a_deep_proposal_keeps_every_row_of_its_check_pass_for_the_predictor_cache() {
+    use spark_tp::bounded_decoder::{HeadRows,Verify,TRAIL_ROWS};
+    let largest=spark_engine::draft::PREDICTOR_DEPTH_MAX;assert!(largest+1>TRAIL_ROWS,"a pass of the largest depth has more rows than the trail held");
+    let c=fixture::Checkpoint::new_with_predictor(64);let mut decoder=Decoder::new(&c.admission,Host,64).unwrap();decoder.enable_predictor().unwrap();
+    let vocab=c.admission.description().vocab as u32;let tokens=(0..48u32).map(|i|(i*7+3)%vocab).collect::<Vec<_>>();
+    // Each row's last hidden state by plain steps, and the proposal that the row-by-row cache gives after row `last`.
+    let mut hidden=Vec::new();let mut state=decoder.zero_state().unwrap();
+    for &token in &tokens {let (_,_,next,row)=decoder.step_hidden(token,&state,|_,_|Ok(())).unwrap();state=next;hidden.push(row[1].clone());}
+    let expected=|last:usize,next:u32,depth:usize| {let mut cache=None;
+        for row in 0..last {cache=Some(decoder.propose_after(&hidden[row],tokens[row+1],0,cache.as_ref()).unwrap().1);}
+        decoder.propose_after(&hidden[last],next,depth,cache.as_ref()).unwrap().0};
+    for depth in [3usize,4,largest] {
+        // A prompt of 8 rows and one decoded row, then cycles: a proposal, and its check pass of depth+1 rows.
+        let (_,state,open)=decoder.prefill_rows_hidden(&tokens[..8],&decoder.zero_state().unwrap(),HeadRows::Last).unwrap();
+        let mut chat=Verify::new(state);chat.track_proposer();chat.seed_trail(&decoder,&[(tokens[..8].to_vec(),open)]).unwrap();
+        chat.rows(&decoder,&[tokens[8]]).unwrap();let mut last=8;
+        for cycle in 0..3 {
+            assert_eq!(chat.propose(&decoder,tokens[last+1],depth).unwrap().0,expected(last,tokens[last+1],depth),"depth {depth} cycle {cycle}");assert_eq!(chat.waiting(),0);
+            // The pass keeps every row: all of them wait for the predictor layer.
+            chat.rows(&decoder,&tokens[last+1..last+2+depth]).unwrap();last+=depth+1;
+            assert_eq!(chat.waiting(),depth+1,"a pass of {} rows at depth {depth}",depth+1);
+        }
+        // A pass that keeps two rows: the dropped rows leave the trail, and the next proposal follows the kept ones.
+        assert_eq!(chat.propose(&decoder,tokens[last+1],depth).unwrap().0,expected(last,tokens[last+1],depth),"depth {depth} before the partial pass");
+        chat.rows(&decoder,&tokens[last+1..last+2+depth]).unwrap();chat.truncate(&decoder,chat.position()-(depth as u64-1)).unwrap();last+=2;
+        assert_eq!(chat.waiting(),2);
+        assert_eq!(chat.propose(&decoder,tokens[last+1],depth).unwrap().0,expected(last,tokens[last+1],depth),"depth {depth} after the partial pass");
     }
 }
 #[test]
@@ -730,4 +768,13 @@ fn every_prompt_group_runs_unrecorded_and_restores_recording() {
     compute.paused.set(true);d.prefill_rows(&[4],&b,HeadRows::Last).unwrap();assert!(compute.paused.get());
     // A failed group restores recording too.
     compute.paused.set(false);assert!(d.prefill_rows(&[u32::MAX],&b,HeadRows::Last).is_err());assert!(!compute.paused.get());
+}
+#[test]
+fn verification_rows_keep_the_callers_recording_state() {
+    use spark_tp::bounded_decoder::Verify;
+    let c=fixture::Checkpoint::new_with_head(Dtype::Bf16,true);let compute=Kept::default();let d=Decoder::new(&c.admission,&compute,8).unwrap();
+    let mut verify=Verify::new(d.zero_state().unwrap());verify.rows(&d,&[1,7]).unwrap();
+    assert!(compute.unrecorded.borrow().is_empty(),"verification should leave resident launch recording enabled");assert!(!compute.paused.get());
+    compute.paused.set(true);verify.rows(&d,&[2,5]).unwrap();
+    assert!(compute.unrecorded.borrow().is_empty(),"verification should not override a caller pause");assert!(compute.paused.get());
 }

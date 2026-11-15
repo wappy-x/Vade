@@ -29,21 +29,19 @@ struct Defer(std::rc::Rc<std::cell::Cell<bool>>);
 impl Drop for Defer {fn drop(&mut self) {self.0.set(false);}}
 impl<'b,'d> Weights<'b,'d> {
     pub fn prepare_kda(&mut self,c:&CheckpointAdmission)->Result<()> {
-        let draft=c.description().with_draft_layer().map_err(|e|e.to_string())?;
-        let description=draft.as_ref().unwrap_or(c.description());
-        for (layer,spec) in description.layers.iter().enumerate() {
-            if !matches!(spec.mixer,engine_model::plan::description::TokenMixer::Kda(_)) {continue;}
-            let layout=crate::kda_heads::layout(spec.mixer,self.topology)?;
-            let plan=LayerPlan::new(description,layer,1,Topology {rank:0,parts:1}).map_err(|e|e.to_string())?;
-            for name in crate::kda_heads::projections(&plan,layout) {
-                let Some(matrix)=self.matrices.get(&name) else {continue;};
-                let rows=matrix.rows;let heads=layout.heads();
-                if rows.total%layout.total_heads()!=0 {return Err("recurrent projection head extent differs".into());}
-                let width=rows.total/layout.total_heads();
-                if rows.start!=heads.start*width || rows.count!=layout.local_heads()*width {return Err("recurrent projection ownership differs".into());}
-                self.kda_local.insert(name);
-            }
-        }Ok(())
+        let owner=std::ptr::from_ref(c) as usize;
+        if self.identity!=Some(owner) {return Err("resident owner is not prepared for this checkpoint".into());}
+        let topology=self.topology;let matrices=&self.matrices;
+        self.kda_plans.prepare(owner,|| {
+            let draft=c.description().with_draft_layer().map_err(|e|e.to_string())?;
+            let description=draft.as_ref().unwrap_or(c.description());let mut entries=Vec::new();
+            for (layer,spec) in description.layers.iter().enumerate() {
+                if !matches!(spec.mixer,engine_model::plan::description::TokenMixer::Kda(_)) {continue;}
+                let layout=crate::kda_heads::layout(spec.mixer,topology)?;
+                let plan=LayerPlan::new(description,layer,1,Topology {rank:0,parts:1}).map_err(|e|e.to_string())?;
+                entries.extend(crate::kda_heads::projections(&plan,layout).into_iter().map(|name|(name,layout)));
+            }Ok(entries)
+        },|name|matrices.get(name).map(|matrix|matrix.rows),&mut self.kda_local)
     }
     pub fn sparse_topology(&self)->Topology {self.topology}
     pub fn apply_owned(&mut self,name:&str,b:&Backend<'d>,input:&DeviceVector<'_>,tokens:usize,layout:crate::sparse_heads::Layout)->Result<DeviceVector<'d>> {

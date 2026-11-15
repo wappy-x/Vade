@@ -7,6 +7,157 @@ A short revision such as `380d8e5` or a number such as PR 142 names a revision
 or pull request of the private development history. This repository does not
 hold them ([glossary](docs/GLOSSARY.md#ho), "Main `abc1234`").
 
+## v0.2.0-rc.20 - 2026-11-15
+
+This release turns drafting on by default for the GLM text service, loads the
+GLM weights about 4 seconds sooner, and gives a GLM chat its first token
+sooner. Long contexts and several chats at once decode faster. The new default
+has measured costs. They are listed below. GLM remains a diagnostic text
+service.
+
+Every number below was measured with GLM FP4-Local on two DGX Sparks. Each
+compares one change, or one batch of changes merged together, with the main
+just before it. No number compares this release as a whole with v0.2.0-rc.19.
+
+New and changed:
+
+- **GLM drafting is on by default (PR 232).** A plain `vade up --sparks 2
+  --diagnostic-unqualified-text` now loads the drafting layer at depth 3.
+  Before, it started without drafting. A lone chat drafts. Chats that run
+  together decode plainly. Token IDs are the same with drafting on and off.
+  One chat of structured text, in the order off, on, on, off on one pair of
+  Sparks, measured 24.35 / 31.54 / 31.61 / 24.32 tokens per second (29.7
+  percent more with drafting). `--mtp 0` turns drafting off.
+- **Known costs of the new default (PR 232).** All measured. A lone code or
+  prose request gains nothing yet and reads 0.35 percent slower: the engine
+  tries drafting, finds no gain and stops. Nine long requests at once at
+  context 32,768 run 5 at once in place of 7, and the last one waits about 27
+  seconds longer. The drafting layer and its workspace take 3.36 GB of the
+  room for chats. A chat that arrives while another one drafts gets its first
+  token about 0.1 seconds later. `--mtp 0` turns drafting off.
+- **Two fall-backs of the default (PR 232).** When you name no depth, `vade
+  up` starts without drafting in two cases. The model folder has no drafting
+  layer: it prints `This model has no drafting layer. Starting without
+  drafting.` There is not enough free memory for drafting: it prints `Not
+  enough free memory for drafting. Starting without drafting.` The default
+  never fails a start that `--mtp 0` passes. A depth that you name with
+  `--mtp` or `MTP` keeps the engine's error.
+- **The GLM text service takes exactly two Sparks (PR 232).**
+  `--diagnostic-unqualified-text` with any other group is refused before a
+  remote start. The message names the start that works: `vade up --sparks 2
+  --diagnostic-unqualified-text`.
+- **The GLM weights load about 4 seconds sooner (PR 183).** Four copy threads
+  now fill page-locked buffers, and the upload thread only queues the copies
+  to the GPU. On one pair of Sparks, over 7 fresh starts before and 6 after,
+  the mean weight load changed from 14.74 to 10.59 seconds, and the time from
+  start to ready from 19.60 to 15.45 seconds. The weight bytes on the GPU are
+  the same on both Sparks, by their hashes. No step cost showed: over 14 pairs
+  of runs the measured interval was -0.180 to +0.012 milliseconds a step.
+- **Sooner first token for a GLM chat (PR 216).** The engine keeps the
+  prepared layout of the recurrent projection layers between sessions. Token
+  IDs are the same. First token by prompt length, in the order main, change,
+  change, main, with fresh sessions and the prompt cache off: 16 tokens 287.3
+  / 250.7 / 248.0 / 287.4 milliseconds; 64 tokens 633.0 / 596.5 / 592.2 /
+  635.6; 256 tokens 1,315.6 / 1,273.5 / 1,277.2 / 1,315.5; 1,024 tokens
+  3,768.5 / 3,721.1 / 3,743.5 / 3,785.2. At 2,048 tokens the gain was smaller
+  than the spread of the two main runs.
+- **Long contexts decode faster (PR 236).** Past a context of about 16,000
+  tokens, two parts of a decode step fell back to a slower general path. They
+  now stay on the fast path up to the full served context of 32,768. A decode
+  step, in the order main, change, change, main, measured 54.087 / 47.188 /
+  47.095 / 54.182 milliseconds at a context of 16,384 tokens (12.9 percent
+  less) and 55.378 / 48.979 / 48.968 / 55.188 at 32,000 tokens (11.4 percent
+  less). Up to 8,192 tokens there was no material change. Token IDs are the
+  same.
+- **Two chats and eight chats decode faster (PR 228, PR 229).** Two chats at
+  once now take the grouped route for the routed expert weights. A step
+  measured 69.292 / 67.877 / 67.950 / 69.238 milliseconds in the order main,
+  change, change, main (2.0 percent less). With eight chats, the recurrent
+  rows of all chats now go out in one GPU launch: 142.713 / 141.252 / 141.233
+  / 142.902 milliseconds a step (1.1 percent less). In the test of the merged
+  batch (these two with PR 235 and PR 236), one run before and one after, the
+  total decode rate changed from 28.825 to 29.509 tokens per second for two
+  chats, from 43.796 to 44.085 for four chats, from 55.949 to 56.500 for eight
+  chats, and from 83.611 to 84.371 for eight copies of one chat.
+- **A loaded drafting layer no longer slows several chats (PR 219).** A server
+  with the drafting layer loaded charged drafting memory to every chat, so
+  eight chats could not all run at once. It now charges that memory only to a
+  lone chat that can draft. On a server with the drafting layer loaded, eight
+  different chats changed from 37.353 to 56.174 tokens per second in total,
+  and eight copies of one chat from 45.468 to 83.742.
+- **Drafting up to depth 7 (PR 214).** `vade up --mtp` accepts depths 0 to 7
+  with `--diagnostic-unqualified-text`, and 0 to 3 otherwise. A request that
+  names its own depth keeps it. Token IDs are the same at every depth. Strict
+  drafting of a 256-token structured request, in the order main at depth 3,
+  depth 7, depth 7, main at depth 3, measured 33.820 / 37.339 / 35.667 /
+  33.732 tokens per second. Code and prose did not gain.
+- **Cheaper drafting checks (PR 225).** The check of drafted tokens now goes
+  through the resident recorder, so a check sends fewer separate GPU launches.
+  Token IDs are the same. One run before and one after, for the merged batch
+  of PR 214, PR 225 and PR 223: strict drafting at depth 3 changed from 33.613
+  to 35.215 tokens per second for structured output, from 26.825 to 29.044 for
+  code and from 23.232 to 22.957 for prose. At depth 2 it changed from 28.626
+  to 30.381, from 26.408 to 28.040 and from 23.356 to 23.484. The engine's own
+  timer for a check of four rows changed from 100.455 to 94.617 milliseconds,
+  and for three rows from 92.442 to 86.352. Prose at depth 3 was 1.2 percent
+  lower in this one run.
+- **A long prompt reads sooner with the drafting layer loaded (PR 223).** At
+  context 32,768 with the drafting layer loaded, a lone prompt borrows the
+  chat memory that no chat holds, reads in larger row groups, and gives the
+  memory back before the next request starts. One run before and one after,
+  for the same merged batch, with the prompt cache on: the first token of a
+  cold 8,192-token prompt changed from 43.633 to 33.000 seconds; at 2,048,
+  1,024 and 512 tokens from 10.27, 4.96 and 2.50 seconds to 7.52, 3.61 and
+  2.01; a second turn from the cache from 3.501 to 2.729 seconds; a second
+  turn read cold from 48.289 to 36.889. The lowest free memory in that load
+  changed from 17.25 and 19.29 GB on the two Sparks to 16.22 and 18.61. A
+  server without the drafting layer keeps its old path: its 8,192-token first
+  token measured 32,208.5 milliseconds before and 32,215.2 after.
+- **A rare fault in the launch recorder is closed (PR 235).** A code review
+  found it. When memory was at its budget at a backend's first recorded launch
+  that uses tables, a kept launch graph could later read its tables from freed
+  memory. The result would have been wrong math without an error. The recorder
+  now keeps the table area that such a graph uses.
+- **One chat without drafting holds its speed.** In the merged batch of PR 183
+  and PR 232, one run before and one after, one plain chat measured 24.310 /
+  24.278 / 24.268 tokens per second before and 24.346 / 24.320 / 24.304 after
+  for prose, code and structured output. In each of the three tests of a
+  merged engine batch, all 48 measured token ID lists (6,880 tokens) matched
+  the main before it.
+- **`vade update` prints a restart command that works (PR 224).** For a
+  running GLM text service, the restart command that `vade update` prints now
+  keeps `--diagnostic-unqualified-text`. Before, the command as printed was a
+  normal start, which the engine refuses for this checkpoint.
+
+Checks:
+
+- **The real default start, on two Sparks (PR 232).** A plain `vade up` of the
+  GLM text service ran on the exact merged code. It printed the fall of the
+  context from 131,072 to 32,768, came up at context 32,768 with room for 8
+  chats and drafting depth 3, and answered with 256 of 256 token IDs equal to
+  the saved baseline. A second start with `--mtp 0` was plain and gave the
+  same 256 token IDs.
+- **Tests on a slow or bare Mac (PR 224).** Five harness tests failed on
+  GitHub's hosted macOS machine for `v0.2.0-rc.19`. Two need `rg`, which that
+  machine does not have; they now skip that part and say so. Three timed a
+  deadline too tightly for a slow machine; they now leave a wide margin. One
+  more test, which failed once on a busy Mac, now holds its mock engine's lock
+  for the margin that its sibling case already used. No product behavior
+  changed.
+
+Not done yet, said plainly:
+
+- GLM remains a diagnostic text service (`--diagnostic-unqualified-text`).
+- With drafting on by default, a lone code or prose chat does not gain yet,
+  and many long requests at once wait longer. Both costs are listed above and
+  stay in this release.
+- The two fall-backs of the default were tested on the host only. Neither has
+  run on a Spark.
+- The gain and the costs of the default were measured before the changes for
+  several chats and long contexts (PR 228, PR 229, PR 236) were merged. They
+  were not measured again on the merged engine.
+- Full cache-fill pressure loads remain unmeasured.
+
 ## v0.2.0-rc.19 - 2026-11-15
 
 This release makes the one-line installer safe against a cut-off download,

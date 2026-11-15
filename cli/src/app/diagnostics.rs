@@ -68,7 +68,12 @@ impl<R: Runner> App<R> {
         if self.config.model.ends_with("-fp8") { arguments.push("--fp8".into()); }
         let options = match crate::cli::parse(&arguments) {
             Ok(crate::cli::Cli { command: Command::Up(options), .. }) => {
-                crate::doctor::generation_defaults(&mut report, options.context, options.output, options.mtp_explicit.then_some(options.mtp))?;
+                let mtp = match Session::load(&self.config.state_dir) {
+                    Ok(Some(session)) if session.mtp_explicit => Some(session.mtp),
+                    Ok(Some(_)) => None,
+                    _ => options.mtp_explicit.then_some(options.mtp),
+                };
+                crate::doctor::generation_defaults(&mut report, options.context, options.output, mtp)?;
                 Some(options)
             }
             Err(error) => { report.fail("launch defaults", &error, "Correct MTP, then run vade doctor.")?; None }

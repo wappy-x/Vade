@@ -74,8 +74,7 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
             || handles && j.request.prefix_cache && j.request.kv_checkpoint
     };
     let reservation_for = |j: &Ready, tokens, plain, cached| {
-        engine
-            .request_reservation_bytes_for_prompt(j.prompt.len(), tokens, plain, cached, retain_prefix(j))?
+        engine.request_reservation_bytes_for_request(j.prompt.len(), tokens, plain, cached, retain_prefix(j), &j.request)?
             .checked_add(engine.request_option_bytes(&j.request))
     };
     // Unfunded retention leaves free what live requests may hold beyond their bound.
@@ -415,6 +414,7 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
                 && engine.shared_prefill_batch() && (engine.shared_batch() || !prompt_cohorts.decoding(active.iter().filter(|j| !j.done).map(|j| (j.id, j.generation.state.tokens.len() >= j.ready.prompt.len())))) {
                 break;
             }
+            super::draft_admission::retire(engine, &mut active, reservation_for)?;
             // The idle maintenance above may predate this request; the cache balance below
             // can poll memory pressure and the forks can allocate.
             engine.admission_started();
@@ -451,7 +451,7 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
             };
             let incremental = |j: &Ready| {
                 let tokens = j.reservation_tokens(output_window, engine.reserve_full_output());
-                let full = reservation_for(j,tokens,shared_plain(j, config, active.iter().map(|a| &a.ready).chain(queued.iter())),Some(cached_prefix(j)))?;
+                let full = reservation_for(j,tokens,engine.discard_contended_draft() && active.iter().any(|job| !job.done) || shared_plain(j, config, active.iter().map(|a| &a.ready).chain(queued.iter())),Some(cached_prefix(j)))?;
                 let shared = if let Some((state, retain)) = checkpoint(j) {
                     shared_charge(state.session.prefix_allocations(retain).unwrap_or_default())
                 } else if config.prefix_cache && j.request.prefix_cache {
@@ -480,7 +480,7 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
                 }
                 continue;
             }
-            let waiting_bytes = reservation_for(oldest,oldest.reservation_tokens(output_window, engine.reserve_full_output()),shared_plain(oldest, config, active.iter().map(|a| &a.ready).chain(queued.iter())),None)
+            let waiting_bytes = reservation_for(oldest,oldest.reservation_tokens(output_window, engine.reserve_full_output()),engine.discard_contended_draft() && active.iter().any(|job| !job.done) || shared_plain(oldest, config, active.iter().map(|a| &a.ready).chain(queued.iter())),None)
                 .or_else(|| retain_prefix(oldest).then_some(usize::MAX))
                 .ok_or("missing request reservation")?;
             let (younger_count, younger_bytes, younger_backgrounds, younger_foreground) = active.iter()
@@ -517,7 +517,7 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
                 .filter(|(i, j)| *i == 0 || (younger_count + 2 <= config.active
                     && younger_backgrounds + usize::from(j.request.priority != 255)
                         + usize::from(oldest.request.priority != 255) <= public_slots
-                    && reservation_for(j,j.reservation_tokens(output_window, engine.reserve_full_output()),false,None)
+                    && reservation_for(j,j.reservation_tokens(output_window, engine.reserve_full_output()),engine.discard_contended_draft() && active.iter().any(|job| !job.done),None)
                         .and_then(|bytes| younger_bytes.checked_add(bytes))
                         .and_then(|bytes| bytes.checked_add(waiting_bytes))
                         .is_some_and(|bytes| bytes <= if j.request.priority == 255 { config.active_bytes } else { backfill_limit })))
@@ -1253,20 +1253,10 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
             .min_by_key(|(_, j)| (Some(j.id) != aged_prefill, Some(j.id) != foreground, j.last_tick, j.id))
             .map(|(i, _)| i);
         if let Some(i) = prefill {
-            let source = &jobs[i];
-            // Waiters for this owner's uncommitted prefix cannot run yet.
-            // Keep the large prefill tile until an independent request is due.
-            let queued_runnable = queued.iter().any(|waiting| !source.automatic_cache
-                || !config.prefix_cache || !waiting.request.prefix_cache || source.ready.scope != waiting.scope
-                || shared_prefix(&source.ready.prompt, &waiting.prompt)
-                    <= source.generation.state.tokens.len() + shared_prompt_limit);
-            let other_runnable = jobs.iter().enumerate().any(|(n, j)| n != i && !j.done
-                && errors[n].is_none() && j.ready.wire.bytes.is_empty()) || queued_runnable;
-            let decoding = jobs.iter().enumerate().any(|(n, j)| n != i && !j.done
-                && errors[n].is_none() && j.ready.wire.bytes.is_empty()
-                && j.generation.state.tokens.len() >= j.ready.prompt.len());
-            let shared_waiters = !queued.is_empty() && !queued_runnable;
+            let (other_runnable, decoding, shared_waiters) = super::prompt_workspace::contention(&jobs,i,&errors,&queued,config,shared_prompt_limit);
             let contended = Some(jobs[i].id) != foreground && other_runnable;
+            super::prompt_workspace::prepare(engine,(config.session_budget_bytes,cache.retained_bytes()),&jobs,&active,&retired,
+                !other_runnable && preparing == 0,request_hold)?;
             let job = &mut jobs[i];
             let context = job.generation.state.tokens.len();
             // Keep in-flight shapes fixed. Engines with canonical tiles retain
@@ -1340,6 +1330,8 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
                 job.events(engine, limits, &mut cache, events)?;
                 Ok(())
             })().err();
+            let returned = engine.finish_prompt_workspace();
+            if errors[i].is_none() { errors[i] = returned.err(); }
         }
         engine.profile_tick_end();
         if jobs.iter().any(|job| job.done) {

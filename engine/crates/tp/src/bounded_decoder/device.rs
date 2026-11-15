@@ -942,6 +942,14 @@ if start==0 && v.pending.as_ref().and_then(|p|p.borrow().state_prefix)==Some(len
     }
     fn rows_release(&self)->Result<()> {self.backend.release_group_spares()}
     fn rows_keep(&self)->Result<()> {self.backend.keep_group_spares(super::POOL_ROOM)}
+    fn rows_return_lease(&self)->Result<()> {
+        self.rows_keep()?;
+        let stats=self.backend.vector_pool_stats();let (_,_,cap)=self.backend.vector_pool_bound();
+        // Vector statistics also include returns and reuses in the decode reserve.
+        let pooled=stats.returned_bytes.saturating_sub(stats.reused_bytes).saturating_sub(stats.evicted_bytes);
+        let (decode,_,decode_cap)=self.backend.decode_reserve_bound();let held=pooled.saturating_sub(decode);
+        eprintln!("TEXT PROMPT SCRATCH retained_spare_bytes={held} normal_cap_bytes={cap} room_bytes={} decode_spare_bytes={decode} decode_cap_bytes={decode_cap} pooled_spare_bytes={pooled}",super::POOL_ROOM);Ok(())
+    }
     fn rows_unrecorded(&self,pause:bool)->Result<bool> {
         let was=self.backend.pause_resident_launches(pause)?;if pause && !was {spark_gpu_probe::prompt_launches::record("rows_unrecorded");}Ok(was)
     }

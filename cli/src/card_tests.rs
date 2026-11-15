@@ -94,6 +94,9 @@ fn glm_bodies_ask_low_effort_and_never_thinking_off() {
     assert!(qwen.contains(r#""chat_template_kwargs":{"enable_thinking":false}"#));
     assert!(!qwen.contains("reasoning_effort") && !qwen.contains("mtp_depth"));
     assert!(is_glm_model("GLM-5.3-Flash-FP4-Local") && !is_glm_model("qwen3.8-flash-next-fp8"));
+    let served = json::packed(&served_default_payload("glm-5.3-flash-fp4-local", "S", "U", 8192, SEED));
+    assert!(!served.contains("mtp_depth") && !served.contains("draft"), "{served}");
+    assert!(served.contains(r#""reasoning_effort":"low""#) && served.contains(r#""cache":false"#));
 }
 
 #[test]
@@ -177,17 +180,17 @@ fn options_and_prompts_are_checked() {
 struct Fake { url: String, seen: Arc<Mutex<Vec<(String, Value)>>>, stop: Arc<AtomicBool>, task: Option<std::thread::JoinHandle<()>> }
 
 impl Fake {
-    fn start() -> Self { Self::refusing_after("/v1/chat/completions", usize::MAX) }
+    fn start() -> Self { Self::refusing_after("fake-model", "/v1/chat/completions", usize::MAX) }
 
     /// A fake that answers HTTP 500 to every request for `path` after the first `count`.
-    fn refusing_after(path: &'static str, count: usize) -> Self {
+    fn refusing_after(model: &'static str, path: &'static str, count: usize) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let (seen, stop) = (Arc::new(Mutex::new(Vec::new())), Arc::new(AtomicBool::new(false)));
         let task = { let (seen, stop) = (seen.clone(), stop.clone()); std::thread::spawn(move || while !stop.load(Ordering::Relaxed) {
             match listener.accept() {
-                Ok((stream, _)) => { let seen = seen.clone(); std::thread::spawn(move || serve(stream, &seen, path, count)); }
+                Ok((stream, _)) => { let seen = seen.clone(); std::thread::spawn(move || serve(stream, &seen, path, count, model)); }
                 Err(_) => std::thread::sleep(Duration::from_millis(2)),
             }
         }) };
@@ -205,7 +208,7 @@ fn fake_ids(body: &str) -> [i64; 2] {
     [i64::from_str_radix(&sha[..6], 16).unwrap(), i64::from_str_radix(&sha[6..12], 16).unwrap()]
 }
 
-fn serve(stream: TcpStream, seen: &Mutex<Vec<(String, Value)>>, refuse: &str, count: usize) {
+fn serve(stream: TcpStream, seen: &Mutex<Vec<(String, Value)>>, refuse: &str, count: usize, model: &str) {
     stream.set_nonblocking(false).unwrap();
     let mut reader = BufReader::new(stream.try_clone().unwrap());
     let mut line = String::new();
@@ -234,7 +237,7 @@ fn serve(stream: TcpStream, seen: &Mutex<Vec<(String, Value)>>, refuse: &str, co
     }
     let json_reply = |body: &str| format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
     let reply = match path.as_str() {
-        "/v1/models" => json_reply(r#"{"object":"list","data":[{"id":"fake-model","object":"model"}]}"#),
+        "/v1/models" => json_reply(&format!(r#"{{"object":"list","data":[{{"id":"{model}","object":"model"}}]}}"#)),
         "/health" => json_reply(r#"{"status":"ok"}"#),
         "/tokenize" => json_reply(&format!(r#"{{"tokens":[{}]}}"#, request["prompt"].as_str().unwrap().bytes().map(|b| b.to_string()).collect::<Vec<_>>().join(","))),
         _ => {
@@ -303,6 +306,27 @@ fn a_fake_server_gets_the_66_requests_in_card_order() {
     assert_eq!(card["decode"]["structured"]["runs"][0]["completion_validation"]["valid"], Value::Bool(false));
     assert_eq!(card["model"].as_str(), Some("fake-model"));
     assert!(summary(&card).ends_with("Output checks 10/15."), "{}", summary(&card));
+}
+
+#[test]
+fn a_glm_card_keeps_the_depth_pin_and_records_served_default_outside_the_digest() {
+    let fake = Fake::refusing_after("glm-5.3-flash-fp4-local", "/v1/chat/completions", usize::MAX);
+    let server = Server::parse(&fake.url).unwrap();
+    let prompts = Prompts { version: "1.0.0".into(), system: "S".into(), prefill_unit: "unit text ".into(),
+        workloads: vec![("code".into(), "Write code.".into()), ("prose".into(), "Write prose.".into()), ("structured".into(), "Return JSON.".into())] };
+    let mut card = object(vec![]);
+    run_card(&server, &prompts, false, &mut card, || false).unwrap();
+    let seen = fake.seen.lock().unwrap().clone();
+    let chats: Vec<&Value> = seen.iter().filter(|(path, _)| path == "/v1/chat/completions").map(|(_, row)| row).collect();
+    assert_eq!(chats.len(), 75);
+    assert!(chats[..15].iter().all(|row| row["mtp_depth"].as_i64() == Some(0) && row.get("draft").is_none()));
+    assert!(chats[15..30].iter().all(|row| row.get("mtp_depth").is_none() && row.get("draft").is_none()));
+    assert!(chats[30..].iter().all(|row| row["mtp_depth"].as_i64() == Some(0)));
+    assert_eq!(token_rows(&card).unwrap().len(), RESPONSES);
+    assert_eq!(card["served_default"]["code"]["runs"].as_array().unwrap().len(), DECODE_RUNS);
+    let mut stripped = card.clone();
+    if let Value::Object(fields) = &mut stripped { fields.retain(|(key, _)| key != "served_default"); }
+    assert_eq!(digest(&card).unwrap(), digest(&stripped).unwrap());
 }
 
 #[test]
@@ -503,7 +527,7 @@ fn a_run_with_no_reply_saves_nothing_and_a_stopped_run_keeps_its_replies() {
     assert!(error.ends_with("No reply arrived, so nothing was saved."), "{error}");
     assert!(!output.exists());
     // The server refuses the third chat: the card keeps code runs 1 and 2 and says why it stopped.
-    let fake = Fake::refusing_after("/v1/chat/completions", 2);
+    let fake = Fake::refusing_after("fake-model", "/v1/chat/completions", 2);
     let output = directory.join("partial.json");
     let options = Options { url: Some(fake.url.clone()), output: Some(output.clone()), ..Options::default() };
     let error = card_file(&options, &prompts, || false).unwrap_err();
@@ -514,7 +538,7 @@ fn a_run_with_no_reply_saves_nothing_and_a_stopped_run_keeps_its_replies() {
     assert!(card.get("token_ids_sha256").is_none() && card.get("prefill").is_none());
     assert_eq!(fake.seen.lock().unwrap().iter().filter(|(p, _)| p == "/v1/chat/completions").count(), 3, "no chat after the refused one");
     // A stop inside an 8K pair: pair 1 is kept; the cold reply of pair 2, whose warm replay failed, is not.
-    let fake = Fake::refusing_after("/v1/completions", 3);
+    let fake = Fake::refusing_after("fake-model", "/v1/completions", 3);
     let output = directory.join("pair.json");
     let options = Options { url: Some(fake.url.clone()), output: Some(output.clone()), ..Options::default() };
     assert!(card_file(&options, &prompts, || false).unwrap_err().contains("answered HTTP 500"));
@@ -523,7 +547,7 @@ fn a_run_with_no_reply_saves_nothing_and_a_stopped_run_keeps_its_replies() {
     assert_eq!((card["decode"]["prose"]["runs"].as_array().map(Vec::len), pairs("cold"), pairs("warm_replay")), (Some(5), Some(1), Some(1)));
     assert!(card.get("concurrency").is_none());
     // A stop inside a concurrency round: the three C1 rounds are kept; the C2 round with a refused stream is not.
-    let fake = Fake::refusing_after("/v1/chat/completions", 15 + 3 + 1);
+    let fake = Fake::refusing_after("fake-model", "/v1/chat/completions", 15 + 3 + 1);
     let output = directory.join("round.json");
     let options = Options { url: Some(fake.url.clone()), output: Some(output.clone()), ..Options::default() };
     assert!(card_file(&options, &prompts, || false).unwrap_err().contains("answered HTTP 500"));

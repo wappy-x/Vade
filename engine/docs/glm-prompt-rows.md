@@ -62,14 +62,14 @@ prompt. The checker can run it on every row to compare prompt logits.
 
 ## Exact drafting
 
-One chat can decode several tokens in one pass. `flash-serve --mtp 1..3` loads the
-checkpoint's own predictor layer. A request then asks for it with `"draft":"strict"`
+One chat can decode several tokens in one pass. `flash-serve --mtp 1..7` loads the
+checkpoint's own predictor layer for proposals up to that depth. A request then asks for it with `"draft":"strict"`
 and `mtp_depth`. With `"draft":"plain"` the same server decodes one token per step.
 
 - **The proposer.** The predictor layer follows the last decoder layer
   ([`proposer.rs`](../crates/tp/src/bounded_decoder/proposer.rs)). It takes the last
   hidden state of a kept row and the token chosen after it, and proposes up to
-  three further tokens. It keeps its own cache of the rows it has seen, starting
+  seven further tokens (`PREDICTOR_DEPTH_MAX`), never more than the loaded depth. It keeps its own cache of the rows it has seen, starting
   with the last prompt rows. A proposal can be wrong. It never changes a kept token.
 - **The verify pass.** The next token and the proposals run as one group of rows
   through `prefill_rows`, with the head on every row
@@ -89,6 +89,14 @@ and `mtp_depth`. With `"draft":"plain"` the same server decodes one token per st
   request's measured step time, pass time and kept proposals
   ([`row_split.rs`](../crates/tp/src/row_split.rs)). When a pass does not pay, the
   chat decodes plain steps.
+- **Deeper than three.** A request whose depth is above 3 starts each answer at
+  depth 3. It goes to depth 5, and then to its whole depth, only while those
+  proposals are kept, and it comes back when they are lost
+  ([`deeper.rs`](../crates/tp/src/row_split/deeper.rs)). The rule counts kept
+  proposals and holds no time, so the same request proposes the same depths every
+  time. A request that names no draft mode leaves the depth to the service, up to
+  the loaded depth. A request of depth 3 or less, and a server started with
+  `--mtp 3` or less, propose as before.
 
 A pass serves one chat. With more chats, each decodes plain rows.
 

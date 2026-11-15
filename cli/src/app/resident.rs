@@ -124,7 +124,9 @@ pub(super) fn recorded_options(session: &Session) -> UpOptions {
         replicas: session.replicas,
         replica_sparks: session.replica_sparks,
         mtp: session.mtp,
-        mtp_explicit: session.mtp_explicit,
+        // A depth 0 that came from a fall (no drafting layer, or too little memory) is nobody's choice: a restart
+        // tries the default again.
+        mtp_explicit: session.mtp_explicit && session.draft_fall.is_none(),
         fp4_local: session.fp4_local,
         context: session.context,
         output: session.output,
@@ -135,6 +137,7 @@ pub(super) fn recorded_options(session: &Session) -> UpOptions {
         cache_bytes: session.cache_bytes,
         decode_fuse: Some(session.decode_fuse),
         diagnostic_unqualified_text: session.diagnostic_unqualified_text,
+        draft_fall: session.draft_fall,
     }
 }
 

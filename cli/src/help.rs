@@ -9,7 +9,10 @@ const DRY_RUN: (&str, &str) = ("--dry-run", "Show what would happen; change noth
 const API_KEY: (&str, &str) = ("--api-key-file PATH", "Bearer credential file (or VADE_API_KEY_FILE)");
 const CONTEXT: (&str, &str) = ("--context N", "Context window in tokens, 4096..262144 (default 32768)");
 const OUTPUT: (&str, &str) = ("--output N", "Output limit in tokens, 1024..16384 (default 8192, or the context if smaller)");
-const MTP: (&str, &str) = ("--mtp N", "Drafting depth 0..3; 0 turns drafting off (default: the engine chooses)");
+/// `vade up`: every start it can make. The text service is a controller start; a local start takes 0..3 ([`MTP_LOCAL`]).
+const MTP: (&str, &str) = ("--mtp N", "Drafting depth 0..3; 0 turns drafting off. Unset: the engine chooses, and controller FP8 passes 2. From a controller, the GLM text service (--diagnostic-unqualified-text) takes 0..7 and loads 3 when this and MTP are unset");
+/// `vade launch`: a local start on this Spark. It has no text service and refuses a depth above 3.
+const MTP_LOCAL: (&str, &str) = ("--mtp N", "Drafting depth 0..3; 0 turns drafting off (default: the engine chooses)");
 /// The README's model command. It stays on one line, wider than [`style::WIDTH`], so it pastes as it is.
 pub const PINNED_PULL: &str = "vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a6887e18c089fdea8509a33e63429a3300";
 
@@ -106,7 +109,7 @@ fn page(command: &str) -> Option<Page<'static>> {
         "launch" => Page {
             summary: "Install if needed, start Vade on this Spark, then open chat.",
             usage: &["vade launch [OPTIONS]"],
-            options: &[CONTEXT, OUTPUT, MTP, ("--memory-bytes N", "Memory budget for this Spark, in bytes"), ("--cache-bytes 0", "Turn the retained prompt cache off"), DRY_RUN],
+            options: &[CONTEXT, OUTPUT, MTP_LOCAL, ("--memory-bytes N", "Memory budget for this Spark, in bytes"), ("--cache-bytes 0", "Turn the retained prompt cache off"), DRY_RUN],
             examples: &["vade launch", "vade launch --context 262144 --output 16384", "vade launch --dry-run"],
             notes: &[
                 "Finds the FP4-Local checkpoint, saves defaults, installs if missing and starts the engine. It opens chat when standard input is a terminal. Run it again to attach.",
@@ -148,7 +151,7 @@ fn page(command: &str) -> Option<Page<'static>> {
                 "Local up and launch start with context 32768 and output 8192 (or the context if smaller). They reuse saved limits. A memory refusal lowers a default or saved context to a smaller size from 32768, 16384, 8192 and 4096. The first size that starts is saved. A refused explicit --context is an error. Local --chats and positive --cache-bytes are refused; --cache-bytes 0 disables retention.",
                 "Controller FP4 defaults match local ones on one Spark: context 32768, output 8192 (or the context if smaller). On 2 or more Sparks in one group, a chain or a pair, the default context is 131072; if it does not fit in memory, up falls to 32768 and says so. --context 262144 requests a larger context. The engine still sets the chat count from context and memory.",
                 "Controller FP4 checks and passes on --chats and --cache-bytes, but its engine does not use them: it admits chats from memory and uses its own prefix cache setting.",
-                "The engine chooses the drafting depth (MTP). On one FP4-Local Spark, concurrent chats can draft; the default request depth is 3 with strict verification. FP8 concurrent chats do not draft. A request with draft=plain turns drafting off; draft=strict asks for it when supported. --mtp sets the depth, and 0 turns drafting off.",
+                "The GLM text service (vade up --sparks 2 --diagnostic-unqualified-text) loads the predictor at depth 3 unless --mtp or MTP is set. When the model has no drafting layer, or free memory is too small for drafting, that start runs without drafting and says so. At loaded depth 3 or more, a greedy request of more than 64 tokens that names no drafting field is tried with drafting and keeps it only when it is faster. At loaded depth 1 or 2 that request decodes plain. A sampled request, a short request, mtp_depth 0 and several chats at once decode plain. --mtp 0 turns drafting off. Loading the predictor takes about 3.4 GB of device memory from the room for chats. One FP4 Spark leaves the depth to the engine. Controller FP8 passes --mtp 2 when unset. A request with draft=plain turns drafting off for that request; draft=strict asks for it when a predictor is loaded.",
                 "Two FP4-Local Sparks run the tensor split, the only two-Spark path for FP4-Local: both Sparks work on every token. It needs RDMA, so vade up refuses SEQPAR_RDMA=0 (TCP) for two FP4-Local Sparks. FP8 on two Sparks keeps its ring and may use TCP.",
                 "FP8 needs an FP8 config such as cli/examples/vade.conf. See docs/benchmarks.md.",
                 "--sparks N above 2 needs a setup with that many Sparks in cable order.",
@@ -432,6 +435,21 @@ mod tests {
             at += examples[at..].find(&format!("\n  {command}")).unwrap_or_else(|| panic!("{command}:\n{examples}"));
         }
         assert!(help(Some("pull")).contains(&format!("\n  {PINNED_PULL}\n")));
+    }
+    #[test]
+    fn each_page_names_the_drafting_depths_its_own_start_takes() {
+        let flat = |page| help(Some(page)).split_whitespace().collect::<Vec<_>>().join(" ");
+        // vade launch is a local start. It has no text service and refuses a depth above 3
+        // (launch::tests::saved_local_fp4_config_rejects_text_only_depths).
+        let launch = flat("launch");
+        assert!(launch.contains("--mtp N Drafting depth 0..3; 0 turns drafting off (default: the engine chooses)"), "{launch}");
+        assert!(!launch.contains("0..7") && !launch.contains("--diagnostic-unqualified-text"), "{launch}");
+        // vade up takes 0..3, and 0..7 with the text service flag, whose unset depth is TEXT_DRAFT_DEPTH.
+        let up = flat("up");
+        assert!(up.contains(&format!("takes 0..7 and loads {} when this and MTP are unset", crate::state::TEXT_DRAFT_DEPTH)), "{up}");
+        let parse = |args: &str| crate::cli::parse(&args.split(' ').map(str::to_owned).collect::<Vec<_>>());
+        assert!(parse("up --mtp 3").is_ok() && parse("up --mtp 4").is_err());
+        assert!(parse("up --diagnostic-unqualified-text --mtp 7").is_ok() && parse("up --diagnostic-unqualified-text --mtp 8").is_err());
     }
     #[test]
     fn help_and_errors_give_the_same_spark_counts() {

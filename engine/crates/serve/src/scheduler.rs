@@ -1,9 +1,11 @@
 //! One CUDA thread, bounded nonblocking sockets, priority between model steps.
 mod dispatch;
+mod draft_admission;
 mod intake;
 mod refusal;
 mod turns;
 mod prompt_cohort;
+mod prompt_workspace;
 #[cfg(test)]
 #[path = "metadata_test.rs"]
 mod metadata_tests;
@@ -1489,3 +1491,5 @@ fn clock_now() -> Instant { Instant::now() }
 fn clock_elapsed(start: &Instant) -> Duration { start.elapsed() }
 #[cfg(test)]
 use model_tests::{clock_now, clock_elapsed};
+
+#[cfg(test)] mod prompt_workspace_tests;

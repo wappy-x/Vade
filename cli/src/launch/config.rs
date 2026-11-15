@@ -107,6 +107,7 @@ impl Config {
         if optional("memory_bytes", u64::MAX)? == Some(0) { return Err("Saved memory budget must be positive; run vade doctor.".into()); }
         if chats == Some(0) { return Err("Saved config chats must be positive; run vade doctor.".into()); }
         Ok(Some(Self {
+            // This saved config starts local FP4, never the diagnostic text service.
             mtp: optional("mtp", 3)?.map(|n| n as u32),
             chats: chats.map(|n| n as usize),
             memory_bytes: optional("memory_bytes", u64::MAX)?,
@@ -130,6 +131,9 @@ impl Config {
         }
         if options.sparks.is_some_and(|n| n != 1) || !options.hosts.is_empty() {
             return Err("Local launch serves FP4-Local on one Spark. More Sparks need a controller config that names them. Run vade setup --hosts spark-a,spark-b, or read docs/INSTALL.md#two-and-more-sparks.".into());
+        }
+        if options.mtp > 3 {
+            return Err("Local FP4-Local supports drafting depth 0..3; use the controller text service for deeper drafting.".into());
         }
         Self::supported_controls(options.chats, options.cache_bytes)
     }
