@@ -10,6 +10,16 @@ pub const OFFSET:usize=768;
 pub const BUDGET:u64=6<<20;
 #[cfg(not(target_arch="nvptx64"))]
 pub const BLOCKS:u32=8;
+/// Blocks of a side-branch prefetch launch (kind ShadowSide); each block is 256 threads and each thread holds one
+/// 128-byte line request. The side launch runs beside the take it is placed in front of and beside the launches after
+/// it, and their own reads wait behind its requests: in a traced one-row step a waiting take beside an 8-block
+/// prefetch ended 13.8 us after the peer's publish, against 6.6 us with no prefetch beside it, and the mHC boundary
+/// lasted 30 us against 15 us (engine/docs/message-hand-over.md). Two blocks: a served plain step of 41.147 ms against
+/// 41.345 ms with eight, one run each on one pair. Prefetch only: no value can change with this number.
+#[cfg(not(target_arch="nvptx64"))]
+pub const SIDE_BLOCKS:u32=2;
+#[cfg(not(target_arch="nvptx64"))]
+const _:()=assert!(SIDE_BLOCKS>=1 && SIDE_BLOCKS<=BLOCKS);
 #[repr(C)]
 #[derive(Clone,Copy,Debug)]
 pub struct Window {pub weight:u64,pub bytes:u64,pub ids:u64,pub experts:u32,pub picks:u32}
@@ -164,7 +174,8 @@ const _:()={assert!(OFFSET.is_multiple_of(16));assert!(OFFSET+core::mem::size_of
         assert!(!arm(&mut command(),&mut [1,1,1,256,0],Window {ids:0x2000,picks:8,experts:16,..window()},0x1001,&[0;24]));
     }
     #[test] fn tail_lines_cover_the_exact_bounded_prefetch_set() {
-        for picks in [1u64,8] {for bytes in [1u64,127,128,129,1<<20] {for tails in [8u64,9,32] {
+        // 8, 9 and 32: tail rows of a take. SIDE_BLOCKS: the blocks of a side launch (side_window has the same stride rule).
+        for picks in [1u64,8] {for bytes in [1u64,127,128,129,1<<20] {for tails in [u64::from(SIDE_BLOCKS),1,2,8,9,32] {
             let lines=crate::mhc_params::shadow_lines(bytes);let mut visits=vec![0u8;(lines*picks) as usize];
             for thread in 0..tails*256 {let mut line=thread;while line<lines*picks {assert!((line%lines)*128<bytes);visits[line as usize]+=1;line+=tails*256;}}
             assert!(visits.iter().all(|&visits|visits==1));

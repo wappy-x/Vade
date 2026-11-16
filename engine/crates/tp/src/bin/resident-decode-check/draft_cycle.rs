@@ -44,7 +44,9 @@ fn pass<'s,E:Engine>(engine:&'s E,session:&mut E::Session<'s>,tokens:&[u32])->Re
 }
 /// What one case measured, by part, in ms. `rows[n]`: passes of n rows.
 #[derive(Default)]
-struct Parts {proposal:Vec<f64>,waiting:Vec<f64>,rows:[Vec<f64>;5],full:Vec<f64>,partial:Vec<f64>,cycle:[Vec<f64>;5],kept:[usize;5],picked:usize,proposed:usize,accepted:usize}
+struct Parts {proposal:Vec<f64>,waiting:Vec<f64>,rows:[Vec<f64>;5],full:Vec<f64>,partial:Vec<f64>,cycle:[Vec<f64>;5],kept:[usize;5],picked:usize,
+    /// `ids[n]`: passes of n rows that answered with their IDs (no logits read).
+    ids:[usize;5],proposed:usize,accepted:usize}
 impl Parts {
     fn lines(&self,case:&str,out:&mut String) {
         let mut put=|line:String| {println!("{line}");out.push_str(&line);out.push('\n');};
@@ -52,7 +54,7 @@ impl Parts {
         put(format!("DRAFT_CYCLE case={case} part=proposal_call {} proposed_tokens={} accepted_tokens={}",stat(&self.proposal),self.proposed,self.accepted));
         put(format!("DRAFT_CYCLE case={case} part=waiting_rows {}",stat(&self.waiting)));
         for rows in 2..5 {if !self.rows[rows].is_empty() {
-            put(format!("DRAFT_CYCLE case={case} part=pass rows={rows} {} kept_rows={}",stat(&self.rows[rows]),self.kept[rows]));
+            put(format!("DRAFT_CYCLE case={case} part=pass rows={rows} {} kept_rows={} picked_on_device={}",stat(&self.rows[rows]),self.kept[rows],self.ids[rows]));
             put(format!("DRAFT_CYCLE case={case} part=cycle rows={rows} {}",stat(&self.cycle[rows])));
         }}
         put(format!("DRAFT_CYCLE case={case} part=verdict_all_kept {}",stat(&self.full)));
@@ -74,7 +76,11 @@ fn hand<E:Engine>(engine:&E,request:&spark_serve::protocol::Request,prompt:&[u32
         rows.truncate(plain.len()-at);let entry=target.checkpoint();
         let timer=std::time::Instant::now();let output=pass(engine,&mut session,&rows)?;parts.rows[rows.len()].push(ms(timer));
         let ids=match output {
-            Predictions::Greedy(ids)=>{if rows.len()!=1 || ids.len()!=1 {return Err("draft-cycle: a picked pass has more than one row".into());}parts.picked+=1;ids},
+            // A greedy pass answers with the ID of each row: one row is the plain greedy step, 2 rows or more are picked
+            // where their logits are. The kept rows are those whose proposed token is the ID the row before it names.
+            Predictions::Greedy(ids)=>{if ids.len()!=rows.len() {return Err("draft-cycle: a picked pass answers another row count".into());}
+                if rows.len()==1 {parts.picked+=1;} else {parts.ids[rows.len()]+=1;}
+                let kept=1+rows[1..].iter().zip(&ids).take_while(|(token,id)|*id==*token).count();ids[..kept].to_vec()},
             Predictions::Logits(logits)=>{if logits.len()!=rows.len() {return Err("draft-cycle: pass row count differs".into());}
                 let kept=1+rows[1..].iter().zip(&logits).take_while(|(token,row)|best(row)==**token).count();logits[..kept].iter().map(|row|best(row)).collect()},
             _=>return Err("draft-cycle: a strict pass answers with tokens or logits".into()),
@@ -98,7 +104,7 @@ fn chooser<E:Engine>(engine:&E,request:&spark_serve::protocol::Request,prompt:&[
         let target=session.draft_target().ok_or("draft-cycle: the target is gone")?;
         match output {
             Predictions::Logits(logits)=>{spec.finish_exact(target,plan,&logits,|_|false,|_|true)?;},
-            Predictions::Greedy(ids)=>{parts.picked+=1;spec.finish_greedy(target,plan,&ids,|_|false)?;},
+            Predictions::Greedy(ids)=>{if rows.len()==1 {parts.picked+=1;} else {parts.ids[rows.len().min(4)]+=1;}spec.finish_greedy(target,plan,&ids,|_|false)?;},
             _=>return Err("draft-cycle: a strict pass answers with tokens or logits".into()),
         }
     }

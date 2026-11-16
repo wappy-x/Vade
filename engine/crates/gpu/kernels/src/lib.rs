@@ -25,6 +25,7 @@ mod bus_shadow;
 mod resident_pointwise;
 mod resident_norm_tail;
 mod resident_causal_chain;
+mod resident_causal_group;
 #[path = "causal_ops.rs"]
 mod causal_operation;
 mod latent_absorption;
@@ -58,6 +59,7 @@ mod nv_rows_small;
 mod fp8_rows_small;
 mod fp8_rows_multi;
 mod fp8_rows_few;
+mod fp8_rows_share;
 mod mx_rows_small;
 mod rows_small;
 #[path = "expert_ops.rs"] mod expert_operation;

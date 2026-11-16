@@ -181,6 +181,10 @@ pub struct Session {
     /// The engine's decode_fuse option, passed in the engine arguments.
     pub decode_fuse: bool,
     pub diagnostic_unqualified_text: bool,
+    /// The text service's default depth met a model with no drafting layer, or too little free memory, so this
+    /// start runs at depth 0 (`mtp` is 0 and is passed to the engine). Nobody named that depth: the restart command
+    /// names none either.
+    pub draft_fall: Option<crate::cli::DraftFall>,
     pub local_port: u16,
     pub serve_port: u16,
     pub ranks: Vec<Rank>,
@@ -191,6 +195,10 @@ pub struct Session {
     /// The local gateway's PID and `ps` start time, recorded before it can serve.
     pub gateway: Option<(u32, String)>,
 }
+
+/// Predictor depth the GLM text service loads when `--diagnostic-unqualified-text` is set
+/// and the user did not pass `--mtp` or `MTP`. A normal start does not use this.
+pub const TEXT_DRAFT_DEPTH: u32 = 3;
 
 impl Session {
     /// A new session for `vade up` from the config, options and build manifest.
@@ -233,6 +241,10 @@ impl Session {
         let machines = config.selected(options)?;
         // Each group of Sparks serves one model: every machine, or one replica.
         let group = if options.replicas { options.replica_sparks.max(1) } else { machines.len() };
+        // The engine's text service is a two-Spark wire. Refuse any other group here, before a remote start.
+        if options.diagnostic_unqualified_text && group != 2 {
+            return Err("--diagnostic-unqualified-text runs on exactly two Sparks. Start it as: vade up --sparks 2 --diagnostic-unqualified-text.".into());
+        }
         if machines.len() % group != 0 {
             return Err("Each pair needs two machines. Give --replicas N --pairs 2N machines.".into());
         }
@@ -325,7 +337,7 @@ impl Session {
             build: manifest.engine_sha.clone(),
             cli_build: manifest.cli_sha.clone(),
             supports_output: manifest.supports_output,
-            mtp: if options.diagnostic_unqualified_text && !options.mtp_explicit {0} else {options.mtp},
+            mtp: if options.diagnostic_unqualified_text && !options.mtp_explicit { if options.draft_fall.is_some() {0} else {TEXT_DRAFT_DEPTH} } else {options.mtp},
             mtp_explicit: options.mtp_explicit || !options.fp4_local || options.diagnostic_unqualified_text,
             fp4_local: options.fp4_local,
             context: options.context,
@@ -337,6 +349,7 @@ impl Session {
             cache_bytes,
             decode_fuse: options.decode_fuse.unwrap_or(options.fp4_local && group == 1 && !options.diagnostic_unqualified_text),
             diagnostic_unqualified_text: options.diagnostic_unqualified_text,
+            draft_fall: options.draft_fall.filter(|_| options.diagnostic_unqualified_text && !options.mtp_explicit),
             local_port: config.local_port,
             serve_port: config.serve_port,
             ranks,
@@ -380,9 +393,21 @@ impl Session {
     pub fn tunnel_socket(&self, dir: &Path, index: usize) -> PathBuf {
         if self.replicas { dir.join(format!("tunnel-{}-{index}.sock", &self.token[..16])) } else { self.socket(dir) }
     }
-    /// The drafting depth for display: the explicit MTP value or "engine default".
+    /// The plan row: the depth that will run, or "engine default" when this launch passes no `--mtp`.
+    pub fn drafting_plan(&self) -> String {
+        if self.mtp_explicit { format!("MTP {}", self.mtp) } else { "engine default".into() }
+    }
+    /// The ready line's depth. Depth 0 names the off switch.
     pub fn mtp_label(&self) -> String {
-        if self.mtp_explicit { self.mtp.to_string() } else { "engine default".into() }
+        if let Some(fall) = self.draft_fall {
+            fall.label().into()
+        } else if self.mtp_explicit && self.mtp == 0 {
+            "0 (off, --mtp 0)".into()
+        } else if self.mtp_explicit {
+            self.mtp.to_string()
+        } else {
+            "engine default".into()
+        }
     }
     /// The engine's positional arguments for the rank at `index`.
     pub fn engine_args(&self, index: usize) -> Vec<String> {
@@ -463,6 +488,7 @@ impl Session {
             fields.insert(key.into(), value);
         }
         if self.diagnostic_unqualified_text {fields.insert("diagnostic_unqualified_text".into(),"true".into());}
+        if let Some(fall) = self.draft_fall {fields.insert("draft_fall".into(),fall.word().into());}
         if let Some(fingerprint) = &self.launch_fingerprint {
             fields.insert("launch_fingerprint".into(), fingerprint.clone());
         }
@@ -598,6 +624,7 @@ impl Session {
             cache_bytes: f.get("cache_bytes").map(|_| number(&f, "cache_bytes")).transpose()?,
             decode_fuse: f.get("decode_fuse").map(|value| boolean(value)).transpose()?.unwrap_or(false),
             diagnostic_unqualified_text: f.get("diagnostic_unqualified_text").map(|value| boolean(value)).transpose()?.unwrap_or(false),
+            draft_fall: f.get("draft_fall").map(|word| crate::cli::DraftFall::parse(word)).transpose()?,
             local_port: number(&f, "local_port")?,
             serve_port: number(&f, "serve_port")?,
             ranks,
@@ -616,7 +643,7 @@ impl Session {
             || (session.replicas && (!session.fp4_local || usize::from(u16::MAX - session.local_port) < session.ranks.len()))
             || session.replica_sparks == 0
             || (session.replica_sparks > 1 && (!session.replicas || !session.ranks.len().is_multiple_of(session.replica_sparks)))
-            || session.mtp > 3
+            || session.mtp > if session.diagnostic_unqualified_text {7} else {3}
             || !(4096..=262144).contains(&session.context)
             || !((if session.diagnostic_unqualified_text {1} else {1024})..=session.context).contains(&session.output)
             || [session.chats, session.admitted_chats].into_iter().flatten().any(|chats| !(1..=32).contains(&chats))

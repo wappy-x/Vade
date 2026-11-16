@@ -26,4 +26,4 @@ mod device {
     }
 }
 #[cfg(target_os="linux")]
-pub(crate) use device::Cost;
+pub(crate) use device::{Cost,Stamp};

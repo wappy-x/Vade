@@ -14,8 +14,8 @@ pub const ROUTED:usize=8;
 
 /// Permute: (rows, cols, source rows) for the expert inputs of a group of `tokens`.
 pub fn permute_cases()->Vec<(usize,usize,usize)> {(1..=MOVE_MAX).flat_map(|m|[2048usize,4096].into_iter().map(move |cols|(m*ROUTED,cols,m))).collect()}
-/// Place: (tokens, local rows, ranks).
-pub fn place_cases()->Vec<(usize,usize,usize)> {(1..=MOVE_MAX).flat_map(|m|[1024usize,2048].into_iter().map(move |d|(m,d,2))).collect()}
+/// Place: (tokens, local rows, ranks). The expert results of two ranks, and one rank's own down rows before their fold (GROUP FOLD).
+pub fn place_cases()->Vec<(usize,usize,usize)> {(1..=MOVE_MAX).flat_map(|m|[(1024usize,2usize),(2048,2),(FOLD_LOCAL,1)].into_iter().map(move |(d,parts)|(m,d,parts))).collect()}
 /// Head counts of the recurrent prompt kernels (`prompt_admission::recurrent_heads`): 64 on one box, 32 a rank on two.
 pub const RECURRENT_HEADS:[usize;2]=[32,64];
 /// Wrapped Prepare (true) and GatedNorm (false): (tokens, heads, dim, is_prepare).
@@ -24,12 +24,12 @@ pub fn prepare_cases()->Vec<(usize,usize,usize,bool)> {
 }
 /// Wrapped Route: (tokens, experts, chosen, normalized).
 pub fn route_cases()->Vec<(usize,usize,usize,usize)> {group_tokens().map(|m|(m,288,ROUTED,1)).collect()}
-/// The rows one rank of a pair owns of the fold's 4096, and the most tokens folded at that width (the chats of a batch step).
+/// The rows one rank of a pair owns of the fold's 4096, and the most tokens of ONE fold launch of a batch step at that width (its chats).
 pub const FOLD_LOCAL:usize=2048;
 pub const FOLD_LOCAL_TOKENS:usize=8;
-/// Wrapped ExpertFold: (tokens, routed rows, width, shared). The whole width at every group size; a pair rank's own rows
-/// at 1 to `FOLD_LOCAL_TOKENS` tokens (ROWS FOLD in one launch).
-pub fn fold_cases()->Vec<(usize,usize,usize,usize)> {group_tokens().map(|m|(m,ROUTED,4096,1)).chain((1..=FOLD_LOCAL_TOKENS).map(|m|(m,ROUTED,FOLD_LOCAL,1))).collect()}
+/// Wrapped ExpertFold: (tokens, routed rows, width, shared). The whole width and a pair rank's own rows, each at every group
+/// size (ROWS FOLD of a batch step; GROUP FOLD of a prompt group).
+pub fn fold_cases()->Vec<(usize,usize,usize,usize)> {group_tokens().flat_map(|m|[4096usize,FOLD_LOCAL].into_iter().map(move |k|(m,ROUTED,k,1))).collect()}
 /// ConvRows: (tokens, heads, dim, taps).
 pub fn conv_cases()->Vec<(usize,usize,usize,usize)> {group_tokens().flat_map(|m|RECURRENT_HEADS.into_iter().map(move |h|(m,h,128,4))).collect()}
 /// mHC project tile: (rows, streams, hidden).

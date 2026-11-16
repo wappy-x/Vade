@@ -1,6 +1,6 @@
 //! Device charges for ordered prompt and decode execution.
 use engine_model::plan::{admission::CheckpointAdmission,layer::Topology,state::StatePlan};
-use crate::{Result,bounded_decoder::{expanded_bytes,group_workspace_bytes_for,RESERVED_ROWS,PROJECTION_MEMO_BYTES}};
+use crate::{Result,bounded_decoder::{expanded_bytes,group_workspace_bytes_for,group_workspace_bytes_with,LatentRows,RESERVED_ROWS,PROJECTION_MEMO_BYTES}};
 /// Replace the full startup allowance only after the device locks the same plan.
 pub fn with_memo_bound(workspace:usize,plan:crate::projection_memo::Plan)->Result<usize> {plan.replace_charge(workspace)}
 
@@ -61,17 +61,27 @@ Ok(copies)
 /// The shared workspace of a service whose lone prompt group has `group` rows, from the workspace
 /// charged for 256 rows: the larger group's buffers replace the 256-row ones, and past 256 rows
 /// the recurrent state copies that can wait behind their sources are added.
-pub fn workspace_for_prompt_group(checkpoint:&CheckpointAdmission,context:usize,workspace:usize,group:usize)->Result<usize> {
-    use crate::bounded_decoder::{group_workspace_bytes,PROMPT_GROUP};
+pub fn workspace_for_prompt_group(checkpoint:&CheckpointAdmission,context:usize,workspace:usize,group:usize)->Result<usize> {workspace_for_prompt_group_with(checkpoint,context,workspace,group,LatentRows::Expanded)}
+/// The same for a server whose latent layers took `rows`: `workspace` is then that server's 256-row charge (`workspace_for_latent_rows`).
+pub fn workspace_for_prompt_group_with(checkpoint:&CheckpointAdmission,context:usize,workspace:usize,group:usize,rows:LatentRows)->Result<usize> {
+    use crate::bounded_decoder::PROMPT_GROUP;
     let copies=if group>PROMPT_GROUP {state_copy_bytes(checkpoint)?} else {0};
-    workspace.checked_sub(group_workspace_bytes(checkpoint,context)?).and_then(|n|n.checked_add(group_workspace_bytes_for(checkpoint,context,group).ok()?)).and_then(|n|n.checked_add(copies)).ok_or_else(||"prompt group workspace overflow".into())
+    workspace.checked_sub(group_workspace_bytes_with(checkpoint,context,PROMPT_GROUP,rows)?).and_then(|n|n.checked_add(group_workspace_bytes_with(checkpoint,context,group,rows).ok()?)).and_then(|n|n.checked_add(copies)).ok_or_else(||"prompt group workspace overflow".into())
+}
+/// The 256-row workspace of a server whose latent layers took `rows`, from the 256-row workspace that charges expanded
+/// rows (`row_split::sparse_service_charges`): the group's own buffers change, nothing else. `Expanded` changes nothing.
+pub fn workspace_for_latent_rows(checkpoint:&CheckpointAdmission,context:usize,workspace:usize,rows:LatentRows)->Result<usize> {
+    use crate::bounded_decoder::{group_workspace_bytes,PROMPT_GROUP};
+    workspace.checked_sub(group_workspace_bytes(checkpoint,context)?).and_then(|n|n.checked_add(group_workspace_bytes_with(checkpoint,context,PROMPT_GROUP,rows).ok()?)).ok_or_else(||"latent rows workspace overflow".into())
 }
 /// The largest of 1024, 512 and 256 rows whose workspace fits `budget` beside the resident
 /// bytes and one full session. 256 when nothing larger fits: startup then judges that charge as before.
-pub fn largest_prompt_group(checkpoint:&CheckpointAdmission,context:usize,workspace:usize,resident:usize,session:usize,budget:usize)->Result<usize> {
+pub fn largest_prompt_group(checkpoint:&CheckpointAdmission,context:usize,workspace:usize,resident:usize,session:usize,budget:usize)->Result<usize> {largest_prompt_group_with(checkpoint,context,workspace,resident,session,budget,LatentRows::Expanded)}
+/// The same for a server whose latent layers took `rows`.
+pub fn largest_prompt_group_with(checkpoint:&CheckpointAdmission,context:usize,workspace:usize,resident:usize,session:usize,budget:usize,rows:LatentRows)->Result<usize> {
     use crate::bounded_decoder::{PROMPT_GROUP,PROMPT_GROUP_MAX};
     for group in [PROMPT_GROUP_MAX,PROMPT_GROUP_MAX/2] {
-        if group>PROMPT_GROUP && resident.checked_add(workspace_for_prompt_group(checkpoint,context,workspace,group)?).and_then(|n|n.checked_add(session)).is_some_and(|n|n<=budget) {return Ok(group);}
+        if group>PROMPT_GROUP && resident.checked_add(workspace_for_prompt_group_with(checkpoint,context,workspace,group,rows)?).and_then(|n|n.checked_add(session)).is_some_and(|n|n<=budget) {return Ok(group);}
     }
     Ok(PROMPT_GROUP)
 }

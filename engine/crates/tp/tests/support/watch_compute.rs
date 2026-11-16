@@ -15,7 +15,9 @@ pub enum Event {
 pub struct Watch {pub events:RefCell<Vec<Event>>,paused:Cell<bool>,
     pub memo:Cell<Option<spark_tp::projection_memo::Summary>>,pub memo_bound:spark_tp::projection_memo::Bound,pub wrong_memo:Cell<bool>,
     /// The append with this number (from 0) fails. None: none fails.
-    pub fail_extend:Cell<Option<usize>>,extends:Cell<usize>}
+    pub fail_extend:Cell<Option<usize>>,extends:Cell<usize>,
+    /// GROUP SPARES: each `rows_follow` call's word, in order, and the `rows_settle` calls. Not in `events`.
+    pub follows:RefCell<Vec<bool>>,pub settles:Cell<usize>}
 impl Watch {
     pub fn take(&self)->Vec<Event> {std::mem::take(&mut *self.events.borrow_mut())}
     /// The appends so far: `fail_extend` counts from here.
@@ -30,6 +32,8 @@ impl Compute for Watch {
     fn state_allocations(&self,v:&Self::Value,out:&mut Vec<(usize,usize)>)->bool {Host.state_allocations(v,out)}
     fn rows_unrecorded(&self,pause:bool)->Result<bool> {self.events.borrow_mut().push(Event::Pause(pause));Ok(self.paused.replace(pause))}
     fn rows_keep(&self)->Result<()> {self.events.borrow_mut().push(Event::Keep);Ok(())}
+    fn rows_follow(&self,follows:bool) {self.follows.borrow_mut().push(follows);}
+    fn rows_settle(&self)->Result<()> {self.settles.set(self.settles.get()+1);Ok(())}
     fn rows_extend(&self,held:Option<&Vec<f32>>,rows:usize,new:&Vec<f32>,width:usize,room:usize)->Result<Vec<f32>> {
         self.events.borrow_mut().push(Event::Extend {held:held.is_some(),rows,words:new.len(),room});
         let number=self.extends.replace(self.extends.get()+1);

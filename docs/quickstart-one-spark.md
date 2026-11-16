@@ -84,7 +84,11 @@ files. Until then, repeat the two commands.
 Exactness means the same prompt, model and settings give the same answer,
 token for token, on every run and every Spark. Vade's default is greedy decoding: it
 always picks the most likely next token. Drafting (guessing tokens ahead) can
-make the answer arrive sooner, but it must not change it.
+make the answer arrive sooner, but it must not change it. On this one Spark,
+`vade up` still lets the engine choose the drafting depth. Depth 3 is the
+default only for the GLM text service (`vade up --sparks 2
+--diagnostic-unqualified-text`) when `--mtp` and `MTP` are unset, and
+`--mtp 0` turns drafting off.
 
 With the engine still running, run `vade verify`. It:
 

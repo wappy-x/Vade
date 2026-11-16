@@ -242,11 +242,18 @@ fn a_text_service_start_that_does_not_fit_the_long_default_falls_to_the_short_on
     assert!(printed.contains("Context 131072 does not fit in memory on these Sparks. Starting with context 32768.\n"), "{printed}");
     let session = Session::load(&app.config.state_dir).unwrap().unwrap();
     assert_eq!((session.context, session.diagnostic_unqualified_text), (32768, true));
-    // A size that the person named stays their choice: the refusal is the answer.
-    let mut f = Fixture::fp4(2, false);
-    let mut app = App { config: f.app.config.clone(), dry: false, runner: RefusesOnce { inner: std::mem::take(&mut f.app.runner), refused: false, log: TEXT_MEMORY_REFUSAL } };
-    let error = app.up(&fp4_options(&["--sparks", "2", "--context", "131072", "--diagnostic-unqualified-text"])).unwrap_err();
+    assert_eq!(session.mtp, crate::state::TEXT_DRAFT_DEPTH, "the fall to the short context keeps the default drafting depth");
+    // A size that the person named stays their choice: it never falls, and the refusal of it is the answer. (A
+    // depth that nobody named falls to 0 first, because `--mtp 0` may fit that size: the next test group.)
+    let (result, printed, starts, app) = text_up(&["--context", "131072"], &[TEXT_MEMORY_REFUSAL, TEXT_MEMORY_REFUSAL]);
+    let error = result.unwrap_err();
     assert!(error.contains("text service memory refusal: CONTEXT=131072;"), "{error}");
+    assert_eq!(starts, both_ranks(&[("131072", "3"), ("131072", "0")]));
+    assert!(!printed.contains("Starting with context"), "{printed}");
+    assert!(Session::load(&app.config.state_dir).unwrap().is_none());
+    let (result, _, starts, app) = text_up(&["--context", "131072", "--mtp", "0"], &[TEXT_MEMORY_REFUSAL]);
+    assert!(result.unwrap_err().contains("text service memory refusal: CONTEXT=131072;"));
+    assert_eq!(starts, both_ranks(&[("131072", "0")]));
     assert!(Session::load(&app.config.state_dir).unwrap().is_none());
     // Another text service stop is not a context refusal: no second start.
     for log in ["text service needs 9 device bytes; budget=8; resident=1; session=1; reduce CONTEXT\n", "text service memory refusal: CONTEXT=32768; budget=1; resident=1; shared_workspace=1; session_pool=1; full_session=2; reduce CONTEXT\n"] {
@@ -256,6 +263,295 @@ fn a_text_service_start_that_does_not_fit_the_long_default_falls_to_the_short_on
         crate::output::with_writer(capture.clone(), || app.up(&fp4_options(&text))).unwrap_err();
         assert!(!String::from_utf8(capture.bytes.borrow().clone()).unwrap().contains("Starting with context"), "{log}");
     }
+}
+
+/// `FakeRunner`, with an engine whose next starts fail in turn, each with one of these rank 0 log lines. Then a start succeeds.
+struct RefusesInTurn { inner: FakeRunner, logs: std::collections::VecDeque<&'static str>, now: Option<&'static str> }
+/// The engine's stop when a start asks for a predictor and the checkpoint declares none, as rank 0 logs it
+/// (`flash-serve/text.rs`, start step `predictor`).
+const NO_DRAFT_LAYER_LOG: &str = "STARTUP rank=0 failed in step predictor after 0.0 s (19.8 s since the process started): checkpoint declares no predictor layer\n";
+/// A start error that is neither fall's business.
+const OTHER_START_LOG: &str = "STARTUP rank=0 failed in step wire_link after 5.0 s (24.8 s since the process started): wire link timed out\n";
+impl Runner for RefusesInTurn {
+    fn run(&mut self, exec: &Exec) -> Result<Output, String> {
+        let request = text::parse(&String::from_utf8_lossy(&exec.stdin)).unwrap_or_default();
+        let op = request.get("op").map(String::as_str);
+        if op == Some("start") {
+            // One start is rank a, then rank b: the next log line belongs to the whole start.
+            if exec.label == "a start" { self.now = self.logs.pop_front(); }
+            if self.now.is_some() { self.inner.exit_on_health = Some("a".into()); }
+        }
+        if let (Some("logs"), Some(log)) = (op, self.now) {
+            return Ok(Output { success: true, stdout: text::encode(&Fields::from([("log".into(), log.into())])) });
+        }
+        self.inner.run(exec)
+    }
+    fn interactive(&mut self, exec: &Exec) -> Result<bool, String> { self.inner.interactive(exec) }
+    fn port_free(&mut self, port: u16) -> Result<(), String> { self.inner.port_free(port) }
+    fn pause(&mut self, duration: Duration) { self.inner.pause(duration); }
+}
+const BARE_TEXT: [&str; 3] = ["--sparks", "2", "--diagnostic-unqualified-text"];
+/// One `vade up` of the text service against an engine that fails its next starts with `logs`, in turn.
+/// Returns the result, what was printed, every rank start as (label, context, depth) and the app. The app holds
+/// the fixture, whose folder keeps the session record: it lives as long as the app does.
+fn text_up(extra: &[&str], logs: &[&'static str]) -> (Result<(), String>, String, Vec<(String, String, String)>, TextApp) {
+    let mut f = Fixture::fp4(2, false);
+    let mut app = App { config: f.app.config.clone(), dry: false, runner: RefusesInTurn { inner: std::mem::take(&mut f.app.runner), logs: logs.iter().copied().collect(), now: None } };
+    let capture = crate::output::testing::Capture::default();
+    let options = fp4_options(&BARE_TEXT.iter().chain(extra).copied().collect::<Vec<_>>());
+    let result = crate::output::with_writer(capture.clone(), || app.up(&options));
+    let starts = rank_starts(&app.runner.inner.calls);
+    (result, String::from_utf8(capture.bytes.borrow().clone()).unwrap(), starts, TextApp { app, _fixture: f })
+}
+struct TextApp { app: App<RefusesInTurn>, _fixture: Fixture }
+impl std::ops::Deref for TextApp { type Target = App<RefusesInTurn>; fn deref(&self) -> &Self::Target { &self.app } }
+impl std::ops::DerefMut for TextApp { fn deref_mut(&mut self) -> &mut Self::Target { &mut self.app } }
+fn rank_starts(calls: &[Exec]) -> Vec<(String, String, String)> {
+    calls.iter().filter(|call| matches!(call.label.as_str(), "a start" | "b start")).map(|call| {
+        let request = text::parse(&String::from_utf8_lossy(&call.stdin)).unwrap();
+        let args: Vec<String> = (0..).map_while(|i| request.get(&format!("arg.{i}")).cloned()).collect();
+        let depth = args.iter().position(|arg| arg == "--mtp").map(|at| args[at + 1].clone()).unwrap_or_default();
+        (call.label.clone(), args[6].clone(), depth)
+    }).collect()
+}
+/// What `starts` holds when each start is both ranks at this (context, depth), in this order.
+fn both_ranks(starts: &[(&str, &str)]) -> Vec<(String, String, String)> {
+    starts.iter().flat_map(|(context, depth)| ["a start", "b start"].map(|label| (label.to_string(), context.to_string(), depth.to_string()))).collect()
+}
+const NO_DRAFT_LINE: &str = "This model has no drafting layer. Starting without drafting.\n";
+const SHORT_CONTEXT_LINE: &str = "Context 131072 does not fit in memory on these Sparks. Starting with context 32768.\n";
+
+/// A GLM model folder with no drafting layer started yesterday, at the old default depth 0. The new default depth must
+/// not fail that start: the engine's "no predictor layer" stop is answered by one second start at depth 0.
+#[test]
+fn a_default_text_start_on_a_model_with_no_drafting_layer_starts_without_drafting() {
+    // The words this reads are the engine's own, and the engine loads the predictor before it admits memory.
+    assert!(include_str!("../../../../engine/crates/tp/src/bounded_decoder/proposer.rs").contains(&format!("ok_or(\"{}\")", super::super::NO_DRAFT_LAYER)));
+    let serve = include_str!("../../../../engine/crates/tp/src/bin/flash-serve/text.rs");
+    assert!(serve.find("startup::step(\"predictor\")").unwrap() < serve.find("text service memory refusal").unwrap());
+    let (result, printed, starts, mut app) = text_up(&[], &[NO_DRAFT_LAYER_LOG]);
+    result.unwrap();
+    assert_eq!(starts, both_ranks(&[("131072", "3"), ("131072", "0")]), "one start at the default depth, one at depth 0");
+    assert_eq!(printed.matches(NO_DRAFT_LINE).count(), 1, "{printed}");
+    assert!(!printed.contains("Starting with context"), "{printed}");
+    // The record: depth 0, passed to the engine as main passes it, and marked as nobody's choice.
+    let session = Session::load(&app.config.state_dir).unwrap().unwrap();
+    assert_eq!((session.mtp, session.draft_fall, session.diagnostic_unqualified_text, session.context), (0, Some(crate::cli::DraftFall::NoLayer), true, 131072));
+    assert_eq!(session.engine_args(0)[9..], ["--diagnostic-unqualified-text", "--mtp", "0"]);
+    assert_eq!(session.mtp_label(), "0 (off: this model has no drafting layer)");
+    assert!(printed.contains("drafting depth 0 (off: this model has no drafting layer)"), "{printed}");
+    // A second start that names no depth is that same engine: it attaches. No refusal, no new start.
+    crate::output::with_writer(crate::output::testing::Capture::default(), || app.up(&fp4_options(&BARE_TEXT))).unwrap();
+    assert_eq!(rank_starts(&app.runner.inner.calls).len(), 4);
+    // A start that names a depth asks for another engine: the record stays and the person is told to stop it first.
+    let named = app.up(&fp4_options(&["--sparks", "2", "--diagnostic-unqualified-text", "--mtp", "3"])).unwrap_err();
+    assert!(named.contains("Run vade down before changing it."), "{named}");
+    // The restart command of `vade update` names the text flag and no depth: a restart tries the default again.
+    let capture = crate::output::testing::Capture::default();
+    crate::output::with_writer(capture.clone(), || app.update().unwrap());
+    let hint = String::from_utf8(capture.bytes.borrow().clone()).unwrap();
+    let line = hint.lines().find(|line| line.trim_start().starts_with("vade up ")).unwrap_or_else(|| panic!("{hint}"));
+    assert!(line.ends_with(" --diagnostic-unqualified-text") && !line.contains("--mtp"), "{line}");
+    // A start that meets no such stop keeps the default depth and carries no mark.
+    let (result, printed, starts, app) = text_up(&[], &[]);
+    result.unwrap();
+    assert_eq!(starts, both_ranks(&[("131072", "3")]));
+    assert!(!printed.contains(NO_DRAFT_LINE), "{printed}");
+    let session = Session::load(&app.config.state_dir).unwrap().unwrap();
+    assert_eq!((session.mtp, session.draft_fall), (crate::state::TEXT_DRAFT_DEPTH, None));
+}
+
+/// The fall is for the default only. A depth the person named, by `--mtp`, is their choice: the engine's stop is
+/// the answer and nothing starts a second time. (`MTP` sets the same `mtp_explicit` as `--mtp`: `cli.rs`.)
+#[test]
+fn a_named_depth_on_a_model_with_no_drafting_layer_stays_the_engines_error() {
+    for depth in ["1", "3", "7"] {
+        let (result, printed, starts, app) = text_up(&["--mtp", depth], &[NO_DRAFT_LAYER_LOG]);
+        let error = result.unwrap_err();
+        assert!(error.contains("checkpoint declares no predictor layer"), "{error}");
+        assert_eq!(starts, both_ranks(&[("131072", depth)]), "--mtp {depth}");
+        assert!(!printed.contains(NO_DRAFT_LINE), "{printed}");
+        assert!(Session::load(&app.config.state_dir).unwrap().is_none());
+    }
+    // `--mtp 0` loads no predictor: a start that names it is a plain start with no mark.
+    let (result, _, starts, app) = text_up(&["--mtp", "0"], &[]);
+    result.unwrap();
+    assert_eq!(starts, both_ranks(&[("131072", "0")]));
+    assert_eq!(Session::load(&app.config.state_dir).unwrap().unwrap().draft_fall, None);
+    // The same engine answer to a start that named no depth is the fall, not an error.
+    let (result, printed, starts, _) = text_up(&[], &[NO_DRAFT_LAYER_LOG]);
+    result.unwrap();
+    assert_eq!((starts.len(), printed.matches(NO_DRAFT_LINE).count()), (4, 1));
+}
+
+/// The two falls compose: the long default context to the short one, and the default depth to none. Each happens
+/// at most once, in either order. A third stop of a kind that already fell is the answer.
+#[test]
+fn the_context_fall_and_the_drafting_fall_compose_once_each_in_either_order() {
+    // The engine's own order: the predictor is loaded before memory is admitted.
+    let (result, printed, starts, app) = text_up(&[], &[NO_DRAFT_LAYER_LOG, TEXT_MEMORY_REFUSAL]);
+    result.unwrap();
+    assert_eq!(starts, both_ranks(&[("131072", "3"), ("131072", "0"), ("32768", "0")]));
+    assert_eq!((printed.matches(NO_DRAFT_LINE).count(), printed.matches(SHORT_CONTEXT_LINE).count()), (1, 1), "{printed}");
+    assert!(printed.find(NO_DRAFT_LINE).unwrap() < printed.find(SHORT_CONTEXT_LINE).unwrap(), "{printed}");
+    let session = Session::load(&app.config.state_dir).unwrap().unwrap();
+    assert_eq!((session.context, session.mtp, session.draft_fall), (32768, 0, Some(crate::cli::DraftFall::NoLayer)));
+    // The other order.
+    let (result, printed, starts, app) = text_up(&[], &[TEXT_MEMORY_REFUSAL, NO_DRAFT_LAYER_LOG]);
+    result.unwrap();
+    assert_eq!(starts, both_ranks(&[("131072", "3"), ("32768", "3"), ("32768", "0")]));
+    assert_eq!((printed.matches(NO_DRAFT_LINE).count(), printed.matches(SHORT_CONTEXT_LINE).count()), (1, 1), "{printed}");
+    let session = Session::load(&app.config.state_dir).unwrap().unwrap();
+    assert_eq!((session.context, session.mtp, session.draft_fall), (32768, 0, Some(crate::cli::DraftFall::NoLayer)));
+    // At most one of each: after the context and the depth have fallen, a third stop is returned as it is, whatever
+    // it says, and nothing is left recorded. Depth 0 is the depth's last fall, for either reason.
+    for (logs, words) in [([NO_DRAFT_LAYER_LOG, TEXT_MEMORY_REFUSAL, NO_DRAFT_LAYER_LOG], "checkpoint declares no predictor layer"),
+                          ([NO_DRAFT_LAYER_LOG, TEXT_MEMORY_REFUSAL, SHORT_MEMORY_REFUSAL], "text service memory refusal: CONTEXT=32768;"),
+                          ([TEXT_MEMORY_REFUSAL, NO_DRAFT_LAYER_LOG, TEXT_MEMORY_REFUSAL], "text service memory refusal: CONTEXT=131072;"),
+                          ([TEXT_MEMORY_REFUSAL, NO_DRAFT_LAYER_LOG, SHORT_MEMORY_REFUSAL], "text service memory refusal: CONTEXT=32768;"),
+                          ([NO_DRAFT_LAYER_LOG, NO_DRAFT_LAYER_LOG, NO_DRAFT_LAYER_LOG], "checkpoint declares no predictor layer")] {
+        let (result, printed, starts, app) = text_up(&[], &logs);
+        let error = result.unwrap_err();
+        assert!(error.contains(words), "{error}");
+        assert!(printed.matches(NO_DRAFT_LINE).count() == 1 && printed.matches(SHORT_CONTEXT_LINE).count() <= 1 && !printed.contains(NO_MEMORY_LINE), "{printed}");
+        assert!(starts.len() <= 6, "{starts:?}");
+        assert!(Session::load(&app.config.state_dir).unwrap().is_none());
+    }
+    // A context the person named does not fall, and the drafting fall still happens beside it.
+    let (result, printed, starts, _) = text_up(&["--context", "131072"], &[NO_DRAFT_LAYER_LOG, TEXT_MEMORY_REFUSAL]);
+    assert!(result.unwrap_err().contains("text service memory refusal: CONTEXT=131072;"));
+    assert_eq!(starts, both_ranks(&[("131072", "3"), ("131072", "0")]));
+    assert_eq!((printed.matches(NO_DRAFT_LINE).count(), printed.matches(SHORT_CONTEXT_LINE).count()), (1, 0), "{printed}");
+}
+
+/// The engine's refusal of the short context for memory, as rank 0 logs it. With the predictor a start needs more.
+const SHORT_MEMORY_REFUSAL: &str = "STARTUP rank=0 failed in step memory_admission after 3.0 s (24.1 s since the process started): text service memory refusal: CONTEXT=32768; budget=106000000000; resident=94784987144; shared_workspace=8836481336; session_pool=2378531520; full_session=3852980224; reduce CONTEXT\n";
+const NO_MEMORY_LINE: &str = "Not enough free memory for drafting. Starting without drafting.\n";
+
+/// The default depth needs more memory than depth 0. A default start that does not fit must not fail where
+/// `--mtp 0` starts: the context falls first, as before, and then the depth falls to 0, once.
+#[test]
+fn a_default_text_start_that_does_not_fit_with_drafting_starts_without_drafting() {
+    // The long default context does not fit, then the short one does not fit with the predictor: three starts.
+    let (result, printed, starts, mut app) = text_up(&[], &[TEXT_MEMORY_REFUSAL, SHORT_MEMORY_REFUSAL]);
+    result.unwrap();
+    assert_eq!(starts, both_ranks(&[("131072", "3"), ("32768", "3"), ("32768", "0")]), "the context falls first, then the depth");
+    assert_eq!((printed.matches(SHORT_CONTEXT_LINE).count(), printed.matches(NO_MEMORY_LINE).count(), printed.matches(NO_DRAFT_LINE).count()), (1, 1, 0), "{printed}");
+    assert!(printed.find(SHORT_CONTEXT_LINE).unwrap() < printed.find(NO_MEMORY_LINE).unwrap(), "{printed}");
+    // The record: depth 0, passed to the engine as `--mtp 0`, marked as a fall for memory and not as a choice.
+    let session = Session::load(&app.config.state_dir).unwrap().unwrap();
+    assert_eq!((session.context, session.mtp, session.draft_fall), (32768, 0, Some(crate::cli::DraftFall::Memory)));
+    assert_eq!(session.engine_args(0)[9..], ["--diagnostic-unqualified-text", "--mtp", "0"]);
+    assert_eq!(session.mtp_label(), "0 (off: not enough free memory for drafting)");
+    assert!(printed.contains("drafting depth 0 (off: not enough free memory for drafting)"), "{printed}");
+    // While that engine runs, a second start that names no depth attaches to it: no refusal, no new start.
+    crate::output::with_writer(crate::output::testing::Capture::default(), || app.up(&fp4_options(&BARE_TEXT))).unwrap();
+    assert_eq!(rank_starts(&app.runner.inner.calls).len(), 6);
+    // The restart command names no depth: the next start tries drafting again, and gets it when memory is free.
+    let capture = crate::output::testing::Capture::default();
+    crate::output::with_writer(capture.clone(), || app.update().unwrap());
+    let hint = String::from_utf8(capture.bytes.borrow().clone()).unwrap();
+    let line = hint.lines().find(|line| line.trim_start().starts_with("vade up ")).unwrap_or_else(|| panic!("{hint}"));
+    assert!(line.contains(" --context 32768 ") && line.ends_with(" --diagnostic-unqualified-text") && !line.contains("--mtp"), "{line}");
+    app.down().unwrap();
+    crate::output::with_writer(crate::output::testing::Capture::default(), || app.up(&fp4_options(&BARE_TEXT))).unwrap();
+    let again = Session::load(&app.config.state_dir).unwrap().unwrap();
+    assert_eq!((again.mtp, again.draft_fall), (crate::state::TEXT_DRAFT_DEPTH, None), "after vade down a bare start drafts again");
+    // A context the person named cannot fall, so the depth falls at that context.
+    let (result, printed, starts, app) = text_up(&["--context", "32768"], &[SHORT_MEMORY_REFUSAL]);
+    result.unwrap();
+    assert_eq!(starts, both_ranks(&[("32768", "3"), ("32768", "0")]));
+    assert_eq!((printed.matches(NO_MEMORY_LINE).count(), printed.matches(SHORT_CONTEXT_LINE).count()), (1, 0), "{printed}");
+    assert_eq!(Session::load(&app.config.state_dir).unwrap().unwrap().draft_fall, Some(crate::cli::DraftFall::Memory));
+    // The same at a long context the person named: where `--mtp 0` fits that size, the default starts there too.
+    let (result, printed, starts, app) = text_up(&["--context", "131072"], &[TEXT_MEMORY_REFUSAL]);
+    result.unwrap();
+    assert_eq!(starts, both_ranks(&[("131072", "3"), ("131072", "0")]));
+    assert_eq!((printed.matches(NO_MEMORY_LINE).count(), printed.matches(SHORT_CONTEXT_LINE).count()), (1, 0), "{printed}");
+    let session = Session::load(&app.config.state_dir).unwrap().unwrap();
+    assert_eq!((session.context, session.mtp, session.draft_fall), (131072, 0, Some(crate::cli::DraftFall::Memory)));
+    // A depth the person named is their choice: the refusal is the answer, at the short context too.
+    for depth in ["1", "3", "7", "0"] {
+        let (result, printed, starts, app) = text_up(&["--mtp", depth], &[TEXT_MEMORY_REFUSAL, SHORT_MEMORY_REFUSAL]);
+        assert!(result.unwrap_err().contains("text service memory refusal: CONTEXT=32768;"), "--mtp {depth}");
+        assert_eq!(starts, both_ranks(&[("131072", depth), ("32768", depth)]), "--mtp {depth}");
+        assert!(!printed.contains(NO_MEMORY_LINE) && printed.matches(SHORT_CONTEXT_LINE).count() == 1, "{printed}");
+        assert!(Session::load(&app.config.state_dir).unwrap().is_none());
+    }
+    // A refusal that names another context than this start's is not this fall.
+    let (result, printed, starts, _) = text_up(&["--context", "65536"], &[SHORT_MEMORY_REFUSAL]);
+    assert!(result.unwrap_err().contains("text service memory refusal: CONTEXT=32768;"));
+    assert_eq!(starts, both_ranks(&[("65536", "3")]));
+    assert!(!printed.contains(NO_MEMORY_LINE), "{printed}");
+}
+
+/// The three falls compose: the context once, and the depth once, for the missing layer or for memory. A stop
+/// after them is the answer, also when it is a memory refusal at depth 0 (then `--mtp 0` would not start either).
+#[test]
+fn the_three_falls_compose_and_each_happens_at_most_once() {
+    // No drafting layer, and the long context does not fit: the depth falls for the layer, the context for memory.
+    // A third stop, memory at the short context and depth 0, is what `--mtp 0` gets too: it is returned as it is.
+    let (result, printed, starts, app) = text_up(&[], &[NO_DRAFT_LAYER_LOG, TEXT_MEMORY_REFUSAL, SHORT_MEMORY_REFUSAL]);
+    assert!(result.unwrap_err().contains("text service memory refusal: CONTEXT=32768;"));
+    assert_eq!(starts, both_ranks(&[("131072", "3"), ("131072", "0"), ("32768", "0")]));
+    assert_eq!((printed.matches(NO_DRAFT_LINE).count(), printed.matches(SHORT_CONTEXT_LINE).count(), printed.matches(NO_MEMORY_LINE).count()), (1, 1, 0), "{printed}");
+    assert!(Session::load(&app.config.state_dir).unwrap().is_none());
+    // Memory at both contexts: the context falls, then the depth. Every later stop is returned as it is: a second
+    // memory refusal (depth 0 does not fit either), the layer error, or any other error. Never a fourth start.
+    for (third, words) in [(SHORT_MEMORY_REFUSAL, "text service memory refusal: CONTEXT=32768;"), (NO_DRAFT_LAYER_LOG, "checkpoint declares no predictor layer"), (OTHER_START_LOG, "wire link timed out")] {
+        let (result, printed, starts, app) = text_up(&[], &[TEXT_MEMORY_REFUSAL, SHORT_MEMORY_REFUSAL, third]);
+        let error = result.unwrap_err();
+        assert!(error.contains(words), "{error}");
+        assert_eq!(starts, both_ranks(&[("131072", "3"), ("32768", "3"), ("32768", "0")]));
+        assert_eq!((printed.matches(SHORT_CONTEXT_LINE).count(), printed.matches(NO_MEMORY_LINE).count(), printed.matches(NO_DRAFT_LINE).count()), (1, 1, 0), "{printed}");
+        assert!(Session::load(&app.config.state_dir).unwrap().is_none());
+    }
+    // The short context's refusal can only come after the context fell or was named: on a first bare start at the
+    // long context it is not this start's context, so nothing falls.
+    let (result, printed, starts, _) = text_up(&[], &[SHORT_MEMORY_REFUSAL]);
+    assert!(result.unwrap_err().contains("text service memory refusal: CONTEXT=32768;"));
+    assert_eq!(starts, both_ranks(&[("131072", "3")]));
+    assert!(!printed.contains(NO_MEMORY_LINE) && !printed.contains("Starting with context"), "{printed}");
+}
+
+/// After the fall, any other start error is reported as it is: no third start, no record left, the words unchanged.
+#[test]
+fn a_different_start_error_after_the_drafting_fall_is_reported_as_it_is() {
+    let (result, printed, starts, app) = text_up(&[], &[NO_DRAFT_LAYER_LOG, OTHER_START_LOG]);
+    let error = result.unwrap_err();
+    assert!(error.contains("wire link timed out") && !error.contains("checkpoint declares no predictor layer"), "{error}");
+    assert_eq!(starts, both_ranks(&[("131072", "3"), ("131072", "0")]));
+    assert_eq!(printed.matches(NO_DRAFT_LINE).count(), 1, "{printed}");
+    assert!(Session::load(&app.config.state_dir).unwrap().is_none());
+    // The same error on the first start is not a fall at all.
+    let (result, printed, starts, _) = text_up(&[], &[OTHER_START_LOG]);
+    assert!(result.unwrap_err().contains("wire link timed out"));
+    assert_eq!(starts, both_ranks(&[("131072", "3")]));
+    assert!(!printed.contains(NO_DRAFT_LINE) && !printed.contains("Starting with context"), "{printed}");
+}
+
+/// What a bare `vade up --sparks 2 --diagnostic-unqualified-text` hands the engine on each rank: the long default
+/// context first and, after the engine refuses that for memory, the short one. `--nocapture` prints every start.
+#[test]
+fn a_bare_text_service_start_passes_these_engine_arguments_on_both_ranks() {
+    let mut f = Fixture::fp4(2, false);
+    let mut app = App { config: f.app.config.clone(), dry: false, runner: RefusesOnce { inner: std::mem::take(&mut f.app.runner), refused: false, log: TEXT_MEMORY_REFUSAL } };
+    app.up(&fp4_options(&["--sparks", "2", "--diagnostic-unqualified-text"])).unwrap();
+    let mut starts = Vec::new();
+    for call in app.runner.inner.calls.iter().filter(|call| matches!(call.label.as_str(), "a start" | "b start")) {
+        let request = text::parse(&String::from_utf8_lossy(&call.stdin)).unwrap();
+        let args: Vec<String> = (0..).map_while(|i| request.get(&format!("arg.{i}")).cloned()).collect();
+        let env: Vec<String> = request.iter().filter(|(key, _)| (key.starts_with("env.") || key.starts_with("env_unset.")) && !key.ends_with("SEQPAR_CONTROL_SECRET") && !key.ends_with("TP_RUN_ID"))
+            .map(|(key, value)| format!("{key}={value}")).collect();
+        println!("ENGINE START {}: args: {}", call.label, args.join(" "));
+        println!("ENGINE START {}: env: {}", call.label, env.join(" "));
+        starts.push((call.label.clone(), args));
+    }
+    // Rank 0 and rank 1 at the long context, then both again at the short one: the same options each time.
+    let options: Vec<String> = ["--diagnostic-unqualified-text", "--mtp", "3"].map(String::from).into();
+    assert_eq!(starts.iter().map(|(label, args)| (label.as_str(), args[0].as_str(), args[1].as_str(), args[6].as_str())).collect::<Vec<_>>(),
+        [("a start", "0", "2", "131072"), ("b start", "1", "2", "131072"), ("a start", "0", "2", "32768"), ("b start", "1", "2", "32768")]);
+    for (label, args) in &starts { assert_eq!(args[9..], options[..], "{label}: {args:?}"); }
 }
 
 /// The manifest of an older vade: one rank kept the folder of an earlier install.
@@ -311,7 +607,8 @@ fn the_ready_line_names_each_spark_and_the_context() {
     let capture = crate::output::testing::Capture::default();
     crate::output::with_writer(capture.clone(), || f.app.up(&fp4_options(&["--sparks", "2"]))).unwrap();
     let printed = String::from_utf8(capture.bytes.borrow().clone()).unwrap();
-    assert!(printed.contains("Vade is ready on 2 Sparks (a, b) at http://localhost:18080: context 131072 tokens, drafting depth "), "{printed}");
+    assert!(printed.contains("Vade is ready on 2 Sparks (a, b) at http://localhost:18080: context 131072 tokens, drafting depth engine default.\n"), "{printed}");
+    assert!(printed.contains("Drafting request") && printed.contains("engine default"), "{printed}");
 }
 
 /// Destinations stay private, including after a config edit.
@@ -376,16 +673,43 @@ fn cache_bytes_zero_starts_every_text_rank_with_no_prompt_keep() {
     for at in 0..plain.ranks.len() {assert!(!plain.engine_args(at).iter().any(|s|s=="--no-prompt-keep"));}
 }
 #[test]
+fn the_restart_hint_of_an_update_keeps_the_text_flag() {
+    // vade update keeps a running engine and prints the command that starts it again.
+    // Without the flag that command is a normal start, which the engine refuses for this checkpoint.
+    let hint=|options:&[&str]| {
+        let mut f=Fixture::fp4(2,false);
+        f.app.requested_session(&fp4_options(options),None,true).unwrap().save(&f.app.config.state_dir).unwrap();
+        let capture=crate::output::testing::Capture::default();
+        crate::output::with_writer(capture.clone(),|| f.app.update().unwrap());
+        String::from_utf8(capture.bytes.borrow().clone()).unwrap()
+    };
+    // The text service starts on exactly two Sparks (any other group is refused before a remote start).
+    let text=hint(&["--sparks","2","--context","4096","--output","64","--diagnostic-unqualified-text"]);
+    let line=text.lines().find(|line| line.trim_start().starts_with("vade up ")).unwrap_or_else(|| panic!("{text}"));
+    assert!(line.ends_with(" --context 4096 --output 64 --fp4-local --diagnostic-unqualified-text"),"{text}");
+    assert_eq!(line.matches("--diagnostic-unqualified-text").count(),1,"{text}");
+    // A start that named no depth loaded the text service's default depth: the restart command names it once.
+    assert_eq!(line.matches(&format!(" --mtp {}",crate::state::TEXT_DRAFT_DEPTH)).count(),1,"{text}");
+    // The printed command parses, and it asks for the same kind of start.
+    let words:Vec<String>=line.split_whitespace().skip(1).map(str::to_owned).collect();
+    let Command::Up(parsed)=crate::cli::parse(&words).unwrap().command else { panic!() };
+    assert!(parsed.diagnostic_unqualified_text && parsed.context==4096,"{line}");
+    // A normal start never gets the flag.
+    let plain=hint(&[]);
+    assert!(plain.contains("vade up ") && !plain.contains("--diagnostic-unqualified-text"),"{plain}");
+}
+
+#[test]
 fn diagnostic_text_opt_in_persists_but_bare_up_does_not_reuse_it() {
     let f=Fixture::fp4(2,false);
-    let options=fp4_options(&["--context","4096","--output","64","--diagnostic-unqualified-text"]);
+    let options=fp4_options(&["--sparks","2","--context","4096","--output","64","--diagnostic-unqualified-text"]);
     let diagnostic=f.app.requested_session(&options,None,true).unwrap();
     assert!(diagnostic.diagnostic_unqualified_text);
     for at in 0..diagnostic.ranks.len() {
         let args=diagnostic.engine_args(at);
         assert_eq!(args.iter().filter(|s|s.as_str()=="--diagnostic-unqualified-text").count(),1);
         assert!(!args.iter().any(|s|s=="--fp4-local" || s=="--decode-fuse"));
-        let depth=args.iter().position(|s|s=="--mtp").unwrap();assert_eq!(args[depth+1],"0");
+        let depth=args.iter().position(|s|s=="--mtp").unwrap();assert_eq!(args[depth+1],"3");
     }
     diagnostic.save(&f.app.config.state_dir).unwrap();
     let saved=Session::load(&f.app.config.state_dir).unwrap().unwrap();assert!(saved.diagnostic_unqualified_text);
@@ -415,9 +739,18 @@ fn second_rail_follows_configured_fabric_aux_and_tp_dual_rail_opt_out() {
             f.app.config.machines[1].fabric_aux.insert("a".into(), "aux-b-to-a".into());
             f.app.up(&fp4_options(&["--sparks", "2"])).unwrap();
             for req in starts(&f) {
-                assert_eq!(req.get("env_unset.TP_AUX_LISTEN").map(String::as_str), Some("1"));
-                assert_eq!(req.get("env_unset.TP_AUX_NEXT").map(String::as_str), Some("1"));
-                assert!(!req.contains_key("env.TP_AUX_LISTEN") && !req.contains_key("env.TP_AUX_NEXT"));
+                // The engines find a pair's second rail by themselves, so the opt-out must reach them: the start
+                // names the second rail `off`, whatever fabric_aux says.
+                assert_eq!(req.get("env.TP_AUX_LISTEN").map(String::as_str), Some("off"));
+                assert_eq!(req.get("env.TP_AUX_NEXT").map(String::as_str), Some("off"));
+                assert!(!req.contains_key("env_unset.TP_AUX_LISTEN") && !req.contains_key("env_unset.TP_AUX_NEXT"));
+            }
+            // The same with no fabric_aux in the config.
+            let mut plain = Fixture::fp4(2, false);
+            plain.app.up(&fp4_options(&["--sparks", "2"])).unwrap();
+            for req in starts(&plain) {
+                assert_eq!(req.get("env.TP_AUX_LISTEN").map(String::as_str), Some("off"));
+                assert_eq!(req.get("env.TP_AUX_NEXT").map(String::as_str), Some("off"));
             }
             return;
         }

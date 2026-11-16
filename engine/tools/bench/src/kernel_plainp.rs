@@ -582,3 +582,7 @@ fn bf16(c: &mut Check, name: &str, f: H, mode: &str, started: &Instant) -> Resul
 }
 
 #[path = "kernel_rowsp1.rs"] pub(crate) mod rowsp1;
+
+#[path = "kernel_shared_forms.rs"] pub(crate) mod shared_forms;
+
+#[path = "kernel_foldrows.rs"] pub(crate) mod foldrows;

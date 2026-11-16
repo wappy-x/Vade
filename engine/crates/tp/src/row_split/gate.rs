@@ -42,6 +42,8 @@ pub struct Account {
 pub(super) struct Gate {pub(super) tried:u32,pub(super) kept:f64,pub(super) cycle_ms:f64,pub(super) declined:u32,
     /// The request's measured record of its proposing cycles, and the depth it sets (price.rs).
     pub(super) pay:super::price::Pay,
+    /// How deep a request above the base depth proposes, by what its cycles kept (deeper.rs).
+    pub(super) deeper:super::deeper::Deeper,
     open:Option<Cycle>,
     /// Sums over the proposing cycles, ms: proposal, waiting rows, pass, verdict.
     pub(super) parts:[f64;4],
@@ -63,12 +65,20 @@ pub(super) struct Gate {pub(super) tried:u32,pub(super) kept:f64,pub(super) cycl
     score:i32}
 /// DEFAULT STOP. Real drafting that a trial started (trial.rs) is counted the way the trial counts: a real cycle of the
 /// full depth scores its kept proposals less EVEN_TOKENS (a cycle that keeps two of three costs what plain steps cost).
+/// A deeper cycle (deeper.rs) scores its kept proposals less `even_tokens` of its depth, which is more: it costs more.
 /// The score starts at 0 and holds at most STOP_BANK. At STOP_SCORE the request stops drafting for good: two failed
 /// cycles at the start (about 190 ms), or a loss of STOP_BANK more after a long good run. The score holds no time: the
 /// same request stops at the same cycle every time. (The code request of 2026-11-11 dips 8 below its best and then
 /// gains 13: a stop at a small dip from the best would cost it most of its gain.)
 pub(super) const STOP_SCORE:i32=-4;
 pub(super) const STOP_BANK:i32=12;
+/// The kept proposals at which a real cycle of `drafted` proposals costs about what plain steps cost. At TRIAL_DEPTH it
+/// is EVEN_TOKENS. Each deeper proposal adds a step of the predictor layer and a row of the check pass, together about
+/// a third of a plain step (two Sparks, 2026-11-15, main: a proposal 3.6 ms, the fourth row of a pass 10 ms, a plain
+/// step 40.9 ms), so every three deeper proposals, or a part of three, add one token. The count holds no time.
+pub(super) fn even_tokens(drafted:u64)->i32 {
+    super::trial::EVEN_TOKENS+drafted.saturating_sub(super::trial::TRIAL_DEPTH as u64).div_ceil(3) as i32
+}
 impl Gate {
     pub(super) fn allows(&mut self,step_ms:Option<f64>)->bool {if step_ms.is_none() {self.declined+=1;}step_ms.is_some()}
     /// The ms the proposing cycles took beyond plain steps of the tokens they kept. Negative: drafting pays.
@@ -103,7 +113,9 @@ impl Gate {
         let ms=parts.iter().sum::<f64>();for (sum,part) in self.parts.iter_mut().zip(parts) {*sum+=part;}
         self.proposed+=cycle.proposed;self.drafted+=cycle.drafted;self.waited+=cycle.waited;
         let kept=kept_to.saturating_sub(cycle.entry);self.pay.verdict(cycle.drafted,kept,ms);
-        if cycle.drafted==super::trial::TRIAL_DEPTH as u64 {self.score=(self.score+kept as i32-1-super::trial::EVEN_TOKENS).min(STOP_BANK);}
+        // A cycle shorter than TRIAL_DEPTH (a cut proposal) is not counted. A request at TRIAL_DEPTH has no longer cycle.
+        if cycle.drafted>=super::trial::TRIAL_DEPTH as u64 {self.score=(self.score+kept as i32-1-even_tokens(cycle.drafted)).min(STOP_BANK);}
+        self.deeper.verdict(cycle.drafted,kept);
         self.kept+=kept as f64;self.cycle_ms+=ms;self.tried+=1;
     }
     /// What a proposing cycle costs beside its pass and its proposals: the waiting rows and the verdict.
@@ -124,7 +136,7 @@ partial_verdicts={} mean_partial_verdict_ms={:.2} one_row_passes={} picked_on_de
 unused_proposals={} unused_proposed_tokens={} unused_proposal_ms={:.2}",
             self.proposed,self.waited,self.edge_ms/cycles,self.partial,self.partial_ms/f64::from(self.partial.max(1)),self.steps,self.picked,
             self.drafted,self.unused,self.unused_tokens,self.unused_ms);
-        self.pay.report(rank,session,depth);
+        self.pay.report(rank,session,depth);self.deeper.report(rank,session);
     }
 }
 #[cfg(test)] mod tests {
@@ -148,5 +160,19 @@ unused_proposals={} unused_proposed_tokens={} unused_proposal_ms={:.2}",
         assert!(gate.losing());
         // The time of a cycle is in the print only.
         assert!(gate.net_ms(48.0).is_finite());
+    }
+    #[test] fn a_deeper_cycle_scores_against_the_larger_even_count_of_its_depth() {
+        // At TRIAL_DEPTH the even count is EVEN_TOKENS; three deeper proposals, or a part of three, add one token.
+        assert_eq!((3..=7).map(even_tokens).collect::<Vec<_>>(),[2,3,3,3,4]);assert_eq!(even_tokens(0),2);
+        // A request of whole depth 7: its cycles go 3, 5, 7 deep while they keep everything, and score 1, 2 and 3 more.
+        let mut gate=Gate::default();
+        for (depth,score) in [(3,1),(5,3),(7,6)] {assert_eq!(gate.deeper.depth(7),depth);cycle(&mut gate,depth+1,depth as u64+1);assert_eq!(gate.score(),score,"depth {depth}");}
+        // A cycle of 7 that keeps 4 proposals is even; one that keeps only its own row loses 4, where a cycle of 3 loses 2.
+        cycle(&mut gate,8,5);assert_eq!(gate.score(),6);assert_eq!(gate.deeper.depth(7),7);cycle(&mut gate,8,1);assert_eq!(gate.score(),2);
+        assert_eq!(gate.deeper.depth(7),5,"two cycles that gained nothing at 7 leave that level (deeper.rs)");
+        // A cycle of 5 that keeps only its own row loses 3. It is the third in a row that gained nothing at 5: the base is next.
+        cycle(&mut gate,6,1);assert_eq!(gate.score(),-1);assert!(!gate.losing());assert_eq!(gate.deeper.depth(7),3);
+        // Deep cycles that keep nothing stop a request sooner than cycles of 3 do: each costs more.
+        let mut gate=Gate::default();cycle(&mut gate,8,1);assert_eq!(gate.score(),STOP_SCORE);assert!(gate.losing());
     }
 }

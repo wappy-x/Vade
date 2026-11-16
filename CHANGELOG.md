@@ -7,6 +7,239 @@ A short revision such as `380d8e5` or a number such as PR 142 names a revision
 or pull request of the private development history. This repository does not
 hold them ([glossary](docs/GLOSSARY.md#ho), "Main `abc1234`").
 
+## v0.2.0-rc.21 - 2026-11-16
+
+Drafting is on by default for the GLM text service. This release includes all
+changes prepared for rc.20, which was not published, and the later engine
+trains below. GLM remains a diagnostic text service.
+
+Every performance number below was measured with GLM FP4-Local on two DGX
+Sparks. Each compares one change, or one train, with the main just before it.
+These numbers do not compare this release as a whole with v0.2.0-rc.19.
+The final card will name its exact released source and settings.
+
+New and changed:
+
+- **GLM drafting is on by default (PR 232).** A plain `vade up --sparks 2
+  --diagnostic-unqualified-text` now loads the drafting layer at depth 3.
+  Before, it started without drafting. A lone chat drafts. Chats that run
+  together decode plainly. Token IDs are the same with drafting on and off.
+  One chat of structured text, in the order off, on, on, off on one pair of
+  Sparks, measured 24.35 / 31.54 / 31.61 / 24.32 tokens per second (29.7
+  percent more with drafting). `--mtp 0` turns drafting off.
+- **A shorter GLM prompt read (train 8).** On two DGX Sparks with the official
+  FP4-Local weights, the engine's 8,192-token read took 32.4230825 seconds on
+  the preceding main and 25.9720625 seconds on the combined train. These are
+  the means of the measured base, candidate, candidate, base comparison
+  `t8-read-m1-1`, `t8-read-t1-1`, `t8-read-t2-1`, `t8-read-m2-1`. The changes
+  share weight reads across rows, use gathered expert rows, and reduce the
+  register demand of latent attention. These are train measurements, not a
+  comparison with the last public release.
+- **A shorter prompt read again (train 9).** The read bundle reduces queued
+  work and keeps more prepared rows. The engine's 8,192-token read measured
+  25.582341 / 24.556782 / 24.639727 / 25.818003 seconds in the order main,
+  bundle, bundle, main (`readb-base-01`, `readb-reduced-c1`,
+  `readb-reduced-c2`, `readb-base-02`): 4.29 percent less on average. All
+  four runs kept the main's token IDs. The merged train's four loads,
+  short-prompt/read checks and context-32,768 cache checks matched all
+  76 saved ID lists (`n3-t9-four-1`, `n3-t9-read-1`, `n3-t9-k32-2`). These
+  lists include overlapping prompts. No token reference was reset.
+- **Smaller GLM drafting checks (train 10, PR 281).** The indexer's pool
+  scores use a smaller kernel with the same products and add order. A
+  four-row check measured 91.87 / 88.92 / 88.41 / 91.65 milliseconds in the
+  order main, change, change, main (`sharea-s1-b1-1`, `sharea-s1-p1-1`,
+  `sharea-s1-p2-1`, `sharea-s1-b2-1`). All answers matched the main.
+- **Corrected GLM memory charges (train 10, PR 274).** A configured context
+  of 65,536 with drafting and cache enabled passed the saved cache and
+  concurrent-chat checks (`ctx2-k64-c1`). Its largest prompt was 8,759
+  tokens; this does not qualify a near-full 65,536-token chat. A bare
+  diagnostic start still falls back from 131,072 to 32,768 with drafting.
+  Explicit `--mtp 0` admitted 131,072 in a startup check, without a fallback;
+  no near-full 131,072-token request was measured (`ctx2-bare-1`). The
+  release gate checks these exact contexts and chat counts, using the
+  contract committed with the change. The merged train kept all 76 saved
+  ID lists in its four loads, short-prompt/read and context-32,768 cache
+  checks (`n3-t10-fourloads-1`, `n3-t10-read-1`, `n3-t10-k32-1`). No token
+  reference was reset.
+- **Less GLM message overhead (train 11, PR 288).** A smaller side
+  prefetch and shorter row delivery reduce a plain decode step. The engine
+  measured 41.145 / 40.844 / 40.808 / 41.118 milliseconds in the order main,
+  change, change, main (`msg-g-m2-1`, `msg-g-y1-1`, `msg-g-y2-1`,
+  `msg-g-m3-1`). All answers matched the main.
+- **Wider GLM read groups (train 11, PR 290).** The served read path can
+  offer groups of 2,048 prompt rows, keeping each row's result. The
+  8,192-token read measured 24.654183 / 23.547281 / 23.596981 / 24.734966
+  seconds in the order main, change, change, main (`readx-br-base1`,
+  `readx-br-mine1`, `readx-br-mine2`, `readx-br-base2`). All answers matched
+  the main.
+- **Less work between GLM prompt groups (train 11, PR 279, PR 283).**
+  An expert gather can overlap independent shared-layer GPU work. Read
+  validation copies back compact status in place of full selection data.
+  Device tests cover retained allocations and a failure between opening
+  and closing the gathered work.
+- **Shared GLM weight reads for row groups (train 11, PR 294).** Pool,
+  block-FP8 and MXFP8 row paths reuse more of their shared inputs. Each
+  row keeps the same products and add order.
+- **Cheaper GLM drafting work (train 11, PR 287, PR 293).** A greedy
+  drafting check can return its row IDs directly, and narrow BF16 jobs
+  can share an existing MXFP8 row launch. These changes keep the saved
+  token IDs.
+- **Prompt exchange and launch safety (train 11, PR 275).** A posted
+  receive must be followed by its matching gather. An intervening wire
+  command fails and closes the transport. Device checks also cover a
+  failed auxiliary-rail startup serving the same prose, code and
+  structured token IDs, and wrong-bound fold-row launch refusals.
+- **Two transport rails when available (PR 248).** A pair on RDMA finds a
+  second suitable rail automatically. If it cannot open that rail, it starts
+  with one rail and reports the cause. Set both `TP_AUX_LISTEN=off` and
+  `TP_AUX_NEXT=off` on both ranks to keep one rail.
+- **Earlier receive posting (PR 246).** The prompt exchange can post its
+  receive before waiting for this rank's queued GPU work. The gather keeps
+  the same rank blocks and token IDs.
+- **Exactness of train 8.** The measured train kept the preceding main's token
+  IDs on the read comparison, all four served loads, and the context-32,768
+  check (`t8-train-1`, `t8-k32-main-1`, `t8-k32-train-1`). No token reference
+  was reset for train 8.
+
+- **Earlier measurements of the drafting default (PR 232).** On that head,
+  a lone code or prose request read 0.35 percent slower: the engine tried
+  drafting, found no gain and stopped. Nine long requests at context 32,768
+  ran 5 at once in place of 7, and the last waited about 27 seconds longer.
+  The drafting layer and its workspace took 3.36 GB of the room for chats.
+  A chat that arrived while another drafted got its first token about 0.1
+  seconds later. These are measurements before the later trains, not the
+  final released-build card. `--mtp 0` turns drafting off.
+- **Two fall-backs of the default (PR 232).** When you name no depth, `vade
+  up` starts without drafting in two cases. The model folder has no drafting
+  layer: it prints `This model has no drafting layer. Starting without
+  drafting.` There is not enough free memory for drafting: it prints `Not
+  enough free memory for drafting. Starting without drafting.` The default
+  never fails a start that `--mtp 0` passes. A depth that you name with
+  `--mtp` or `MTP` keeps the engine's error.
+- **The GLM text service takes exactly two Sparks (PR 232).**
+  `--diagnostic-unqualified-text` with any other group is refused before a
+  remote start. The message names the start that works: `vade up --sparks 2
+  --diagnostic-unqualified-text`.
+- **The GLM weights load about 4 seconds sooner (PR 183).** Four copy threads
+  now fill page-locked buffers, and the upload thread only queues the copies
+  to the GPU. On one pair of Sparks, over 7 fresh starts before and 6 after,
+  the mean weight load changed from 14.74 to 10.59 seconds, and the time from
+  start to ready from 19.60 to 15.45 seconds. The weight bytes on the GPU are
+  the same on both Sparks, by their hashes. No step cost showed: over 14 pairs
+  of runs the measured interval was -0.180 to +0.012 milliseconds a step.
+- **Sooner first token for a GLM chat (PR 216).** The engine keeps the
+  prepared layout of the recurrent projection layers between sessions. Token
+  IDs are the same. First token by prompt length, in the order main, change,
+  change, main, with fresh sessions and the prompt cache off: 16 tokens 287.3
+  / 250.7 / 248.0 / 287.4 milliseconds; 64 tokens 633.0 / 596.5 / 592.2 /
+  635.6; 256 tokens 1,315.6 / 1,273.5 / 1,277.2 / 1,315.5; 1,024 tokens
+  3,768.5 / 3,721.1 / 3,743.5 / 3,785.2. At 2,048 tokens the gain was smaller
+  than the spread of the two main runs.
+- **Long contexts decode faster (PR 236).** Past a context of about 16,000
+  tokens, two parts of a decode step fell back to a slower general path. They
+  stay on the fast path through the measured context of 32,768. A decode
+  step, in the order main, change, change, main, measured 54.087 / 47.188 /
+  47.095 / 54.182 milliseconds at a context of 16,384 tokens (12.9 percent
+  less) and 55.378 / 48.979 / 48.968 / 55.188 at 32,000 tokens (11.4 percent
+  less). Up to 8,192 tokens there was no material change. Token IDs are the
+  same.
+- **Two chats and eight chats decode faster (PR 228, PR 229).** Two chats at
+  once now take the grouped route for the routed expert weights. A step
+  measured 69.292 / 67.877 / 67.950 / 69.238 milliseconds in the order main,
+  change, change, main (2.0 percent less). With eight chats, the recurrent
+  rows of all chats now go out in one GPU launch: 142.713 / 141.252 / 141.233
+  / 142.902 milliseconds a step (1.1 percent less). In the test of the merged
+  batch (these two with PR 235 and PR 236), one run before and one after, the
+  total decode rate changed from 28.825 to 29.509 tokens per second for two
+  chats, from 43.796 to 44.085 for four chats, from 55.949 to 56.500 for eight
+  chats, and from 83.611 to 84.371 for eight copies of one chat.
+- **A loaded drafting layer no longer slows several chats (PR 219).** A server
+  with the drafting layer loaded charged drafting memory to every chat, so
+  eight chats could not all run at once. It now charges that memory only to a
+  lone chat that can draft. On a server with the drafting layer loaded, eight
+  different chats changed from 37.353 to 56.174 tokens per second in total,
+  and eight copies of one chat from 45.468 to 83.742.
+- **Drafting up to depth 7 (PR 214).** `vade up --mtp` accepts depths 0 to 7
+  with `--diagnostic-unqualified-text`, and 0 to 3 otherwise. A request that
+  names its own depth keeps it. Token IDs are the same at every depth. Strict
+  drafting of a 256-token structured request, in the order main at depth 3,
+  depth 7, depth 7, main at depth 3, measured 33.820 / 37.339 / 35.667 /
+  33.732 tokens per second. Code and prose did not gain.
+- **Cheaper drafting checks (PR 225).** The check of drafted tokens now goes
+  through the resident recorder, so a check sends fewer separate GPU launches.
+  Token IDs are the same. One run before and one after, for the merged batch
+  of PR 214, PR 225 and PR 223: strict drafting at depth 3 changed from 33.613
+  to 35.215 tokens per second for structured output, from 26.825 to 29.044 for
+  code and from 23.232 to 22.957 for prose. At depth 2 it changed from 28.626
+  to 30.381, from 26.408 to 28.040 and from 23.356 to 23.484. The engine's own
+  timer for a check of four rows changed from 100.455 to 94.617 milliseconds,
+  and for three rows from 92.442 to 86.352. Prose at depth 3 was 1.2 percent
+  lower in this one run.
+- **A long prompt reads sooner with the drafting layer loaded (PR 223).** At
+  context 32,768 with the drafting layer loaded, a lone prompt borrows the
+  chat memory that no chat holds, reads in larger row groups, and gives the
+  memory back before the next request starts. One run before and one after,
+  for the same merged batch, with the prompt cache on: the first token of a
+  cold 8,192-token prompt changed from 43.633 to 33.000 seconds; at 2,048,
+  1,024 and 512 tokens from 10.27, 4.96 and 2.50 seconds to 7.52, 3.61 and
+  2.01; a second turn from the cache from 3.501 to 2.729 seconds; a second
+  turn read cold from 48.289 to 36.889. The lowest free memory in that load
+  changed from 17.25 and 19.29 GB on the two Sparks to 16.22 and 18.61. A
+  server without the drafting layer keeps its old path: its 8,192-token first
+  token measured 32,208.5 milliseconds before and 32,215.2 after.
+- **A rare fault in the launch recorder is closed (PR 235).** A code review
+  found it. When memory was at its budget at a backend's first recorded launch
+  that uses tables, a kept launch graph could later read its tables from freed
+  memory. The result would have been wrong math without an error. The recorder
+  now keeps the table area that such a graph uses.
+- **Plain-chat measurements for PR 183 and PR 232.** In the merged batch of PR 183
+  and PR 232, one run before and one after, one plain chat measured 24.310 /
+  24.278 / 24.268 tokens per second before and 24.346 / 24.320 / 24.304 after
+  for prose, code and structured output. In each of the three tests of a
+  merged engine batch, all 48 measured token ID lists (6,880 tokens) matched
+  the main before it.
+- **`vade update` prints a restart command that works (PR 224).** For a
+  running GLM text service, the restart command that `vade update` prints now
+  keeps `--diagnostic-unqualified-text`. Before, the command as printed was a
+  normal start, which the engine refuses for this checkpoint.
+
+Checks:
+
+- **Train 11 repeatability.** The combined engine kept all 76 saved ID
+  lists and 9,248 token IDs across the four loads, short-prompt/read and
+  context-32,768 cache checks (`n3-t11-fourloads-1`, `n3-t11-read-1`,
+  `n3-t11-k32-1`). These checks include overlapping prompts. The touched
+  host suites passed 1,116 tests with no failures and 13 device-only tests
+  ignored. The source checks and Qwen/GLM golden checks also passed.
+- **The default start at the landing of PR 232.** A plain `vade up` of the
+  GLM text service ran on the exact merged code. It printed the fall of the
+  context from 131,072 to 32,768, came up at context 32,768 with room for 8
+  chats and drafting depth 3, and answered with 256 of 256 token IDs equal to
+  the saved baseline. A second start with `--mtp 0` was plain and gave the
+  same 256 token IDs.
+- **Tests on a slow or bare Mac (PR 224).** Five harness tests failed on
+  GitHub's hosted macOS machine for `v0.2.0-rc.19`. Two need `rg`, which that
+  machine does not have; they now skip that part and say so. Three timed a
+  deadline too tightly for a slow machine; they now leave a wide margin. One
+  more test, which failed once on a busy Mac, now holds its mock engine's lock
+  for the margin that its sibling case already used. No product behavior
+  changed.
+
+Repeatability checks retain the same saved token reference. The diagnostic
+GLM goldens remain at epoch 3; this release makes no token-ID rebase.
+The released build's complete card is collected separately with drafting
+on and off, using the frozen source and settings named with that card.
+
+Known limits:
+
+- GLM remains a diagnostic text service (`--diagnostic-unqualified-text`).
+- The missing-layer and insufficient-drafting-memory fallbacks of PR 232
+  have host tests. Neither case has run on a Spark.
+- The earlier drafting-default measurements precede the later changes for
+  several chats and long contexts. They do not replace the final card.
+- Short golden checks do not qualify full cache-capacity pressure. The
+  context and cache-pressure evidence must be read with its own run scope.
+
 ## v0.2.0-rc.19 - 2026-11-15
 
 This release makes the one-line installer safe against a cut-off download,

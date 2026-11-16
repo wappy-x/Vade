@@ -12,6 +12,11 @@ pub const MAX_COLS: usize = 8192;
 /// (`swept::MX_COLS_DENSE`). Before, a prompt group ran this matrix on the 16-token decode kernels, 64 launches a group.
 pub const DENSE_COLS: usize = 12288;
 pub const MAX_TOKENS: usize = 1024;
+/// The output head of one rank when two ranks serve the model (154,880 tokens): 77,440 x 4,096. It is past `MAX_ROWS` and `admitted` does
+/// NOT take it. The kernels hold no row bound of their own; `small_choice::mx` sends ONLY 5 to 8 tokens of this one table to the tile
+/// (and 3 and 4 tokens to `mx_rows_small4`), and the device sweep covers exactly that (`kernel-bench --mx-small {OLD} {X} head`).
+pub const HEAD_ROWS: usize = 77_440;
+pub const HEAD_COLS: usize = 4096;
 /// Wider launches win in the device sweep through 16 MiB of weight codes.
 /// Larger matrices keep the existing 256-token pieces.
 pub fn token_limit(rows:usize,cols:usize)->usize {

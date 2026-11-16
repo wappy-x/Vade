@@ -312,3 +312,144 @@ pub(crate) fn rows_fold<const BF16:bool>(weights: *const f32, input: *const f32,
         }
     }
 }
+
+const _: () = assert!(crate::plain_admission::FOLD_ROWS_BYTES <= BLOCK_BYTES, "the fold-rows slots must not enlarge the block's shared memory");
+/// FOLD ROWS (`plain_admission::fold_rows_admitted`): the fold schedule for 2 to 8 source rows in one block. Returns, on lane
+/// `t * FOLD_ROWS + r` of warp 0, the dot product of weight row `first_row + r` with source row `t` when `t` is below `tokens`
+/// and the row is below `rows`; every other thread returns 0.0 and the caller must not store it. `LAYOUT` is
+/// `plain_admission::fold_rows_layout(tokens)` (2, 4 or 8). `input` holds `[tokens][cols]` FP32 words. `smem` is the block's
+/// `plain_admission::FOLD_ROWS_BYTES` of shared memory.
+///
+/// Each output is the ONE ascending chain from 0.0 that `rows_fold` makes for that source row alone: every product is made by its
+/// own `mul.rn.f32` (weight first, input second), stored to shared memory as its bits, and added by its own `add.rn.f32` in column
+/// order. No fused multiply-add. What changes against `rows_fold` is only who shares a block: a producer loads a weight vector
+/// ONCE and multiplies it into one product vector for each source row, and the folding warp runs `tokens * FOLD_ROWS` chains,
+/// one lane a (source row, weight row). A chain has its own accumulator register and its own pitch of each slot
+/// (`plain_admission::fold_rows_word`); no two chains share either.
+pub(crate) fn rows_fold_rows<const BF16:bool, const LAYOUT: usize>(weights: *const f32, input: *const f32, cols: usize, first_row: usize, rows: usize, tokens: usize, smem: u32) -> f32 {
+    // SAFETY: The caller reaches this with every thread of a FOLD_THREADS-thread block (no early exit), with
+    // plain_admission::fold_rows_admitted true (cols a multiple of 32 in 1024..=8192, weights and input 16-byte aligned, rows * cols
+    // within the swept envelope; weights contain BF16 patterns when BF16 is true), `tokens` in 2..=LAYOUT with LAYOUT 2, 4 or 8,
+    // `tokens * cols` input words, first_row below rows and the same on all threads, and `smem` the start of FOLD_ROWS_BYTES of
+    // shared memory private to this block (2 slots x FOLD_ROWS * LAYOUT chains x (1024 / LAYOUT + 4) words fit it for every LAYOUT).
+    // Global reads: a producer loads a weight vector only for a row below `rows` and columns below `cols` (a whole 16-byte vector,
+    // cols a multiple of 4), and an input vector only for a source row below `tokens` and columns below `cols`; so every read stays
+    // in the matrix and the input. Shared memory: a slot is written only by producers between the empty barrier of that slot (or the
+    // start, for the first FOLD_SLOTS chunks) and their arrival at its full barrier; a word is written by exactly one producer
+    // (`fold_rows_vector` maps the producers and their eight product vectors onto the chunk's (source row, weight row, vector)
+    // triples one to one for each LAYOUT; a host test walks it); it is read only by a folding lane after the full barrier, and only
+    // the words of its own live chain below the chunk's span, all of which a producer stored for this chunk. The consumer warp
+    // arrives at the empty barrier of a slot only after its reads of that slot, and only when a later chunk will refill it;
+    // producers wait at it exactly for those chunks, so arrivals and waits pair up and no thread waits for a barrier nobody
+    // reaches. Every named barrier counts all FOLD_THREADS threads; the warp-level syncs before each one reconverge a warp after
+    // its per-thread branches. No global memory is written.
+    unsafe {
+        use crate::plain_admission::{fold_rows_chunk, fold_rows_pitch, fold_rows_vector, fold_rows_word, FOLD_ROWS};
+        let tid = core::arch::nvptx::_thread_idx_x() as usize;
+        let n = crate::plain_admission::FOLD_THREADS as u32;
+        let ch = fold_rows_chunk(LAYOUT);
+        let slot_bytes = FOLD_ROWS * LAYOUT * fold_rows_pitch(LAYOUT) * 4;
+        let chunks = cols.div_ceil(ch);
+        if tid < 32 {
+            let chains = FOLD_ROWS * LAYOUT;
+            let (t, r) = (tid / FOLD_ROWS, tid % FOLD_ROWS);
+            let live = tid < chains && t < tokens && first_row + r < rows;
+            let chain = if tid < chains { tid } else { chains - 1 };
+            let row_base = (fold_rows_word(LAYOUT, chain / FOLD_ROWS, chain % FOLD_ROWS, 0) * 4) as u32;
+            let mut sum = 0.0f32;
+            macro_rules! add {($v:expr)=>{{
+                asm!("add.rn.f32 {sum}, {sum}, {product};", sum = inout(reg32) sum, product = in(reg32) f32::from_bits($v), options(nomem, nostack));
+            }};}
+            // Groups of 16 products, two register sets used in turn, as `rows_fold`: the same adds in the same ascending order.
+            macro_rules! group {($at:expr)=>{{let at=$at;[crate::ptx::load4(at),crate::ptx::load4(at+16),crate::ptx::load4(at+32),crate::ptx::load4(at+48)]}}}
+            macro_rules! adds {($r:ident)=>{{
+                add!($r[0][0]);add!($r[0][1]);add!($r[0][2]);add!($r[0][3]);add!($r[1][0]);add!($r[1][1]);add!($r[1][2]);add!($r[1][3]);
+                add!($r[2][0]);add!($r[2][1]);add!($r[2][2]);add!($r[2][3]);add!($r[3][0]);add!($r[3][1]);add!($r[3][2]);add!($r[3][3]);
+            }};}
+            let mut c = 0;
+            while c < chunks {
+                let s = c % FOLD_SLOTS;
+                asm!("bar.sync {id}, {n};", id = in(reg32) FOLD_FULL + s as u32, n = in(reg32) n);
+                if live {
+                    let span = (cols - c * ch).min(ch);
+                    let at = smem + (s * slot_bytes) as u32 + row_base;
+                    let groups = span / 16;
+                    if groups > 0 {
+                        let mut a = group!(at);
+                        let mut g = 0usize;
+                        while g + 1 < groups {
+                            let b = group!(at + ((g + 1) * 64) as u32);
+                            adds!(a);
+                            a = if g + 2 < groups { group!(at + ((g + 2) * 64) as u32) } else { b };
+                            adds!(b);
+                            g += 2;
+                        }
+                        if g < groups { adds!(a); }
+                    }
+                    let mut j = groups * 16;
+                    while j < span {
+                        let v = crate::ptx::load4(at + (j * 4) as u32);
+                        add!(v[0]); add!(v[1]); add!(v[2]); add!(v[3]);
+                        j += 4;
+                    }
+                }
+                asm!("bar.warp.sync 0xffffffff;");
+                if c + FOLD_SLOTS < chunks { asm!("bar.arrive {id}, {n};", id = in(reg32) FOLD_EMPTY + s as u32, n = in(reg32) n); }
+                c += 1;
+            }
+            if live { sum } else { 0.0 }
+        } else {
+            let p = tid - 32;
+            macro_rules! ld4 {($a:expr)=>{{
+                let (a,b,c,d):(f32,f32,f32,f32);
+                asm!("ld.global.v4.f32 {{{a},{b},{c},{d}}}, [{p}];",a=out(reg32)a,b=out(reg32)b,c=out(reg32)c,d=out(reg32)d,p=in(reg64)$a);
+                [a,b,c,d]
+            }};}
+            macro_rules! mul {($w:expr,$x:expr)=>{{
+                let product: f32;
+                asm!("mul.rn.f32 {product}, {w}, {x};", product = out(reg32) product, w = in(reg32) $w, x = in(reg32) $x, options(nomem, nostack));
+                product.to_bits()
+            }};}
+            let mut c = 0;
+            while c < chunks {
+                let s = c % FOLD_SLOTS;
+                if c >= FOLD_SLOTS { asm!("bar.sync {id}, {n};", id = in(reg32) FOLD_EMPTY + s as u32, n = in(reg32) n); }
+                let first = c * ch;
+                let span = (cols - first).min(ch);
+                let slot = smem + (s * slot_bytes) as u32;
+                // Product vector j of this producer: weight vector slot k, source row t, block weight row r, vector q of the chunk.
+                // A warp reads 32 neighbouring vectors of one weight row. All loads of the chunk issue before any product; a weight
+                // vector is loaded once (at its first source row) and used for every source row.
+                let mut w = [[0.0f32; 4]; 8];
+                let mut x = [[0.0f32; 4]; 8];
+                macro_rules! fetch {($j:expr)=>{{
+                    let (k, t, r, q) = fold_rows_vector(LAYOUT, p, $j);
+                    if q * 4 < span {
+                        if t < tokens { x[$j] = ld4!(input.add(t * cols + first + q * 4)); }
+                        if t == 0 && first_row + r < rows {
+                            let at=(first_row+r)*cols+first+q*4;
+                            w[k]=if BF16 {
+                                let (a,b):(u32,u32);
+                                asm!("ld.global.v2.u32 {{{a},{b}}}, [{p}];",a=out(reg32)a,b=out(reg32)b,p=in(reg64)weights.cast::<u16>().add(at));
+                                [f32::from_bits(a<<16),f32::from_bits(a&0xffff0000),f32::from_bits(b<<16),f32::from_bits(b&0xffff0000)]
+                            } else {ld4!(weights.add(at))};
+                        }
+                    }
+                }};}
+                fetch!(0); fetch!(1); fetch!(2); fetch!(3); fetch!(4); fetch!(5); fetch!(6); fetch!(7);
+                macro_rules! put {($j:expr)=>{{
+                    let (k, t, r, q) = fold_rows_vector(LAYOUT, p, $j);
+                    if q * 4 < span && first_row + r < rows && t < tokens {
+                        let (a, b, cc, d) = (mul!(w[k][0], x[$j][0]), mul!(w[k][1], x[$j][1]), mul!(w[k][2], x[$j][2]), mul!(w[k][3], x[$j][3]));
+                        asm!("st.shared.v4.b32 [{at}], {{{a}, {b}, {c}, {d}}};", at = in(reg32) slot + (fold_rows_word(LAYOUT, t, r, q * 4) * 4) as u32, a = in(reg32) a, b = in(reg32) b, c = in(reg32) cc, d = in(reg32) d);
+                    }
+                }};}
+                put!(0); put!(1); put!(2); put!(3); put!(4); put!(5); put!(6); put!(7);
+                asm!("bar.warp.sync 0xffffffff;");
+                asm!("bar.arrive {id}, {n};", id = in(reg32) FOLD_FULL + s as u32, n = in(reg32) n);
+                c += 1;
+            }
+            0.0
+        }
+    }
+}

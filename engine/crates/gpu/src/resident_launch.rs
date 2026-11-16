@@ -23,7 +23,17 @@ pub enum Kind {Causal=1,Expert,Plain,Mx,Round,Copy,Put,Take,Prepare,Collapse,Com
     /// owner's quarters (nv_quarter_fold). ReduceTake: the take of the one sum exchange a sublayer (tp_reduce_take).
     NvQuarters=39,QuarterFold=40,ReduceTake=41,
     /// Original row kernels with indirect arguments. Their grids and arithmetic stay fixed.
-    MxRows2,MxRows4,MxRows8,MxRows8w,MixedRows,Fp8RowsSmall,Fp8RowsMulti,Fp8RowsFew,PlainRowsSmall,PromptRows,RowPrepare,RowGatedNorm,RowRoute,RowFold,RowPlace,RowPermute,RowSelect,TransposeSmem,DeviceRouteRows}
+    MxRows2,MxRows4,MxRows8,MxRows8w,MixedRows,Fp8RowsSmall,Fp8RowsMulti,Fp8RowsFew,PlainRowsSmall,PromptRows,RowPrepare,RowGatedNorm,RowRoute,RowFold,RowPlace,RowPermute,RowSelect,TransposeSmem,DeviceRouteRows,
+    /// One launch of 2 to 8 same-shape causal chains, or same-shape recurrent causal-fast calls. Each block row runs one member's own command.
+    CausalGroup=64,
+    /// FOLD ROWS: the plain fold batch for 2 to 8 source rows, BF16 weight patterns and FP32 weights (row kernels with indirect arguments).
+    FoldRows=65,FoldRowsF32=66,
+    /// The indexer's pool scores of few tokens, a warp a (token, pool) (prompt_pool_scores; a row kernel with indirect arguments).
+    RowPoolScores=67,
+    /// SHARE ROWS: block-FP8 rows with the same checked direct and recorded arguments.
+    Fp8RowsShare=71,
+    /// SHARE ROWS: the existing MXFP8 tile for 5 to 8 decode rows.
+    MxRowsTile=68}
 /// The payload word of an NvQuarters command that holds the quarters a row gets (4, 2 or 1). It is the first word
 /// past the command's LaunchArguments (112 bytes).
 pub const NV_QUARTERS_WORD:usize=14;
@@ -37,23 +47,28 @@ pub const NV_QUARTERS_WORD:usize=14;
 impl Kind {
     /// One more than the largest kind number: the length of a table indexed by kind.
     pub const COUNT:usize={let mut count=0;let mut at=0;while at<Self::ALL.len() {let next=Self::ALL[at] as usize+1;if next>count {count=next;}at+=1;}count};
-    pub const ALL:[Self;64]=[Self::MhcPhaseRms,Self::MhcPhaseDots,Self::MhcPhaseFinish,Self::MxRows2,Self::MxRows4,Self::MxRows8,Self::MxRows8w,Self::MixedRows,Self::Fp8RowsSmall,Self::Fp8RowsMulti,Self::Fp8RowsFew,Self::PlainRowsSmall,Self::PromptRows,Self::RowPrepare,Self::RowGatedNorm,Self::RowRoute,Self::RowFold,Self::RowPlace,Self::RowPermute,Self::RowSelect,Self::TransposeSmem,Self::DeviceRouteRows,Self::NvQuarters,Self::QuarterFold,Self::ReduceTake,Self::MhcBoundaryFused,Self::AbsorbDense,Self::AbsorbAttention,Self::MixedBf16,Self::PlainBatch,Self::CausalChain,Self::NormTail,Self::Pointwise,Self::ShadowSide,Self::PutJoin,Self::PutPlain,Self::ShadowPrefetch,Self::PutWide,Self::Causal,Self::Expert,Self::Plain,Self::Mx,Self::Round,Self::Copy,Self::Put,Self::Take,Self::Prepare,Self::Collapse,Self::Combine,Self::RmsPartials,Self::RmsApply,Self::Elementwise,Self::CopyWords,Self::ZeroWords,Self::Mixed,Self::NvStream,Self::CausalFast,Self::NvTile,Self::DeviceRoute,Self::TakeScatter,Self::PlainBf16,Self::MhcBoundaryRms,Self::MhcBoundaryDots,Self::MhcBoundaryFinish];
-    pub const ROWS:[Self;19]=[Self::MxRows2,Self::MxRows4,Self::MxRows8,Self::MxRows8w,Self::MixedRows,Self::Fp8RowsSmall,Self::Fp8RowsMulti,Self::Fp8RowsFew,Self::PlainRowsSmall,Self::PromptRows,Self::RowPrepare,Self::RowGatedNorm,Self::RowRoute,Self::RowFold,Self::RowPlace,Self::RowPermute,Self::RowSelect,Self::TransposeSmem,Self::DeviceRouteRows,];
+    pub const ALL:[Self;70]=[Self::MxRowsTile,Self::Fp8RowsShare,Self::RowPoolScores,Self::FoldRows,Self::FoldRowsF32,Self::MhcPhaseRms,Self::MhcPhaseDots,Self::MhcPhaseFinish,Self::MxRows2,Self::MxRows4,Self::MxRows8,Self::MxRows8w,Self::MixedRows,Self::Fp8RowsSmall,Self::Fp8RowsMulti,Self::Fp8RowsFew,Self::PlainRowsSmall,Self::PromptRows,Self::RowPrepare,Self::RowGatedNorm,Self::RowRoute,Self::RowFold,Self::RowPlace,Self::RowPermute,Self::RowSelect,Self::TransposeSmem,Self::DeviceRouteRows,Self::NvQuarters,Self::QuarterFold,Self::ReduceTake,Self::MhcBoundaryFused,Self::AbsorbDense,Self::AbsorbAttention,Self::MixedBf16,Self::PlainBatch,Self::CausalChain,Self::NormTail,Self::Pointwise,Self::ShadowSide,Self::PutJoin,Self::PutPlain,Self::ShadowPrefetch,Self::PutWide,Self::Causal,Self::Expert,Self::Plain,Self::Mx,Self::Round,Self::Copy,Self::Put,Self::Take,Self::Prepare,Self::Collapse,Self::Combine,Self::RmsPartials,Self::RmsApply,Self::Elementwise,Self::CopyWords,Self::ZeroWords,Self::Mixed,Self::NvStream,Self::CausalFast,Self::NvTile,Self::DeviceRoute,Self::TakeScatter,Self::PlainBf16,Self::MhcBoundaryRms,Self::MhcBoundaryDots,Self::MhcBoundaryFinish,Self::CausalGroup];
+    pub const ROWS:[Self;24]=[Self::MxRowsTile,Self::Fp8RowsShare,Self::RowPoolScores,Self::FoldRows,Self::FoldRowsF32,Self::MxRows2,Self::MxRows4,Self::MxRows8,Self::MxRows8w,Self::MixedRows,Self::Fp8RowsSmall,Self::Fp8RowsMulti,Self::Fp8RowsFew,Self::PlainRowsSmall,Self::PromptRows,Self::RowPrepare,Self::RowGatedNorm,Self::RowRoute,Self::RowFold,Self::RowPlace,Self::RowPermute,Self::RowSelect,Self::TransposeSmem,Self::DeviceRouteRows,];
     pub fn row(name:&str)->Option<Self> {match name {
         "mx_rows_small2"=>Some(Self::MxRows2),
         "mx_rows_small4"=>Some(Self::MxRows4),
         "mx_rows_small8"=>Some(Self::MxRows8),
         "mx_rows_small8w"=>Some(Self::MxRows8w),
+        "mx_rows_tile"=>Some(Self::MxRowsTile),
         "flash_resident_projection_bf16_rows"=>Some(Self::MixedRows),
+        "flash_resident_projection_fold_rows"=>Some(Self::FoldRows),
+        "flash_resident_projection_fold_rows_f32"=>Some(Self::FoldRowsF32),
         "fp8_rows_small"=>Some(Self::Fp8RowsSmall),
         "fp8_rows_multi"=>Some(Self::Fp8RowsMulti),
         "fp8_rows_few"=>Some(Self::Fp8RowsFew),
+        "fp8_rows_share"=>Some(Self::Fp8RowsShare),
         "plain_rows_small"=>Some(Self::PlainRowsSmall),
         "prompt_rows"=>Some(Self::PromptRows),
         "prompt_prepare"=>Some(Self::RowPrepare),
         "prompt_gated_norm"=>Some(Self::RowGatedNorm),
         "prompt_route"=>Some(Self::RowRoute),
         "prompt_fold"=>Some(Self::RowFold),
+        "prompt_pool_scores"=>Some(Self::RowPoolScores),
         "prompt_place"=>Some(Self::RowPlace),
         "prompt_permute"=>Some(Self::RowPermute),
         "prompt_select_rows"=>Some(Self::RowSelect),
@@ -64,17 +79,22 @@ impl Kind {
         Self::MxRows2=>"resident_launch_mx_rows_small2",
         Self::MxRows4=>"resident_launch_mx_rows_small4",
         Self::MxRows8=>"resident_launch_mx_rows_small8",
+        Self::MxRowsTile=>"resident_launch_mx_rows_tile",
         Self::MxRows8w=>"resident_launch_mx_rows_small8w",
         Self::MixedRows=>"resident_launch_flash_resident_projection_bf16_rows",
+        Self::FoldRows=>"resident_launch_flash_resident_projection_fold_rows",
+        Self::FoldRowsF32=>"resident_launch_flash_resident_projection_fold_rows_f32",
         Self::Fp8RowsSmall=>"resident_launch_fp8_rows_small",
         Self::Fp8RowsMulti=>"resident_launch_fp8_rows_multi",
         Self::Fp8RowsFew=>"resident_launch_fp8_rows_few",
+        Self::Fp8RowsShare=>"resident_launch_fp8_rows_share",
         Self::PlainRowsSmall=>"resident_launch_plain_rows_small",
         Self::PromptRows=>"resident_launch_prompt_rows",
         Self::RowPrepare=>"resident_launch_prompt_prepare",
         Self::RowGatedNorm=>"resident_launch_prompt_gated_norm",
         Self::RowRoute=>"resident_launch_prompt_route",
         Self::RowFold=>"resident_launch_prompt_fold",
+        Self::RowPoolScores=>"resident_launch_prompt_pool_scores",
         Self::RowPlace=>"resident_launch_prompt_place",
         Self::RowPermute=>"resident_launch_prompt_permute",
         Self::RowSelect=>"resident_launch_prompt_select_rows",
@@ -87,7 +107,7 @@ impl Kind {
         Self::RmsPartials=>"resident_launch_rms_partials",Self::RmsApply=>"resident_launch_rms_apply",Self::NormTail=>"resident_launch_norm_tail",Self::Elementwise=>"resident_launch_elementwise",
         Self::CopyWords=>"resident_launch_copy_words",Self::ZeroWords=>"resident_launch_zero_words",Self::Mixed=>"resident_launch_mixed",
         Self::MixedBf16=>"resident_launch_mixed_bf16",Self::PlainBatch=>"resident_launch_plain_batch",
-        Self::NvStream=>"resident_launch_nv_stream",Self::CausalFast=>"resident_launch_causal_fast",Self::CausalChain=>"resident_launch_causal_chain",Self::NvTile=>"resident_launch_nv_tile",
+        Self::NvStream=>"resident_launch_nv_stream",Self::CausalFast=>"resident_launch_causal_fast",Self::CausalChain=>"resident_launch_causal_chain",Self::CausalGroup=>"resident_launch_causal_group",Self::NvTile=>"resident_launch_nv_tile",
         Self::DeviceRoute=>"resident_launch_device_route",Self::TakeScatter=>"resident_launch_take_scatter",Self::PutWide=>"resident_launch_put_wide",Self::PlainBf16=>"resident_launch_plain_bf16",
         Self::MhcPhaseRms=>"resident_launch_mhc_phase_rms",Self::MhcPhaseDots=>"resident_launch_mhc_phase_dots",Self::MhcPhaseFinish=>"resident_launch_mhc_phase_finish",Self::MhcBoundaryRms=>"resident_launch_mhc_boundary_rms",Self::MhcBoundaryDots=>"resident_launch_mhc_boundary_dots",Self::MhcBoundaryFinish=>"resident_launch_mhc_boundary_finish",Self::MhcBoundaryFused=>"resident_launch_mhc_boundary_fused",
         Self::NvQuarters=>"resident_launch_nv_quarters",Self::QuarterFold=>"resident_launch_quarter_fold",Self::ReduceTake=>"resident_launch_reduce_take",

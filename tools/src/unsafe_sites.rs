@@ -268,8 +268,12 @@ pub fn violations(sites: &[Site], allowed: &Allowlist) -> Vec<String> {
             }
             continue;
         }
-        if !site.gpu { issues.push(format!("{here}: new unsafe {} outside the GPU crate",site.kind)); }
-        else if site.kind != "block" { issues.push(format!("{here}: only a new unsafe block is allowed in the GPU crate")); }
+        // LEAD RULING 2026-11-15 (RECEIVE FIRST): a new unsafe block outside the GPU crate passes only with its own ruling line on
+        // its row and a SAFETY: contract directly above it (the contract is checked above). Every other new site still fails here.
+        if !site.gpu && !(site.kind == "block" && site.contract && !approval.is_empty()) {
+            issues.push(format!("{here}: new unsafe {} outside the GPU crate",site.kind));
+        }
+        if site.gpu && site.kind != "block" { issues.push(format!("{here}: only a new unsafe block is allowed in the GPU crate")); }
         if site.kind == "block" && site.gpu {
             if let Some(wrapper) = site.wrapper {
                 let count = blocks.entry((&site.path,wrapper)).or_insert(0); *count += 1;

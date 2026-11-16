@@ -153,3 +153,65 @@ fn the_prompt_group_is_the_largest_one_the_budget_funds_and_256_rows_change_no_c
         assert_eq!(pick(0),256);assert_eq!(pick(usize::MAX),1024);
     }
 }
+
+#[test]
+fn absorbed_latent_layers_are_not_charged_the_expanded_rows_of_the_whole_context() {
+    use engine_model::plan::description::TokenMixer;
+    use spark_tp::bounded_decoder::{absorbed_group_words,absorbed_chat_words,expanded_row_words,group_workspace_bytes_for,group_workspace_bytes_with,LatentRows,BATCH_ROWS};
+    // The served model's shapes, as independent literals: 64 heads x (256 key + 256 value) = 32,768 words an expanded row,
+    // latent 512, 2,051 selected rows. One decode row of an unabsorbed layer: 2,051 x (3 x 32,768 + 512) + 256 x 32,768 words
+    // (844 MB). The rows of one layer for a 131,072 context that the expanded form charges: (131,072 + 256) x 16,896 + 256 x 32,768
+    // words (8.9 GB).
+    assert_eq!(expanded_row_words(32_768,512,2051),Some(211_060_224));
+    assert_eq!((131_072usize+256)*(32_768/2+512)+256*32_768,2_227_306_496);
+    assert_eq!(expanded_row_words(usize::MAX,1,1),None);assert_eq!(expanded_row_words(1,1,usize::MAX),None);
+    let c=fixture::Checkpoint::new_with_capacity(Dtype::Bf16,true,70000);let _=&c.operands;
+    let a=c.admission.description().layers.iter().find_map(|l|match l.mixer {TokenMixer::LatentAttention(a)=>Some(a),_=>None}).expect("the fixture has a latent layer");
+    let slots=(a.indexer.token_budget+if a.indexer.select_tail {a.indexer.pool-1} else {0}) as usize;
+    let (row,rank)=((a.heads*(a.key_dim+a.value_dim)) as usize,a.kv_rank as usize);
+    let (plain,draft)=(LatentRows::Absorbed {draft:false},LatentRows::Absorbed {draft:true});let mut lower=0;
+    for group in [1usize,64,256,512,1024] {for context in [1usize,slots,4096,8192,32768,65536] {
+        let expanded=group_workspace_bytes_for(&c.admission,context,group).unwrap();
+        // The name every caller used before: the same charge.
+        assert_eq!(group_workspace_bytes_with(&c.admission,context,group,LatentRows::Expanded).unwrap(),expanded,"group {group} context {context}");
+        let (absorbed,with)=(group_workspace_bytes_with(&c.admission,context,group,plain).unwrap(),group_workspace_bytes_with(&c.admission,context,group,draft).unwrap());
+        // Never above what the server was charged before, and an unabsorbed predictor layer never below a server without one.
+        assert!(absorbed<=with && with<=expanded,"group {group} context {context}: {absorbed} {with} {expanded}");
+        if with<expanded {lower+=1;}
+        // An absorbed group still holds its five planes, and a chat step its owners.
+        let live=slots.min(context);
+        assert!(absorbed>=4*absorbed_group_words(group,a.heads as usize,rank,a.value_dim as usize,live).unwrap(),"group {group} context {context}");
+        assert!(absorbed>=4*absorbed_chat_words(BATCH_ROWS,a.heads as usize,rank,a.key_dim as usize,a.value_dim as usize,live).unwrap(),"group {group} context {context}");
+        // The predictor's row is charged in full wherever the old charge held that much, and the old charge otherwise.
+        let union=(context.min(group*live)+group)*(row/2+rank)+group*row;
+        assert!(with>=4*union.min(expanded_row_words(row,rank,live).unwrap()),"group {group} context {context}");
+    }}
+    assert!(lower>0,"no context of the fixture is charged less: the test proves nothing");
+    // Past the rows a token can select, the absorbed charge of a 256-row group no longer follows the context (the Scores
+    // map stops at 16,384 rows). The expanded one follows the largest of its three alternatives: where that is the union
+    // of selected rows, one packed row and its latent for every context token.
+    let largest=|context:usize| {let live=slots.min(context);((context.min(256*live)+256)*(row/2+rank)+256*row)
+        .max(absorbed_group_words(256,a.heads as usize,rank,a.value_dim as usize,live).unwrap()).max(absorbed_chat_words(BATCH_ROWS,a.heads as usize,rank,a.key_dim as usize,a.value_dim as usize,live).unwrap())};
+    for (near,far) in [(32768usize,65536usize),(16384,65536)] {
+        assert_eq!(group_workspace_bytes_with(&c.admission,near,256,plain).unwrap(),group_workspace_bytes_with(&c.admission,far,256,plain).unwrap());
+        assert_eq!(group_workspace_bytes_for(&c.admission,far,256).unwrap()-group_workspace_bytes_for(&c.admission,near,256).unwrap(),4*(largest(far)-largest(near)));
+    }
+    // The service's workspace: only the group's own buffers change, and the larger groups follow the same form.
+    for context in [8192usize,32768,65536] {
+        let (_,workspace)=spark_tp::row_split::service_charges(&c.admission,context,true).unwrap();
+        assert_eq!(service_memory::workspace_for_latent_rows(&c.admission,context,workspace,LatentRows::Expanded).unwrap(),workspace);
+        let small=service_memory::workspace_for_latent_rows(&c.admission,context,workspace,plain).unwrap();
+        assert_eq!(workspace-small,group_workspace_bytes_for(&c.admission,context,256).unwrap()-group_workspace_bytes_with(&c.admission,context,256,plain).unwrap());
+        assert_eq!(service_memory::workspace_for_prompt_group_with(&c.admission,context,small,256,plain).unwrap(),small);
+        let copies=service_memory::state_copy_bytes(&c.admission).unwrap();
+        for group in [512usize,1024] {
+            let charge=service_memory::workspace_for_prompt_group_with(&c.admission,context,small,group,plain).unwrap();
+            assert_eq!(charge,small-group_workspace_bytes_with(&c.admission,context,256,plain).unwrap()+group_workspace_bytes_with(&c.admission,context,group,plain).unwrap()+copies);
+            assert!(charge<=service_memory::workspace_for_prompt_group(&c.admission,context,workspace,group).unwrap());
+            let (resident,session)=(1usize<<30,1usize<<28);
+            let pick=|budget:usize|service_memory::largest_prompt_group_with(&c.admission,context,small,resident,session,budget,plain).unwrap();
+            assert!(pick(resident+charge+session)>=group);assert!(pick(resident+charge+session-1)<group);
+        }
+    }
+}
+

@@ -265,6 +265,25 @@ pub trait Compute {
     /// two local outputs meet in SwiGLU before the gather. `places` has three
     /// numbers for each output row. None runs each expert separately.
     fn rows_experts(&self,_:&[(&str,usize)],_:Option<(&[(&str,usize)],f32)>,_:&Self::Value,_:&[f32])->Result<Option<Self::Value>> {Ok(None)}
+    /// GATHERED ROWS: `rows_experts` for a gate and up step whose rows were NOT copied into expert order. `source` holds
+    /// one row a token; `order` has one number for each row the lists read: its row of `source` (the table of the
+    /// `PermuteRows` the caller would run). The compute reads each row where it lies. The words of `rows_experts` on the
+    /// copied rows. None, before any launch: the caller copies the rows and calls `rows_experts`.
+    fn rows_experts_gathered(&self,_:&[(&str,usize)],_:Option<(&[(&str,usize)],f32)>,_:&Self::Value,_:&[f32],_:&[f32])->Result<Option<Self::Value>> {Ok(None)}
+    /// LOOKAHEAD: `rows_experts` for the routed gate and up of a prompt group (`second` is given), stopped before the
+    /// link step of its exchange. True: this rank's rows and their copy to the exchange are queued, and the exchange is
+    /// open. The caller then queues work that does not read the result and makes no exchange, and MUST call
+    /// `rows_experts_close`, also when that work failed. The work runs on this rank's GPU while the link carries the
+    /// rows; before, the GPU ran nothing during a link step. False, before any work: the caller calls `rows_experts`.
+    fn rows_experts_open(&self,_:&[(&str,usize)],_:(&[(&str,usize)],f32),_:&Self::Value,_:&[f32])->Result<bool> {Ok(false)}
+    /// LOOKAHEAD: the link step and the result of the exchange that `rows_experts_open` left open: the value
+    /// `rows_experts` gives. `failed`: the work queued ahead failed, and the exchange fails with it.
+    fn rows_experts_close(&self,_failed:bool)->Result<Self::Value> {Err("no prompt exchange is open".into())}
+    /// LOOKAHEAD over GATHERED ROWS: `rows_experts_open` for rows that were NOT copied into expert order (`source` and
+    /// `order` as in `rows_experts_gathered`). True: the exchange is open and `rows_experts_close` MUST follow, as for
+    /// `rows_experts_open`. False, before any launch: the caller goes on without it (`rows_experts_gathered`, then the
+    /// copied rows).
+    fn rows_experts_open_gathered(&self,_:&[(&str,usize)],_:(&[(&str,usize)],f32),_:&Self::Value,_:&[f32],_:&[f32])->Result<bool> {Ok(false)}
     /// ROUTE ROWS: one layer's routed experts for `m` rows with the picks left on the device. `steps` is the layer's
     /// two ExpertProject steps (gate, up: their local outputs meet in SwiGLU with `bound` before the gather) or its
     /// one ExpertDown step. `ids` holds `m * picks` expert IDs, row-major, as a device value; `input` holds one row a
@@ -289,9 +308,38 @@ pub trait Compute {
     /// expert's down rows): that fold reads each rank's own rows only. None, before any work: the caller makes the whole
     /// rows with their exchange (`rows_project`).
     fn rows_project_local(&self,_:&CheckpointAdmission,_name:&str,_x:&Self::Value,_m:usize,_round:bool)->Result<Option<Self::Value>> {Ok(None)}
+    /// LOCAL QUERY: `rows_project_local` for a projection whose readers take only the output rows `rows` (of one token's
+    /// output) on this rank: this rank's own rows, token-major `[m, rows.len()]`, with the words its exchange would carry,
+    /// and NO exchange. None, before any work: this rank's rows of the matrix are not exactly `rows`, or the compute keeps
+    /// no rows on their rank for this pass. The caller then makes the whole rows with their exchange (`rows_project`).
+    fn rows_project_owned(&self,_:&CheckpointAdmission,_name:&str,_x:&Self::Value,_m:usize,_round:bool,_rows:std::ops::Range<usize>)->Result<Option<Self::Value>> {Ok(None)}
     /// True when `rows_routed_fold` can take the `m` rows of the row pass that runs now (`routes_rows` with a device
     /// exchange attached). The routed down step of such a pass then waits for its fold.
     fn folds_rows(&self,_m:usize)->bool {false}
+    /// GROUP FOLD: true when `rows_experts_fold` can take the `m` rows of a prompt group (the device compute: two ranks
+    /// that split the rows). The grouped down step of such a group then waits for its fold.
+    fn folds_groups(&self,_m:usize)->bool {false}
+    /// GROUP FOLD: the grouped down step of a prompt group and its fold as one stage: `rows_experts` for the down step
+    /// (`first`, `source`, `places` as it takes them), each rank's own rows folded on that rank, and ONE exchange of the
+    /// folded rows (one row a token; the unfolded rows are one a (token, pick)). `ids` and `weights` hold `m * picks`
+    /// words, row-major; `shared` is this rank's own rows of the fold's last input (`rows_project_local`); `fold` is the
+    /// ExpertFold shape of one token's whole output. The fold is a chain a word, so the result holds the words of the fold
+    /// after the gather: one row a token, complete on every rank. None, before any work: the caller runs the two steps apart.
+    #[allow(clippy::too_many_arguments)]
+    fn rows_experts_fold(&self,_first:&[(&str,usize)],_source:&Self::Value,_places:&[f32],_ids:&Self::Value,_weights:&Self::Value,_shared:Option<&Self::Value>,_fold:Shape,_m:usize)->Result<Option<Self::Value>> {Ok(None)}
+    /// WIDE COHORT: `rows_experts_gathered` for the gate and up step of TWO OR MORE row sets (the runs of a wide prompt
+    /// group), with ONE launch of the routed expert products a list for all the sets: the sets read each expert's
+    /// weights from memory once. Each set is (gate list, up list, SwiGLU bound, source, order, places), as
+    /// `rows_experts_gathered` takes them. One result a set, each the words its own `rows_experts_gathered` gives.
+    /// None, before any launch: the caller calls `rows_experts_gathered` for each set.
+    #[allow(clippy::type_complexity)] // the arguments of `rows_experts_gathered`, a tuple a set.
+    fn rows_experts_gathered_wide(&self,_sets:&[(&[(&str,usize)],&[(&str,usize)],f32,&Self::Value,&[f32],&[f32])])->Result<Option<Vec<Self::Value>>> {Ok(None)}
+    /// WIDE COHORT: `rows_experts_fold` for the down step of TWO OR MORE row sets, with ONE launch of the routed expert
+    /// products for all the sets. Each set is (down list, source, places, ids, weights, shared, fold, m), as
+    /// `rows_experts_fold` takes them. One result a set, each the words its own `rows_experts_fold` gives.
+    /// None, before any launch: the caller calls `rows_experts_fold` for each set.
+    #[allow(clippy::type_complexity)] // the arguments of `rows_experts_fold`, a tuple a set.
+    fn rows_experts_fold_wide(&self,_sets:&[(&[(&str,usize)],&Self::Value,&[f32],&Self::Value,&Self::Value,Option<&Self::Value>,Shape,usize)])->Result<Option<Vec<Self::Value>>> {Ok(None)}
     /// After a batch step's first routed layer read `picks` total picks across `distinct` experts: sparse sharing
     /// (`picks < 2 * distinct`, below the tensor-core cohort admission line of `expert_group_launch`) switches the
     /// step's remaining routed layers to `rows_routed`; dense sharing keeps the grouped tensor-core form (`nv_rows_tc`).
@@ -303,6 +351,8 @@ pub trait Compute {
     fn rows_release(&self)->Result<()> {Ok(())}
     /// After a prompt group: keep its spares within the pool's normal room (default: release).
     fn rows_keep(&self)->Result<()> {self.rows_release()}
+    /// Return a temporary prompt workspace and report actual spare ownership.
+    fn rows_return_lease(&self)->Result<()> {self.rows_keep()}
     /// Pause (true) or resume (false) launch recording around a prompt rows pass; returns the
     /// previous paused value. A compute that records nothing ignores it.
     fn rows_unrecorded(&self,_pause:bool)->Result<bool> {Ok(false)}
@@ -316,6 +366,18 @@ pub trait Compute {
     /// buffers a large group may keep (`group_pool_cap`) stay under it. A service that has such a charge calls this
     /// for every group; a tool without admission does not, and its groups have the cap alone. Nothing off the device.
     fn rows_charge(&self,_bytes:usize) {}
+    /// GROUP SPARES. `follows`: the prompt of the group that runs next goes on after it (its service reads the prompt in
+    /// consecutive groups and says so before each one). The end of such a group then leaves the vector pool's spares and
+    /// the group's cap as they are (`rows_keep` frees nothing): the next group takes the same buffer sizes back, where
+    /// each group's end freed them and each group's start bought them again (measured on a pair, an 8,192-token prompt
+    /// in 8 groups: 790 frees and 999 allocations, 146 ms and 213 ms with the device idle). Free storage only, inside
+    /// the group's charge (`rows_charge`): the pool's own rules release it before an allocation passes that charge. A
+    /// decode token, a small group and a session's first group trim the pool at their start, as before, and
+    /// `rows_settle` trims it when a session leaves. Nothing off the device.
+    fn rows_follow(&self,_follows:bool) {}
+    /// GROUP SPARES: a session leaves. Spares that a group's end left for a next group (`rows_follow`) are trimmed now, as
+    /// that group's end would have trimmed them: the pool at rest holds what it held.
+    fn rows_settle(&self)->Result<()> {Ok(())}
     /// PROJ-DELIVERY: called before each plain decode step. True when a latent layer of that step reads its selection
     /// back (the host cannot know it at this context, so the step waits for the device). Speed only: a compute keeps its
     /// projection side lane off for such a step, because a fork there waits behind the selection reads.
@@ -468,6 +530,9 @@ impl<'f,C:Compute> Decoder<'f,C> {
     fn local_query(&self,input:&C::Value,tokens:usize,layout:crate::sparse_heads::Layout)->Result<C::Value> {
         let rows=layout.query_rows();let width=layout.total_heads()*layout.key_dim();
         if rows.len()==width {return self.compute.range(input,0,tokens*width);}
+        // LOCAL QUERY: the rows of a prompt group that stayed on their rank (`rows_query_local`) are this value already.
+        // The two extents differ (a rank owns some heads, not all), so the extent names the form.
+        if self.compute.words(input)==tokens*rows.len() {return self.compute.range(input,0,tokens*rows.len());}
         if tokens==1 {return self.compute.range(input,rows.start,rows.len());}
         let parts=(0..tokens).map(|token|self.compute.range(input,token*width+rows.start,rows.len())).collect::<Result<Vec<_>>>()?;
         self.compute.join(&parts.iter().collect::<Vec<_>>())
@@ -497,6 +562,12 @@ impl<'f,C:Compute> Decoder<'f,C> {
         let parameters=Rc::new(parameters);let static_parameters=Rc::new(StaticParameterPlan::new(parameters.clone(),parameter_jobs)?);
         crate::startup::step("weights");
         compute.prepare(checkpoint)?;Ok(Self {checkpoint,compute,capacity,parameters,static_parameters,initial_state:Rc::new(initial_state::Layouts::default()),blocks:Rc::new(blocks),schedules:RefCell::new(schedules),expanded_limit:std::cell::Cell::new(rows::RESERVED_ROWS),forced_union:std::cell::Cell::new(None),memo_seed:std::cell::Cell::new(false),batch_plans:RefCell::new(BTreeMap::new()),draft:None,draft_schedule:RefCell::new(None),verify_routes:std::cell::Cell::new(0),fold_links:(0..=checkpoint.description().layers.len()).map(|_|std::cell::Cell::new(None)).collect()})
+    }
+    /// Toggle already prepared predictor metadata; no weights or device scratch are allocated.
+    /// The caller first drops this session's predictor state and growing held rows when disabling.
+    pub(crate) fn set_prepared_predictor(&mut self,prepared:&Prepared<'f>,enabled:bool) {
+        self.draft=prepared.draft.as_ref().filter(|_|enabled).map(|draft|draft.0.clone());
+        *self.draft_schedule.borrow_mut()=prepared.draft.as_ref().filter(|_|enabled).map(|draft|draft.1.clone());
     }
     pub fn prepared(&self)->Prepared<'f> {Prepared {topology:self.compute.sparse_topology(),checkpoint:self.checkpoint,parameters:self.parameters.clone(),static_parameters:self.static_parameters.clone(),initial_state:self.initial_state.clone(),blocks:self.blocks.clone(),schedules:self.schedules.borrow().clone(),draft:self.draft.clone().zip(self.draft_schedule.borrow().clone()),verify_routes:self.verify_routes.get()}}
     /// A new session without rereading immutable parameters.
@@ -1100,8 +1171,8 @@ impl<'f,C:Compute> Decoder<'f,C> {
 #[path="bounded_decoder/rows.rs"] mod rows;
 #[path="bounded_decoder/batch.rs"] mod batch;
 pub use batch::{BATCH_ROWS,BATCH_MIN_ROWS,BATCH_PAIR_ROWS,expert_union_counts,chat_attention_layers};
-pub use rows::absorbed_chat_words;
-pub use rows::{absorbed_group_words,full_memo_ballast,HeadRows,PROMPT_GROUP,PROMPT_GROUP_MAX,PROMPT_GROUP_CHECK,PROMPT_SHARED,ROW_STAGE_ROWS,RESERVED_ROWS,HELD_ROOM,POOL_ROOM,DECODE_RESERVE,DECODE_RETURNS,MEMO_KEEP,trims_spares_first,group_pool_cap,PROJECTION_MEMO_BYTES,expanded_bytes,group_workspace_bytes,group_workspace_bytes_for,OpenRows};
+pub use rows::{absorbed_chat_words,expanded_row_words,group_workspace_bytes_with,LatentRows};
+pub use rows::{absorbed_group_words,full_memo_ballast,HeadRows,PROMPT_GROUP,PROMPT_GROUP_MAX,PROMPT_GROUP_LEASE,lease_groups,PROMPT_GROUP_CHECK,PROMPT_SHARED,ROW_STAGE_ROWS,RESERVED_ROWS,HELD_ROOM,POOL_ROOM,DECODE_RESERVE,DECODE_RETURNS,MEMO_KEEP,trims_spares_first,group_pool_cap,PROJECTION_MEMO_BYTES,expanded_bytes,group_workspace_bytes,group_workspace_bytes_for,OpenRows};
 mod indirect;
 #[path="bounded_decoder/projection_stage.rs"] mod projection_stage;
 #[cfg(any(target_os="linux",test))] #[path="bounded_decoder/held.rs"] mod held;

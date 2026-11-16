@@ -91,8 +91,9 @@ This guide calls each half a **rail**.
 - On FP8, Vade's rank transport opens a cable's second rail only between two
   ranks, or on each link of a path of three or more ranks, and only when both
   ends have a second subnet. The two-Spark FP4-Local tensor split opens the
-  second rail only when the config sets `fabric_aux.<peer>` on both machines
-  (see below). A closed ring of three or more ranks uses one rail per
+  second rail of its cable by itself when both Sparks have an address on it in
+  one subnet, or the rail the config names with `fabric_aux.<peer>` (see
+  below). A closed ring of three or more ranks uses one rail per
   neighbor. The FP4-Local layer chain sends on one rail.
 
 **Confirm the names on your machine.** Run `ibdev2netdev` (or `rdma link show`).
@@ -274,14 +275,20 @@ MTU shows as **4096**. That is expected.
 `fabric.<peer>` is **its own rail-0 address on the cable to that peer** (port
 `tp_port`, `29960` by default). On FP8, `seqpar` discovers rail 1 from shared
 subnets. On the two-Spark FP4-Local tensor split, Vade **never scans the
-network**: it opens the second rail (port `tp_port + 1`, `29961` by default,
-passed to the engine as `TP_AUX_LISTEN` and `TP_AUX_NEXT`) **only** when both
-ends of the pair also set `fabric_aux.<peer>` to their own rail-1 address on
-that cable, and `TP_DUAL_RAIL=0` opts out cleanly back to one rail. On a
+network**. The two engines find the second rail by themselves: each lists its
+own fast links, they trade the lists on rail 0, and they open the rail on
+which both have an address in one subnet (ports `tp_port + 1` and
+`tp_port + 3`, `29961` and `29963` by default). A link that is down,
+has no address, or runs at another speed than rail 0 is not used. If both
+ends of the pair set `fabric_aux.<peer>` to their own rail-1 address on that
+cable, that rail is opened instead (passed to the engine as `TP_AUX_LISTEN`
+and `TP_AUX_NEXT`). `TP_DUAL_RAIL=0` opts out cleanly back to one rail. On a
 two-Spark pair, un-prepared block gathers stripe across both rails once each
 rank's slice reaches `1 MiB` (`1,048,576` bytes), keeping short prompts on one
-rail; if the configured second rail is down or unreachable at startup, the
-engine logs `tp_aux ... fallback=single_rail` and continues on rail 0.
+rail. A pair that finds no second rail logs `tp_aux ... second_rail=none`
+with the reason and runs on rail 0; if the second rail is down or unreachable
+at startup, the engine logs `tp_aux ... fallback=single_rail` and continues
+on rail 0.
 
 ```ini
 [machine spark-1]

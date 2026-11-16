@@ -18,6 +18,10 @@ pub(crate) fn drain_and_retry<T>(mut attempt:impl FnMut()->Result<T,String>,can_
         Err(first)=>{if !can_drain() {return Err(first);}drain()?;attempt()},
     }
 }
+/// LOOKAHEAD: how many entries at the front of the deferred list were listed before `mark`. `total` counts every entry
+/// ever listed and `len` is the list's length now, so the first entry has the number `total - len`. A list that a drain
+/// emptied after the mark holds no entry older than the mark: 0.
+pub(crate) fn deferred_before(total:usize,len:usize,mark:usize)->usize {mark.saturating_sub(total.saturating_sub(len)).min(len)}
 #[cfg(test)] mod tests {
     use super::*;
     /// A pool that charges deferred bytes until drained, as Context does.
@@ -28,6 +32,14 @@ pub(crate) fn drain_and_retry<T>(mut attempt:impl FnMut()->Result<T,String>,can_
             let this=std::cell::RefCell::new(self);
             drain_and_retry(||this.borrow_mut().allocate(bytes),||{let s=this.borrow();s.live+s.deferred+bytes>s.budget && s.deferred>0},||{let mut s=this.borrow_mut();s.deferred=0;s.drains+=1;Ok(())})
         }
+    }
+    #[test] fn only_buffers_listed_before_a_mark_are_freed_at_it() {
+        // Ten buffers were listed in all and four wait (numbers 6 to 9).
+        assert_eq!(deferred_before(10,4,8),2);assert_eq!(deferred_before(10,4,10),4);assert_eq!(deferred_before(10,4,6),0);
+        // A drain emptied the list after the mark was read (mark 3): every entry is newer than the mark.
+        assert_eq!(deferred_before(10,4,3),0);assert_eq!(deferred_before(10,0,10),0);
+        // Nothing was listed after the mark: all of the list. A mark past the count cannot name more than the list.
+        assert_eq!(deferred_before(4,4,4),4);assert_eq!(deferred_before(4,4,9),4);assert_eq!(deferred_before(0,0,0),0);
     }
     #[test] fn a_budget_failure_with_deferred_bytes_drains_once_and_retries() {
         let mut c=Charged {budget:100,live:40,deferred:50,drains:0};

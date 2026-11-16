@@ -37,7 +37,19 @@ pub enum Mx {
 /// Order: the small entries FIRST (their predicate holds its own alignment checks and the sweep lists: 2 to 8 tokens),
 /// then the tile for 2 or more tokens (12288 columns since `mx_rows::DENSE_COLS`), then the old kernels. One token always keeps the old M1 kernel.
 pub fn mx(rows: usize, cols: usize, tokens: usize, weights: u64, input: u64, output: u64) -> Mx {
-    if mx_small::admitted(rows, cols, tokens, weights, input, output) { if let Some((entry, per, _)) = mx_small::entry(tokens, cols) { return Mx::Small(entry, per); } }
+    // 5 to 8 tokens of q, k, v (4,096 x 4,096) and of the dense gate and up (6,144 x 4,096): lane K's tile reads them faster than `mx_rows_small8`
+    // since the tile was rebuilt (one Spark, `kernel-bench --mx-small {OLD} {X} time`, run shareb-mx-time-03, us a launch at 5 and 8 tokens:
+    // tile 99.2 and 98.5 against 103.4 and 113.6 for q, k, v; 142.6 and 143.2 against 151.7 and 165.1 for gate and up). Same bytes (`--mx-small`).
+    // The 8,192 and 12,288-column tables keep `mx_rows_small8w` (97.3 against 95.7 us: no gain to take).
+    let tile_first = (5..=8).contains(&tokens) && matches!((rows, cols), (4096, 4096) | (6144, 4096)) && mx_rows::admitted(rows, cols, tokens, 0, 0, weights, input, output);
+    // The output head (77,440 x 4,096 a rank): at 3 and 4 tokens `mx_rows_small4` and at 5 to 8 the tile read it faster than the old pair
+    // kernel (one Spark, `kernel-bench --mx-small {OLD} {X} head`, us a launch at 3 / 4 / 5 / 8 tokens: pair 1,561 / 1,895 / 2,224 / 2,973;
+    // small4 1,428 / 1,435; tile 1,527 / 1,537 at 5 / 8). At 2 tokens and from 9 the head keeps the old kernels, as before.
+    if rows == mx_rows::HEAD_ROWS && cols == mx_rows::HEAD_COLS && weights & 15 == 0 && input & 15 == 0 && output & 3 == 0 {
+        if matches!(tokens, 3 | 4) { return Mx::Small("mx_rows_small4", 4); }
+        if (5..=8).contains(&tokens) { return Mx::Tile; }
+    }
+    if !tile_first && mx_small::admitted(rows, cols, tokens, weights, input, output) { if let Some((entry, per, _)) = mx_small::entry(tokens, cols) { return Mx::Small(entry, per); } }
     if tokens != 1 && mx_rows::admitted(rows, cols, tokens.min(mx_rows::token_limit(rows,cols)), 0, 0, weights, input, output) { return Mx::Tile; }
     Mx::Old
 }
@@ -66,6 +78,11 @@ pub struct Group<'a> {
 /// SHARED ROWS: FP8 parts of one shape that all read the same rows (`fp8_small::shared_admitted`) take ONE `fp8_rows_multi` launch; no other kernel here takes a table that is not cumulative.
 pub fn group(g: &Group) -> Option<(&'static str, u32, u32, u32)> {
     if g.words != 1 { return None; }
+    // SHARE ROWS first: ONE block-FP8 part of 2 to 8 tokens, or two parts of one shape on the same rows (`fp8_small::share_admitted`), where the
+    // device bench shows `fp8_rows_share` ahead of the older forms (`fp8_small::share_wins`). The words are the same; only who computes them differs.
+    if g.all_fp8 && (g.cumulative || g.shared_rows) && fp8_small::share_admitted(g.fp8, g.input, !g.cumulative) && fp8_small::share_wins(g.fp8[0].rows, g.fp8[0].cols, g.fp8.len(), g.fp8[0].tokens) {
+        return Some(("fp8_rows_share", fp8_small::share_blocks(g.fp8)?, fp8_small::share_threads(g.fp8[0].tokens), fp8_small::share_shared(g.fp8[0].tokens)));
+    }
     if !g.cumulative {
         if g.shared_rows && g.all_fp8 && fp8_small::shared_admitted(g.fp8, g.input) { return Some(("fp8_rows_multi", fp8_small::multi_blocks(g.fp8)?, fp8_small::MULTI_THREADS, 0)); }
         return None;
@@ -73,6 +90,10 @@ pub fn group(g: &Group) -> Option<(&'static str, u32, u32, u32)> {
     if g.all_nv && nv_small::admitted(g.nv, g.input) { return Some(("nv_rows_small", nv_small::blocks(g.nv)?, nv_small::THREADS, nv_small::SHARED)); }
     if g.all_fp8 {
         let longest = g.fp8.iter().map(|p| p.tokens).max().unwrap_or(0);
+        // The served bracket supports the new choices only for two rows.
+        if longest==2 && g.fp8.first().is_some_and(|p|fp8_small::two_wins(p.rows,p.cols)) && fp8_small::few_admitted(g.fp8,g.input) {
+            return Some(("fp8_rows_few",fp8_small::few_blocks(g.fp8)?,fp8_small::FEW_THREADS,0));
+        }
         // One part of 3 or 4 tokens over at most FP8_SMALL_RULE_ROWS rows (the model's q_a 768 x 4096 and kv_a 256 x 4096): fp8_rows_small is faster than fp8_rows_multi there
         // (29 against 51 and 23 against 49 us at 3 tokens; one Spark 07:35, kernel-bench --fp8-small time), because multi has one block for 32 rows of the part.
         let few_rows = g.fp8.len() == 1 && (3..=4).contains(&longest) && g.fp8[0].rows <= fp8_small::SMALL_RULE_ROWS;
@@ -89,6 +110,18 @@ mod tests {
     fn project(rows: u32, tokens: usize, cols: u32) -> Shape { let mut s = Shape::new(Op::ProjectRows, tokens).unwrap(); s.rows = rows; s.cols = cols; s }
     fn wrapped(op: crate::causal_ops::Op, tokens: usize) -> Shape { Shape::wrapped(crate::causal_ops::Shape { op, heads: 64, dim: 128, taps: 4, rows: 288, cols: 8, epsilon: 1e-5, bound: -5.0 }, tokens).unwrap() }
     fn step(tokens: usize) -> Shape { let mut s = Shape::new(Op::StepRows, tokens).unwrap(); s.heads = 64; s.dim = 128; s }
+    #[test]
+    fn the_small_pool_scores_and_the_tile_share_no_shape() {
+        use crate::{pool_scores_small as small, pool_scores_tile as tile};
+        // Every token count is one kernel's or the other's, never both; the small kernel ends where the tile starts.
+        for tokens in 0..=1100usize { for rows in [1usize, 89, 482, 8192, 16384] {
+            assert!(!(small::admitted(rows, tokens, 32, 128, 4) && tile::admitted(rows, tokens, 32, 128, 4, 0, 0)), "{rows} {tokens}");
+        } }
+        assert_eq!(small::MAX_TOKENS + 1, tile::MIN_TOKENS);
+        assert_eq!(small::THREADS, crate::prompt_admission::FAST_THREADS);
+        assert!(crate::prompt_writes::writes_every_word(false, 89, 0, Some("prompt_pool_scores")));
+        assert_eq!(crate::resident_launch::Kind::row("prompt_pool_scores").map(|k| k.kernel()), Some("resident_launch_prompt_pool_scores"));
+    }
     #[test]
     fn a_prompt_operation_takes_its_small_kernel_before_any_tile() {
         // A plain shape both `plain_small` and lane K's tile admit goes to plain_small, for every token count of the small range, and to nobody above it.
@@ -128,7 +161,7 @@ mod tests {
         assert_eq!(pick(&nv(1024, 4096, &[17]), &[], true, false, 1, true), None);
         // FP8: parts of 1 to 2 tokens take fp8_rows_small, 3 to 16 fp8_rows_multi, over 16 neither (lane K's tile).
         for tokens in 1..=16usize {
-            let want = if tokens <= 2 { "fp8_rows_small" } else if tokens <= 4 { "fp8_rows_few" } else { "fp8_rows_multi" };
+            let want = if tokens == 1 { "fp8_rows_small" } else if tokens <= 4 { "fp8_rows_few" } else { "fp8_rows_multi" };
             assert_eq!(pick(&[], &fp8(1024, 4096, &[tokens]), false, true, 1, true), Some(want), "tokens {tokens}");
             assert!(fp8_rows::admitted(&fp8(1024, 4096, &[tokens]), 256), "lane K's tile admits it too: the order decides");
         }
@@ -136,14 +169,21 @@ mod tests {
         assert_eq!(pick(&[], &fp8(1024, 4096, &[1, 2, 2, 1]), false, true, 1, true), Some("fp8_rows_small"));
         assert_eq!(pick(&[], &fp8(1024, 4096, &[1, 2, 3, 1]), false, true, 1, true), Some("fp8_rows_multi"), "one part of 3 tokens among several decides multi: few is for ONE part");
         // 3 or 4 tokens over more than 768 rows: fp8_rows_few up to 4 MB of weights, else multi; 5 tokens and more: multi.
-        for (rows, cols, tokens, want) in [(1024, 4096, 3, "fp8_rows_few"), (2048, 2048, 3, "fp8_rows_few"), (2048, 16384, 3, "fp8_rows_multi"), (8192, 1536, 3, "fp8_rows_multi"),
-            (1024, 4096, 4, "fp8_rows_few"), (2048, 2048, 4, "fp8_rows_few"), (2048, 16384, 4, "fp8_rows_multi"), (8192, 1536, 4, "fp8_rows_multi"), (1024, 4096, 5, "fp8_rows_multi"), (768, 4096, 4, "fp8_rows_small")] {
+        // SHARE-B: the timed single tables (down and q_b at 2 to 8 tokens, o_proj at 2 to 5) and q_a from 3 tokens take `fp8_rows_share`; ONE part
+        // of 1,024 x 4,096 was not timed and keeps few; o_proj at 6 to 8 tokens keeps multi.
+        for (rows, cols, tokens, want) in [(1024, 4096, 3, "fp8_rows_few"), (2048, 2048, 3, "fp8_rows_share"), (2048, 16384, 3, "fp8_rows_share"), (8192, 1536, 3, "fp8_rows_share"),
+            (1024, 4096, 4, "fp8_rows_few"), (2048, 2048, 4, "fp8_rows_share"), (2048, 16384, 4, "fp8_rows_share"), (8192, 1536, 4, "fp8_rows_share"), (1024, 4096, 5, "fp8_rows_multi"), (768, 4096, 4, "fp8_rows_share"),
+            (2048, 2048, 2, "fp8_rows_share"), (2048, 16384, 2, "fp8_rows_share"), (8192, 1536, 2, "fp8_rows_share"), (1024, 4096, 2, "fp8_rows_few"),
+            (2048, 2048, 5, "fp8_rows_share"), (2048, 16384, 5, "fp8_rows_share"), (8192, 1536, 5, "fp8_rows_share"), (2048, 2048, 8, "fp8_rows_share"), (2048, 16384, 6, "fp8_rows_multi"), (2048, 16384, 8, "fp8_rows_multi"), (8192, 1536, 8, "fp8_rows_share"),
+            (2048, 2048, 9, "fp8_rows_multi"), (8192, 1536, 9, "fp8_rows_multi")] {
             assert_eq!(pick(&[], &fp8(rows, cols, &[tokens]), false, true, 1, true), Some(want), "{rows}x{cols} {tokens} tokens");
         }
         assert_eq!(pick(&[], &fp8(1024, 4096, &[4, 1, 3, 2]), false, true, 1, true), Some("fp8_rows_multi"), "several parts keep multi: few is admitted for one part only");
         // One part of 3 or 4 tokens over at most 768 rows: the small kernel (q_a, kv_a); 5 tokens or several parts of 768 rows keep multi (1024 rows: few, below).
-        for (rows, tokens, want) in [(768, 3, "fp8_rows_small"), (768, 4, "fp8_rows_small"), (288, 3, "fp8_rows_small"), (288, 4, "fp8_rows_small"), (768, 5, "fp8_rows_multi"), (1024, 3, "fp8_rows_few"), (1024, 4, "fp8_rows_few"),
-            (256, 1, "fp8_rows_small"), (256, 2, "fp8_rows_small"), (256, 3, "fp8_rows_small"), (256, 4, "fp8_rows_small"), (256, 5, "fp8_rows_multi"), (256, 8, "fp8_rows_multi"), (256, 16, "fp8_rows_multi")] {
+        // SHARE-B: q_a (768 x 4,096) takes `fp8_rows_share` at 3 to 8 tokens and kv_a (256 x 4,096) at 5 to 8; below that they keep the small kernel.
+        for (rows, tokens, want) in [(768, 2, "fp8_rows_small"), (768, 3, "fp8_rows_share"), (768, 4, "fp8_rows_share"), (288, 3, "fp8_rows_small"), (288, 4, "fp8_rows_small"), (768, 5, "fp8_rows_share"), (768, 8, "fp8_rows_share"),
+            (768, 9, "fp8_rows_multi"), (288, 5, "fp8_rows_multi"), (1024, 3, "fp8_rows_few"), (1024, 4, "fp8_rows_few"),
+            (256, 1, "fp8_rows_small"), (256, 2, "fp8_rows_small"), (256, 3, "fp8_rows_small"), (256, 4, "fp8_rows_small"), (256, 5, "fp8_rows_share"), (256, 8, "fp8_rows_share"), (256, 9, "fp8_rows_multi"), (256, 16, "fp8_rows_multi")] {
             assert_eq!(pick(&[], &fp8(rows, 4096, &[tokens]), false, true, 1, true), Some(want), "{rows} rows {tokens} tokens");
         }
         assert_eq!(pick(&[], &[fp8(768, 4096, &[3])[0], fp8(768, 4096, &[3])[0]], false, true, 1, true), Some("fp8_rows_multi"), "two parts keep multi");
@@ -155,9 +195,13 @@ mod tests {
         // SHARED ROWS: 2 to 4 FP8 parts of one shape, block shape and count on the SAME rows (not cumulative) take ONE fp8_rows_multi launch with a block
         // for each 32 rows of each part, for every count of 1 to 16; any other table that is not cumulative keeps the old kernels.
         let shared = |fp8: &[fp8_rows::Part], all_fp8: bool, words: u32, shared_rows: bool| group(&Group { nv: &[], fp8, all_nv: false, all_fp8, words, cumulative: false, shared_rows, input: 256 });
+        // SHARE-B: the timed table (TWO parts of 1,024 x 4,096, the shared expert's gate and up) at 2 to 6 tokens takes ONE `fp8_rows_share` launch
+        // with a block for each 16 rows of each part.
         for tokens in 1..=16usize { for parts in 2..=4usize {
-            assert_eq!(shared(&fp8(1024, 4096, &vec![tokens; parts]), true, 1, true), Some(("fp8_rows_multi", (32 * parts) as u32, 128, 0)), "{parts} parts of {tokens} tokens");
+            let want = if parts == 2 && (2..=6).contains(&tokens) { ("fp8_rows_share", 128, [160, 192, 192, 224, 224][tokens - 2], if tokens == 2 { 27744 } else { 30912 }) } else { ("fp8_rows_multi", (32 * parts) as u32, 128, 0) };
+            assert_eq!(shared(&fp8(1024, 4096, &vec![tokens; parts]), true, 1, true), Some(want), "{parts} parts of {tokens} tokens");
         } }
+        assert_eq!(shared(&fp8(2048, 4096, &[3, 3]), true, 1, true), Some(("fp8_rows_multi", 128, 128, 0)), "two parts of a table that was not timed keep multi");
         assert_eq!(shared(&fp8(1024, 4096, &[4, 4]), true, 1, false), None, "the caller did not say the rows are the same");
         assert_eq!(shared(&fp8(1024, 4096, &[4; 5]), true, 1, true), None, "5 parts");
         assert_eq!(shared(&fp8(1024, 4096, &[4, 3]), true, 1, true), None, "counts differ");
@@ -176,21 +220,34 @@ mod tests {
     #[test]
     fn an_mxfp8_projection_takes_the_small_entry_first_then_the_tile_then_the_old_kernels() {
         let w = 256; let i = 512; let o = 4;
-        // 1 token old, 2 small2, 3 and 4 small4, 5 to 8 small8 (small8w past 4,096 columns), 9 and more tile.
-        for (cols, rows) in [(8192, 2048), (4096, 4096), (4096, 6144)] {
-            let eight = if cols > 4096 { "mx_rows_small8w" } else { "mx_rows_small8" };
-            let got: Vec<Mx> = [1, 2, 3, 4, 5, 8, 9, 16, 17].iter().map(|&t| mx(rows, cols, t, w, i, o)).collect();
-            assert_eq!(got, [Mx::Old, Mx::Small("mx_rows_small2", 2), Mx::Small("mx_rows_small4", 4), Mx::Small("mx_rows_small4", 4), Mx::Small(eight, 8), Mx::Small(eight, 8), Mx::Tile, Mx::Tile, Mx::Tile], "{rows}x{cols}");
+        // 1 token old, 2 small2, 3 and 4 small4, 9 and more tile. 5 to 8: small8w past 4,096 columns; the two timed 4,096-column tables (q, k, v
+        // and the dense gate and up) take the TILE (SHARE-B); another 4,096-column table keeps small8.
+        for (cols, rows) in [(8192, 2048), (4096, 4096), (4096, 6144), (4096, 2048)] {
+            let eight = if cols > 4096 { Mx::Small("mx_rows_small8w", 8) } else if rows == 2048 { Mx::Small("mx_rows_small8", 8) } else { Mx::Tile };
+            let got: Vec<Mx> = [1, 2, 3, 4, 5, 6, 7, 8, 9, 16, 17].iter().map(|&t| mx(rows, cols, t, w, i, o)).collect();
+            assert_eq!(got, [Mx::Old, Mx::Small("mx_rows_small2", 2), Mx::Small("mx_rows_small4", 4), Mx::Small("mx_rows_small4", 4), eight, eight, eight, eight, Mx::Tile, Mx::Tile, Mx::Tile], "{rows}x{cols}");
         }
         // 12,288 columns (the model's down projection, `mx_rows::DENSE_COLS`): 2 to 8 tokens reach the small entries, 9 or more take the tile
         // (they ran the old 16-token kernels until the device sweep covered this column count). Its neighbours keep the old kernels.
         let got: Vec<Mx> = [1, 2, 3, 4, 5, 8, 9, 16, 17, 256, 1024].iter().map(|&t| mx(2048, 12288, t, w, i, o)).collect();
         assert_eq!(got, [Mx::Old, Mx::Small("mx_rows_small2", 2), Mx::Small("mx_rows_small4", 4), Mx::Small("mx_rows_small4", 4), Mx::Small("mx_rows_small8w", 8), Mx::Small("mx_rows_small8w", 8), Mx::Tile, Mx::Tile, Mx::Tile, Mx::Tile, Mx::Tile]);
         for cols in [12256, 12320, 10240, 16384] { assert_eq!(mx(2048, cols, 16, w, i, o), Mx::Old, "{cols}"); }
-        // Every swept (rows, cols) takes a small entry at 2 to 8 tokens: no listed shape is dead behind the tile's limits.
+        // Every swept (rows, cols) takes a small entry at 2 to 8 tokens (but the two tables that take the tile at 5 to 8): no listed shape is dead
+        // behind the tile's limits.
         for &rows in crate::small_sweep::MX_ROWS { for &cols in crate::small_sweep::MX_COLS {
-            for t in 2..=8 { assert_eq!(matches!(mx(rows, cols, t, w, i, o), Mx::Small(..)), rows * cols <= crate::small_sweep::MX_MAX_BYTES, "{rows}x{cols} tokens {t}"); }
+            for t in 2..=8 {
+                let tile_first = t >= 5 && matches!((rows, cols), (4096, 4096) | (6144, 4096));
+                assert_eq!(matches!(mx(rows, cols, t, w, i, o), Mx::Small(..)), rows * cols <= crate::small_sweep::MX_MAX_BYTES && !tile_first, "{rows}x{cols} tokens {t}");
+                if tile_first { assert_eq!(mx(rows, cols, t, w, i, o), Mx::Tile); }
+            }
         } }
+        // The output head (77,440 x 4,096): small4 at 3 and 4 tokens, the tile at 5 to 8; the old kernels at every other count, for another
+        // column count and for an unaligned operand.
+        let got: Vec<Mx> = [1, 2, 3, 4, 5, 6, 7, 8, 9, 16, 17, 256].iter().map(|&t| mx(77440, 4096, t, w, i, o)).collect();
+        assert_eq!(got, [Mx::Old, Mx::Old, Mx::Small("mx_rows_small4", 4), Mx::Small("mx_rows_small4", 4), Mx::Tile, Mx::Tile, Mx::Tile, Mx::Tile, Mx::Old, Mx::Old, Mx::Old, Mx::Old]);
+        assert_eq!(crate::mx_small::grid(77440, 4096, 4), Some([4840, 1]));
+        for t in 3..=8 { assert_eq!(mx(77440, 8192, t, w, i, o), Mx::Old); assert_eq!(mx(77441, 4096, t, w, i, o), Mx::Old); assert_eq!(mx(154880, 4096, t, w, i, o), Mx::Old);
+            assert_eq!(mx(77440, 4096, t, 8, i, o), Mx::Old); assert_eq!(mx(77440, 4096, t, w, 8, o), Mx::Old); assert_eq!(mx(77440, 4096, t, w, i, 2), Mx::Old); }
         // A shape off the lists keeps the tile (rows up to 8,192; columns up to 8,192, and 12,288) or the old kernels.
         assert_eq!(mx(4000, 4096, 3, w, i, o), Mx::Tile);
         assert_eq!(mx(4000, 12288, 3, w, i, o), Mx::Tile);
@@ -203,3 +260,6 @@ mod tests {
         assert_eq!(mx(4096, 4096, 0, w, i, o), Mx::Old);
     }
 }
+
+#[cfg(test)]
+#[path="shared_restore_tests.rs"] mod shared_restore_tests;

@@ -98,7 +98,7 @@ impl<'f,C:Compute> Decoder<'f,C> {
     fn propose_run(&self,hidden:&C::Value,token:u32,depth:usize,seen:Option<&PredictorState<C::Value>>,normalized:bool,scored:bool,expected:Option<&[u32]>)->Result<(Vec<u32>,Vec<[f32;2]>,PredictorState<C::Value>)> {
         let draft=self.draft.as_ref().ok_or("predictor layer is not enabled")?;let c=self.checkpoint;let d=c.description();let b=&self.compute;
         let h=d.hidden as usize;let layer=d.layers.len();let prefix=format!("model.language_model.layers.{layer}");
-        need(depth<=3 && u64::from(token)<d.vocab,"proposal depth or token differs")?;
+        need(depth<=spark_engine::draft::PREDICTOR_DEPTH_MAX && u64::from(token)<d.vocab,"proposal depth or token differs")?;
         let norm=|part:&str,x:&C::Value|->Result<C::Value> {let name=format!("{prefix}.{part}.weight");
             b.norm(&name,norm_shape(c,&name,h)?,x,draft.parameters.get(&name).ok_or("predictor norm is absent")?)};
         // The empty cache is read only by the first step of a chain that has no earlier position.

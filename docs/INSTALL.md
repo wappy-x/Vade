@@ -1182,9 +1182,7 @@ the checkout before your next `vade install`, which refuses untracked files.
 On FP4-Local, a controller asks for the same defaults as Route A: context
 **32768** and output **min(context, 8192)**, whether or not you pass
 `--chats`. FP4-Local on two or more Sparks in one group asks for context
-**131072** instead. FP8 asks for context **131072** and output **65536**. Drafting is on, and the engine picks how far
-ahead it drafts on FP4-Local. Controller FP8 uses fixed depth 2 unless you
-set another depth. The prefix cache is on by default on one Spark, on the
+**131072** instead. FP8 asks for context **131072** and output **65536**. A normal FP4 start lets the engine choose the drafting depth. The GLM text service (`vade up --sparks 2 --diagnostic-unqualified-text`) loads predictor depth 3 unless `--mtp` or `MTP` is set, and `--mtp 0` turns it off. Controller FP8 passes depth 2, including four Sparks, unless you set another depth. The prefix cache is on by default on one Spark, on the
 FP4-Local tensor split, and on FP8. The FP4-Local layer chain runs without it.
 
 A controller lowers the context in one case only: FP4-Local on two or more
@@ -1578,8 +1576,11 @@ to a request. Drafting is multi-token prediction (MTP).
   32768 on one Spark and 131072 on two or more Sparks in one group. If the
   larger default does not fit, it retries with 32768. Its output is
   `min(context, 8192)`. FP8 uses context 131072 and output
-  `min(context, 65536)`. Drafting is on. FP4-Local lets the engine select the
-  depth; FP8 uses fixed depth 2 unless you set another depth. The prefix cache
+  `min(context, 65536)`. Drafting is on. The GLM text service
+  (`vade up --sparks 2 --diagnostic-unqualified-text`) loads depth 3 when
+  neither `--mtp` nor `MTP` is set. A normal FP4-Local start leaves the depth
+  to the engine. FP8 uses fixed depth 2 unless you set another
+  depth. The prefix cache
   is on for one Spark, the FP4-Local tensor split and FP8. It is off for the
   FP4-Local layer chain.
 - **From a controller, with `vade up --replicas N`.** Each replica has a
@@ -1600,7 +1601,7 @@ engine refuses it, Vade reports the refusal and does not lower the context.
 | --- | --- |
 | `--context` | How many tokens the prompt and reply can use together. On the Spark, the value must fit the checkpoint's limit and pass the engine's memory check. If the engine refuses a value you set, you get an error. Vade does not lower it. The defaults are in the list above. |
 | `--output` | The most tokens a reply can use. It cannot be larger than the context or the FP4-Local limit of 16384. |
-| `--mtp` | Asks for a specific drafting depth. `0` turns drafting off. It overrides the `MTP` variable. A local launch saves the selected drafting depth for later starts. To restore engine-selected drafting, stop the engine, remove the `mtp=` line from `${VADE_HOME:-$HOME/.vade}/config`, unset `MTP`, and restart without `--mtp`. A controller uses the engine default when neither the flag nor `MTP` is set. |
+| `--mtp` | Asks for a specific drafting depth. `0` turns drafting off. It overrides the `MTP` variable. A local launch saves the selected drafting depth for later starts. To restore engine-selected drafting, stop the engine, remove the `mtp=` line from `${VADE_HOME:-$HOME/.vade}/config`, unset `MTP`, and restart without `--mtp`. The GLM text service loads depth 3 when neither the flag nor `MTP` is set. One FP4 Spark and other FP4 sizes use the engine default. Controller FP8 passes depth 2, including four Sparks. |
 | `--chats` | It works only from a controller. On the Spark itself, Vade refuses it. Vade records it and passes it on, but FP4-Local sets the chat count from context and memory. So `--chats` changes neither the context nor how many chats run at once. With FP8, `--chats N` reserves room for N chats. |
 | `--memory-bytes` | Sets a memory budget. The engine's memory check and the memory actually free still apply. |
 | `--cache-bytes 0` | Turns the prefix cache off for a local install. Any local size above zero is refused. With `--diagnostic-unqualified-text` it turns the two-Spark GLM text service's prompt cache off, from a controller too. |
@@ -1627,7 +1628,7 @@ pair on 2026-11-15: 2,666,771,392 bytes at context 32,768 (the context `vade
 up` starts), where a second turn of 8,759 tokens started from its kept
 8,192-token prompt. `vade up --cache-bytes 0`
 turns its prompt cache off (every engine rank is started with
-`--no-prompt-keep`), and a size above 0 is refused for it. Its limits and
+`--no-prompt-keep`), and a size above 0 is refused for it. It loads the predictor at depth 3 unless `--mtp` or `MTP` says otherwise. When the model folder has no drafting layer, or free memory is too small for drafting at the context the start ends at, `vade up` starts without drafting and says so; with a depth you named, that start stops with the engine's error. Such a start is nobody's choice: `vade status` shows why the depth is 0, a second `vade up` joins the running engine, and after `vade down` the next start tries drafting again. At loaded depth 3 or more, a greedy request of more than 64 tokens that names no drafting field is tried with drafting and keeps it only when it is faster. At loaded depth 1 or 2 that request decodes plain. A sampled request, a short request, `mtp_depth` 0 and several chats at once decode plain. `--mtp 0` turns drafting off. Loading the predictor takes 3,361,650,688 bytes of device memory (2,480,846,848 for the predictor, 880,803,840 for its workspace), about 3.4 GB, and that comes out of the room for chats and for the prompt cache. Measured on one pair on 2026-11-15 at context 32,768, two starts with the predictor against two starts with `--mtp 0`: one chat of 256 tokens ran at 31.5 and 31.6 tok/s against 24.3 and 24.3 on structured text, where the trial kept drafting, and at 24.2 and 24.3 against 24.3 and 24.3 on code and on prose, where the trial gave drafting up (about 0.35 percent slower). 8 chats of 128 tokens sent together ran 8 wide at 42.0 and 42.1 tok/s in total against 41.8 and 38.6; 4 chats ran at 34.7 and 34.8 against 34.6 and 34.9. The room for chats was 8.6 GB against 11.8 and 11.9 GB. In a burst of 8 chats and one 8,192-token prompt that room let 6 requests start at once against 8: the widest decode batch was 5 against 7, and the last request waited 115 s against 88 s, about 27 s longer. `--mtp 0` turns drafting off: start with it when you need the most chats at once. Its limits and
 what it costs are in
 [the text service notes](../engine/crates/tp/RESIDENT-TEXT-SERVICE.md).
 

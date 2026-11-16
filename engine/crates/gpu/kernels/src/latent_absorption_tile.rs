@@ -6,6 +6,12 @@
 //!   a[i] = s[i] + s[i+16], b[i] = a[i] + a[i+8], c[i] = b[i] + b[i+4], e[i] = c[i] + c[i+2], sum = e[0] + e[1].
 //! Chunk g holds strips g, g+16, g+8, g+24 and so yields b[g]. The chunks run in the order 0, 4, 2, 6, 1, 5, 3, 7, so
 //! three held values a dot product are enough. An empty strip is +0, as in the scalar form.
+//! Two blocks run on an SM at once: the stamp caps the kernel at 128 registers (ptx_stamp.rs), and without a cap
+//! one block fills the SM's registers. To fit, a thread keeps only the running chunk's 32 strip sums in registers.
+//! The held values live in its local memory (read and written once a turn). A quad's operands arrive one load at a
+//! time: one B row's four columns, or for values one column's four features. A thread's A row and B rows are the
+//! same for every chunk, so their sources are found once, before the first chunk. None of this changes a sum:
+//! every strip sum still takes the same rounded products in ascending column order.
 //! | operation | outer | A rows  | B rows          | columns         |
 //! | query     | head  | tokens  | latent features | key features    |
 //! | scores    | token | heads   | selected slots  | latent features |
@@ -20,7 +26,8 @@ pub extern "ptx-kernel" fn latent_absorption_tile(p:Arguments) {
     // SAFETY: prompt_operation validates latent_absorb_rows::lengths and launches latent_absorb_rows::launch:
     // 256 threads and one block for each outer index and 32 x 64 tile; any other grid traps or returns as a whole block.
     // A selected count is a finite integer at most `first`, and a selected ID is a finite integer below `rows`, or the
-    // block traps before the read that would use it. Every global read is below an extent that the host checked:
+    // block traps before the read that would use it (scores reads its two rows' IDs once, before the first chunk;
+    // values reads a column's ID when it issues that column). Every global read is below an extent that the host checked:
     // A and B rows below their counts, columns below `terms`, packed BF16 weights inside [heads,key+value,latent].
     // The 27,648 shared bytes belong to this block: two stage buffers. A thread stages only the quads it owns
     // (asynchronous copies of 16 or 8 aligned bytes or of single words, or widened BF16 stores), waits for the running
@@ -62,7 +69,8 @@ pub extern "ptx-kernel" fn latent_absorption_tile(p:Arguments) {
             if live(turn,first+PERIOD) {(turn,first+PERIOD)} else {let mut next=turn+1;while next<8 && !live(next,0) {next+=1;}(next,0)}
         };
         // Staged quad of a row: stage buffer, strip slot 0..3 of the chunk, quad 0..1 of the strip's eight columns.
-        let place=|buffer:usize,row:usize,slot:usize,quad:usize|->u32 {stage+((buffer*WORDS+row*SK+slot*8+quad*4)*4) as u32};
+        // All four factors are small (two buffers of 13,824 bytes), so the offset is formed in 32 bits.
+        let place=|buffer:usize,row:usize,slot:usize,quad:usize|->u32 {stage+(buffer as u32)*((WORDS*4) as u32)+(row as u32)*((SK*4) as u32)+((slot*8+quad*4)*4) as u32};
         // Values: the features of one staged column. `at` is the column's place in the chunk, 0..31.
         let place_values=|buffer:usize,at:usize,feature:usize|->u32 {stage+((buffer*WORDS+A*SK+at*VS+feature)*4) as u32};
         // Up to four FP32 words by asynchronous copy: one 16-byte copy when the source allows it, else one copy a word.
@@ -81,16 +89,21 @@ pub extern "ptx-kernel" fn latent_absorption_tile(p:Arguments) {
             crate::ptx::store(to,f32::from_bits(low<<16));crate::ptx::store(to+4,f32::from_bits(low&0xffff_0000));
             crate::ptx::store(to+8,f32::from_bits(high<<16));crate::ptx::store(to+12,f32::from_bits(high&0xffff_0000));
         };
-        let weight=|b:usize,column:usize|->*const u16 {if s.op==Op::AbsorbQuery {w.add(outer*(d+v)*k+b*d+column)} else {w.add((outer*(d+v)+d+b)*k+column)}};
+        // The rows a thread stages are the same for every chunk: its A row (thread/8) and its two B rows (thread/8 and
+        // 32 + thread/8). Column 0 of each is found here, once. Null: the row is outside the operation, or for scores
+        // past the token's count, and nothing is staged for it. Values stages its B area by column, not by row.
+        let a_source:*const f32={let a=a0+thread/8;if a>=na {core::ptr::null()} else {match s.op {
+            Op::AbsorbQuery=>x.add((a*h+outer)*d),Op::AbsorbProject=>x.add((a*h+outer)*k),
+            Op::AbsorbScores=>x.add((outer*h+a)*k),_=>x.add((outer*h+a)*c)}}};
+        let b_source=|n:usize|->*const u8 {let b=b0+(thread+n*TILE_THREADS as usize)/8;
+            if values || b>=nb {core::ptr::null()}
+            else if dense {(if s.op==Op::AbsorbQuery {w.add(outer*(d+v)*k+b*d)} else {w.add((outer*(d+v)+d+b)*k)}).cast()}
+            else if b<count {latent.add(id(b)*k).cast()} else {core::ptr::null()}};
+        let b_sources=[b_source(0),b_source(1)];
         // Stage one chunk of one period: each thread issues one A quad and two B quads.
         let issue=|turn:usize,first:usize,buffer:usize| {
-            let (row,slot,quad)=(thread/8,thread%8/2,thread%2);let (a,column)=(a0+row,first+8*strip(turn,slot)+quad*4);
-            if a<na && column<terms {let valid=(terms-column).min(4);let to=place(buffer,row,slot,quad);match s.op {
-                Op::AbsorbQuery=>copy(to,x.add((a*h+outer)*d+column),valid),
-                Op::AbsorbProject=>copy(to,x.add((a*h+outer)*k+column),valid),
-                Op::AbsorbScores=>copy(to,x.add((outer*h+a)*k+column),valid),
-                _=>copy(to,x.add((outer*h+a)*c+column),valid),
-            }}
+            let (row,slot,quad)=(thread/8,thread%8/2,thread%2);let column=first+8*strip(turn,slot)+quad*4;
+            if !a_source.is_null() && column<terms {copy(place(buffer,row,slot,quad),a_source.add(column),(terms-column).min(4));}
             let mut item=thread;
             while item<B*8 {
                 if values {
@@ -98,9 +111,10 @@ pub extern "ptx-kernel" fn latent_absorption_tile(p:Arguments) {
                     let (at,group)=(item/16,item%16);let (column,feature)=(first+8*strip(turn,at/8)+at%8,b0+group*4);
                     if column<terms && feature<nb {copy(place_values(buffer,at,group*4),latent.add(id(column)*k+feature),(nb-feature).min(4));}
                 } else {
-                    let (row,slot,quad)=(item/8,item%8/2,item%2);let (b,column)=(b0+row,first+8*strip(turn,slot)+quad*4);
-                    if b<nb && column<terms {let valid=(terms-column).min(4);let to=place(buffer,A+row,slot,quad);
-                        if dense {fetch(to,weight(b,column),valid);} else if b<count {copy(to,latent.add(id(b)*k+column),valid);}}
+                    let (row,slot,quad)=(item/8,item%8/2,item%2);let column=first+8*strip(turn,slot)+quad*4;
+                    let source=b_sources[item/TILE_THREADS as usize];
+                    if !source.is_null() && column<terms {let valid=(terms-column).min(4);let to=place(buffer,A+row,slot,quad);
+                        if dense {fetch(to,source.cast::<u16>().add(column),valid);} else {copy(to,source.cast::<f32>().add(column),valid);}}
                 }
                 item+=TILE_THREADS as usize;
             }
@@ -109,16 +123,20 @@ pub extern "ptx-kernel" fn latent_absorption_tile(p:Arguments) {
         let finish=|turn:usize,first:usize,buffer:usize| {
             if dense {let mut item=thread;
                 while item<B*8 {
-                    let (row,slot,quad)=(item/8,item%8/2,item%2);let (b,column)=(b0+row,first+8*strip(turn,slot)+quad*4);
-                    if b<nb && column<terms && packed(weight(b,column),(terms-column).min(4)) {widen(place(buffer,A+row,slot,quad));}
+                    let (row,slot,quad)=(item/8,item%8/2,item%2);let column=first+8*strip(turn,slot)+quad*4;
+                    let source=b_sources[item/TILE_THREADS as usize];
+                    if !source.is_null() && column<terms && packed(source.cast::<u16>().add(column),(terms-column).min(4)) {widen(place(buffer,A+row,slot,quad));}
                     item+=TILE_THREADS as usize;
                 }
             }
         };
         let add=|x:f32,y:f32|->f32 {let sum:f32;asm!("add.rn.f32 {s}, {x}, {y};",s=out(reg32)sum,x=in(reg32)x,y=in(reg32)y,options(nomem,nostack));sum};
-        // A thread's sums are named by constant indices only, so they stay in registers.
-        // acc[strip slot][a][b]: the four strip sums of the running chunk. hold[level][a][b]: joined values of the tree.
+        // acc[strip slot][a][b]: the four strip sums of the running chunk. They are named by constant indices only, so
+        // they stay in registers. hold[level][a][b]: joined values of the tree. A turn reads and writes them once, so
+        // they live in the thread's local memory: the volatile accesses keep 24 values out of the registers.
         let mut acc=[[[0.0f32;4];2];4];let mut hold=[[[0.0f32;4];2];3];
+        macro_rules! held {($l:expr,$i:expr,$j:expr)=>{core::ptr::read_volatile(&hold[$l][$i][$j])};}
+        macro_rules! hold_set {($l:expr,$i:expr,$j:expr,$v:expr)=>{{let value=$v;core::ptr::write_volatile(&mut hold[$l][$i][$j],value);}};}
         macro_rules! pairs {($f:ident $(,$x:expr)*)=>{
             $f!(0,0 $(,$x)*);$f!(0,1 $(,$x)*);$f!(0,2 $(,$x)*);$f!(0,3 $(,$x)*);$f!(1,0 $(,$x)*);$f!(1,1 $(,$x)*);$f!(1,2 $(,$x)*);$f!(1,3 $(,$x)*);
         };}
@@ -132,24 +150,32 @@ pub extern "ptx-kernel" fn latent_absorption_tile(p:Arguments) {
                 if next.0<8 {issue(next.0,next.1,buffer^1);crate::ptx::commit();crate::ptx::wait_one();} else {crate::ptx::wait();}
                 finish(turn,first,buffer);
                 crate::ptx::sync();
-                // One product, rounded, then added to its own strip sum.
-                macro_rules! mac {($i:expr,$j:expr,$slot:expr,$e:expr,$a:expr,$b:expr)=>{let product:f32;
-                    asm!("mul.rn.f32 {p}, {a}, {b};",p=out(reg32)product,a=in(reg32)f32::from_bits($a[$i][$e]),b=in(reg32)f32::from_bits($b[$j][$e]),options(nomem,nostack));
-                    asm!("add.rn.f32 {s}, {s}, {p};",s=inout(reg32)acc[$slot][$i][$j],p=in(reg32)product,options(nomem,nostack));
-                };}
-                // Values: one load holds this thread's four features of one column. It fills b[feature][column].
-                macro_rules! features {($b:expr,$slot:expr,$quad:expr,$e:expr)=>{let f=crate::ptx::load4(place_values(buffer,$slot*8+$quad*4+$e,tx*4));
-                    $b[0][$e]=f[0];$b[1][$e]=f[1];$b[2][$e]=f[2];$b[3][$e]=f[3];};}
-                // Four columns of one strip: 6 loads, then up to 32 products.
+                // Four columns of one strip: 6 loads and up to 32 products. The two A quads are loaded first. Then one load
+                // at a time brings a B row's four columns (values: one column's four features), so 12 operand words are
+                // live at once, not 24. A strip sum takes its columns in ascending order either way.
                 macro_rules! quad {($slot:expr,$quad:expr)=>{let column=first+8*strip(turn,$slot)+$quad*4;
                     if column<terms {
-                        let mut a=[[0u32;4];2];let mut b=[[0u32;4];4];
-                        a[0]=crate::ptx::load4(place(buffer,ty*2,$slot,$quad));a[1]=crate::ptx::load4(place(buffer,ty*2+1,$slot,$quad));
-                        if values {features!(b,$slot,$quad,0);features!(b,$slot,$quad,1);features!(b,$slot,$quad,2);features!(b,$slot,$quad,3);}
-                        else {b[0]=crate::ptx::load4(place(buffer,A+tx,$slot,$quad));b[1]=crate::ptx::load4(place(buffer,A+tx+16,$slot,$quad));
-                            b[2]=crate::ptx::load4(place(buffer,A+tx+32,$slot,$quad));b[3]=crate::ptx::load4(place(buffer,A+tx+48,$slot,$quad));}
-                        if column<terms {pairs!(mac,$slot,0,a,b);}if column+1<terms {pairs!(mac,$slot,1,a,b);}
-                        if column+2<terms {pairs!(mac,$slot,2,a,b);}if column+3<terms {pairs!(mac,$slot,3,a,b);}
+                        let a=[crate::ptx::load4(place(buffer,ty*2,$slot,$quad)),crate::ptx::load4(place(buffer,ty*2+1,$slot,$quad))];
+                        // One product, rounded, then added to its own strip sum.
+                        macro_rules! one {($i:expr,$j:expr,$x:expr,$y:expr)=>{let product:f32;
+                            asm!("mul.rn.f32 {p}, {a}, {b};",p=out(reg32)product,a=in(reg32)f32::from_bits($x),b=in(reg32)f32::from_bits($y),options(nomem,nostack));
+                            asm!("add.rn.f32 {s}, {s}, {p};",s=inout(reg32)acc[$slot][$i][$j],p=in(reg32)product,options(nomem,nostack));
+                        };}
+                        if values {
+                            // One load holds this thread's four features (its B rows) of one column.
+                            macro_rules! col {($e:expr)=>{if column+$e<terms {let f=crate::ptx::load4(place_values(buffer,$slot*8+$quad*4+$e,tx*4));
+                                one!(0,0,a[0][$e],f[0]);one!(0,1,a[0][$e],f[1]);one!(0,2,a[0][$e],f[2]);one!(0,3,a[0][$e],f[3]);
+                                one!(1,0,a[1][$e],f[0]);one!(1,1,a[1][$e],f[1]);one!(1,2,a[1][$e],f[2]);one!(1,3,a[1][$e],f[3]);}};}
+                            col!(0);col!(1);col!(2);col!(3);
+                        } else {
+                            // One load holds four columns of one of this thread's B rows (tx, tx+16, tx+32, tx+48).
+                            macro_rules! row {($j:expr)=>{let r=crate::ptx::load4(place(buffer,A+tx+16*$j,$slot,$quad));
+                                one!(0,$j,a[0][0],r[0]);one!(1,$j,a[1][0],r[0]);
+                                if column+1<terms {one!(0,$j,a[0][1],r[1]);one!(1,$j,a[1][1],r[1]);}
+                                if column+2<terms {one!(0,$j,a[0][2],r[2]);one!(1,$j,a[1][2],r[2]);}
+                                if column+3<terms {one!(0,$j,a[0][3],r[3]);one!(1,$j,a[1][3],r[3]);}};}
+                            row!(0);row!(1);row!(2);row!(3);
+                        }
                     }
                 };}
                 quad!(0,0);quad!(0,1);quad!(1,0);quad!(1,1);quad!(2,0);quad!(2,1);quad!(3,0);quad!(3,1);
@@ -162,21 +188,21 @@ pub extern "ptx-kernel" fn latent_absorption_tile(p:Arguments) {
                 let joined=add(add(acc[0][$i][$j],acc[1][$i][$j]),add(acc[2][$i][$j],acc[3][$i][$j]));
                 acc[0][$i][$j]=0.0;acc[1][$i][$j]=0.0;acc[2][$i][$j]=0.0;acc[3][$i][$j]=0.0;
                 match turn {
-                    0=>hold[0][$i][$j]=joined,
-                    1=>hold[0][$i][$j]=add(hold[0][$i][$j],joined),
-                    2=>hold[1][$i][$j]=joined,
-                    3=>hold[0][$i][$j]=add(hold[0][$i][$j],add(hold[1][$i][$j],joined)),
-                    4=>hold[1][$i][$j]=joined,
-                    5=>hold[1][$i][$j]=add(hold[1][$i][$j],joined),
-                    6=>hold[2][$i][$j]=joined,
-                    _=>hold[0][$i][$j]=add(hold[0][$i][$j],add(hold[1][$i][$j],add(hold[2][$i][$j],joined))),
+                    0=>hold_set!(0,$i,$j,joined),
+                    1=>hold_set!(0,$i,$j,add(held!(0,$i,$j),joined)),
+                    2=>hold_set!(1,$i,$j,joined),
+                    3=>hold_set!(0,$i,$j,add(held!(0,$i,$j),add(held!(1,$i,$j),joined))),
+                    4=>hold_set!(1,$i,$j,joined),
+                    5=>hold_set!(1,$i,$j,add(held!(1,$i,$j),joined)),
+                    6=>hold_set!(2,$i,$j,joined),
+                    _=>hold_set!(0,$i,$j,add(held!(0,$i,$j),add(held!(1,$i,$j),add(held!(2,$i,$j),joined)))),
                 }
             };}
             pairs!(join);
             turn+=1;
         }
         let out=p.output as *mut f32;
-        macro_rules! emit {($i:expr,$j:expr)=>{let (a,b,sum)=(a0+ty*2+$i,b0+tile_b_row(values,tx as u32,$j) as usize,hold[0][$i][$j]);
+        macro_rules! emit {($i:expr,$j:expr)=>{let (a,b,sum)=(a0+ty*2+$i,b0+tile_b_row(values,tx as u32,$j) as usize,held!(0,$i,$j));
             if a<na && b<nb {match s.op {
                 Op::AbsorbQuery=>out.add((a*h+outer)*k+b).write(crate::latent_absorb::round(sum)),
                 Op::AbsorbProject=>{let live=count_of(p.input[1] as *const f32,a)!=0;

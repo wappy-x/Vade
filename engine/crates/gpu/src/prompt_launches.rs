@@ -1,7 +1,7 @@
 //! How many launches each prompt row kernel took in this process, for proof logs: a model
 //! proof must show that the model reached a new kernel, not only that a bench did.
 use std::sync::atomic::{AtomicU64,Ordering};
-const NAMES:[&str;49]=["fp8_rows_tile","prompt_rows","plain_rows_tile","scores_rows_tile","scores_rows_tile_packed","step_rows_block","transpose_tiles","nv_rows_tile","expert_group","mx_rows_tile","mx_rows_groups","plain_rows_small","plain_rows_few","prompt_rows_small","nv_rows_small","fp8_rows_small","fp8_rows_multi","fp8_rows_few","mx_rows_small",
+const NAMES:[&str;63]=["fp8_rows_tile","prompt_rows","plain_rows_tile","scores_rows_tile","scores_rows_tile_packed","step_rows_block","transpose_tiles","nv_rows_tile","expert_group","mx_rows_tile","mx_rows_groups","plain_rows_small","plain_rows_few","prompt_rows_small","nv_rows_small","fp8_rows_small","fp8_rows_multi","fp8_rows_few","mx_rows_small",
     // Lane P's reading entries: prompt_operation records the first seven; the mHC launcher records the last two.
     "prompt_permute","prompt_place","prompt_prepare","prompt_gated_norm","prompt_route","prompt_fold","prompt_conv","mhc_residual_rows","mhc_project_tile",
     // The zero fill a launch did not need (prompt_writes): counted so a proof shows the fill-free path ran.
@@ -33,8 +33,21 @@ const NAMES:[&str;49]=["fp8_rows_tile","prompt_rows","plain_rows_tile","scores_r
     // The recurrent update of a prompt group with its tokens staged ahead in shared memory.
     "step_rows_tile",
     // A dense NVFP4 prompt group's operands in one pass from the FP32 rows (no quantizer rows, no pack).
-    "nv_quantize_pack"];
-static COUNTS:[AtomicU64;49]=[const {AtomicU64::new(0)};49];
+    "nv_quantize_pack",
+    // GROUP FOLD: a prompt group folded a routed layer's down rows on their rank before the exchange (tp apply_experts_fold).
+    "prompt_fold_first",
+    // RECEIVE FIRST: host-staged exchanges whose receive was posted before the wait for this rank's GPU (not a launch).
+    "prompt_receive_first",
+    // GATHERED ROWS: a dense NVFP4 prompt group's operands read through the expert order table (no PermuteRows copy of the rows).
+    "nv_quantize_gather",
+    "shared_plain_fold",
+    // FOLD ROWS: one fold launch for 2 to 8 source rows of plain matrices (several chats in a step, a drafting check).
+    "fold_rows","prompt_query_local","prompt_spares_kept",
+    // MIXED ROWS: an MXFP8 row launch that also made the stage's small plain BF16 jobs (tp mx_rows_launch).
+    "plain_rows_ride","fp8_rows_share","prompt_link_ahead","prompt_selection_checked","wide_group_layer","wide_cohort",
+    // The pool scores of a verify pass or a batch step (1 to 16 token rows), a warp a word (pool_scores_small.rs).
+    "prompt_pool_scores"];
+static COUNTS:[AtomicU64;63]=[const {AtomicU64::new(0)};63];
 pub fn record(kernel:&str) {if let Some(at)=NAMES.iter().position(|n|*n==kernel) {COUNTS[at].fetch_add(1,Ordering::Relaxed);}}
 /// One text line of all counts.
 pub fn line()->String {NAMES.iter().zip(&COUNTS).map(|(n,c)|format!("{n}={}",c.load(Ordering::Relaxed))).collect::<Vec<_>>().join(" ")}

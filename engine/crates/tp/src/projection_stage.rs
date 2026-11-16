@@ -98,3 +98,41 @@ pub fn checked_rows(rows:&[crate::resident_weights::Rows])->Result<usize> {
     let words=rows.iter().try_fold(0usize,|sum,row|sum.checked_add(row.count)).ok_or("projection stage rows overflow")?;
     words.checked_mul(chunks).ok_or("projection stage gathered extent overflow")?;Ok(words)
 }
+
+/// Source rows per BF16 part. Only the measured two-row latent form changes.
+/// Every other count retains the base part exactly; zero keeps fold or FP32.
+pub fn plain_rows_part(tokens:usize,rows:usize,cols:usize)->usize {
+    match tokens {2 if (rows,cols)==(4096,128)=>2,4=>4,6=>3,8=>4,_=>0}
+}
+/// FOLD ROWS: whether a plain matrix of a group of `tokens` rows takes the one fold launch for all its rows
+/// (`flash_resident_projection_fold_rows`, `_f32`). By shape alone, so every rank chooses the same: the fold's own
+/// geometry (few rows, long rows) and 2 to 8 rows. One row keeps the plain step's own forms.
+pub fn fold_rows(tokens:usize,rows:usize,cols:usize)->bool {
+    spark_gpu_probe::plain_admission::fold_rows_shape(rows,cols,tokens)
+        && spark_gpu_probe::plain_admission::plain_geometry(rows,cols).1 as usize==spark_gpu_probe::plain_admission::FOLD_THREADS
+}
+#[cfg(test)]
+mod shared_form_tests {
+    use super::plain_rows_part;
+    #[test]
+    fn the_fold_shapes_take_one_fold_launch_at_2_to_8_rows_and_every_other_matrix_keeps_its_form() {
+        // The router gate (FP32) and the narrow BF16 groups, rank-local and logical rows.
+        for (rows,cols) in [(144,4096),(288,4096),(128,4096),(64,4096),(32,4096),(16,4096)] {
+            for m in 0..=20 {assert_eq!(super::fold_rows(m,rows,cols),(2..=8).contains(&m),"{rows}x{cols} m={m}");}
+        }
+        // Latent tables, index tables and wide matrices never take it: their forms are the base's.
+        for (rows,cols) in [(4096,128),(8192,128),(2048,1536),(4096,1536),(16384,512),(32768,512),(4096,4096),(513,4096),(144,512)] {
+            for m in 1..=16 {assert!(!super::fold_rows(m,rows,cols),"{rows}x{cols} m={m}");}
+        }
+    }
+    #[test]
+    fn two_rows_change_but_three_four_and_prompt_parts_match_base() {
+        assert_eq!(plain_rows_part(2,4096,128),2);assert_eq!(plain_rows_part(2,128,4096),0);
+        for rows in [16,32,64,128,144,256,4096,8192] {for cols in [128,1536,4096,8192] {
+            for m in [1,3,4,5,6,7,8,9,16,32,128,512,1024] {
+                let base=match m {4=>4,6=>3,8=>4,_=>0};
+                assert_eq!(plain_rows_part(m,rows,cols),base,"{rows}x{cols} m={m}");
+            }
+        }}
+    }
+}

@@ -122,6 +122,7 @@ impl<'b,'d> Weights<'b,'d> {
         if output.len()!=pairs*local {return Err("routed rows extent differs".into());}
         self.cost.settle(b)?;self.cost.record(||"projection_2".into(),stamp,b,0);
         let (parts,words)=(rows.total/local,output.len());
+        crate::exchange_trace::kind(||"routed rows".into());
         let gathered=self.gather_small(b,&output)?;if gathered.is_none() {self.gather_mapped(b,&output)?;}drop(output);let stamp=self.cost.start(b);
         let temporary=if self.place_tables.contains_key(&pairs) {None} else if wait {
             let places=(0..pairs).flat_map(|pair|[pair as f32,1.0,0.0]).collect::<Vec<_>>();
@@ -146,12 +147,18 @@ impl<'b,'d> Weights<'b,'d> {
         static SEEN:std::sync::atomic::AtomicU64=std::sync::atomic::AtomicU64::new(0);
         let bit=1u64<<(m.min(31)+if down {32} else {0});
         if SEEN.fetch_or(bit,std::sync::atomic::Ordering::Relaxed)&bit==0 {eprintln!("ROUTE ROWS rank={} rows={m} picks={picks} down={down} local_rows={local} first use",self.topology.rank);}
+        // RECEIVE FIRST: the place above was the one read of the mapped exchange buffer.
+        if gathered.is_none() {self.exchange_read(b)?;}
         Ok(Some(out))
     }
     /// ROWS FOLD, the shared row: this rank's rows of the row projection `name`, token-major `[m, local rows]`, and no
     /// exchange. They are the words `apply_matrix` makes before its gather (the same call, stopped where a projection of
     /// the KDA head split stops), so they are this rank's rows of the gathered value. None, before any work: a matrix that
     /// is not split by rows here, or no device exchange.
+    /// LOCAL QUERY: true when this rank's rows of the row-split matrix `name` are exactly the output rows `rows`.
+    pub fn owns_rows(&self,name:&str,rows:&std::ops::Range<usize>)->bool {
+        self.matrices.get(name).is_some_and(|matrix|matrix.rows.split && matrix.rows.count>0 && matrix.rows.start==rows.start && matrix.rows.count==rows.len())
+    }
     pub fn apply_matrix_local(&mut self,name:&str,b:&Backend<'d>,input:&DeviceVector<'_>,m:usize,round:bool)->Result<Option<DeviceVector<'d>>> {
         let Some(matrix)=self.matrices.get(name) else {return Ok(None);};
         let rows=matrix.rows;

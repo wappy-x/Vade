@@ -341,7 +341,9 @@ KV changes answers. Default: <code>0</code>.</dd>
 <code>SEQPAR_RDMA</code> is set. Default: RDMA.</dd>
 <dt><code>TP_DUAL_RAIL</code></dt>
 <dd><code>0</code> uses one network link (rail) per cable when a cable carries
-two. Default: both.</dd>
+two. Default: both. The launcher reads it. Two ranks on RDMA started with no
+<code>TP_AUX_LISTEN</code> and <code>TP_AUX_NEXT</code> find the second rail of
+their cable by themselves; the word <code>off</code> in both keeps one rail.</dd>
 <dt><code>TP_RDMA_SMALL</code></dt>
 <dd><code>0</code> turns off the small preposted message buffers. Default:
 on.</dd>

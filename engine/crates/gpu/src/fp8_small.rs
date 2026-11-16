@@ -71,6 +71,44 @@ pub fn blocks(parts: &[Part]) -> Option<u32> {
     let first = parts.first()?; let jobs: usize = parts.iter().map(|p| p.tokens).sum();
     u32::try_from(first.rows.div_ceil(ROWS_PER_BLOCK).checked_mul(jobs)?).ok()
 }
+/// `fp8_rows_share`: parts of ONE token count of 2 to 8, the lists and alignment of `multi_admitted`. A block takes 16 rows of a part, as the one-row tile
+/// does; 128 producer threads copy and decode a weight once for all tokens, and a chain warp holds 2 tokens (`kernels/src/fp8_rows_share.rs`).
+pub const SHARE_ROWS_PER_BLOCK: usize = 16;
+pub const SHARE_MIN_TOKENS: usize = 2;
+pub const SHARE_MAX_TOKENS: usize = 8;
+/// Parts of a launch whose parts all read the same rows (gate and up of the shared expert).
+pub const SHARE_SHARED_PARTS: usize = 2;
+/// Threads of a block: a chain warp for each 2 tokens, then the 128 producers.
+pub fn share_threads(tokens: usize) -> u32 { (32 * tokens.div_ceil(2) + 128) as u32 }
+/// Dynamic shared bytes of a block: 3 stages of raw weights (16 rows of 128 bytes) and of scales (128 words), two buffers of first products
+/// (16 rows of 132 words) and 3 stages of activations (a row of 132 words for each token slot of the chain warps).
+pub fn share_shared(tokens: usize) -> u32 { (3 * 16 * 128 + 3 * 128 * 4 + 2 * 16 * 132 * 4 + (if tokens > 4 { 2 } else { 3 }) * 2 * tokens.div_ceil(2) * 132 * 4) as u32 }
+/// The launches `kernel-bench --fp8-small share` walks in full over every listed rows x columns x block shape: ONE part of 2 to 8 tokens, or
+/// (`shared_rows`) exactly two parts of one shape, block shape and count on the same rows. Any other table keeps the older kernels.
+pub fn share_admitted(parts: &[Part], input: u64, shared_rows: bool) -> bool {
+    let Some(first) = parts.first() else { return false; };
+    parts.len() == (if shared_rows { SHARE_SHARED_PARTS } else { 1 }) && (SHARE_MIN_TOKENS..=SHARE_MAX_TOKENS).contains(&first.tokens) && multi_admitted(parts, input)
+        && parts.iter().all(|p| p.tokens == first.tokens && p.block_rows == first.block_rows && p.block_cols == first.block_cols)
+}
+/// Blocks of `fp8_rows_share`: `ceil(rows/16)` for each part.
+pub fn share_blocks(parts: &[Part]) -> Option<u32> {
+    let first = parts.first()?;
+    u32::try_from(first.rows.div_ceil(SHARE_ROWS_PER_BLOCK).checked_mul(parts.len())?).ok()
+}
+/// Where `fp8_rows_share` is faster than the entry it would replace: the six block-FP8 tables a rank serves with two ranks, timed on one
+/// Spark (`kernel-bench --fp8-small {OLD} {X} sharetime`, us a launch; the numbers and run tags are in `docs/measurements/share-rows.md`).
+/// The shared expert's gate and up (two parts on the same rows, 1,024 x 4,096) at 2 to 6 tokens; its down (2,048 x 2,048) and q_b
+/// (8,192 x 1,536) at 2 to 8; o_proj (2,048 x 16,384) at 2 to 5; q_a (768 x 4,096) at 3 to 8; kv_a (256 x 4,096) at 5 to 8.
+/// It LOSES and is not chosen for gate and up at 7 and 8 tokens and o_proj at 6 to 8 (four chain warps a block: the chains are the bound),
+/// q_a at 2 tokens and kv_a at 2 to 4 (16 to 48 blocks: the chain of one block is the bound and the small kernel has more blocks).
+/// Any other table (another rank count, another part count) keeps the entries of main.
+pub fn share_wins(rows: usize, cols: usize, parts: usize, tokens: usize) -> bool {
+    matches!((rows, cols, parts, tokens), (1024, 4096, 2, 2..=6) | (2048, 2048, 1, 2..=8) | (2048, 16384, 1, 2..=5) | (8192, 1536, 1, 2..=8) | (768, 4096, 1, 3..=8) | (256, 4096, 1, 5..=8))
+}
+/// The existing few-row form's measured two-row winners. Three/four rows retain the base rule.
+pub fn two_wins(rows:usize,cols:usize)->bool {
+    matches!((rows,cols),(1024,4096)|(2048,2048)|(2048,16384)|(8192,1536))
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,6 +167,29 @@ mod tests {
         assert!(!two(Part { block_rows: 1, block_cols: 16, ..part(1024, 4096, 4) }) && !two(Part { weight: 8, ..part(1024, 4096, 4) }) && !two(Part { scales: 2, ..part(1024, 4096, 4) }));
         assert!(shared_admitted(&[Part { block_rows: 1, block_cols: 16, ..part(1024, 4096, 4) }; 2], 16) && !shared_admitted(&[part(1024, 4096, 4); 2], 8) && !shared_admitted(&[part(130, 4096, 4); 2], 16));
         assert_eq!(multi_blocks(&[part(1024, 4096, 8); 2]), Some(64));
+    }
+    #[test]
+    fn the_share_admitted_set_is_one_part_or_two_parts_on_the_same_rows_of_2_to_8_tokens() {
+        for rows in 0..=8200 { assert_eq!(share_admitted(&[part(rows, 4096, 3)], 16, false), FP8_ROWS.contains(&rows), "rows {rows}"); }
+        for cols in 0..=16400 { assert_eq!(share_admitted(&[part(1024, cols, 3)], 16, false), FP8_COLS.contains(&cols) && 1024 * cols <= FP8_MAX_BYTES, "cols {cols}"); }
+        for br in 0..=200 { for bc in 0..=200 { assert_eq!(share_admitted(&[Part { block_rows: br, block_cols: bc, ..part(1024, 4096, 3) }], 16, false), FP8_BLOCKS.contains(&(br, bc))); } }
+        for parts in 0..=5usize { for tokens in 0..=17usize { for shared in [false, true] {
+            assert_eq!(share_admitted(&vec![part(1024, 4096, tokens); parts], 16, shared), parts == (if shared { 2 } else { 1 }) && (2..=8).contains(&tokens), "{parts} parts of {tokens} tokens, shared {shared}");
+        } } }
+        // Every block-FP8 shape of the model, 2 to 8 tokens: one part, and two parts on the same rows.
+        for (rows, cols) in [(1024, 4096), (2048, 2048), (2048, 16384), (8192, 1536), (768, 4096), (256, 4096)] { for tokens in 2..=8 {
+            assert!(share_admitted(&[part(rows, cols, tokens)], 256, false) && share_admitted(&[part(rows, cols, tokens); 2], 256, true));
+        } }
+        // One count, one shape and one block shape; the alignment of `multi_admitted`.
+        let two = |second: Part| share_admitted(&[part(1024, 4096, 4), second], 16, true);
+        assert!(two(part(1024, 4096, 4)) && !two(part(1024, 4096, 3)) && !two(part(2048, 4096, 4)) && !two(Part { block_rows: 1, block_cols: 16, ..part(1024, 4096, 4) }));
+        assert!(!two(Part { weight: 8, ..part(1024, 4096, 4) }) && !two(Part { scales: 2, ..part(1024, 4096, 4) }) && !share_admitted(&[part(1024, 4096, 4); 2], 8, true) && !share_admitted(&[part(1024, 4096, 4)], 8, false));
+        // Geometry: 16 rows a block for each part; a chain warp for each 2 tokens before the 128 producers.
+        assert_eq!(share_blocks(&[part(1024, 4096, 4)]), Some(64));
+        assert_eq!(share_blocks(&[part(1024, 4096, 8); 2]), Some(128));
+        assert_eq!(share_blocks(&[part(17, 4096, 2)]), Some(2));
+        assert_eq!((2..=8).map(share_threads).collect::<Vec<_>>(), [160, 192, 192, 224, 224, 256, 256]);
+        assert_eq!((2..=8).map(share_shared).collect::<Vec<_>>(), [27744, 30912, 30912, 30912, 30912, 33024, 33024]);
     }
     #[test]
     fn the_admitted_set_is_the_sweep_set() {

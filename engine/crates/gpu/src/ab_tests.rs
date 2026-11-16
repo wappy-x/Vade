@@ -3,6 +3,7 @@
 fn ab_flag_off_kernel_table_matches_main() {
     // Ordered literal symbol lookups captured from base 90c50937 (including optional tables).
     let sources = [include_str!("backend.rs").split("impl<'a> Backend<'a> {").next().unwrap(),
+        include_str!("backend/start.rs"),
         include_str!("batch.rs"), include_str!("multi.rs"), include_str!("moe.rs"),
         include_str!("fp8.rs"), include_str!("fp4.rs")];
     let names: Vec<_> = sources.iter().flat_map(|source| source.split(".function").skip(1)

@@ -15,6 +15,15 @@ pub(crate) fn root(x:f32)->f32 {
 /// Largest prompt group one launch accepts. The checks below keep all address
 /// products inside the existing 32-bit element ABI.
 pub const MAX_ROWS:usize=1<<16;
+/// The count and causal-ID checks of absorbed prompt attention. Padding is not read.
+/// Status 2 is a bad count; 1 is a bad ID; zero means every live word is valid.
+pub fn selection_validation_status(row:&[f32],context:usize)->u32 {
+    let Some((&count,ids))=row.split_last() else {return 2;};
+    if !count.is_finite() || count<0.0 || count!=count as u32 as f32 || count>ids.len().min(context) as f32 {return 2;}
+    for &id in &ids[..count as usize] {
+        if !id.is_finite() || id<0.0 || id!=id as u32 as f32 || id>=context as f32 {return 1;}
+    }0
+}
 #[repr(u32)]
 #[derive(Debug,Clone,Copy,PartialEq,Eq)]
 pub enum Op {
@@ -78,6 +87,8 @@ pub enum Op {
     /// `[rows,tokens,cols]` rank packets to `[tokens,rows,cols]`. Raw words only.
     /// `first` nonzero refuses non-finite words, as an exchange transpose does.
     RankRows,
+    /// One status per selection row: zero means its count and live IDs are causal integers.
+    CheckSelectionRows,
 }
 #[repr(C)]
 #[derive(Debug,Clone,Copy)]
@@ -139,6 +150,8 @@ impl Shape {
             Op::StepRows if width>0 && d<=1024=>([m.checked_mul(h)?.checked_mul(4usize.checked_mul(d)?.checked_add(1)?)?,width.checked_mul(d)?,m.checked_mul(width)?,0,0],0,width,d.checked_add(m)?),
             Op::PoolScoresRows if width>0 && r>0 && t>0=>([m.checked_mul(width)?,r.checked_mul(d)?,m.checked_mul(h)?,0,0],0,m.checked_mul(r)?,1),
             Op::SelectRows if d>0 && t>0 && t%d==0 && k<=1 && slots>0=>([m.checked_mul(r)?,0,0,0,0],0,m,slots.checked_add(1)?),
+            Op::CheckSelectionRows if slots>0 && self.first>0 && (self.first as usize).checked_add(m)?<=1<<24=>
+                ([m.checked_mul(slots.checked_add(1)?)?,0,0,0,0],0,m,1),
             Op::ScoresRows if h>0 && d>0 && t>0 && k>0 && slots>0=>{let row=h.checked_mul(d.checked_add(t)?)?;
                 // `first` counts entries of an optional (row, token, slot) table sorted by row.
                 ([m.checked_mul(width)?,r.checked_mul(row)?,m.checked_mul(slots.checked_add(1)?)?,(self.first as usize).checked_mul(3)?,0],0,m.checked_mul(h)?,k)},
@@ -251,6 +264,8 @@ pub(crate) fn packed_feature(x:&[f32],base:usize,feature:usize)->f32 {
 pub fn unit(s:Shape,index:usize,x:[&[f32];5],w:&[f32],out:&mut[f32]) {
     let (m,h,d,t,r,k)=(s.tokens as usize,s.heads as usize,s.dim as usize,s.taps as usize,s.rows as usize,s.cols as usize);let width=h*d;
     match s.op {
+        Op::CheckSelectionRows=>{let words=s.slots as usize+1;let row=&x[0][index*words..(index+1)*words];
+            out[0]=selection_validation_status(row,s.first as usize+index) as f32;},
         Op::Wrapped=>{
             let unit_count=x_units(s);let token=index/unit_count;
             let part=|n:usize|{let size=x[n].len()/m;&x[n][token*size..(token+1)*size]};

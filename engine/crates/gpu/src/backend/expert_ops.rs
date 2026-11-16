@@ -197,12 +197,76 @@ impl<'a> Backend<'a> {
     /// launched, and the caller runs the two-step path (`expert_group_products` does).
     #[allow(clippy::type_complexity)] // the part tuple of `expert_group`, a list of lists.
     pub fn expert_group_quantized(&self,lists:&[&[(Shape,Option<(&DeviceVector<'_>,&DeviceVector<'_>)>,usize)]],input:&DeviceVector<'_>,cols:usize)->Result<Option<Vec<DeviceVector<'a>>>,String> {
+        self.expert_group_operands(lists,input,None,cols)
+    }
+    /// GATHERED ROWS: `expert_group_quantized` for rows that were not copied into expert order. `source` holds one FP32
+    /// row a token (`cols` words a row); `index` holds, for each row the lists read, its row of `source` (the table
+    /// `Op::PermuteRows` reads: a float cast to an index). The one operand launch is `nv_quantize_gather`, which reads
+    /// each row where it lies; the product launches are those of `expert_group_quantized`. The words of
+    /// `expert_group_quantized` on the copied rows: the copy moves words, and the operand bytes of a row depend on that
+    /// row and its input scale only. An index word at or beyond the rows of `source` traps on the device, as the copy's does.
+    /// None, before any allocation, upload or launch: a group `expert_group_quantized` does not take, an active primary
+    /// image without the `nv_quantize_gather` entry, or the check-tool switch: the caller copies the rows as before.
+    #[allow(clippy::type_complexity)] // the part tuple of `expert_group`, a list of lists.
+    pub fn expert_group_gathered(&self,lists:&[&[(Shape,Option<(&DeviceVector<'_>,&DeviceVector<'_>)>,usize)]],source:&DeviceVector<'_>,index:&DeviceVector<'_>,cols:usize)->Result<Option<Vec<DeviceVector<'a>>>,String> {
+        self.expert_group_operands(lists,source,Some(index),cols)
+    }
+    /// The body of `expert_group_quantized` (`index` None: `input` holds the rows the lists read) and of
+    /// `expert_group_gathered` (`index` Some: row r of the lists is row `index[r]` of `input`).
+    #[allow(clippy::type_complexity)] // the part tuple of `expert_group`, a list of lists.
+    fn expert_group_operands(&self,lists:&[&[(Shape,Option<(&DeviceVector<'_>,&DeviceVector<'_>)>,usize)]],input:&DeviceVector<'_>,index:Option<&DeviceVector<'_>>,cols:usize)->Result<Option<Vec<DeviceVector<'a>>>,String> {
+        Ok(self.expert_group_sets(&[(lists,input,index,cols)])?.and_then(|mut sets|sets.pop()))
+    }
+    /// WIDE COHORT: the one-pass products of `expert_group_quantized` (a set without an index) or `expert_group_gathered`
+    /// (a set with one) for ONE OR MORE row sets, with ONE product launch a list for all the sets
+    /// (`nv_rows_tc`). A set is what one of those calls takes: its lists (gate and up of a layer, or its down
+    /// list), its FP32 rows, its index and its row width. Every set has the same number of lists, and list l of
+    /// every set is the same matrix shape and word function. One output a list for each set, in set order: the words
+    /// that set's own call gives (a part's words depend on that part alone).
+    /// None, before any allocation, upload or launch: a set its own call would not take, or sets whose lists differ.
+    #[allow(clippy::type_complexity)] // the part tuple of `expert_group`, a list of lists, for each set.
+    pub fn expert_group_sets(&self,sets:&[(&[&[(Shape,Option<(&DeviceVector<'_>,&DeviceVector<'_>)>,usize)]],&DeviceVector<'_>,Option<&DeviceVector<'_>>,usize)])->Result<Option<Vec<Vec<DeviceVector<'a>>>>,String> {
         self.require_resident_stream()?;
+        if sets.is_empty() {return Err("expert group is empty or its input is segmented".into());}
+        let mut ready=Vec::with_capacity(sets.len());
+        for &(lists,input,index,cols) in sets {
+            let Some(set)=self.expert_set_tables(lists,input,index,cols)? else {return Ok(None);};
+            ready.push(set);
+        }
+        // The sets of one launch: the same lists, list for list the same matrix shape and word function.
+        let head=&ready[0].0;
+        if ready.iter().any(|(tables,_)|tables.len()!=head.len() || tables.iter().zip(head).any(|(x,y)|x.3!=y.3 || x.0[0].shape.rows!=y.0[0].shape.rows || x.0[0].shape.cols!=y.0[0].shape.cols)) {return Ok(None);}
+        let mut outputs:Vec<Vec<DeviceVector<'a>>>=ready.iter().map(|(tables,_)|Vec::with_capacity(tables.len())).collect();
+        for at in 0..head.len() {
+            // No fill: the product kernel writes every (row, token) word of every part before any read.
+            let mut made=Vec::with_capacity(ready.len());
+            for (tables,_) in &ready {let mut output=self.vector(tables[at].1)?;self.skip_fill(&mut output)?;made.push(output);}
+            let launch=ready.iter().zip(sets).zip(&made).map(|(((tables,activations),&(_,input,index,_)),output)| {
+                let operands=match (at,index) {(0,Some(index))=>tc_family::NvOperands::Gathered(input,index,activations),(0,None)=>tc_family::NvOperands::Fp32(input,activations),_=>tc_family::NvOperands::Kept};
+                tc_family::NvSet {table:&tables[at].0,operands,output,rows_in:tables[at].2}
+            }).collect::<Vec<_>>();
+            self.nv_rows_tc(&launch,head[at].3)?;drop(launch);
+            for (list,output) in outputs.iter_mut().zip(made) {list.push(output);}
+        }
+        Ok(Some(outputs))
+    }
+    /// One set of `expert_group_sets`: the checked table of each list ((entries, output words, the end of the last
+    /// part's input rows, the word function)) and the input scale of each row. None: the set does not take the
+    /// one-pass operands (not dense, not admitted to the tensor-core image, the active primary image has no entry for
+    /// it, a check-tool switch or a capture is on, lists that do not read the same rows at the same scales).
+    #[allow(clippy::type_complexity)] // the part tuple of `expert_group`, a list of lists; the tables are private to the two callers.
+    fn expert_set_tables(&self,lists:&[&[(Shape,Option<(&DeviceVector<'_>,&DeviceVector<'_>)>,usize)]],input:&DeviceVector<'_>,index:Option<&DeviceVector<'_>>,cols:usize)->Result<Option<(Vec<(Vec<GroupEntry>,usize,usize,u32)>,Vec<f32>)>,String> {
         if lists.is_empty() || input.is_segmented() || cols==0 || !cols.is_multiple_of(16) || !input.len().is_multiple_of(cols) {return Err("expert group is empty or its input is segmented".into());}
         self.check_vector(input,input.len())?;
+        if let Some(index)=index {
+            if index.is_segmented() || index.is_empty() || input.is_empty() {return Err("expert group index is empty or segmented".into());}
+            self.check_vector(index,index.len())?;
+        }
         // An active primary image without the entry (an older kernel file under a newer host) keeps the two-step path.
         if !self.tc_image_present() || self.nv_tc_groups_off() || self.nv_quantize_pack_off() || self.nv_capture_active() || !self.nv_quantize_pack_present() {return Ok(None);}
-        let stride=cols/16*17;let rows_in=input.len()/cols;
+        if index.is_some() && (self.nv_quantize_gather_off() || !self.nv_quantize_gather_present()) {return Ok(None);}
+        // The rows the lists read: one a word of the index, or the rows of the input.
+        let stride=cols/16*17;let rows_in=match index {Some(index)=>index.len(),None=>input.len()/cols};
         let mut tables=Vec::with_capacity(lists.len());
         for parts in lists {
             if parts.iter().any(|(shape,raw,_)|shape.op!=Op::NvRows || raw.is_none() || shape.cols as usize!=cols) {return Ok(None);}
@@ -223,15 +287,7 @@ impl<'a> Backend<'a> {
         // The input scale of each row: the parts are cumulative from row 0 (`nv_rows_tc_admitted`), so every row has one.
         let mut activations=vec![0f32;first.2];
         for e in &first.0 {activations[e.first_row as usize..(e.first_row+e.shape.tokens) as usize].fill(e.shape.activation);}
-        let mut outputs=Vec::with_capacity(tables.len());
-        for (index,(table,total,end_row,chains)) in tables.iter().enumerate() {
-            // No fill: the product kernel writes every (row, token) word of every part before any read.
-            let mut output=self.vector(*total)?;self.skip_fill(&mut output)?;
-            let operands=if index==0 {tc_family::NvOperands::Fp32(input,&activations)} else {tc_family::NvOperands::Kept};
-            self.nv_rows_tc(table,operands,&output,*end_row,*chains)?;
-            outputs.push(output);
-        }
-        Ok(Some(outputs))
+        Ok(Some((tables,activations)))
     }
     /// The products of NvRows part lists that read the SAME quantized rows, one output a list: the one-pass operands when
     /// the group takes them (`expert_group_quantized`), else the quantizer once (each part at its own input scale) and one
@@ -274,7 +330,7 @@ impl<'a> Backend<'a> {
         if tensor_core && (dense || !job_path) {
             // No fill: the product kernel writes every (row, token) word of every part before any read.
             let mut output=self.vector(total)?;self.skip_fill(&mut output)?;
-            self.nv_rows_tc(&table,tc_family::NvOperands::Rows(input,stride),&output,end_row,chains)?;
+            self.nv_rows_tc_one(&table,tc_family::NvOperands::Rows(input,stride),&output,end_row,chains)?;
             return Ok(output);
         }
         // Column-tile parts of few tokens: one job of the decode kernel a (part, token), the role nv_rows_small has for row-major parts.

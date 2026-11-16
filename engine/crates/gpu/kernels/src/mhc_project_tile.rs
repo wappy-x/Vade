@@ -9,8 +9,11 @@ pub extern "ptx-kernel" fn mhc_project_tile(p:Boundary) {
     // SAFETY: The caller validates and retains disjoint planes. Each complete
     // warp owns one token. Warps past the last token return together. The prior
     // residual launch completes before any read here. All lanes reach every
-    // full-mask shuffle. Distinct lanes write distinct normalized words; lane
-    // zero alone writes that token's coefficients. All loads stay in checked rows.
+    // full-mask shuffle. Distinct lanes write distinct normalized words (lane L
+    // owns the 8-feature groups L, L + 32, ... of its token, 16 bytes a store; the
+    // normalized plane is a device vector of the residual's shape, so its rows
+    // start at 16-byte addresses as the residual's do); lane zero alone writes
+    // that token's coefficients. All loads stay in checked rows.
     unsafe {
         let shape=p.shape;let rows=shape.rows as usize;
         let first=core::arch::nvptx::_block_idx_x() as usize*TOKENS;
@@ -38,38 +41,40 @@ pub extern "ptx-kernel" fn mhc_project_tile(p:Boundary) {
             col+=256;
         }
         let inverse=1.0/crate::qsa_common::root(crate::reduction::warp_root(squares)/wide as f32+shape.rms_eps);
-        let mut feature=lane;
-        while feature<wide {*(p.mixing_normalized as *mut f32).add(token*wide+feature)=*residual.add(feature)*inverse;feature+=32;}
-        // Eight coefficient rows a pass: the normalized group is made once (residual * inverse, as the normalized plane)
-        // and multiplied by each row's weights (weight * normalized), one add per product in the row's strip.
-        const RB:usize=8;
-        let weights=p.weights as *const f32;let mut c0=0;
-        while c0<count {
-            let mut acc=[0.0f32;RB];let mut rowp=[weights;RB];
-            unroll!(8,r,{rowp[r]=weights.add((c0+r).min(count-1)*wide);});
-            let mut col=lane*8;
-            while col<wide {
-                let halves=if col+4<wide {2} else {1};
-                unroll!(2,h,{if h<halves {
-                    let x=ld4!(residual.add(col+4*h));let n=[mul!(x[0],inverse),mul!(x[1],inverse),mul!(x[2],inverse),mul!(x[3],inverse)];
+        // ONE sweep for the normalized plane and every coefficient row (it was one sweep for the plane and one for each 8 rows:
+        // four more reads of the group's residual plane, which is larger than the L2). The normalized group is made once
+        // (residual * inverse, one `mul.rn.f32`, the word the plane holds), stored, and multiplied by each row's weights
+        // (weight * normalized), one add per product in the row's strip. A row's strip still adds its products in ascending
+        // features from +0.0; only instructions of different rows changed places.
+        macro_rules! st4 {($at:expr,$v:expr)=>{{let v:[f32;4]=$v;
+            core::arch::asm!("st.global.v4.u32 [{at}], {{{a},{b},{c},{d}}};",a=in(reg32)v[0].to_bits(),b=in(reg32)v[1].to_bits(),c=in(reg32)v[2].to_bits(),d=in(reg32)v[3].to_bits(),at=in(reg64)$at,options(nostack));
+        }};}
+        const RB:usize=8;const BATCHES:usize=3;
+        let weights=p.weights as *const f32;let normalized=(p.mixing_normalized as *mut f32).add(token*wide);
+        let mut acc=[0.0f32;RB*BATCHES];let mut col=lane*8;
+        while col<wide {
+            let halves=if col+4<wide {2} else {1};
+            unroll!(2,h,{if h<halves {
+                let x=ld4!(residual.add(col+4*h));let n=[mul!(x[0],inverse),mul!(x[1],inverse),mul!(x[2],inverse),mul!(x[3],inverse)];
+                st4!(normalized.add(col+4*h),n);
+                unroll!(3,b,{if b*RB<count {
                     let mut w=[[0.0f32;4];RB];
-                    unroll!(8,r,{w[r]=ld4!(rowp[r].add(col+4*h));});
-                    unroll!(8,r,{unroll!(4,e,{add!(acc[r],mul!(w[r][e],n[e]));});});
+                    unroll!(8,r,{w[r]=ld4!(weights.add((b*RB+r).min(count-1)*wide+col+4*h));});
+                    unroll!(8,r,{unroll!(4,e,{add!(acc[b*RB+r],mul!(w[r][e],n[e]));});});
                 }});
-                col+=256;
-            }
-            unroll!(8,r,{
-                let coefficient=c0+r;
-                if coefficient<count {
-                    let total=crate::reduction::warp_root(acc[r]);
-                    if lane==0 {
-                        let group=if coefficient<streams {0} else if coefficient<2*streams {1} else {2};
-                        *(p.coefficients as *mut f32).add(token*count+coefficient)=total * *(p.scale as *const f32).add(group)+*(p.base as *const f32).add(coefficient);
-                    }
-                }
-            });
-            c0+=RB;
+            }});
+            col+=256;
         }
+        unroll!(3,b,{unroll!(8,r,{
+            let coefficient=b*RB+r;
+            if coefficient<count {
+                let total=crate::reduction::warp_root(acc[coefficient]);
+                if lane==0 {
+                    let group=if coefficient<streams {0} else if coefficient<2*streams {1} else {2};
+                    *(p.coefficients as *mut f32).add(token*count+coefficient)=total * *(p.scale as *const f32).add(group)+*(p.base as *const f32).add(coefficient);
+                }
+            }
+        });});
     }
 }
 /// The residual plane, one thread per feature: `mhc_boundary_project`'s first loop, as its own launch so that every

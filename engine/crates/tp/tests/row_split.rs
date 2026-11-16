@@ -4,6 +4,7 @@ use spark_tp::{bounded_decoder::{Compute,Decoder,Host},row_split::{Exchange,Fact
 use spark_serve::{Engine,Session};
 use std::sync::mpsc::{sync_channel,SyncSender,Receiver};
 #[path="support/attention_checkpoint.rs"] mod fixture;
+include!("support/draft_admission.rs");
 struct Wire {topology:Topology,controller:bool,tx:SyncSender<Vec<u8>>,rx:Receiver<Vec<u8>>}
 #[test]
 fn compact_head_survives_reference_and_split_wrappers() {
@@ -781,28 +782,43 @@ fn served_strict_request_streams_the_plain_ids() {
     eprintln!("strict tail: {}",&strict[strict.len().saturating_sub(700)..]);
 }
 #[test]
-fn model_proposals_keep_the_plain_ids_on_two_ranks() {
+fn model_proposals_keep_the_plain_ids_on_two_ranks() {model_proposals_keep_the_plain_ids(3);}
+/// The same with the largest predictor depth loaded: requests of depth 1 to 7. A request above depth 3 proposes as deep
+/// as its kept proposals set (row_split/deeper.rs), and with the test control its whole depth in every cycle, so chains
+/// of 4 to 7 tokens and check passes of 5 to 8 rows run on both ranks. Every kept row has the plain ID.
+#[test]
+fn deeper_model_proposals_keep_the_plain_ids_on_two_ranks() {model_proposals_keep_the_plain_ids(spark_engine::draft::PREDICTOR_DEPTH_MAX);}
+fn model_proposals_keep_the_plain_ids(loaded:usize) {
     use spark_engine::draft::{Config,Speculator};
     let c=fixture::Checkpoint::new_with_predictor(80);
     let (a_tx,b_rx)=sync_channel(1);let (b_tx,a_rx)=sync_channel(1);
     std::thread::scope(|scope| {
         let checkpoint=&c.admission;
-        let worker=scope.spawn(move || {let split=Split::new(Host,Wire {topology:Topology {rank:1,parts:2},controller:false,tx:b_tx,rx:b_rx}).unwrap();Factory::new(checkpoint,split,80,vec![0]).unwrap().with_predictor(3).unwrap().worker().unwrap();});
+        let worker=scope.spawn(move || {let split=Split::new(Host,Wire {topology:Topology {rank:1,parts:2},controller:false,tx:b_tx,rx:b_rx}).unwrap();Factory::new(checkpoint,split,80,vec![0]).unwrap().with_predictor(loaded).unwrap().worker().unwrap();});
         let split=Split::new(Host,Wire {topology:Topology {rank:0,parts:2},controller:true,tx:a_tx,rx:a_rx}).unwrap();
+        // A depth past the largest is refused when the predictor is loaded.
+        let refused=Factory::new(checkpoint,Split::new(Host,FaultWire {fault:std::rc::Rc::new(std::cell::Cell::new(false)),aborted:std::rc::Rc::new(std::cell::Cell::new(false))}).unwrap(),80,vec![0]).unwrap().with_predictor(spark_engine::draft::PREDICTOR_DEPTH_MAX+1);
+        assert_eq!(refused.err().as_deref(),Some("predictor depth is outside 1..=7"));
         let engine=Factory::new(checkpoint,split,80,vec![0]).unwrap();let before=engine.request_reservation_bytes(80).unwrap();
-        let engine=engine.with_predictor(3).unwrap();assert_eq!(engine.predictor_depth(),3);
+        let engine=engine.with_predictor(loaded).unwrap();assert_eq!(engine.predictor_depth(),loaded);
+        // The charge of a request does not depend on the loaded depth: a chain of any depth and its check pass are inside it.
+        let charged=engine.request_reservation_bytes(80).unwrap();
         assert!(engine.request_reservation_bytes(80).unwrap()>before,"the predictor's state and waiting rows are charged");
         let vocab=engine.vocab_size() as u32;let count=40;
         let best=|v:&[f32]|(0..v.len()).reduce(|a,b|if v[b]>v[a] {b} else {a}).unwrap() as u32;
-        let mut limits=spark_tp::row_split::limits(80,64).unwrap();limits.next_mtp_depth=Some(3);
+        let mut limits=spark_tp::row_split::limits(80,64).unwrap();limits.next_mtp_depth=Some(loaded);
         let request=|depth:usize|spark_serve::protocol::parse(format!(r#"{{"messages":[{{"role":"user","content":"Say hello."}}],"max_tokens":40,"mtp_depth":{depth}}}"#).as_bytes(),true,&limits).unwrap();
         let prompt=vec![3u32,5,1,7,2,6];
         let mut session=engine.session().unwrap();let mut logits=session.prefill(&prompt).unwrap();let mut plain=Vec::new();
         for at in 0..count {let id=best(&logits);plain.push(id);if at+1<count {logits=Session::step(&mut session,id).unwrap();}}drop(session);
-        // A depth above the loaded predictor is refused; depths 1 to 3 give the plain ids.
+        // A depth above the loaded predictor is refused; every depth up to it gives the plain ids.
         let mut session=engine.session().unwrap();
-        assert!(session.configure_request(&spark_serve::protocol::parse(br#"{"messages":[{"role":"user","content":"Say hello."}],"max_tokens":40,"mtp_depth":3,"draft":"fast"}"#,true,&limits).unwrap()).is_err());drop(session);
-        for depth in 1..=3 {
+        assert!(session.configure_request(&spark_serve::protocol::parse(br#"{"messages":[{"role":"user","content":"Say hello."}],"max_tokens":40,"mtp_depth":3,"draft":"fast"}"#,true,&limits).unwrap()).is_err());
+        if loaded<spark_engine::draft::PREDICTOR_DEPTH_MAX {let mut wide=spark_tp::row_split::limits(80,64).unwrap();wide.next_mtp_depth=Some(spark_engine::draft::PREDICTOR_DEPTH_MAX);
+            let above=spark_serve::protocol::parse(format!(r#"{{"messages":[{{"role":"user","content":"Say hello."}}],"max_tokens":40,"mtp_depth":{}}}"#,loaded+1).as_bytes(),true,&wide).unwrap();
+            assert!(session.configure_request(&above).is_err(),"a depth above the loaded predictor");}
+        drop(session);
+        for depth in 1..=loaded {
             let mut session=engine.session().unwrap();session.configure_request(&request(depth)).unwrap();
             let first=session.prefill(&prompt).unwrap();
             let mut spec=Speculator::from_selected(&prompt,prompt.len(),best(&first),vocab as usize,Config::strict(count-1),request(depth).sampling).unwrap();
@@ -813,18 +829,38 @@ fn model_proposals_keep_the_plain_ids_on_two_ranks() {
             drop(session);assert_eq!(engine.fatal_error(),None);
             // By hand, so that proposals are made whatever the chooser thinks of host timings: every
             // kept row has the plain id, and both ranks stay in step through proposals and verdicts.
+            // `rule`: the depth the kept proposals set for the next cycle (deeper.rs), followed here by its own words. The
+            // levels are 3, 5 and the whole depth. A level scores 3 for each proposal kept above the level under it, less
+            // 2 for each proposal it makes above that level, and holds 8 at most. A whole keep goes one level deeper when
+            // that level does not wait. At -4 a level is left and waits 2 cycles, then 8, 32 and 128; a score of 8 puts
+            // the wait back to 2. A request of depth 3 or less proposes its whole depth.
+            let by_hand=|whole:bool| {
             let mut session=engine.session().unwrap();session.configure_request(&request(depth)).unwrap();
             let first=session.prefill(&prompt).unwrap();assert_eq!(best(&first),plain[0]);
-            let target=session.draft_target().unwrap();let (mut at,mut proposed,mut kept_proposals)=(1,0,0);
+            let target=session.draft_target().unwrap();let (mut at,mut proposed,mut kept_proposals,mut deepest)=(1,0,0,0);
+            let levels:Vec<usize>=if depth<=3 {vec![depth]} else {(3..depth).step_by(2).chain([depth]).collect()};
+            let (mut level,mut score,mut wait,mut left)=(0,vec![0i32;levels.len()],vec![0u32;levels.len()],vec![0u32;levels.len()]);
             while at<count {target.limit_model_depth(depth);
                 let mut rows=vec![plain[at-1]];rows.extend(target.propose_model(&prompt,plain[at-1],depth).unwrap().unwrap().tokens);
-                rows.truncate(count-at);proposed+=rows.len()-1;
-                let entry=target.checkpoint();let logits=target.verify_batch(&rows).unwrap();
+                let rule=levels[level];let made=rows.len()-1;if made>0 {assert_eq!(made,if whole {depth} else {rule},"depth {depth} row {at}: the proposal's length");}
+                rows.truncate(count-at);proposed+=rows.len()-1;deepest=deepest.max(rows.len()-1);
+                let entry=target.checkpoint();let logits=target.verify_batch(&rows).unwrap();assert_eq!(logits.len(),rows.len());
                 let kept=1+rows[1..].iter().zip(&plain[at..]).take_while(|(a,b)|a==b).count();kept_proposals+=kept-1;
+                if depth>3 && rows.len()-1==rule {let (got,mut stay)=(kept-1,level);
+                    for tried in (1..=level).rev() {let (deep,under)=(levels[tried],levels[tried-1]);
+                        score[tried]=(score[tried]+3*(got.min(deep)-got.min(under)) as i32-2*(deep-under) as i32).min(8);if score[tried]==8 {left[tried]=0;}
+                        if score[tried]<=-4 {score[tried]=0;wait[tried]=2<<(2*left[tried]);left[tried]=(left[tried]+1).min(3);stay=tried-1;}}
+                    for waiting in &mut wait[level+1..] {*waiting=waiting.saturating_sub(1);}
+                    level=if stay<level {stay} else if got==rule && level+1<levels.len() && wait[level+1]==0 {level+1} else {level};
+                }
                 target.truncate(entry+kept).unwrap();for row in &logits[..kept] {assert_eq!(best(row),plain[at],"depth {depth} row {at}");at+=1;}}
-            eprintln!("depth {depth} by hand: proposed={proposed} kept={kept_proposals}");assert!(proposed>0,"the predictor made proposals at depth {depth}");
-            drop(session);assert_eq!(engine.fatal_error(),None);
+            eprintln!("depth {depth} by hand whole={whole}: proposed={proposed} kept={kept_proposals} deepest={deepest}");assert!(proposed>0,"the predictor made proposals at depth {depth}");
+            drop(session);assert_eq!(engine.fatal_error(),None);deepest};
+            let deepest=by_hand(false);assert!(deepest<=depth);if depth<=3 {assert_eq!(deepest,depth);}
+            // The whole depth in every cycle: the deep chain's own command and a check pass of depth+1 rows, on both ranks.
+            if depth>3 {engine.set_deep_always(true);assert_eq!(by_hand(true),depth);engine.set_deep_always(false);}
         }
+        assert_eq!(engine.request_reservation_bytes(80).unwrap(),charged);
         engine.shutdown().unwrap();worker.join().unwrap();
     });
 }
@@ -852,20 +888,29 @@ fn a_greedy_strict_pass_of_one_row_answers_with_the_plain_token_on_two_ranks() {
         let mut session=engine.session().unwrap();let mut logits=session.prefill(&prompt).unwrap();let mut plain=Vec::new();
         for at in 0..count {let id=best(&logits);plain.push((id,bits(&logits)));if at+1<count {logits=Session::step(&mut session,id).unwrap();}}drop(session);
         // The same chat twice: passes of one row by their logits, then by the head's pick. Every third
-        // cycle is a pass of proposed rows. The tokens, and the proposals after them, are the same.
-        let mut proposals=Vec::new();
+        // cycle is a pass of proposed rows: by its logits, then by the ID of each row (no logits are read).
+        // The tokens, and the proposals after them, are the same.
+        let mut proposals=Vec::new();let mut passes=Vec::new();
         for picked in [false,true] {
             let mut session=engine.session().unwrap();session.configure_request(&request).unwrap();
             let first=session.prefill(&prompt).unwrap();assert_eq!(bits(&first),plain[0].1);
-            let (mut at,mut cycle,mut proposed)=(1,0,Vec::new());
+            let (mut at,mut cycle,mut proposed,mut named)=(1,0,Vec::new(),Vec::new());
             while at<count {
                 if cycle%3==2 && at+4<count {
                     let target=session.draft_target().unwrap();target.limit_model_depth(3);
                     let mut rows=vec![plain[at-1].0];rows.extend(target.propose_model(&prompt,plain[at-1].0,3).unwrap().unwrap().tokens);proposed.push(rows[1..].to_vec());
                     let entry=target.checkpoint();let kept=1+rows[1..].iter().zip(&plain[at..]).take_while(|(a,b)|**a==b.0).count();
-                    let Predictions::Logits(logits)=one_pass(&engine,&mut session,&rows,picked) else {panic!("a pass of rows answers with logits")};
+                    // What each row names, kept or dropped: the best of its logits, or the ID the pass picked.
+                    let ids=match one_pass(&engine,&mut session,&rows,picked) {
+                        Predictions::Logits(logits)=>{assert!(!picked || rows.len()==1,"a greedy pass of rows reads no logits");
+                            for (row,logits) in logits[..kept].iter().enumerate() {assert_eq!(bits(logits),plain[at+row].1,"row {}",at+row);}
+                            logits.iter().map(|row|best(row)).collect::<Vec<_>>()},
+                        Predictions::Greedy(ids)=>{assert!(picked,"a pass that was not asked for IDs answers with logits");ids},
+                        _=>panic!("a strict pass answers with tokens or logits"),
+                    };
+                    assert_eq!(ids.len(),rows.len());
                     session.draft_target().unwrap().truncate(entry+kept).unwrap();
-                    for row in &logits[..kept] {assert_eq!(bits(row),plain[at].1,"row {at}");at+=1;}
+                    for &id in &ids[..kept] {assert_eq!(id,plain[at].0,"row {at}");at+=1;}named.push(ids);
                 } else {
                     match one_pass(&engine,&mut session,&[plain[at-1].0],picked) {
                         Predictions::Greedy(ids)=>{assert!(picked);assert_eq!(ids,vec![plain[at].0],"row {at}");},
@@ -876,9 +921,11 @@ fn a_greedy_strict_pass_of_one_row_answers_with_the_plain_token_on_two_ranks() {
                 cycle+=1;
             }
             assert!(proposed.iter().any(|tokens|!tokens.is_empty()),"the predictor made proposals");proposals.push(proposed);
+            assert!(named.iter().any(|ids|ids.len()>=2),"a pass of 2 rows or more ran");passes.push(named);
             drop(session);assert_eq!(engine.fatal_error(),None);
         }
         assert_eq!(proposals[0],proposals[1],"a picked row leaves the proposer the hidden row a logits row leaves");
+        assert_eq!(passes[0],passes[1],"each row of a greedy pass answers with the best ID of its logits, kept or dropped");
         // The scheduler's way back when the tokenizer does not hold a picked token: drop the row, run it again by its logits.
         let mut session=engine.session().unwrap();session.configure_request(&request).unwrap();session.prefill(&prompt).unwrap();
         let Predictions::Greedy(ids)=one_pass(&engine,&mut session,&[plain[0].0],true) else {panic!("the pass was not picked")};assert_eq!(ids,vec![plain[1].0]);
@@ -891,14 +938,19 @@ fn a_greedy_strict_pass_of_one_row_answers_with_the_plain_token_on_two_ranks() {
     });
 }
 #[test]
-fn served_model_drafting_keeps_the_plain_ids_at_caps_ends_and_beside_a_second_chat() {
+fn served_model_drafting_keeps_the_plain_ids_at_caps_ends_and_beside_a_second_chat() {served_model_drafting(3);}
+/// The same at the largest depth, with the whole depth in every cycle (the test control): an answer shorter than the
+/// depth, an answer that ends inside a pass of 8 rows, and a chain that would pass the end of the context.
+#[test]
+fn served_deep_drafting_keeps_the_plain_ids_at_caps_ends_and_beside_a_second_chat() {served_model_drafting(spark_engine::draft::PREDICTOR_DEPTH_MAX);}
+fn served_model_drafting(loaded:usize) {
     use std::{io::{Read,Write},net::{TcpListener,TcpStream},sync::atomic::AtomicBool,time::Duration};
     let listener=TcpListener::bind("127.0.0.1:0").unwrap();let address=listener.local_addr().unwrap();
-    let caps=[1usize,2,3,4,5,6,7,9];let requests=caps.len()*2+2+2+2+2;
+    let caps=[1usize,2,3,4,5,6,7,8,9,10,17];let requests=caps.len()*2+2+2+2+2;
     let worker=std::thread::spawn(move|| {
         let c=fixture::Checkpoint::new_with_predictor(80);
         let split=Split::new(Host,FaultWire {fault:std::rc::Rc::new(std::cell::Cell::new(false)),aborted:std::rc::Rc::new(std::cell::Cell::new(false))}).unwrap();
-        let engine=Factory::new(&c.admission,split,80,vec![0]).unwrap().with_predictor(3).unwrap();
+        let engine=Factory::new(&c.admission,split,80,vec![0]).unwrap().with_predictor(loaded).unwrap();if loaded>3 {engine.set_deep_always(true);}
         let mut limits=spark_tp::row_split::limits(80,48).unwrap();limits.next_mtp_depth=Some(engine.predictor_depth());
         let cache=spark_serve::cache::CacheLimits {entries:1,retained_bytes:0,tokens_per_entry:8,logits_per_entry:16,idle_ttl:Duration::from_secs(1)};
         let config=spark_serve::scheduler::Config {active:8,connections:32,prefill_chunk:4,foreground_rows:1,background_rows:1,active_bytes:1<<26,session_budget_bytes:1<<26,draft:spark_serve::protocol::DraftMode::Plain,mtp_depth:0,draft_global_bank:false,prefix_cache:false,sharing:Default::default()};
@@ -906,7 +958,7 @@ fn served_model_drafting_keeps_the_plain_ids_at_caps_ends_and_beside_a_second_ch
         assert_eq!(engine.fatal_error(),None);engine.shutdown().unwrap();
     });
     let ask=move|prompt:&str,tokens:usize,ignore_eos:bool,strict:bool| {
-        let draft=if strict {r#""draft":"strict","mtp_depth":3"#} else {r#""draft":"plain""#};
+        let draft=if strict {format!(r#""draft":"strict","mtp_depth":{loaded}"#)} else {r#""draft":"plain""#.to_owned()};
         let body=format!(r#"{{"prompt_token_ids":{prompt},"stream":true,"max_tokens":{tokens},"ignore_eos":{ignore_eos},"cache":false,{draft}}}"#);
         let mut stream=TcpStream::connect(address).unwrap();stream.set_read_timeout(Some(Duration::from_secs(120))).unwrap();
         write!(stream,"POST /v1/completions HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",body.len()).unwrap();let mut reply=String::new();stream.read_to_string(&mut reply).unwrap();reply};
@@ -1062,7 +1114,10 @@ fn without_the_switch_no_session_forks() {
 /// drafting at its first closed shadow, so the speculator is made inside the request, drafts, and is dropped when
 /// the request's own cycles stop it. `marker`: the token that ends a think block; the trial makes no shadow before the
 /// request's own steps give it (or before its bound of steps). Every answer must be the plain one.
-fn default_drafting_run(force:bool,marker:Option<u32>) {
+fn default_drafting_run(force:bool,marker:Option<u32>) {default_drafting_loaded(3,force,marker);}
+/// `loaded`: the predictor depth both ranks load. Above TRIAL_DEPTH the service's default depth stays TRIAL_DEPTH, and
+/// real drafting that a trial started may go as deep as the loaded predictor (with the test control: in every cycle).
+fn default_drafting_loaded(loaded:usize,force:bool,marker:Option<u32>) {
     use std::{io::{Read,Write},net::{TcpListener,TcpStream},sync::atomic::{AtomicBool,Ordering::SeqCst},time::Duration};
     let listener=TcpListener::bind("127.0.0.1:0").unwrap();let address=listener.local_addr().unwrap();
     let c=fixture::Checkpoint::new_with_predictor(144);
@@ -1075,11 +1130,12 @@ fn default_drafting_run(force:bool,marker:Option<u32>) {
     std::thread::scope(|scope| {
         let checkpoint=&c.admission;
         let worker=scope.spawn(move || {let split=Split::new(Host,Wire {topology:Topology {rank:1,parts:2},controller:false,tx:b_tx,rx:b_rx}).unwrap();
-            Factory::new(checkpoint,split,144,vec![0]).unwrap().with_predictor(3).unwrap().worker().unwrap();});
+            Factory::new(checkpoint,split,144,vec![0]).unwrap().with_predictor(loaded).unwrap().worker().unwrap();});
         let counter=batches.clone();
         let server=scope.spawn(move || {
             let split=Split::new(Host,Counted(Wire {topology:Topology {rank:0,parts:2},controller:true,tx:a_tx,rx:a_rx},counter)).unwrap();
-            let engine=Factory::new(checkpoint,split,144,vec![0]).unwrap().with_predictor(3).unwrap();if force {engine.set_trial_always();}
+            let engine=Factory::new(checkpoint,split,144,vec![0]).unwrap().with_predictor(loaded).unwrap();if force {engine.set_trial_always();}
+            if loaded>spark_tp::row_split::TRIAL_DEPTH {engine.set_deep_always(true);}
             if let Some(marker)=marker {engine.set_answer_marker(marker);}
             let mut limits=spark_tp::row_split::limits(144,96).unwrap();limits.next_mtp_depth=Some(engine.predictor_depth());
             let cache=spark_serve::cache::CacheLimits {entries:1,retained_bytes:0,tokens_per_entry:8,logits_per_entry:16,idle_ttl:Duration::from_secs(1)};
@@ -1105,7 +1161,9 @@ fn default_drafting_run(force:bool,marker:Option<u32>) {
         // Alone: the plain answer of each prompt, then the same prompt with no draft mode.
         let plain=prompts.map(|prompt|ids(&ask(prompt,88,r#","draft":"plain""#)));
         assert_eq!(ids(&strict_zero),plain[0],"strict without mtp_depth");
-        for (prompt,want) in prompts.iter().zip(&plain) {assert_eq!(want.len(),88);let reply=ask(prompt,88,"");assert_eq!(&ids(&reply),want,"alone {prompt}: {reply}");}
+        // The answer of a request that names no draft mode names the service's default depth, whatever depth is loaded.
+        for (prompt,want) in prompts.iter().zip(&plain) {assert_eq!(want.len(),88);let reply=ask(prompt,88,"");assert_eq!(&ids(&reply),want,"alone {prompt}: {reply}");
+            assert!(reply.contains(&format!("\"mtp_depth\":{}",spark_tp::row_split::TRIAL_DEPTH)),"{reply}");}
         // An output cap across TRIAL_START, the trial's stop and the token that the dropped speculator hands back:
         // the answer has exactly that many tokens, the plain ones.
         for cap in caps {let (want,got)=(ids(&ask(prompts[0],cap,r#","draft":"plain""#)),ids(&ask(prompts[0],cap,"")));assert_eq!(want.len(),cap);assert_eq!(got,want,"cap {cap}");}
@@ -1118,7 +1176,7 @@ fn default_drafting_run(force:bool,marker:Option<u32>) {
         assert!(batches.load(SeqCst)>0,"four chats with no draft mode share the batch step");
         // A chat alone in its trial (or drafting), then joined by a strict request: both keep their IDs.
         let first=scope.spawn(move||ask(prompts[0],88,""));std::thread::sleep(Duration::from_millis(20));
-        let second=ask(prompts[1],88,r#","draft":"strict","mtp_depth":3"#);
+        let second=ask(prompts[1],88,&format!(r#","draft":"strict","mtp_depth":{loaded}"#));
         assert_eq!(ids(&first.join().unwrap()),plain[0]);assert_eq!(ids(&second),plain[1]);
         // A request that ends at the context's last row: a probe that is due there stays inside the context, the answer
         // is the plain one, and the service goes on.
@@ -1135,6 +1193,13 @@ fn default_drafting_run(force:bool,marker:Option<u32>) {
 fn default_requests_give_the_plain_ids_alone_and_in_the_shared_step_on_two_ranks() {default_drafting_run(false,None);}
 #[test]
 fn a_trial_that_starts_real_drafting_and_stops_gives_the_plain_ids_on_two_ranks() {default_drafting_run(true,None);}
+/// The largest predictor depth loaded: a request that names no draft mode keeps the default depth in its answer, its
+/// trial probes at TRIAL_DEPTH, and its real drafting runs cycles of the whole loaded depth (the test control) on
+/// both ranks. Every answer is the plain one, alone, beside other chats and at the end of the context.
+#[test]
+fn default_requests_on_a_deeper_predictor_give_the_plain_ids_on_two_ranks() {
+    default_drafting_loaded(spark_engine::draft::PREDICTOR_DEPTH_MAX,true,None);default_drafting_loaded(spark_engine::draft::PREDICTOR_DEPTH_MAX,false,None);
+}
 /// The trial waits for the token that ends the think block: a token of this model's answers (the wait ends inside the
 /// answer), and a token no answer holds (the wait ends at its bound).
 #[test]
@@ -1368,3 +1433,5 @@ fn verify_routes_are_charged_to_the_verify_row_limit_with_a_predictor_and_absent
     });
 }
 
+
+#[path="support/deep_service.rs"] mod deep_service;

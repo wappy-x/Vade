@@ -95,9 +95,9 @@ pub const fn fast_admitted(s:Shape,threads:u32)->bool {
         Op::KeyNorm=>swept_dims_wide(d),
         // One warp per 32-word group; the column counts the device sweep covers (the model's 4,096 and 8,192, the dense 12,288, and small and odd multiples of 32).
         Op::Mxfp8Quantize|Op::Mxfp8QuantizePositiveZero=>r<=2 && (matches!(k,32|64|96|128|160|1024|2048|4096|8192|12288|16384) || quantize_rows(k)),
-        Op::PoolScores=>matches!(d,1|2|31|32|33|127|128|255|256) && matches!(h,1|2|3|31|32|33|63|64|65|100|128) && r<=4096,
+        Op::PoolScores=>matches!(d,1|2|31|32|33|127|128|255|256) && matches!(h,1|2|3|31|32|33|63|64|65|100|128) && r<=8192,
         Op::Softmax=>matches!(h,1|2|3|32|33|64|65|100|128) && r>=1 && r<=4096,
-        Op::Gather=>matches!(d,1|3|32|33|512|1024) && r>=1 && r<=16384 && k>=1 && k<=4096,
+        Op::Gather=>matches!(d,1|3|32|33|512|1024) && r>=1 && r<=32768 && k>=1 && k<=4096,
         // Heads are not read by either version. Dims and taps are the swept lists of `swept.rs`, rows an interval with swept edges.
         Op::PoolChannels=>matches!(d,1|2|31|32|33|127|128|129) && matches!(s.taps,1|2|3|4|5|8|127|128|129) && r>=1 && r<=16384,
         // The fold of the routed experts with the round of its rows (dim FOLD_ROUNDS) only: the picks sit in one thread's
@@ -492,17 +492,17 @@ mod tests {
             assert!(fast_admitted(s(op,64,128,0,0),128) && fast_admitted(s(op,1,128,0,0),128));
             assert!(!fast_admitted(s(op,65,128,0,0),128) && !fast_admitted(s(op,64,127,0,0),128) && !fast_admitted(s(op,64,129,0,0),128) && !fast_admitted(s(op,64,128,0,0),32));
         }
-        assert!(fast_admitted(s(Op::PoolScores,64,128,1040,0),128) && fast_admitted(s(Op::PoolScores,128,256,4096,0),128) && fast_admitted(s(Op::PoolScores,1,1,0,0),128));
-        assert!(!fast_admitted(s(Op::PoolScores,129,128,10,0),128) && !fast_admitted(s(Op::PoolScores,64,257,10,0),128) && !fast_admitted(s(Op::PoolScores,64,128,4097,0),128) && !fast_admitted(s(Op::PoolScores,64,0,10,0),128));
+        assert!(fast_admitted(s(Op::PoolScores,64,128,1040,0),128) && fast_admitted(s(Op::PoolScores,128,256,8192,0),128) && fast_admitted(s(Op::PoolScores,1,1,0,0),128));
+        assert!(!fast_admitted(s(Op::PoolScores,129,128,10,0),128) && !fast_admitted(s(Op::PoolScores,64,257,10,0),128) && !fast_admitted(s(Op::PoolScores,64,128,8193,0),128) && !fast_admitted(s(Op::PoolScores,64,0,10,0),128));
         assert!(fast_admitted(s(Op::Softmax,64,0,2051,0),128) && fast_admitted(s(Op::Softmax,128,0,4096,0),128));
         assert!(!fast_admitted(s(Op::Softmax,129,0,10,0),128) && !fast_admitted(s(Op::Softmax,64,0,4097,0),128) && !fast_admitted(s(Op::Softmax,64,0,0,0),128) && !fast_admitted(s(Op::Softmax,64,0,10,0),64));
-        assert!(fast_admitted(s(Op::Gather,0,512,4158,2051),128) && fast_admitted(s(Op::Gather,0,1024,16384,4096),128));
-        assert!(!fast_admitted(s(Op::Gather,0,1025,10,10),128) && !fast_admitted(s(Op::Gather,0,512,16385,10),128) && !fast_admitted(s(Op::Gather,0,512,10,4097),128) && !fast_admitted(s(Op::Gather,0,0,10,10),128));
+        assert!(fast_admitted(s(Op::Gather,0,512,4158,2051),128) && fast_admitted(s(Op::Gather,0,1024,32768,4096),128));
+        assert!(!fast_admitted(s(Op::Gather,0,1025,10,10),128) && !fast_admitted(s(Op::Gather,0,512,32769,10),128) && !fast_admitted(s(Op::Gather,0,512,10,4097),128) && !fast_admitted(s(Op::Gather,0,0,10,10),128));
         // Review: heads and dims between the swept values keep the original entry too.
         for op in [Op::Prepare,Op::GatedNorm] {assert!(!fast_admitted(s(op,6,6,0,0),128) && !fast_admitted(s(op,64,130,0,0),128) && !fast_admitted(s(op,7,128,0,0),128) && !fast_admitted(s(op,100,64,0,0),128) && !fast_admitted(s(op,128,255,0,0),128));
             assert!(fast_admitted(s(op,100,128,0,0),128) && fast_admitted(s(op,5,1023,0,0),128) && fast_admitted(s(op,127,1,0,0),128) && !fast_admitted(s(op,128,1024,0,0),64));}
         for op in [Op::Step,Op::StepColumns,Op::StepLayout] {assert!(!fast_admitted(s(op,4,128,0,0),128) && !fast_admitted(s(op,32,128,0,0),128) && fast_admitted(s(op,17,128,0,0),128) && fast_admitted(s(op,63,128,0,0),128));}
-        assert!(!fast_admitted(s(Op::PoolScores,30,128,10,0),128) && !fast_admitted(s(Op::PoolScores,32,129,10,0),128) && fast_admitted(s(Op::PoolScores,32,128,10,0),128) && fast_admitted(s(Op::PoolScores,100,255,4096,0),128));
+        assert!(!fast_admitted(s(Op::PoolScores,30,128,10,0),128) && !fast_admitted(s(Op::PoolScores,32,129,10,0),128) && fast_admitted(s(Op::PoolScores,32,128,10,0),128) && fast_admitted(s(Op::PoolScores,100,255,8192,0),128));
         assert!(!fast_admitted(s(Op::Softmax,4,0,10,0),128) && !fast_admitted(s(Op::Softmax,63,0,10,0),128) && fast_admitted(s(Op::Softmax,100,0,10,0),128));
         assert!(!fast_admitted(s(Op::Gather,0,128,10,10),128) && !fast_admitted(s(Op::Gather,0,2,10,10),128) && fast_admitted(s(Op::Gather,0,3,10,10),128));
         // PoolChannels (READ-SPLIT): the swept dims and taps, rows 1 to 16,384, any heads; every other value keeps the original entry.

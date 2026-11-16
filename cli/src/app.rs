@@ -126,15 +126,30 @@ impl<R: Runner> App<R> {
             self.install()?;
             result = self.start_engine(options);
         }
-        let refused = result.as_ref().err().filter(|error| options.fp4_local && !options.supplied_options.contains("--context")
-            && error.contains(&format!("CONTEXT={}", crate::cli::FP4_LONG_CONTEXT)) && !error.contains("Cleanup could not finish")
-            && (crate::launch::memory_refusal(error).is_some() || text_memory_refusal(error))).is_some();
-        if !refused { return result; }
-        crate::output::line(format_args!("Context {} does not fit in memory on these Sparks. Starting with context {}.", crate::cli::FP4_LONG_CONTEXT, crate::cli::FP4_CONTEXT))?;
-        let mut smaller = options.clone();
-        smaller.context = crate::cli::FP4_CONTEXT;
-        smaller.supplied_options.insert("--context".to_owned());
-        self.start_engine(&smaller)
+        // Defaults fall back, each at most once: the long default context to the short one on a memory refusal, and
+        // the text service's default drafting depth to no drafting (a default must not fail a start that `--mtp 0`
+        // passes). The depth falls on a model folder with no drafting layer, or on a memory refusal that the
+        // context can no longer answer: the context falls first. What the person named stays their choice: the
+        // engine's error is the answer. Any other error, also after a fall, is returned as it is.
+        let mut options = options.clone();
+        let mut shorter = false;
+        loop {
+            let Some(error) = result.as_ref().err().filter(|error| !error.contains("Cleanup could not finish")) else { return result };
+            if !shorter && options.fp4_local && !options.supplied_options.contains("--context")
+                && error.contains(&format!("CONTEXT={}", crate::cli::FP4_LONG_CONTEXT))
+                && (crate::launch::memory_refusal(error).is_some() || text_memory_refusal(error, crate::cli::FP4_LONG_CONTEXT)) {
+                crate::output::line(format_args!("Context {} does not fit in memory on these Sparks. Starting with context {}.", crate::cli::FP4_LONG_CONTEXT, crate::cli::FP4_CONTEXT))?;
+                options.context = crate::cli::FP4_CONTEXT;
+                options.supplied_options.insert("--context".to_owned());
+                shorter = true;
+            } else if let Some(fall) = draft_fall(error, &options) {
+                crate::output::line(format_args!("{}", fall.line()))?;
+                options.draft_fall = Some(fall);
+            } else {
+                return result;
+            }
+            result = self.start_engine(&options);
+        }
     }
 
     fn start_engine(&mut self, options: &UpOptions) -> Result<(), String> {
@@ -142,9 +157,18 @@ impl<R: Runner> App<R> {
         self.config.validate_control_socket()?;
         let rdma = rdma_enabled()?;
         let existing = Session::load(&self.config.state_dir)?;
+        // A text service that runs without drafting after a fall of the default depth (no drafting layer, or too
+        // little memory at its start): a start that names no depth asks for that same running engine again, not for
+        // a change of depth. The running engine keeps its depth, as it keeps a context that fell.
+        let same_fall = existing.as_ref().and_then(|session| session.draft_fall).filter(|_| options.diagnostic_unqualified_text && !options.mtp_explicit)
+            .map(|fall| UpOptions { draft_fall: Some(fall), ..options.clone() });
+        let options = same_fall.as_ref().unwrap_or(options);
         let mut session = self.requested_session(options, existing.as_ref(), rdma)?;
         if let Some(existing) = existing {
             if !resident::same_launch(&existing, &session) {
+                if existing.diagnostic_unqualified_text && session.diagnostic_unqualified_text && existing.mtp == 0 && session.mtp == crate::state::TEXT_DRAFT_DEPTH && !options.mtp_explicit {
+                    return Err("The default drafting depth for this text service is now 3. This engine was started with no predictor. Run vade down, then start it again with --diagnostic-unqualified-text.".into());
+                }
                 return Err("Vade already has an ownership record with different launch settings or build. Run vade down before changing it.".into());
             }
             return self.already_ready(&existing);
@@ -162,7 +186,7 @@ impl<R: Runner> App<R> {
             ("Machines", session.ranks.iter().map(|rank| rank.machine.name.as_str()).collect::<Vec<_>>().join(", ")),
             ("Context", format!("{} tokens", session.context)),
             ("Output limit", format!("{} tokens", session.output)),
-            ("Drafting request", if session.mtp_explicit { format!("MTP {}", session.mtp) } else { "engine default".into() }),
+            ("Drafting request", session.drafting_plan()),
             ("Concurrent chats", session.chats.map_or_else(|| "engine-admitted".into(), |count| count.to_string())),
             ("Transport", transport.clone()),
             ("Endpoint", format!("{}/v1", session.endpoint())),
@@ -838,13 +862,38 @@ impl<R: Runner> App<R> {
     }
 }
 
-/// The two-Spark text service's refusal of the long default context
+/// The engine's error when a start asks for a predictor and the checkpoint declares none (`enable_predictor`; the
+/// text service loads a predictor only for a depth above 0, in its start step `predictor`).
+const NO_DRAFT_LAYER: &str = "checkpoint declares no predictor layer";
+fn no_draft_layer(error: &str) -> bool {
+    error.lines().any(|line| line.contains(NO_DRAFT_LAYER))
+}
+
+/// The fall of the text service's default depth that this start error asks for, if any. The depth was not named
+/// and has not fallen yet (depth 0 is its last fall), and the engine either found no drafting layer or refused
+/// this start's context for memory. The context falls first: a memory refusal asks for the depth only when the
+/// context is fixed, because the person named it or because it fell already (both leave `--context` supplied; an
+/// unnamed context is the long default, which is not in `options.context` here).
+fn draft_fall(error: &str, options: &UpOptions) -> Option<crate::cli::DraftFall> {
+    if !options.diagnostic_unqualified_text || options.mtp_explicit || options.draft_fall.is_some() {
+        return None;
+    }
+    if no_draft_layer(error) {
+        Some(crate::cli::DraftFall::NoLayer)
+    } else if options.supplied_options.contains("--context") && text_memory_refusal(error, options.context) {
+        Some(crate::cli::DraftFall::Memory)
+    } else {
+        None
+    }
+}
+
+/// The two-Spark text service's refusal of a context for memory
 /// (`--diagnostic-unqualified-text`): one engine line that names that context
 /// and ends "reduce CONTEXT". Its wording differs from the FP4 engine's
 /// "Requested size does not fit.", which `launch::memory_refusal` reads.
-fn text_memory_refusal(error: &str) -> bool {
-    let long = format!("text service memory refusal: CONTEXT={};", crate::cli::FP4_LONG_CONTEXT);
-    error.lines().any(|line| line.contains(&long) && line.trim_end().ends_with("reduce CONTEXT"))
+fn text_memory_refusal(error: &str, context: u32) -> bool {
+    let refused = format!("text service memory refusal: CONTEXT={context};");
+    error.lines().any(|line| line.contains(&refused) && line.trim_end().ends_with("reduce CONTEXT"))
 }
 
 fn clear_cloud_auth(exec: &mut Exec) {

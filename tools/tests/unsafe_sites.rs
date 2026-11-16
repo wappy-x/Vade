@@ -34,6 +34,32 @@ fn new_block_is_only_allowed_in_gpu_crate() {
     fails_with(&check_fixture(HOST,GOOD,false),"outside the GPU crate");
 }
 #[test]
+fn a_new_block_outside_the_gpu_crate_passes_only_with_its_own_ruling_and_a_contract() {
+    let found = sites(HOST,GOOD,false).unwrap(); assert_eq!(found.len(),1);
+    // In the allowlist with no ruling text: still refused.
+    let listed = allowlist(&unsafe_sites::render(&found,&BTreeMap::new())).unwrap();
+    fails_with(&violations(&found,&listed),"new unsafe block outside the GPU crate");
+    let ruled = allowlist(&format!("{}\t{RULING}\n",found[0].key)).unwrap();
+    assert!(violations(&found,&ruled).is_empty());
+    assert!(unsafe_sites::drift(&found,&ruled).is_empty());
+    // The ruling does not replace the contract.
+    let bare = sites(HOST,"fn launch() { unsafe { call(); } }",false).unwrap();
+    let ruled_bare = allowlist(&format!("{}\t{RULING}\n",bare[0].key)).unwrap();
+    fails_with(&violations(&bare,&ruled_bare),"needs a SAFETY: contract");
+    // A ruling for another item approves nothing here.
+    let other = sites(HOST,"fn other() {\n    // SAFETY: The caller owns the buffer until this call returns.\n    unsafe { call(); }\n}\n",false).unwrap();
+    assert!(!violations(&other,&ruled).is_empty());
+    // A second block in the ruled item is a new site with no row: refused.
+    let grown = sites(HOST,"fn launch() {\n    // SAFETY: The caller owns the buffer until this call returns.\n    unsafe { call(); }\n    // SAFETY: The same buffer.\n    unsafe { other(); }\n}\n",false).unwrap();
+    assert_eq!(grown.len(),2); assert!(!violations(&grown,&ruled).is_empty());
+    // Every other kind of new unsafe item outside the GPU crate is refused with a ruling line too.
+    for source in ["unsafe impl Send for Old {}","unsafe extern \"C\" { fn old(); }","unsafe trait Old {}"] {
+        let decl = sites(HOST,source,false).unwrap(); assert_eq!(decl.len(),1);
+        let ruled_decl = allowlist(&format!("{}\t{RULING}\n",decl[0].key)).unwrap();
+        fails_with(&violations(&decl,&ruled_decl),"outside the GPU crate");
+    }
+}
+#[test]
 fn new_declarations_fail_and_legacy_declarations_pass() {
     for source in ["unsafe fn old() {}","unsafe impl Send for Old {}","unsafe extern \"C\" { fn old(); }","unsafe trait Old {}","#[unsafe(no_mangle)] fn old() {}"] {
         let old = sites(HOST,source,false).unwrap(); assert_eq!(old.len(),1);

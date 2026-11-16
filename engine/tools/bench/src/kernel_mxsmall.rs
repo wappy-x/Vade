@@ -103,7 +103,67 @@ fn launch_replaced(g: &Gpu, olds: &[(&str, H)], tile: H, p: &Proj) -> Result<()>
     let mut a = proj_bytes(p);
     g.launch(f, [p.rows.div_ceil(16), p.tokens.div_ceil(per), 1], 128, 0, &mut [a.as_mut_ptr().cast()])
 }
-pub(crate) fn run(base_path: &str, candidate_path: &str, time: bool) -> Result<()> {
+/// `head`: the output head of one rank (77,440 x 4,096; `mx_rows::HEAD_ROWS`). Bytes: the candidate image's `mx_rows_small4` at 3 and 4
+/// tokens and its tile at 5 to 8 (the host rule of `small_choice::mx`) against the production M kernels, five activation kinds, with a
+/// shifted-rows control. Time: the production kernels, the tile, the small entries and ONE token, at 2 to 8 tokens.
+fn head(g: &mut Gpu, fns: &[(&str, H)], tile: H, smalls: &[(&str, H)]) -> Result<()> {
+    let (rows, cols) = (77440usize, 4096usize); let started = Instant::now();
+    let wa = weights_of(g, rows, cols, 4242)?;
+    let (mut comparisons, mut controls) = (0u64, 0u64);
+    for tokens in 3..=8usize { for kind in 0..5u32 {
+        let (fx, oa, ob) = build_shared(g, rows, cols, tokens, kind, 2000 + tokens as u64 * 11 + kind as u64, wa)?;
+        oa.poison(g)?; ob.poison(g)?;
+        // The host rule: `mx_rows_small4` at 3 and 4 tokens, the tile at 5 to 8.
+        launch_reference(g, fns, &fx.p)?;
+        if tokens <= 4 { launch_small(g, smalls, &Proj { output: ob.address, ..fx.p })?; } else { launch_tile(g, tile, &Proj { output: ob.address, ..fx.p })?; }
+        g.sync()?;
+        let (x, y) = (oa.read(g)?, ob.read(g)?);
+        if x != y { let at = x.iter().zip(&y).position(|(p, q)| p != q).map(|i| (i.saturating_sub(16) / 4, i)); return Err(format!("MXSMALL HEAD BYTE FAIL tokens={tokens} act_kind={kind} first_word_and_byte={at:?}")); }
+        if y[..16] != GUARD || y[y.len() - 16..] != GUARD { return Err("MXSMALL head guard changed".into()); }
+        comparisons += 1;
+        if kind == 0 {
+            ob.poison(g)?;
+            let q = Proj { output: ob.address, input: fx.p.input + (cols * 4) as u64, tokens: tokens as u32 - 1, ..fx.p };
+            if tokens <= 4 { launch_small(g, smalls, &q)?; } else { launch_tile(g, tile, &q)?; }
+            g.sync()?;
+            let shifted = ob.read(g)?; let n = 16 + (tokens - 1) * rows * 4;
+            if shifted[16..n] == x[16..n] { return Err(format!("MXSMALL HEAD CONTROL did not fail tokens={tokens}")); }
+            controls += 1;
+        }
+    } }
+    println!("MXSMALL HEAD BYTES PASS rows={rows} cols={cols} mx_rows_small4 at 3 and 4 tokens and the tile at 5 to 8 equal the production kernels comparisons={comparisons} controls_failed_as_they_must={controls} elapsed_s={:.1}", started.elapsed().as_secs_f64());
+    g.clear()?;
+    // Time: weights and scales at the start of their allocation, as the engine's are; two copies, so a launch reads cold memory.
+    let k = 2usize; let mut ws = vec![];
+    for i in 0..k {
+        let mut r = Rng(77 + i as u64 * 13 + rows as u64);
+        let w: Vec<u8> = (0..rows * cols).map(|_| { let c = (r.next() >> 24) as u8; if c & 127 == 127 { c & 0xfe } else { c } }).collect();
+        let sc: Vec<u8> = (0..rows * cols / 32).map(|_| 120 + (r.next() % 14) as u8).collect();
+        ws.push((g.upload(&w)?, g.upload(&sc)?));
+    }
+    let bytes = (rows * cols) as f64 * (1.0 + 1.0 / 32.0);
+    for tokens in 2..=8usize {
+        let mut ps = vec![];
+        for (i, w) in ws.iter().enumerate() {
+            let x = g.upload(&le(&activations(0, tokens * cols, 36 + i as u64)))?; let out = g.upload(&vec![0u8; rows * tokens * 4])?;
+            ps.push(Proj { weights: w.0, scales: w.1, input: x, output: out, rows: rows as u32, cols: cols as u32, tokens: tokens as u32 });
+        }
+        let mut t: [Vec<f64>; 4] = Default::default();
+        for repeat in 0..5 { for step in 0..4 { let arm = (step + repeat) % 4;
+            let run = |g: &Gpu, i: usize| -> Result<()> { let p = &ps[i % k]; match arm {
+                0 => launch_reference(g, fns, p), 1 => launch_tile(g, tile, p), 2 => launch_small(g, smalls, p), _ => launch_reference(g, fns, &Proj { tokens: 1, ..*p }) } };
+            for i in 0..k { run(g, i)?; } g.sync()?;
+            let t0 = Instant::now(); for i in 0..4 * k { run(g, i)?; } g.sync()?;
+            t[arm].push(t0.elapsed().as_secs_f64() * 1e6 / (4 * k) as f64);
+        } }
+        let us = t.map(median);
+        println!("MXSMALL HEAD TIME tokens={tokens} production_us={:.0} ({:.0} GB/s) mx_rows_tile_us={:.0} ({:.0} GB/s) mx_rows_small_us={:.0} ({:.0} GB/s) one_token_us={:.0} ({:.0} GB/s)",
+            us[0], bytes / us[0] / 1e3, us[1], bytes / us[1] / 1e3, us[2], bytes / us[2] / 1e3, us[3], bytes / us[3] / 1e3);
+    }
+    Ok(())
+}
+pub(crate) fn run(base_path: &str, candidate_path: &str, mode: &str) -> Result<()> {
+    let time = mode == "time";
     let (a, b) = (std::fs::read(base_path).map_err(|e| e.to_string())?, std::fs::read(candidate_path).map_err(|e| e.to_string())?);
     println!("MXSMALL baseline_sha256={} candidate_sha256={}", sha256::digest(&a), sha256::digest(&b));
     let mut g = Gpu::new()?; let (ma, mb) = (g.module(&a)?, g.module(&b)?);
@@ -114,6 +174,7 @@ pub(crate) fn run(base_path: &str, candidate_path: &str, time: bool) -> Result<(
     // The replaced kernels exist only in a baseline image older than ROWS-MX (one without `mx_rows_small8`).
     let olds: Vec<(&str, H)> = if g.function(ma, "mx_rows_small8").is_ok() { vec![] } else { ["mx_rows_small2", "mx_rows_small4"].iter().map(|n| g.function(ma, n).map(|h| (*n, h))).collect::<Result<_>>()? };
     println!("MXSMALL replaced_kernel_arm={}", if olds.is_empty() { "absent (the baseline image has the new entries)" } else { "present" });
+    if mode == "head" { let tile_b = g.function(mb, "mx_rows_tile")?; return head(&mut g, &fns, tile_b, &smalls); }
     let started = Instant::now();
     if !time {
         let (comparisons, compared, replaced) = (std::cell::Cell::new(0u64), std::cell::Cell::new(0u64), std::cell::Cell::new(0u64));
@@ -158,6 +219,40 @@ pub(crate) fn run(base_path: &str, candidate_path: &str, time: bool) -> Result<(
         } }
         println!("MXSMALL sweep ok comparisons={} elapsed_s={:.1}", comparisons.get(), started.elapsed().as_secs_f64());
         for (rows, cols) in [(4096usize, 4096usize), (2048, 8192), (6144, 4096), (2048, 12288)] { for tokens in 2..=8usize { for kind in 0..5u32 { check(&mut g, rows, cols, tokens, 0, kind, 900 + rows as u64 + kind as u64 + tokens as u64)?; } } }
+        // The host rule (`small_choice::mx`) sends 5 to 8 tokens of the 4,096-column shapes to `mx_rows_tile`: the candidate image's tile against the
+        // small entries (which the sweep above holds to the production M kernels), on the four served shapes, five activation kinds. Control: the tile
+        // on the rows shifted by one token must NOT give the same bytes.
+        let tile_b = g.function(mb, "mx_rows_tile")?; let (mut tiles, mut controls) = (0u64, 0u64);
+        for (rows, cols) in [(4096usize, 4096usize), (6144, 4096), (2048, 8192), (2048, 12288)] { for tokens in 5..=8usize { for kind in 0..5u32 {
+            let (fx, oa, ob) = build(&mut g, rows, cols, tokens, 0, kind, 1300 + rows as u64 + kind as u64 * 3 + tokens as u64 * 17, rows * tokens)?;
+            oa.poison(&g)?; ob.poison(&g)?;
+            launch_small(&g, &smalls, &fx.p)?; launch_tile(&g, tile_b, &Proj { output: ob.address, ..fx.p })?; g.sync()?;
+            let (x, y) = (oa.read(&g)?, ob.read(&g)?);
+            if x != y { let at = x.iter().zip(&y).position(|(p, q)| p != q).map(|i| (i.saturating_sub(16) / 4, i)); return Err(format!("MXSMALL TILE BYTE FAIL rows={rows} cols={cols} tokens={tokens} act_kind={kind} first_word_and_byte={at:?}")); }
+            if y[..16] != GUARD || y[y.len() - 16..] != GUARD { return Err("MXSMALL tile guard changed".into()); }
+            tiles += 1;
+            if kind == 0 {
+                ob.poison(&g)?; launch_tile(&g, tile_b, &Proj { output: ob.address, input: fx.p.input + (cols * 4) as u64, tokens: tokens as u32 - 1, ..fx.p })?; g.sync()?;
+                let shifted = ob.read(&g)?; let n = 16 + (tokens - 1) * rows * 4;
+                if shifted[16..n] == x[16..n] { return Err(format!("MXSMALL TILE CONTROL did not fail rows={rows} cols={cols} tokens={tokens}")); }
+                controls += 1;
+            }
+            g.clear()?;
+        } } }
+        println!("MXSMALL TILE at 5 to 8 tokens equals the small entries comparisons={tiles} controls_failed_as_they_must={controls} elapsed_s={:.1}", started.elapsed().as_secs_f64());
+        // The recorded wrapper of the tile (`resident_launch_mx_rows_tile`, Kind 68: the launch a decode step makes for 5 to 8 rows) against the
+        // direct entry: same bytes, and the launch itself is accepted (384 threads a block: registers and shared memory).
+        let wrapper = g.function(mb, "resident_launch_mx_rows_tile")?; let mut wrapped = 0u64;
+        for (rows, cols) in [(4096usize, 4096usize), (6144, 4096)] { for tokens in 5..=8usize {
+            let (fx, oa, ob) = build(&mut g, rows, cols, tokens, 0, (tokens % 5) as u32, 1700 + rows as u64 + tokens as u64 * 29, rows * tokens)?;
+            oa.poison(&g)?; ob.poison(&g)?;
+            launch_tile(&g, tile_b, &fx.p)?;
+            super::fp8small::launch_wrapped(&mut g, wrapper, 68, &proj_bytes(&Proj { output: ob.address, ..fx.p }), [rows.div_ceil(48) as u32, tokens.div_ceil(16) as u32, 1], 384, 0).map_err(|e| format!("MXSMALL WRAPPER LAUNCH FAIL rows={rows} tokens={tokens}: {e}"))?;
+            g.sync().map_err(|e| format!("MXSMALL WRAPPER RUN FAIL rows={rows} tokens={tokens}: {e}"))?;
+            if oa.read(&g)? != ob.read(&g)? { return Err(format!("MXSMALL WRAPPER BYTE FAIL rows={rows} cols={cols} tokens={tokens}")); }
+            wrapped += 1; g.clear()?;
+        } }
+        println!("MXSMALL WRAPPER PASS resident_launch_mx_rows_tile equals mx_rows_tile comparisons={wrapped}");
         println!("MXSMALL BYTES PASS comparisons={} replaced_kernel_comparisons={} output_bytes={} digest={} elapsed_s={:.1}", comparisons.get(), replaced.get(), compared.get(), sha256::digest(format!("{}{}", comparisons.get(), compared.get()).as_bytes()), started.elapsed().as_secs_f64());
         return Ok(());
     }
@@ -165,11 +260,13 @@ pub(crate) fn run(base_path: &str, candidate_path: &str, time: bool) -> Result<(
     // Weights and scales start at their allocation, as the engine's do (finite codes, plain scales, as --mx-wave). The guarded sweep buffers
     // sit 16 bytes past a line start, where EVERY MXFP8 kernel reads about 15 percent slower (one Spark, 2026-11-12: the one-token kernel 12.7 against 14.8 ms a pass).
     let shapes: [(usize, usize, f64, &str); 4] = [(4096, 4096, 102.0, "qkv"), (2048, 8192, 34.0, "o"), (6144, 4096, 6.0, "gate_up"), (2048, 12288, 3.0, "down")];
-    let names = ["production", "mx_rows_tile", "replaced", "one_token_m1", "mx_rows_small"];
-    println!("MXSMALL TIME arms: production (the M kernels in 16-token groups) | mx_rows_tile | replaced (the baseline's kernel for the count) | one_token_m1 (ONE token, the rate to reach) | mx_rows_small (candidate); us a launch and GB/s");
+    let names = ["production", "mx_rows_tile", "replaced", "one_token_m1", "mx_rows_small", "mx_rows_small_wrapped", "mx_rows_tile_wrapped"];
+    println!("MXSMALL TIME arms: production (the M kernels in 16-token groups) | mx_rows_tile | replaced (the baseline's kernel for the count) | one_token_m1 (ONE token, the rate to reach) | mx_rows_small (candidate) | the candidate's small entry and its tile as a decode step records them (the resident launch wrappers); us a launch and GB/s");
+    let small_wrappers: Vec<(&str, H, u32)> = [("mx_rows_small2", 42u32), ("mx_rows_small4", 43), ("mx_rows_small8", 44), ("mx_rows_small8w", 45)].iter().map(|(n, k)| g.function(mb, &format!("resident_launch_{n}")).map(|h| (*n, h, *k))).collect::<Result<_>>()?;
+    let tile_wrapper = g.function(mb, "resident_launch_mx_rows_tile")?;
     // The activations: `input_offset=0` at the start of their allocation, as an engine vector is (a fresh device buffer, or a token row of one);
     // `input_offset=16` in the guarded sweep buffer, 16 bytes past a line start (the row entries read the activations straight from the buffer).
-    let mut totals: Vec<(usize, usize, [f64; 5])> = vec![];
+    let mut totals: Vec<(usize, usize, [f64; 7])> = vec![];
     for &input_offset in &[0usize, 16] { for &(rows, cols, calls, label) in &shapes {
         let bytes = (rows * cols) as f64 * (1.0 + 1.0 / 32.0);
         for &tokens in &[2usize, 3, 4, 5, 8] {
@@ -183,27 +280,31 @@ pub(crate) fn run(base_path: &str, candidate_path: &str, time: bool) -> Result<(
                 if input_offset == 0 { fx.p.input = g.upload(&le(&activations(0, tokens * cols, 36 + i as u64)))?; }
                 fxs.push(fx);
             }
+            let commands: Vec<(u64, u64)> = fxs.iter().map(|fx| { let a = proj_bytes(&fx.p); Ok((super::fp8small::command_of(&mut g, small_wrappers.iter().find(|w| w.0 == small_entry(fx.p.tokens, fx.p.cols).0).ok_or("small wrapper")?.2, &a)?, super::fp8small::command_of(&mut g, 68, &a)?)) }).collect::<Result<_>>()?;
             let per = 4 * k;
-            let mut t: [Vec<f64>; 5] = Default::default();
-            for repeat in 0..5 { for step in 0..5 { let arm = (step + repeat) % 5;
+            let mut t: [Vec<f64>; 7] = Default::default();
+            for repeat in 0..5 { for step in 0..7 { let arm = (step + repeat) % 7;
                 if arm == 2 && olds.is_empty() { continue; }
                 let run = |g: &Gpu, i: usize| -> Result<()> { let p = &fxs[i % k].p; match arm {
                     0 => launch_reference(g, &fns, p), 1 => launch_tile(g, tile_fn, p), 2 => launch_replaced(g, &olds, tile_fn, p),
-                    3 => launch_reference(g, &fns, &Proj { tokens: 1, ..*p }), _ => launch_small(g, &smalls, p) } };
+                    3 => launch_reference(g, &fns, &Proj { tokens: 1, ..*p }), 4 => launch_small(g, &smalls, p),
+                    5 => { let (name, per_block, warp_rows) = small_entry(p.tokens, p.cols); let w = small_wrappers.iter().find(|w| w.0 == name).ok_or("small wrapper")?.1;
+                        super::fp8small::launch_command(g, w, commands[i % k].0, [p.rows.div_ceil(4 * warp_rows), p.tokens.div_ceil(per_block), 1], 128, 0) }
+                    _ => super::fp8small::launch_command(g, tile_wrapper, commands[i % k].1, [p.rows.div_ceil(48), p.tokens.div_ceil(16), 1], 384, 0) } };
                 for i in 0..k { run(&g, i)?; } g.sync()?;
                 let t0 = Instant::now(); for i in 0..per { run(&g, i)?; } g.sync()?;
                 t[arm].push(t0.elapsed().as_secs_f64() * 1e6 / per as f64);
             } }
-            let us: [f64; 5] = t.map(|v| if v.is_empty() { f64::NAN } else { median(v) });
-            println!("MXSMALL TIME input_offset={input_offset} {label} rows={rows} cols={cols} tokens={tokens} {} floor_us_at_230GBs={:.0}", (0..5).map(|a| format!("{}_us={:.1} ({:.0} GB/s)", names[a], us[a], bytes / us[a] / 1e3)).collect::<Vec<_>>().join(" "), bytes / 230e3);
+            let us: [f64; 7] = t.map(|v| if v.is_empty() { f64::NAN } else { median(v) });
+            println!("MXSMALL TIME input_offset={input_offset} {label} rows={rows} cols={cols} tokens={tokens} {} floor_us_at_230GBs={:.0}", (0..7).map(|a| format!("{}_us={:.1} ({:.0} GB/s)", names[a], us[a], bytes / us[a] / 1e3)).collect::<Vec<_>>().join(" "), bytes / 230e3);
             totals.push((input_offset, tokens, us.map(|u| u * calls / 1e3)));
             g.clear()?;
         }
     } }
     for &input_offset in &[0usize, 16] { for &tokens in &[2usize, 3, 4, 5, 8] {
-        let mut sum = [0.0f64; 5];
-        for t in totals.iter().filter(|t| t.0 == input_offset && t.1 == tokens) { for a in 0..5 { sum[a] += t.2[a]; } }
-        println!("MXSMALL PASS input_offset={input_offset} tokens={tokens} ms_a_pass: {}", (0..5).map(|a| format!("{}={:.2}", names[a], sum[a])).collect::<Vec<_>>().join(" "));
+        let mut sum = [0.0f64; 7];
+        for t in totals.iter().filter(|t| t.0 == input_offset && t.1 == tokens) { for a in 0..7 { sum[a] += t.2[a]; } }
+        println!("MXSMALL PASS input_offset={input_offset} tokens={tokens} ms_a_pass: {}", (0..7).map(|a| format!("{}={:.2}", names[a], sum[a])).collect::<Vec<_>>().join(" "));
     } }
     println!("MXSMALL TIME DONE elapsed_s={:.1}", started.elapsed().as_secs_f64());
     Ok(())

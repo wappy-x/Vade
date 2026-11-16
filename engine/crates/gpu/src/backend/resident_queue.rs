@@ -14,6 +14,12 @@ impl<'a> Backend<'a> {
             ||context.has_deferred() && context.accounted_bytes().saturating_add(bytes)>context.budget.get(),
             ||{self.stats.borrow_mut().budget_drains+=1;self.synchronize()})
     }
+    /// LOOKAHEAD: a fence, and the count of buffers dropped so far that wait for a drain. `wait_fence_frees` frees
+    /// exactly those, so a caller that queues more work behind the fence holds no buffer longer than a drain here would.
+    pub fn fence_frees(&self)->Result<(Fence<'a>,usize),String> {let fence=self.fence()?;Ok((fence,self.context.deferred_total.get()))}
+    /// LOOKAHEAD: wait for a `fence_frees` mark, then free the buffers that were dropped before it. Work queued behind
+    /// the fence keeps running, and buffers dropped after the mark wait for the next drain.
+    pub fn wait_fence_frees(&self,fence:Fence<'_>,frees:usize)->Result<(),String> {self.wait_fence(fence)?;self.context.release_deferred_before(frees);Ok(())}
     pub fn resident_queue_active(&self)->bool {self.context.resident_queued.get()}
     pub fn resident_queue(&self)->Result<ResidentQueue<'_,'a>,String> {
         self.require_resident_stream()?;

@@ -51,6 +51,9 @@ pub mod head_path;
 pub mod resident_weights;
 pub mod projection_stage;
 mod resident_profile;
+pub mod exchange_trace;
+pub mod receive_first;
+pub mod second_rail;
 pub mod expert_path;
 pub mod matrix_role;
 

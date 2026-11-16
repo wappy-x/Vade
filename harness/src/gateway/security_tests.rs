@@ -23,6 +23,11 @@ fn connect_timeout_returns_a_502_with_the_engine_reason() {
     worker.join().unwrap().unwrap();
 }
 
+/// The slow-bytes tests: three bytes, one a step, against one total deadline. The last byte
+/// leaves at two steps, 600 ms before the deadline.
+const SLOW_BYTES_DEADLINE: Duration = Duration::from_millis(900);
+const SLOW_BYTE_STEP: Duration = Duration::from_millis(150);
+
 #[test]
 fn slow_request_bytes_hit_one_total_receive_deadline() {
     let upstream = listener();
@@ -37,14 +42,17 @@ fn slow_request_bytes_hit_one_total_receive_deadline() {
             None,
             &ConnectionPool::default(),
             &Access::default(),
-            Duration::from_millis(120),
+            SLOW_BYTES_DEADLINE,
         )
     });
     let mut client = TcpStream::connect(address).unwrap();
-    client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    // Every byte is sent well before the deadline. A byte that arrives after the server gave up
+    // makes it reset the connection, and the client then loses the 408 (seen on a hosted Mac
+    // with 50 ms steps against a 120 ms deadline).
     for byte in b"GET" {
         let _ = client.write_all(&[*byte]);
-        thread::sleep(Duration::from_millis(50));
+        thread::sleep(SLOW_BYTE_STEP);
     }
     let mut reply = String::new();
     client.read_to_string(&mut reply).unwrap();

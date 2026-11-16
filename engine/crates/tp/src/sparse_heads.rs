@@ -1,7 +1,7 @@
 //! Host preparation for complete-head sparse attention. No device execution is admitted here.
 #![forbid(unsafe_code)]
 use crate::Result;
-use engine_model::plan::{TextDescription,description::TokenMixer,layer::{Split,Topology}};
+use engine_model::plan::{TextDescription,description::TokenMixer,layer::{Kind,LayerPlan,Split,Topology}};
 use std::ops::Range;
 
 fn need(ok:bool,why:&str)->Result<()> {if ok {Ok(())} else {Err(why.into())}}
@@ -50,6 +50,18 @@ impl Layout {
     /// Host twin for a replicated-to-owned cache handoff. Copies raw elements only.
     pub fn local_expanded<T:Copy>(self,source:&[T])->Result<Vec<T>> {self.copy_rows(source,self.key+self.value)}
     pub fn local_queries<T:Copy>(self,source:&[T])->Result<Vec<T>> {self.copy_rows(source,self.key)}
+}
+
+/// LOCAL QUERY: true when step `index` of a layer's program is a projection whose output every reader takes as a score
+/// step's query (its first input, and only there), and the program does not return it. Such a reader takes this rank's
+/// heads only (`Layout::query_rows`), so a rank needs no other rank's rows of that output. False for every other step.
+pub fn query_stays_local(plan:&LayerPlan,index:usize)->bool {
+    let Some(step)=plan.steps.get(index) else {return false;};
+    if step.kind!=Kind::Project || step.weights.len()!=1 || step.inputs.len()!=1 || step.outputs.len()!=1 {return false;}
+    let name=&step.outputs[0].name;
+    let mut readers=plan.steps.iter().filter(|other|other.inputs.contains(name)).peekable();
+    readers.peek().is_some() && !plan.returns.contains(name)
+        && readers.all(|other|other.kind==Kind::Scores && other.inputs.first()==Some(name) && other.inputs.iter().filter(|input|*input==name).count()==1)
 }
 
 /// Checkpoint-derived ownership, including any appended latent predictor layer.

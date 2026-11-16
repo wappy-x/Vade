@@ -124,6 +124,8 @@ pub struct Request {
     pub draft: Option<DraftMode>,
     /// Requested model proposals, zero selects plain; bounded by resident depth.
     pub mtp_depth: Option<usize>,
+    /// True when the caller supplied a depth, before the scheduler fills defaults.
+    pub mtp_depth_explicit: bool,
     /// Derived Flash-Next policy, never an HTTP or environment selector.
     pub prompt_lookup: bool,
     pub prompt_lookup_max_draft: usize,
@@ -265,6 +267,9 @@ pub(crate) fn text_content(value: &Value) -> Result<String, String> {
     }
 }
 
+/// The refusal of an `mtp_depth` that is no whole number in the range every service accepts. The largest depth is
+/// `spark_engine::draft::PREDICTOR_DEPTH_MAX` (a test holds the two together); a service's own resident depth bounds it further.
+const MTP_DEPTH_RANGE: &str = "mtp_depth must be an integer in 0..=7";
 pub fn parse(body: &[u8], chat: bool, limits: &Limits) -> Result<Request, String> {
     parse_for_model(body, chat, limits, MODEL_ID)
 }
@@ -535,9 +540,9 @@ pub(crate) fn parse_with_reservation(body: &[u8], chat: bool, limits: &Limits, m
         .map(|v| {
             let depth = v
                 .u64()
-                .map_err(|_| "mtp_depth must be an integer in 0..=3")?;
-            if depth > 3 {
-                return Err("mtp_depth must be an integer in 0..=3");
+                .map_err(|_| MTP_DEPTH_RANGE)?;
+            if depth > spark_engine::draft::PREDICTOR_DEPTH_MAX as u64 {
+                return Err(MTP_DEPTH_RANGE);
             }
             if limits
                 .next_mtp_depth
@@ -562,6 +567,7 @@ pub(crate) fn parse_with_reservation(body: &[u8], chat: bool, limits: &Limits, m
                 .is_none_or(|m| m != "plain"),
         prompt_lookup_max_draft: 15,
         mtp_depth,
+        mtp_depth_explicit: mtp_depth.is_some(),
         draft: get("draft").map(|v| DraftMode::parse(v.string().map_err(|e| e.to_string())?)).transpose()?
             .or(mtp_depth.map(|k| {
                 if k == 0 {
@@ -1026,6 +1032,21 @@ fn request_mtp_depth_is_bounded_and_selects_plain_or_strict() {
         assert!(parse(body.as_bytes(), false, &limits).is_err());
     }
     assert_eq!(parse(br#"{"prompt":"hi"}"#, false, &limits).unwrap().mtp_depth, None);
+    // The request bound is the largest predictor depth. A service with that depth resident takes every depth up to
+    // it; a service with a smaller resident depth refuses the depths above its own with the resident refusal.
+    let largest = spark_engine::draft::PREDICTOR_DEPTH_MAX;
+    assert!(MTP_DEPTH_RANGE.ends_with(&format!("0..={largest}")), "{MTP_DEPTH_RANGE}");
+    let deep = crate::Limits { next_mtp_depth: Some(largest), ..crate::Limits::default() };
+    for depth in 0..=largest {
+        let body = format!(r#"{{"prompt":"hi","max_tokens":8,"mtp_depth":{depth}}}"#);
+        assert_eq!(parse(body.as_bytes(), false, &deep).unwrap().mtp_depth, Some(depth));
+    }
+    let above = format!(r#"{{"prompt":"hi","mtp_depth":{}}}"#, largest + 1);
+    assert_eq!(parse(above.as_bytes(), false, &deep).unwrap_err(), MTP_DEPTH_RANGE);
+    for depth in 4..=largest {
+        let body = format!(r#"{{"prompt":"hi","mtp_depth":{depth}}}"#);
+        assert_eq!(parse(body.as_bytes(), false, &limits).unwrap_err(), "requested mtp_depth exceeds resident model depth");
+    }
 }
 
 #[cfg(test)]

@@ -21,7 +21,10 @@ use crate::next_params::MxProjection;
 const WARPS:usize=12;const TILE:usize=256;const TOKENS:usize=16;const STAGE:usize=TOKENS*TILE*4;const SHARED:usize=2*STAGE;
 
 #[no_mangle]
-pub extern "ptx-kernel" fn mx_rows_tile(p:MxProjection) {
+pub extern "ptx-kernel" fn mx_rows_tile(p:MxProjection) {tile(p)}
+/// The body of `mx_rows_tile`; the resident launch wrapper (`Kind::MxRowsTile`) runs it too, for the small row groups of a decode step.
+#[inline(always)]
+pub(crate) fn tile(p:MxProjection) {
     // SAFETY: The host checks the descriptor as MxLayer::push does (complete E4M3 rows and UE8M0 groups
     // in the retained arena, input rows for all tokens, a disjoint output of tokens x rows words) and
     // keeps every owner alive through stream completion. Weights, scales and input are immutable; each

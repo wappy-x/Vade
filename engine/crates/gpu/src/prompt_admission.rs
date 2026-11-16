@@ -40,9 +40,11 @@ pub fn permute_admitted(s:Shape,source:u64,output:u64)->bool {
 pub fn permute_blocks(s:Shape)->u32 {if s.op==Op::RankRows {s.rows*s.tokens} else {s.rows}}
 /// `ExpertPlaceTile` of the expert results on two ranks: `tokens * ROUTED` rows, local rows 1024 or 2048 (output rows of 2048 or
 /// 4096 words), `slots = rows * dim`. Tiles are 32 channels wide. The table must come from `prompt_ops::place_table`.
+/// GROUP FOLD: and of ONE rank's own down rows (`FOLD_LOCAL` words a row, one part), placed before their fold and its exchange.
+/// The kernel takes any part count (a source word is `part * slots + ...`); each form here is device-swept (`swept::place_cases`).
 pub fn place_admitted(s:Shape)->bool {
     let rows=s.rows as usize;
-    s.op==Op::ExpertPlaceTile && matches!((s.dim,s.taps),(1024,2)|(2048,2)) && rows%ROUTED==0 && (1..=MOVE_MAX).contains(&(rows/ROUTED))
+    s.op==Op::ExpertPlaceTile && matches!((s.dim,s.taps),(1024,2)|(2048,2)|(FOLD_LOCAL,1)) && rows%ROUTED==0 && (1..=MOVE_MAX).contains(&(rows/ROUTED))
         && s.cols==s.dim*s.taps && s.slots as usize==rows*s.dim as usize && s.lengths().is_some()
 }
 /// Grid of the place tile: slot tiles on x, channel tiles on y.
@@ -103,10 +105,10 @@ pub const FOLD_LOCAL:u32=2048;
 /// Most tokens of a fold of `FOLD_LOCAL` rows: the chats of one batch step (`bounded_decoder::BATCH_ROWS`, pinned there).
 pub const FOLD_LOCAL_TOKENS:usize=8;
 /// Wrapped `ExpertFold` of the model: 8 routed rows of 4096 plus the shared expert. And the same fold of the `FOLD_LOCAL`
-/// rows one rank of a pair owns, for the 1 to `FOLD_LOCAL_TOKENS` chats of a batch step: each rank folds its own rows of
-/// every chat in ONE launch before the exchange (`rows_fold::one_launch`). The kernel takes any width (one thread a
-/// (token, feature) word); each width here is device-swept (`swept::fold_cases`).
-fn fold_admitted(i:CausalShape,tokens:usize)->bool {i.rows==ROUTED as u32 && i.taps==1 && (i.cols==4096 || i.cols==FOLD_LOCAL && tokens<=FOLD_LOCAL_TOKENS)}
+/// rows one rank of a pair owns: each rank folds its own rows before the exchange, for the 1 to `FOLD_LOCAL_TOKENS` chats
+/// of a batch step in ONE launch (`rows_fold::one_launch`) and for the rows of a prompt group (GROUP FOLD). The kernel takes
+/// any width (one thread a (token, feature) word); each width here is device-swept at every group size (`swept::fold_cases`).
+fn fold_admitted(i:CausalShape)->bool {i.rows==ROUTED as u32 && i.taps==1 && matches!(i.cols,4096|FOLD_LOCAL)}
 /// Head counts of the recurrent prompt kernels (Prepare, GatedNorm, convolution rows): the model's 64 heads on one box, and the
 /// 32 a rank owns when two ranks split them (`kda_heads`; the prompt path passes the local count). The kernels take any count;
 /// each count here is device-swept (`swept.rs RECURRENT_HEADS`). Four ranks (16 heads) join after their own sweep.
@@ -123,7 +125,7 @@ pub fn fast_kernel(s:Shape)->Option<&'static str> {
             Causal::Prepare if recurrent_heads(i.heads) && i.dim==128 && i.bound<0.0 && i.bound.is_finite()=>Some("prompt_prepare"),
             Causal::GatedNorm if recurrent_heads(i.heads) && i.dim==128 && i.epsilon>0.0 && i.epsilon.is_finite()=>Some("prompt_gated_norm"),
             Causal::Route if route_admitted(i)=>Some("prompt_route"),
-            Causal::ExpertFold if fold_admitted(i,s.tokens as usize)=>Some("prompt_fold"),
+            Causal::ExpertFold if fold_admitted(i)=>Some("prompt_fold"),
             _=>None}},
         Op::ConvRows if recurrent_heads(s.heads) && s.dim==128 && s.taps==4=>Some("prompt_conv"),
         _=>None,
@@ -280,12 +282,16 @@ mod tests {
         // The test is not vacuous: every predicate admitted something, and each list is no larger than the admitted set plus the neighbours it also runs.
         assert!(seen[..7].iter().all(|&n|n>0),"{seen:?}");
         let sizes=GROUP_MAX+GROUP_BIG.len();assert_eq!(swept::GROUP_BIG,GROUP_BIG);
-        // The fold: the whole width at every group size, and a pair rank's own rows at the 1 to 8 chats of a batch step, no more.
-        assert_eq!((swept::FOLD_LOCAL,swept::FOLD_LOCAL_TOKENS),(FOLD_LOCAL as usize,FOLD_LOCAL_TOKENS));assert_eq!(fold_list.len(),sizes+FOLD_LOCAL_TOKENS);
-        for tokens in 1..=FOLD_LOCAL_TOKENS {let local=wrapped(Causal::ExpertFold,0,0,1,8,FOLD_LOCAL,0.0,0.0,tokens);
+        // The fold: the whole width, and a pair rank's own rows (a batch step's chats, a prompt group's rows), at every group size.
+        assert_eq!((swept::FOLD_LOCAL,swept::FOLD_LOCAL_TOKENS),(FOLD_LOCAL as usize,FOLD_LOCAL_TOKENS));assert_eq!(fold_list.len(),2*sizes);
+        for tokens in swept::group_tokens() {let local=wrapped(Causal::ExpertFold,0,0,1,8,FOLD_LOCAL,0.0,0.0,tokens);
             assert_eq!(fast_kernel(local),Some("prompt_fold"),"{tokens}");assert_eq!(fast_blocks(local),16*tokens as u32);}
-        for tokens in [FOLD_LOCAL_TOKENS+1,16,256,512] {assert_eq!(fast_kernel(wrapped(Causal::ExpertFold,0,0,1,8,FOLD_LOCAL,0.0,0.0,tokens)),None,"{tokens}");}
-        assert_eq!(permute_list.len(),2*MOVE_MAX);assert_eq!(place_list.len(),2*MOVE_MAX);assert_eq!(prepare_list.len(),2*swept::RECURRENT_HEADS.len()*sizes);assert_eq!(conv_list.len(),swept::RECURRENT_HEADS.len()*sizes);assert_eq!(mhc_list.len(),sizes-127);
+        for tokens in [257usize,300,1023,1025] {assert_eq!(fast_kernel(wrapped(Causal::ExpertFold,0,0,1,8,FOLD_LOCAL,0.0,0.0,tokens)),None,"{tokens}");}
+        // GROUP FOLD: one rank's own down rows are placed by the tile kernel at every group size; no other one-part form is.
+        for tokens in [1usize,16,64,256,512,1024] {let mut s=Shape::new(Op::ExpertPlaceTile,1).unwrap();s.rows=(tokens*ROUTED) as u32;s.dim=FOLD_LOCAL;s.taps=1;s.cols=FOLD_LOCAL;s.slots=s.rows*FOLD_LOCAL;
+            assert!(place_admitted(s),"{tokens}");assert_eq!(place_grid(s),(s.rows.div_ceil(TILE),FOLD_LOCAL/TILE));
+            s.dim=1024;s.cols=1024;s.slots=s.rows*1024;assert!(!place_admitted(s),"{tokens}");}
+        assert_eq!(permute_list.len(),2*MOVE_MAX);assert_eq!(place_list.len(),3*MOVE_MAX);assert_eq!(prepare_list.len(),2*swept::RECURRENT_HEADS.len()*sizes);assert_eq!(conv_list.len(),swept::RECURRENT_HEADS.len()*sizes);assert_eq!(mhc_list.len(),sizes-127);
         for tokens in [257usize,511,513,1023,1025,2048] {assert!(!group_admitted(tokens),"{tokens}");}
         for tokens in GROUP_BIG {assert!(group_admitted(tokens));assert_eq!(fast_kernel(conv(tokens,64,128,4)),Some("prompt_conv"));assert!(mhc_tile_admitted(mhc(tokens as u32,4,4096)));}
     }

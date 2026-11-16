@@ -58,6 +58,48 @@ pub const fn fold_admitted(rows: usize, cols: usize, weights: usize, input: usiz
     threads == FOLD_THREADS && deep_admitted(rows, cols, weights, input)
 }
 
+/// FOLD ROWS (`plain_warp::rows_fold_rows`, the entries `flash_resident_projection_fold_rows` and `_f32`): the fold schedule for a
+/// group of 2 to FOLD_ROWS_MAX_TOKENS source rows in ONE launch. A block keeps FOLD_ROWS weight rows and runs every source row:
+/// its producers load a weight vector once and make one product vector a source row, and lane `token * FOLD_ROWS + row` of the
+/// folding warp adds the products of its own (weight row, source row) in column order. So the matrix is read once for all source
+/// rows, and each (weight row, source row) keeps its own ascending chain from 0.0 (the one-row fold's chain).
+pub const FOLD_ROWS_MAX_TOKENS: usize = 8;
+/// Source rows a block is laid out for: 2, 4 or 8 (the smallest that holds `tokens`). The chunk shrinks as the layout grows, so
+/// the two product slots keep about the one-row fold's shared bytes.
+#[inline(always)]
+pub const fn fold_rows_layout(tokens: usize) -> usize { if tokens <= 2 { 2 } else if tokens <= 4 { 4 } else { 8 } }
+/// Columns of one chunk for a layout of `layout` source rows: 512, 256 or 128.
+#[inline(always)]
+pub const fn fold_rows_chunk(layout: usize) -> usize { 1024 / layout }
+/// Shared words of one chain in a slot (the chunk and a 4-word pad, as the one-row fold).
+#[inline(always)]
+pub const fn fold_rows_pitch(layout: usize) -> usize { fold_rows_chunk(layout) + 4 }
+/// Shared bytes of the two slots of a block, the largest layout: 2 slots x 32 chains x 132 words.
+pub const FOLD_ROWS_BYTES: usize = 2 * FOLD_ROWS * 8 * (1024 / 8 + 4) * 4;
+/// Product vector `j` (0..8) of producer `p` (0..FOLD_THREADS - 32) in a chunk: (weight vector slot, source row, weight row of the
+/// block, vector of the chunk). A producer loads 8 / layout weight vectors a chunk and makes `layout` product vectors of each.
+#[inline(always)]
+pub const fn fold_rows_vector(layout: usize, p: usize, j: usize) -> (usize, usize, usize, usize) {
+    let (k, t) = (j / layout, j % layout);
+    let v = p + k * (FOLD_THREADS - 32);
+    let quads = fold_rows_chunk(layout) / 4;
+    (k, t, v / quads, v % quads)
+}
+/// Word offset, inside a slot, of the product of (source row `t`, block weight row `r`) at column `col` of the chunk: the chain
+/// `t * FOLD_ROWS + r` owns one pitch of the slot.
+#[inline(always)]
+pub const fn fold_rows_word(layout: usize, t: usize, r: usize, col: usize) -> usize { (t * FOLD_ROWS + r) * fold_rows_pitch(layout) + col }
+/// By shape alone, so every rank of a split matrix makes the same choice: few rows and long rows (the fold's own geometry),
+/// whole 32-column groups, 2 to FOLD_ROWS_MAX_TOKENS source rows.
+pub const fn fold_rows_shape(rows: usize, cols: usize, tokens: usize) -> bool {
+    tokens >= 2 && tokens <= FOLD_ROWS_MAX_TOKENS && rows >= 1 && rows <= NARROW_MAX_ROWS && cols >= FOLD_MIN_COLS && cols % 32 == 0 && in_envelope(rows, cols)
+}
+/// The entry's envelope: the shape rule and whole 16-byte vectors of the weights and of every source row (cols is a multiple of 4,
+/// so an aligned first source row makes every source row aligned).
+pub const fn fold_rows_admitted(rows: usize, cols: usize, weights: usize, input: usize, tokens: usize) -> bool {
+    fold_rows_shape(rows, cols, tokens) && deep_admitted(rows, cols, weights, input)
+}
+
 /// Launch geometry of `project_bf16_ordered`: one-warp blocks to NARROW_MAX_ROWS rows, four-warp blocks above (the rule the BF16 entry was swept in).
 pub const fn bf16_geometry(rows: usize) -> (u32, u32) {
     if rows <= NARROW_MAX_ROWS { (rows.div_ceil(32) as u32, NARROW_THREADS as u32) } else { (rows.div_ceil(128) as u32, TILE_THREADS as u32) }
@@ -268,3 +310,18 @@ mod tests {
         assert!(!tile_admitted(144, 4096, 256, 512, FOLD_THREADS));
     }
 }
+
+/// Whether a repeated plain matrix can take its existing one-row fold.
+pub fn batch_fold(batch:&crate::next_params::ResidentProjectionBatch)->bool {
+    let n=batch.layer.count as usize;
+    if n!=2 || batch.round!=0 || batch.plain!=(1<<n)-1 {return false;}
+    let first=batch.layer.projections[0];
+    if (first.rows,first.cols)!=(144,4096) || plain_geometry(first.rows as usize,first.cols as usize).1 as usize!=FOLD_THREADS {return false;}
+    batch.layer.projections[..n].iter().enumerate().all(|(i,p)|p.weights==first.weights && p.rows==first.rows && p.cols==first.cols && p.scales==4
+        && p.tokens==1 && p.input_bf16==0 && p.round==0 && p.input==first.input+i as u64*first.cols as u64*4
+        && deep_admitted(p.rows as usize,p.cols as usize,p.weights as usize,p.input as usize))
+}
+#[cfg(test)]
+#[path="plain_few_tests.rs"] mod few_tests;
+#[cfg(test)]
+#[path="plain_fold_rows_tests.rs"] mod fold_rows_tests;

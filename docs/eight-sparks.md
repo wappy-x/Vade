@@ -279,8 +279,8 @@ template on every Spark: each Spark has two cables.
 
 The controller config has one `[machine]` section per Spark. Each
 `fabric.<peer>` value is the Spark's **own rail 0 address on the cable to that
-peer**. Ring discovery finds rail 1. For an FP4-Local pair, set
-`fabric_aux.<peer>` at both ends to use the second rail. Two Sparks are linked in the config when
+peer**. Ring discovery finds rail 1. An FP4-Local pair finds the second rail
+of its cable by itself; `fabric_aux.<peer>` at both ends names it. Two Sparks are linked in the config when
 each names the other. Start from the complete example,
 [cli/examples/eight-sparks.conf](../cli/examples/eight-sparks.conf), keep
 your copy in a private file such as `.local/eight.conf`, and select it with

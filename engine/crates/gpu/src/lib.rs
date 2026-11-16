@@ -53,6 +53,7 @@ pub mod mhc_host;
 pub mod mhc_host_service;
 pub mod nv_stream;
 pub mod prompt_writes;
+pub mod pool_scores_small;
 pub mod pool_scores_tile;
 pub mod step_tile;
 pub mod fill_free;
@@ -504,3 +505,5 @@ mod resident_launch_encode;
 mod resident_pointwise;
 #[cfg_attr(not(target_os="linux"),allow(dead_code))]
 mod resident_causal_chain;
+#[cfg_attr(not(target_os="linux"),allow(dead_code))]
+mod resident_causal_group;

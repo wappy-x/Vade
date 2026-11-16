@@ -5,6 +5,9 @@ use std::time::Instant;
 #[path = "draft_steps.rs"] mod steps; pub use steps::StepRule;
 #[path = "draft_validity.rs"] mod validity; pub use validity::UNMAPPED_GREEDY;
 type Result<T> = std::result::Result<T, String>;
+/// The most tokens a predictor layer proposes in one drafting cycle. It bounds a request's `mtp_depth`, the two-Spark
+/// text service's `--mtp`, and the proposer's chain. A check pass of such a proposal has one more row.
+pub const PREDICTOR_DEPTH_MAX: usize = 7;
 /// VADE_MTP_SAMPLED=1 (default off): verified sampled rows draw in parallel (sample_rows).
 fn parallel_rows() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();

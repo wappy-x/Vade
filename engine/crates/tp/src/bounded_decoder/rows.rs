@@ -12,8 +12,19 @@ pub(super) struct RowsFold<V> {
     waits:bool,
     /// This rank's own rows of the shared projection, when the compute kept them here for that fold (`rows_fold_shared`).
     shared:Option<V>,
+    /// GROUP FOLD: the pass is a prompt group (`layer_rows` without kept rows). Only such a pass asks `folds_groups`.
+    group:bool,
+    /// GROUP FOLD: the down step that waits is the grouped form of a prompt group (`rows_group_fold_waits`).
+    grouped:bool,
+    /// LOOKAHEAD: this rank's own rows of the shared projection, made behind the routed gate and up of a prompt group
+    /// (`rows_ahead`). The shared projection's step hands them to the fold (`rows_fold_shared`).
+    ahead:Option<V>,
 }
-impl<V> Default for RowsFold<V> {fn default()->Self {Self {waits:false,shared:None}}}
+impl<V> Default for RowsFold<V> {fn default()->Self {Self {waits:false,shared:None,group:false,grouped:false,ahead:None}}}
+impl<V> RowsFold<V> {
+    /// The fold state of one layer of a prompt group.
+    fn of_group()->Self {Self {group:true,..Self::default()}}
+}
 /// ROWS FOLD: the steps of a routed layer's fold, by index. They follow from the layer's program alone, which has the
 /// same steps at every context (the batch step relies on that too), so a decoder finds them once a layer
 /// (`Decoder::fold_links`) and a row pass reads three numbers.
@@ -46,6 +57,29 @@ impl FoldLinks {
 pub const PROMPT_GROUP:usize=256;
 /// Largest group a server admits. The server's group comes from its admitted memory.
 pub const PROMPT_GROUP_MAX:usize=1024;
+/// Groups above `PROMPT_GROUP_MAX` that only a prompt lease funds (`row_split::prompt_lease`), largest first. No startup
+/// workspace holds them: a lone chat borrows their bytes from the unused part of the session pool for one prompt call and
+/// returns them after it, so the pool, the cache cap and the admitted context are those of the startup group. A group
+/// reads every routed expert once (about 0.3 s of a 1,024-row group does not grow with its rows), so 4,096 rows pay that
+/// read once where four groups of 1,024 pay it four times. A leased call cuts its tokens into whole groups of these
+/// sizes and a rest of at most `PROMPT_GROUP_MAX` rows (`lease_groups`). A group above `PROMPT_GROUP_MAX` passes every
+/// layer as runs of `PROMPT_GROUP_MAX` rows (`Decoder::layer_wide`), so no kernel sees more rows than a startup group
+/// gives it; only the routed expert product launches hold the parts of every run (WIDE COHORT).
+pub const PROMPT_GROUP_LEASE:[usize;2]=[4096,2048];
+const _:()=assert!(PROMPT_GROUP_LEASE[0]<=PROMPT_GROUP_CHECK && PROMPT_GROUP_LEASE[1]>PROMPT_GROUP_MAX && PROMPT_GROUP_LEASE[0]>PROMPT_GROUP_LEASE[1]
+    && PROMPT_GROUP_LEASE[0].is_multiple_of(PROMPT_GROUP_MAX) && PROMPT_GROUP_LEASE[1].is_multiple_of(PROMPT_GROUP_MAX));
+/// The groups of one prompt call of `tokens` rows whose largest group is `rows`: up to `PROMPT_GROUP_MAX` rows the call
+/// is cut as before, in runs of `rows`. Above it only whole groups of a `PROMPT_GROUP_LEASE` size (at most `rows`) are
+/// taken, largest first, and the rest runs in groups of at most `PROMPT_GROUP_MAX` rows. The row bits do not depend on
+/// the cut; the cut keeps every group at a row count the kernels' swept lists hold.
+pub fn lease_groups(tokens:usize,rows:usize)->Vec<usize> {
+    let mut out=Vec::new();let mut left=tokens;
+    if rows==0 {return out;}
+    if rows>PROMPT_GROUP_MAX {for size in PROMPT_GROUP_LEASE {if size<=rows {while left>=size {out.push(size);left-=size;}}}}
+    let small=rows.min(PROMPT_GROUP_MAX);
+    while left>0 {let n=left.min(small);out.push(n);left-=n;}
+    out
+}
 /// Largest group the row pass itself accepts. Above `PROMPT_GROUP_MAX` only the check tool asks for it
 /// (`--row-groups`): a premise size, not charged by any admission ledger.
 pub const PROMPT_GROUP_CHECK:usize=4096;
@@ -138,7 +172,29 @@ pub fn absorbed_chat_words(chats:usize,heads:usize,latent:usize,key:usize,value:
         .checked_add(chats.checked_mul(heads)?.checked_mul(key)?)
 }
 /// The same charge for a group of this many rows.
-pub fn group_workspace_bytes_for(c:&CheckpointAdmission,context:usize,group:usize)->Result<usize> {
+pub fn group_workspace_bytes_for(c:&CheckpointAdmission,context:usize,group:usize)->Result<usize> {group_workspace_bytes_with(c,context,group,LatentRows::Expanded)}
+/// Which attention form the latent layers of a loaded server took. It decides whether a prompt group can hold expanded rows.
+#[derive(Clone,Copy,Debug,PartialEq,Eq,Default)]
+pub enum LatentRows {
+    /// Some latent layer expands the rows its tokens selected: the charge every server had before this type.
+    #[default] Expanded,
+    /// Every latent layer of the checkpoint took the absorbed form on every rank. A prompt group and a decode step of
+    /// such a layer leave the expansion branch before they expand or hold a row (`Kind::ExpandKv` here and in
+    /// `bounded_decoder.rs`), so no group holds rows of one layer for the whole context. `draft`: a predictor layer is
+    /// loaded and is NOT absorbed. It reads no prompt group (`rows/seed.rs` runs its cache half only) and proposes one
+    /// row at a time, so what one such row can hold stays charged (`expanded_row_words`).
+    Absorbed {draft:bool},
+}
+/// Words one decode row of an unabsorbed latent layer can hold at once in its widest form (`bounded_decoder.rs`,
+/// `Kind::ExpandKv`, the fallback after the memo): for each of its `slots` selected rows the packed expansion twice (the
+/// pieces and their reserved join) and the plain keys and values twice (the unpacked join and the planes cut from it),
+/// the gathered latent, and one chunk of PROMPT_GROUP rows between its projection and its pack. `row`: words of one
+/// expanded row of every head. The projection memo has its own charge.
+pub fn expanded_row_words(row:usize,latent:usize,slots:usize)->Option<usize> {
+    slots.checked_mul(row.checked_mul(3)?.checked_add(latent)?)?.checked_add(PROMPT_GROUP.checked_mul(row)?)
+}
+/// `group_workspace_bytes_for` for a server whose latent layers took `rows`.
+pub fn group_workspace_bytes_with(c:&CheckpointAdmission,context:usize,group:usize,rows:LatentRows)->Result<usize> {
     let d=c.description();let (mut per_row,mut selected,mut gather)=(0usize,0usize,0usize);
     for layer in 0..d.layers.len() {
         // Slot and context buffers are charged below from the group's own shapes.
@@ -158,14 +214,21 @@ pub fn group_workspace_bytes_for(c:&CheckpointAdmission,context:usize,group:usiz
         if let TokenMixer::LatentAttention(a)=d.layers[layer].mixer {
             let i=a.indexer;let slots=(i.token_budget+if i.select_tail {i.pool-1} else {0}) as usize;let live=slots.min(context);
             let row=(a.heads*(a.key_dim+a.value_dim)) as usize;
-            // Two buffers per head, the selection, three words per entry of the Scores table,
+            // Two buffers per head, the selection and its validation status, three words per entry of the Scores table,
             // and the pair map, which holds one word per token for each row of a small union.
-            words=words.checked_add(live.checked_mul(a.heads as usize*2).ok_or("prompt workspace overflow")?).and_then(|n|n.checked_add(slots+1+live*3+context.min(SCORE_MAP_ROWS))).ok_or("prompt workspace overflow")?;
+            words=words.checked_add(live.checked_mul(a.heads as usize*2).ok_or("prompt workspace overflow")?).and_then(|n|n.checked_add(slots+2+live*3+context.min(SCORE_MAP_ROWS))).ok_or("prompt workspace overflow")?;
             // Past the persistent limit, a layer holds only rows its tokens selected.
             // The gathered latents of those rows live beside them, with one chunk being copied.
             // The rows are packed (row/2 words); the gathered latents stay full words. One chunk
             // also sits unpacked between its projection and its pack, hence one group's plain rows.
-            selected=selected.max(context.min(group.checked_mul(live).ok_or("prompt workspace overflow")?).checked_add(group).and_then(|rows|rows.checked_mul(row/2+a.kv_rank as usize)).and_then(|n|n.checked_add(group.checked_mul(row)?)).ok_or("prompt workspace overflow")?);
+            let union=context.min(group.checked_mul(live).ok_or("prompt workspace overflow")?).checked_add(group).and_then(|rows|rows.checked_mul(row/2+a.kv_rank as usize)).and_then(|n|n.checked_add(group.checked_mul(row)?)).ok_or("prompt workspace overflow")?;
+            match rows {
+                LatentRows::Expanded=>selected=selected.max(union),
+                // The predictor layer has the geometry of the latent layers (`TextDescription::with_draft_layer`). One decode
+                // row of it, and never more than the union this charge funded before: no charge of any server grows.
+                LatentRows::Absorbed {draft:true}=>selected=selected.max(union.min(expanded_row_words(row,a.kv_rank as usize,live).ok_or("prompt workspace overflow")?)),
+                LatentRows::Absorbed {draft:false}=>{},
+            }
             // Absorbed attention replaces the expanded rows with five planes that a group holds at once.
             // Charge the larger alternative, with the same head count as the expanded rows above.
             selected=selected.max(absorbed_group_words(group,a.heads as usize,a.kv_rank as usize,a.value_dim as usize,live).ok_or("prompt workspace overflow")?);
@@ -237,6 +300,29 @@ fn score_map(selected:&[f32],slots:usize,rows:usize,m:usize)->Vec<f32> {
     }
     map
 }
+/// WIDE GROUP: the cut of a routed layer's program (`Decoder::wide_cut`), from the program alone.
+pub(super) fn wide_cut_of(plan:&LayerPlan)->Option<(usize,String)> {
+    let cut=plan.steps.iter().rposition(|step|step.kind==Kind::MhcPrepare)?;let (head,tail)=plan.steps.split_at(cut);
+    // Every step of the second half is one `rows_stateless` runs: none reads or makes history.
+    if !tail.iter().all(|step|matches!(step.kind,Kind::MhcPrepare|Kind::Collapse|Kind::Norm|Kind::Project|Kind::Route|Kind::ExpertProject|Kind::SwiGlu|Kind::ExpertDown|Kind::ExpertSum|Kind::Combine)) {return None;}
+    let made=|steps:&[engine_model::plan::layer::Step],name:&str|steps.iter().any(|step|step.outputs.iter().any(|output|output.name==name));
+    // It reads ONE earlier value, and only its mHC boundary reads it; it makes the output, and the first half does not.
+    let mut carry:Option<&str>=None;
+    for step in tail {for input in &step.inputs {if !made(tail,input) {
+        if !matches!(step.kind,Kind::MhcPrepare|Kind::Collapse|Kind::Combine) || carry.is_some_and(|name|name!=input) {return None;}
+        carry=Some(input);
+    }}}
+    let carry=carry?;
+    // Every state the layer returns is made by the first half.
+    if !made(head,carry) || !made(tail,"output") || made(head,"output") || plan.returns.iter().any(|name|name!="output" && !made(head,name)) {return None;}
+    Some((cut,carry.to_owned()))
+}
+/// The host tables of one grouped expert step (`Decoder::expert_tables`): the (token, pick) rows of each expert; each
+/// expert's (ID, first row, rows) in ascending expert order; the source row of each grouped row; and three numbers
+/// (earlier rows, this expert's rows, row index) for each row in grouped order and in (token, pick) order.
+struct ExpertTables {groups:BTreeMap<usize,Vec<usize>>,spans:Vec<(usize,usize,usize)>,order:Vec<f32>,grouped:Vec<f32>,placed:Vec<f32>}
+/// The (matrix, rows) list of a grouped expert step for the experts of `spans`.
+fn expert_names<'s>(step:&'s engine_model::plan::layer::Step,spans:&[(usize,usize,usize)])->Vec<(&'s str,usize)> {spans.iter().map(|&(id,_,count)|(step.weights[id].name.as_str(),count)).collect()}
 fn row_shape(op:Row,m:usize)->Result<RowShape> {RowShape::new(op,m).ok_or_else(||"prompt row count exceeds ABI".into())}
 impl<'f,C:Compute> Decoder<'f,C> {
     /// Test and admission control. Bits do not depend on this limit.
@@ -298,16 +384,24 @@ impl<'f,C:Compute> Decoder<'f,C> {
     /// One chat's prompt rows in one group. No committed state changes until
     /// every layer and the head succeed. Equal bits to `step` for each row.
     pub fn prefill_rows(&self,tokens:&[u32],state:&State<C::Value>,head:HeadRows)->Result<(Vec<Vec<f32>>,State<C::Value>)> {
-        self.rows_pass(tokens,state,head,0).map(|(logits,next,_)|(logits,next))
+        self.rows_pass(tokens,state,head,0,None).map(|(logits,next,_)|(logits,next))
     }
     /// The same group, which also keeps what `prefix_state` needs.
     pub fn prefill_rows_open(&self,tokens:&[u32],state:&State<C::Value>,head:HeadRows)->Result<(Vec<Vec<f32>>,State<C::Value>,OpenRows<C::Value>)> {
-        let (logits,next,open)=self.rows_pass(tokens,state,head,2)?;Ok((logits,next,open.ok_or("prompt group kept no rows")?))
+        let (logits,next,open)=self.rows_pass(tokens,state,head,2,None)?;Ok((logits,next,open.ok_or("prompt group kept no rows")?))
+    }
+    /// The same group for a greedy caller: each row from `first` on answers with the ID its head picks, taken where
+    /// the logits are (`Compute::rows_greedy`, the pick of the batch step). No logits come to the host. The same
+    /// state and the same kept rows as `prefill_rows_open` with `HeadRows::From(first)`, and the ID of each row is
+    /// the best of that pass's logits (the lower ID of two equal values).
+    pub fn prefill_rows_open_greedy(&self,tokens:&[u32],state:&State<C::Value>,first:usize)->Result<(Vec<u32>,State<C::Value>,OpenRows<C::Value>)> {
+        let mut ids=Vec::new();let (_,next,open)=self.rows_pass(tokens,state,HeadRows::From(first),2,Some(&mut ids))?;
+        need(first<tokens.len() && ids.len()==tokens.len()-first,"prompt greedy row count differs")?;Ok((ids,next,open.ok_or("prompt group kept no rows")?))
     }
     /// The same group, which keeps only each row's last hidden state (`open_hidden`), for a
     /// proposer's cache of prompt positions. `prefix_state` does not apply to it.
     pub fn prefill_rows_hidden(&self,tokens:&[u32],state:&State<C::Value>,head:HeadRows)->Result<(Vec<Vec<f32>>,State<C::Value>,OpenRows<C::Value>)> {
-        let (logits,next,open)=self.rows_pass(tokens,state,head,1)?;Ok((logits,next,open.ok_or("prompt group kept no hidden rows")?))
+        let (logits,next,open)=self.rows_pass(tokens,state,head,1,None)?;Ok((logits,next,open.ok_or("prompt group kept no hidden rows")?))
     }
     /// The state after the first `rows` rows of a group, from the group's own results: appended
     /// caches are prefixes of the group's caches, and each recurrent layer runs its two state
@@ -361,10 +455,10 @@ impl<'f,C:Compute> Decoder<'f,C> {
         Ok([self.compute.range(&open.hidden[0],row*h,h)?,self.compute.range(&open.hidden[1],row*h,h)?])
     }
     /// `keep`: 0 nothing, 1 the rows' hidden states, 2 also the recurrent layers' kept inputs.
-    /// One group with launch recording paused (PROVED-3): every rows op launches directly, and a new
-    /// row count or chunk position captures no graph pieces. Same commands, same order, same bits
-    /// (measured on the device wire: logits and every state plane equal). Recording resumes after,
-    /// also when the group fails.
+    /// Prompt groups keep launch recording paused (PROVED-3): a new row count or chunk position then
+    /// captures no graph pieces. Verification rows repeat a small bounded set of shapes, so they keep
+    /// the caller's recording state and let resident pieces replay. Both forms enqueue the same commands
+    /// in the same order. A prompt group's recording state is restored also when the group fails.
     /// Warm multi-row device route tables, descriptor scratch, and placement tables across all target routed layers
     /// for verify passes up to `max_rows` rows.
     pub fn warm_verify_routes(&self,max_rows:usize)->Result<()> {
@@ -385,30 +479,60 @@ impl<'f,C:Compute> Decoder<'f,C> {
         self.verify_routes.set(self.verify_routes.get().max(max_rows));
         Ok(())
     }
-    fn rows_pass(&self,tokens:&[u32],state:&State<C::Value>,head:HeadRows,keep:u8)->Result<(Vec<Vec<f32>>,State<C::Value>,Option<OpenRows<C::Value>>)> {
-        let was=self.compute.rows_unrecorded(true)?;
+    /// `picked`: the head rows answer with their IDs, pushed there, and the logits stay empty (`prefill_rows_open_greedy`).
+    fn rows_pass(&self,tokens:&[u32],state:&State<C::Value>,head:HeadRows,keep:u8,picked:Option<&mut Vec<u32>>)->Result<(Vec<Vec<f32>>,State<C::Value>,Option<OpenRows<C::Value>>)> {
+        // A check is already inside the resident queue opened by `Compute::work`. Unlike prompt
+        // groups, its 2..=8-row shapes recur every cycle and can amortize retained pieces.
+        let paused=if keep==2 {None} else {Some(self.compute.rows_unrecorded(true)?)};
         self.compute.rows_verify(keep==2 && self.predictor_enabled() && (2..=self.verify_routes.get()).contains(&tokens.len()));
-        let result=self.rows_pass_body(tokens,state,head,keep);
+        let result=self.rows_pass_body(tokens,state,head,keep,picked);
         self.compute.rows_verify(false);
         // A failed large group must end its extra spare capacity too. Keep the
         // original error if the device cannot synchronize for this cleanup.
         if result.is_err() && group_pool_cap(tokens.len()).is_some() {let _=self.compute.rows_keep();}
-        let restored=self.compute.rows_unrecorded(was);let value=result?;restored?;Ok(value)
+        let restored=paused.map_or(Ok(()),|was|self.compute.rows_unrecorded(was).map(|_|()));let value=result?;restored?;Ok(value)
     }
-    fn rows_pass_body(&self,tokens:&[u32],state:&State<C::Value>,head:HeadRows,keep:u8)->Result<(Vec<Vec<f32>>,State<C::Value>,Option<OpenRows<C::Value>>)> {
+    fn rows_pass_body(&self,tokens:&[u32],state:&State<C::Value>,head:HeadRows,keep:u8,mut picked:Option<&mut Vec<u32>>)->Result<(Vec<Vec<f32>>,State<C::Value>,Option<OpenRows<C::Value>>)> {
         let c=self.checkpoint;let d=c.description();let m=tokens.len();
         need(m>0 && m<=PROMPT_GROUP_CHECK && state.layers.len()==d.layers.len(),"prompt group differs")?;
         need(state.position.checked_add(m as u64).is_some_and(|n|n<=self.capacity && n<=u32::MAX as u64),"prompt group exceeds capacity")?;
         need(tokens.iter().all(|&t|u64::from(t)<d.vocab),"prompt token exceeds vocabulary")?;
         if trims_spares_first(m,state.position) {self.compute.rows_keep()?;}
         let streams=d.residual.streams as usize;let hidden=d.hidden as usize;
-        let mut residual=match self.compute.rows_embedding(tokens,streams)? {
-            Some(value)=>value,
-            None=>{let rows=tokens.iter().map(|&t|self.embedding(t)).collect::<Result<Vec<_>>>()?;self.compute.join(&rows.iter().collect::<Vec<_>>())?},
-        };
+        let embed=|tokens:&[u32]|->Result<C::Value> {match self.compute.rows_embedding(tokens,streams)? {
+            Some(value)=>Ok(value),
+            None=>{let rows=tokens.iter().map(|&t|self.embedding(t)).collect::<Result<Vec<_>>>()?;self.compute.join(&rows.iter().collect::<Vec<_>>())},
+        }};
+        // WIDE GROUP: a prompt group above PROMPT_GROUP_MAX rows passes every layer as runs of at most that many rows
+        // (`layer_wide`), and the residual rows of each run stay a value of their own from the embedding to the last
+        // layer: a run's rows are never copied out of or into the group's rows between two layers.
+        if m>PROMPT_GROUP_MAX && keep<2 {
+            let mut runs=tokens.chunks(PROMPT_GROUP_MAX).map(|run|Ok((run.len(),embed(run)?))).collect::<Result<Vec<_>>>()?;
+            let mut layers=Vec::new();let mut expanded=BTreeMap::new();
+            for layer in 0..d.layers.len() {
+                let cut=self.wide_cut(layer,state.position+m as u64)?;
+                let (outputs,next,held)=self.layer_wide(layer,state,runs,cut.as_ref().map(|(cut,carry)|(*cut,carry.as_str())))?;
+                runs=outputs;layers.push(next);
+                if let Some(held)=held {expanded.insert(layer,held);}
+            }
+            // The stream mean and the final norm of each run (a row depends on that row alone), then one value for the head.
+            let mut s=shape(Op::StreamMean);s.heads=number(d.residual.streams)?;s.dim=number(d.hidden)?;let name="model.language_model.norm.weight";
+            let (mut means,mut norms)=(Vec::with_capacity(runs.len()),Vec::with_capacity(runs.len()));
+            for (n,residual) in runs {
+                let mean=self.compute.prompt(RowShape::wrapped(s,n).ok_or("prompt row count exceeds ABI")?,[Some(&residual),None,None,None,None],&[])?;drop(residual);
+                norms.push(self.compute.rows_norm(name,norm_shape(c,name,hidden)?,&mean,n,&self.parameters[name])?);means.push(mean);
+            }
+            let normalized=self.compute.join(&norms.iter().collect::<Vec<_>>())?;drop(norms);
+            let logits=self.head_rows(&normalized,m,head,picked.as_deref_mut())?;
+            if m>=PROMPT_SHARED {self.compute.rows_keep()?;}
+            let open=if keep>0 {let mean=self.compute.join(&means.iter().collect::<Vec<_>>())?;
+                Some(OpenRows {first:state.position,rows:m,layers:(0..d.layers.len()).map(|_|None).collect(),hidden:[mean,self.compute.range(&normalized,0,m*hidden)?]})} else {None};
+            return Ok((logits,State {position:state.position+m as u64,layers,expanded},open));
+        }
+        let mut residual=embed(tokens)?;
         let mut layers=Vec::new();let mut expanded=BTreeMap::new();let mut kept_layers=Vec::new();
         for layer in 0..d.layers.len() {
-            let (output,next,cache,kept)=self.layer_rows(layer,state.position,m,residual,&state.layers[layer],state.expanded.get(&layer).filter(|v|v.1<=state.position as usize && v.1<=self.expanded_limit.get()),keep==2)?;
+            let (output,next,cache,kept)=self.layer_rows(layer,state.position,m,residual,&state.layers[layer],state.expanded.get(&layer).filter(|v|v.1<=state.position as usize && v.1<=self.expanded_limit.get()),keep==2,None)?;
             residual=output;layers.push(next);kept_layers.push(kept);
             // A group past the held limit adds no rows, but the rows held before it stay:
             // they are the first rows of the same cache and admission charges them for the whole chat.
@@ -419,20 +543,34 @@ impl<'f,C:Compute> Decoder<'f,C> {
         let mean=self.compute.prompt(RowShape::wrapped(s,m).ok_or("prompt row count exceeds ABI")?,[Some(&residual),None,None,None,None],&[])?;
         let name="model.language_model.norm.weight";
         let normalized=self.compute.rows_norm(name,norm_shape(c,name,hidden)?,&mean,m,&self.parameters[name])?;
-        let vocab=d.vocab as usize;let mut logits=Vec::new();
-        let first=match head {HeadRows::Last=>m-1,HeadRows::All=>0,HeadRows::From(row)=>{need(row<m,"prompt head row is outside its group")?;row}};
-        // Each head row has its own launch group, so the logits stay bounded.
-        let mut at=first;while at<m {let count=(m-at).min(32);
-            let rows=self.compute.range(&normalized,at*hidden,count*hidden)?;
-            let values=self.compute.read(&self.project_group("lm_head.weight",&rows,count,true)?)?;
-            need(values.len()==count*vocab && values.iter().all(|v|v.is_finite()),"prompt logits differ")?;
-            logits.extend(values.chunks_exact(vocab).map(<[f32]>::to_vec));at+=count;}
+        let logits=self.head_rows(&normalized,m,head,picked)?;
         // Keep the group's spares, trimmed to the pool's normal room, instead of releasing them:
         // the next group, or the next session's first group, reuses the same buffer sizes.
         if m>=PROMPT_SHARED {self.compute.rows_keep()?;}
         // Each row's last hidden state, before and after the final norm, for a proposer.
         let open=if keep>0 {Some(OpenRows {first:state.position,rows:m,layers:kept_layers,hidden:[self.compute.range(&mean,0,m*hidden)?,self.compute.range(&normalized,0,m*hidden)?]})} else {None};
         Ok((logits,State {position:state.position+m as u64,layers,expanded},open))
+    }
+    /// The logits of the head rows of a group of `m` rows, from its rows after the final norm.
+    fn head_rows(&self,normalized:&C::Value,m:usize,head:HeadRows,mut picked:Option<&mut Vec<u32>>)->Result<Vec<Vec<f32>>> {
+        let d=self.checkpoint.description();let hidden=d.hidden as usize;
+        let vocab=d.vocab as usize;let mut logits=Vec::new();
+        let first=match head {HeadRows::Last=>m-1,HeadRows::All=>0,HeadRows::From(row)=>{need(row<m,"prompt head row is outside its group")?;row}};
+        // Each head row has its own launch group, so the logits stay bounded.
+        let mut at=first;while at<m {let count=(m-at).min(32);
+            let rows=self.compute.range(normalized,at*hidden,count*hidden)?;
+            let projected=self.project_group("lm_head.weight",&rows,count,true)?;
+            // A greedy caller: each row's ID is picked where its logits are, and three words a row are read, not the
+            // row. A backend that cannot pick there reads the rows and picks on the host by the same rule.
+            if let Some(ids)=picked.as_deref_mut() && let Some(best)=self.compute.rows_greedy(&projected,count)? {
+                need(best.len()==count && best.iter().all(|&id|u64::from(id)<d.vocab),"prompt greedy rows differ")?;ids.extend(best);at+=count;continue;}
+            let values=self.compute.read(&projected)?;
+            need(values.len()==count*vocab && values.iter().all(|v|v.is_finite()),"prompt logits differ")?;
+            match picked.as_deref_mut() {
+                Some(ids)=>for row in values.chunks_exact(vocab) {ids.push(greedy_logits(row,vocab)?);},
+                None=>logits.extend(values.chunks_exact(vocab).map(<[f32]>::to_vec)),
+            }at+=count;}
+        Ok(logits)
     }
     /// Token-major `[m,rows]` from token-major `[m,cols]`, gathered on every rank.
     pub(super) fn project_group(&self,name:&str,input:&C::Value,m:usize,round:bool)->Result<C::Value> {
@@ -441,7 +579,124 @@ impl<'f,C:Compute> Decoder<'f,C> {
         let mut rows=Vec::new();for token in 0..m {rows.push(self.project(name,&self.compute.range(input,token*cols,cols)?,round)?);}
         self.compute.join(&rows.iter().collect::<Vec<_>>())
     }
-    fn layer_rows(&self,layer:usize,first:u64,m:usize,residual:C::Value,state:&BTreeMap<String,C::Value>,expanded:Option<&Expanded<C::Value>>,keep:bool)->Result<(C::Value,BTreeMap<String,C::Value>,Option<C::Value>,Option<KeptRows<C::Value>>)> {
+    /// WIDE GROUP: where a layer's program is cut for a group above `PROMPT_GROUP_MAX` rows: the index of the second
+    /// half's first step (the last mHC prepare, `ffn.prepare`) and the one value that half reads from the steps before it
+    /// (`after_attention`, one residual row a token). The mixer half before the cut holds every step that reads or makes
+    /// history (convolution, recurrence, caches, pools, selection, attention); the half after it (the routed experts, or
+    /// a dense block) is stateless: each of its rows depends on that row alone. None: the program is not of this form (a
+    /// step of the second half reads history, or reads another earlier value), and the layer runs whole.
+    fn wide_cut(&self,layer:usize,last:u64)->Result<Option<(usize,String)>> {
+        let mut schedules=self.schedules.borrow_mut();
+        let plan=schedules.get_mut(layer).ok_or("prompt layer is outside the recipe")?.at(last).map_err(|e|e.to_string())?;
+        Ok(wide_cut_of(plan))
+    }
+    /// WIDE GROUP: one layer of a prompt group above `PROMPT_GROUP_MAX` rows, given and returned as its runs of at most
+    /// `PROMPT_GROUP_MAX` rows in token order: (rows, residual rows) of each run.
+    /// `cut` (`wide_cut`): the layer's program has a mixer half and a stateless routed half. The mixer half runs a run
+    /// at a time, each with the state and the held rows after the run before it: exactly what consecutive groups of
+    /// those sizes do, so every kernel of that half sees a row count a served group already gives it. The routed half
+    /// then runs for the SAME runs, a step at a time for every run (each row of that half depends on that row alone, so
+    /// a run's steps are those of a group of its size), and only the routed expert products of all runs share ONE
+    /// launch a list (`experts_wide`, WIDE COHORT): each expert's weights are then read from memory once for the whole
+    /// group, which is the cost a group pays once. No cut: the whole layer runs a run at a time, as consecutive groups do.
+    /// The bits are those of the smaller groups. A run's rows go from layer to layer as its own value, so what a run's
+    /// last step of a layer leaves for the first step of the next (a residual pass that is finished with the next
+    /// prepare) is what a group of its size leaves. Returns each run's output rows, the layer's next state, and its
+    /// held rows when a run made or kept some.
+    #[allow(clippy::type_complexity)] // one private call.
+    fn layer_wide(&self,layer:usize,state:&State<C::Value>,runs:Vec<(usize,C::Value)>,cut:Option<(usize,&str)>)->Result<(Vec<(usize,C::Value)>,BTreeMap<String,C::Value>,Option<Expanded<C::Value>>)> {
+        let m=runs.iter().map(|(n,_)|*n).sum::<usize>();
+        if cut.is_some() {spark_gpu_probe::prompt_launches::record("wide_group_layer");}
+        let mut held=state.expanded.get(&layer).cloned();let mut before:Option<BTreeMap<String,C::Value>>=None;
+        // Each run: its rows and what its mixer half hands over (the layer's output when the layer has no cut).
+        let mut made:Vec<(usize,C::Value)>=Vec::with_capacity(runs.len());let mut at=0usize;
+        for (n,rows) in runs {
+            let first=state.position+at as u64;
+            let owner=held.as_ref().filter(|v|v.1<=first as usize && v.1<=self.expanded_limit.get());
+            let (middle,next,cache,_)=self.layer_rows(layer,first,n,rows,before.as_ref().unwrap_or(&state.layers[layer]),owner,false,cut)?;
+            // As between two groups: a run that made held rows replaces them, any other run keeps what was held.
+            if let Some(cache)=cache {held=Some(Expanded(std::rc::Rc::new(cache),first as usize+n,self.sparse_layout(layer)?));}
+            made.push((n,middle));before=Some(next);at+=n;
+        }
+        let next=before.ok_or("wide prompt group has no rows")?;
+        let Some((cut,carry))=cut else {return Ok((made,next,held));};
+        // The routed half: the values of each run (first the one value its mixer half handed over).
+        let mut runs:Vec<(usize,BTreeMap<String,C::Value>)>=made.into_iter().map(|(n,middle)|{let mut values=BTreeMap::new();values.insert(carry.to_owned(),middle);(n,values)}).collect();
+        let last=state.position+m as u64;
+        let plan={let mut schedules=self.schedules.borrow_mut();schedules.get_mut(layer).ok_or("prompt layer is outside the recipe")?.at(last).cloned().map_err(|e|e.to_string())?};
+        let mut passes:Vec<BTreeMap<String,C::Pass>>=runs.iter().map(|_|BTreeMap::new()).collect();
+        let mut folds:Vec<RowsFold<C::Value>>=runs.iter().map(|_|RowsFold::of_group()).collect();
+        // Steps a run has already done with an earlier step (`rows_stateless`: Some(n)).
+        let mut skips=vec![0usize;runs.len()];
+        for index in cut..plan.steps.len() {
+            // WIDE COHORT: the routed expert products of every run in one launch a list, when every run is at this step.
+            if skips.iter().all(|&skip|skip==0) && let Some(done)=self.experts_wide(layer,index,&plan,&mut runs,&mut folds)? {skips.fill(done);continue;}
+            for (slot,(n,values)) in runs.iter_mut().enumerate() {
+                if skips[slot]>0 {skips[slot]-=1;continue;}
+                skips[slot]=self.rows_stateless(layer,index,&plan,*n,values,&mut passes[slot],&mut folds[slot])?.ok_or_else(||format!("{}: wide prompt group step reads history",plan.steps[index].id))?;
+            }
+        }
+        let outputs=runs.into_iter().map(|(n,mut values)|Ok((n,values.remove("output").ok_or("prompt layer has no output")?))).collect::<Result<Vec<_>>>()?;
+        Ok((outputs,next,held))
+    }
+    /// WIDE COHORT: the grouped expert step `index` for every run of a wide prompt group at once, when it is one of the
+    /// two that launch the routed expert products: the gate step (with up and their SwiGLU: `rows_experts_gathered_wide`)
+    /// or the fold step whose grouped down step waited for it (`rows_experts_fold_wide`). Each run gets the tables,
+    /// the lists and the values that `experts_group` gives its own call, so each run's result is the result of that
+    /// call; the compute shares only the product launches. `runs`: (rows, values) of each run. `folds`: each run's fold state.
+    /// Some(n): the step is done for every run, and the next n steps with it. None, before any launch: the step is not
+    /// one of the two, or a run or the compute does not take the shared form; each run then takes the step on its own.
+    fn experts_wide(&self,layer:usize,index:usize,plan:&LayerPlan,runs:&mut [(usize,BTreeMap<String,C::Value>)],folds:&mut [RowsFold<C::Value>])->Result<Option<usize>> {
+        let b=&self.compute;let step=&plan.steps[index];
+        if runs.len()<2 || runs.iter().any(|(n,_)|b.routes_rows(*n)) {return Ok(None);}
+        match step.kind {
+            Kind::ExpertProject if step.id=="expert_gate"=>{
+                let (Some(up),Some(swiglu))=(plan.steps.get(index+1),plan.steps.get(index+2)) else {return Ok(None);};
+                if up.id!="expert_up" || up.kind!=Kind::ExpertProject || swiglu.kind!=Kind::SwiGlu || runs.iter().any(|(_,values)|!values.contains_key(&step.inputs[0]) || !values.contains_key(&step.inputs[1])) {return Ok(None);}
+                let limit=self.checkpoint.description().swiglu_limit as f32;
+                let tables=runs.iter().map(|(n,values)|self.expert_tables(plan,step,*n,values)).collect::<Result<Vec<_>>>()?;
+                let lists=tables.iter().map(|tables|(expert_names(step,&tables.spans),expert_names(up,&tables.spans))).collect::<Vec<_>>();
+                let made={
+                    let sets=runs.iter().zip(&tables).zip(&lists).map(|(((_,values),tables),(gate,up))|(gate.as_slice(),up.as_slice(),limit,&values[&step.inputs[0]],tables.order.as_slice(),tables.grouped.as_slice())).collect::<Vec<_>>();
+                    b.rows_experts_gathered_wide(&sets)?};
+                let Some(made)=made else {return Ok(None);};
+                need(made.len()==runs.len(),"wide expert cohort result count differs")?;
+                for ((_,values),middle) in runs.iter_mut().zip(made) {values.insert("expert_middle_grouped".to_owned(),middle);}
+                Ok(Some(2))
+            },
+            Kind::ExpertSum=>{
+                // Every run's grouped down step waited for this fold (`rows_stateless`, GROUP FOLD), with its middle in the grouped order.
+                if !folds.iter().all(|fold|fold.waits && fold.grouped) || step.inputs.len()<3 {return Ok(None);}
+                let Some(links)=self.fold_links(layer,plan).filter(|links|links.fold==index) else {return Ok(None);};
+                let down=&plan.steps[links.down];
+                // As `experts_group` refuses it: a fold with a shared row that is not this rank's own rows.
+                if step.inputs.len()>=4 && folds.iter().any(|fold|fold.shared.is_none()) {return Ok(None);}
+                if runs.iter().any(|(_,values)|!values.contains_key("expert_middle_grouped") || !values.contains_key(&down.inputs[1]) || step.inputs.iter().take(2).any(|name|!values.contains_key(name))) {return Ok(None);}
+                let d=self.checkpoint.description();
+                let route=plan.steps.iter().find(|s|s.kind==Kind::Route).ok_or("prompt expert fold has no route")?;
+                let mut s=shape(Op::ExpertFold);s.rows=number(route.outputs[0].shape[0])?;s.cols=number(d.hidden)?;s.taps=u32::from(step.inputs.len()==4);
+                let tables=runs.iter().map(|(n,values)|self.expert_tables(plan,down,*n,values)).collect::<Result<Vec<_>>>()?;
+                let lists=tables.iter().map(|tables|expert_names(down,&tables.spans)).collect::<Vec<_>>();
+                let made={
+                    let sets=runs.iter().zip(folds.iter()).zip(&tables).zip(&lists).map(|((((n,values),fold),tables),list)|(list.as_slice(),&values["expert_middle_grouped"],tables.placed.as_slice(),
+                        &values[&step.inputs[0]],&values[&step.inputs[1]],step.inputs.get(3).and(fold.shared.as_ref()),s,*n)).collect::<Vec<_>>();
+                    b.rows_experts_fold_wide(&sets)?};
+                let Some(made)=made else {return Ok(None);};
+                need(made.len()==runs.len(),"wide expert cohort result count differs")?;
+                for (((_,values),fold),value) in runs.iter_mut().zip(folds.iter_mut()).zip(made) {
+                    fold.waits=false;fold.grouped=false;fold.shared=None;values.remove("expert_middle_grouped");
+                    values.insert(step.outputs[0].name.clone(),value);
+                }
+                Ok(Some(0))
+            },
+            _=>Ok(None),
+        }
+    }
+    /// `cut`: None runs the whole layer. WIDE GROUP: Some((step, name)) runs only the steps before `step` (the mixer half,
+    /// `wide_cut`) and returns the value `name` in place of the layer's output; the states and held rows are those of the
+    /// whole layer, which the mixer half alone makes.
+    #[allow(clippy::too_many_arguments)]
+    fn layer_rows(&self,layer:usize,first:u64,m:usize,residual:C::Value,state:&BTreeMap<String,C::Value>,expanded:Option<&Expanded<C::Value>>,keep:bool,cut:Option<(usize,&str)>)->Result<(C::Value,BTreeMap<String,C::Value>,Option<C::Value>,Option<KeptRows<C::Value>>)> {
         if let Some(owner)=expanded {need(owner.2==self.sparse_layout(layer)?,"expanded prompt owner layout differs")?;}
         let c=self.checkpoint;let d=c.description();let b=&self.compute;let last=first+m as u64;
         let planning=std::time::Instant::now();
@@ -449,11 +704,12 @@ impl<'f,C:Compute> Decoder<'f,C> {
         b.plan_cost("planning",planning.elapsed().as_nanos());
         let mut values=BTreeMap::new();values.insert("residual".to_owned(),residual);
         let mut kept_conv=None;let mut kept_step=None;
-        let mut passes=BTreeMap::new();let mut fold=RowsFold::default();let mut skip=0;let mut cache=None;let mut cache_rows=last;let mut selected=Vec::new();let mut selected_device=None;
+        // GROUP FOLD: a prompt group (no kept rows) may fold a routed layer's down rows before their exchange.
+        let mut passes=BTreeMap::new();let mut fold=if keep {RowsFold::default()} else {RowsFold::of_group()};let mut skip=0;let mut cache=None;let mut cache_rows=last;let mut selected=Vec::new();let mut selected_device=None;let mut selection_checked=false;
         // With a proposer a pass follows a few steps, each time. Its held rows then follow the decoded rows
         // (admission charges them by the request's tokens), so no pass expands a decoded row twice.
         let persist=last as usize<=self.expanded_limit.get() && (first==0 || expanded.is_some_and(|v|v.1==first as usize || self.draft.is_some() && v.1<first as usize));
-        for index in 0..plan.steps.len() {
+        for index in 0..cut.map_or(plan.steps.len(),|cut|cut.0) {
             if skip>0 {skip-=1;continue;}
             let step=&plan.steps[index];
             if let Some(done)=self.rows_stateless(layer,index,&plan,m,&mut values,&mut passes,&mut fold)? {skip=done;continue;}
@@ -517,6 +773,19 @@ impl<'f,C:Compute> Decoder<'f,C> {
                     let empty;let scores=if pools==0 {empty=b.zeros(0)?;&empty} else {&values[&step.inputs[0]]};
                     let value=b.prompt(s,[Some(scores),None,None,None,None],&[])?;
                     let words=slots as usize+1;
+                    // Absorbed attention consumes the device table directly. Read only one
+                    // validation status per token, retaining every count and causal-ID check.
+                    let absorbed=plan.steps.iter().find(|step|step.kind==Kind::ExpandKv)
+                        .is_some_and(|step|b.has_latent_absorption(&step.weights[0].name));
+                    if m>VERIFY_ROWS && absorbed && self.forced_union.get().is_none() {
+                        let mut check=row_shape(Row::CheckSelectionRows,m)?;check.slots=number(slots)?;check.first=number(first+1)?;
+                        let status=b.prompt(check,[Some(&value),None,None,None,None],&[])?;
+                        let status=b.read(&status)?;
+                        need(status.len()==m && status.iter().all(|&v|v.to_bits()==0),"absorbed prompt selection is invalid")?;
+                        spark_gpu_probe::prompt_launches::record("prompt_selection_checked");
+                        selected_device=Some(b.range(&value,0,m*words)?);selection_checked=true;
+                        values.insert(step.outputs[0].name.clone(),value);continue;
+                    }
                     // For small row groups below the pool budget, every token keeps all complete pools, so
                     // IDs and counts are known on the host while `select_known_rows` defers NaN count checks
                     // to the step's final readback.
@@ -537,7 +806,9 @@ impl<'f,C:Compute> Decoder<'f,C> {
                         for (token,row) in read.chunks_exact(words).enumerate() {need(row[words-1]>=0.0 && row[words-1] as u64<=slots.min(first+1+token as u64),"prompt selection count is invalid")?;}
                         selected=read;if self.forced_union.get().is_some() {force_distinct_rows(&mut selected,slots as usize,first as usize);}
                         b.plan_cost("prompt_selection",host.elapsed().as_nanos());
-                        selected_device=None;
+                        // Keep the selection that was just checked. Its device words are unchanged;
+                        // only a forced test union needs the modified host table uploaded below.
+                        selected_device=if self.forced_union.get().is_none() {Some(b.range(&value,0,selected.len())?)} else {None};
                         values.insert(step.outputs[0].name.clone(),value);
                     }},
                 Kind::Gather=>{},
@@ -545,7 +816,7 @@ impl<'f,C:Compute> Decoder<'f,C> {
                     if b.has_latent_absorption(&step.weights[0].name) {
                         let (query_name,output_name)=indirect::attention_tail(&plan,index).ok_or("absorbed prompt tail is not private")?;
                         let layout=self.sparse_layout(layer)?;let slots=(a.indexer.token_budget+if a.indexer.select_tail {a.indexer.pool-1} else {0}) as usize;
-                        need(selected.len()==m*(slots+1),"absorbed prompt selection extent differs")?;
+                        if !selection_checked {need(selected.len()==m*(slots+1),"absorbed prompt selection extent differs")?;}
                         let queries=self.local_query(&values[query_name],m,layout)?;
                         let host=std::time::Instant::now();
                         for (token,row) in selected.chunks_exact(slots+1).enumerate() {
@@ -662,7 +933,8 @@ impl<'f,C:Compute> Decoder<'f,C> {
             // The complete pools ride with the state, as in the step path.
             TokenMixer::LatentAttention(_)=>vec![("latent_cache","next_latent_cache"),("index_keys","next_index_keys"),("index_gates","next_index_gates"),("pool_keys","pool_keys")],
         };
-        let output=values.remove("output").ok_or("prompt layer has no output")?;let mut next=BTreeMap::new();
+        need(skip==0,"prompt layer cut is inside a stage")?;
+        let output=values.remove(cut.map_or("output",|cut|cut.1)).ok_or("prompt layer has no output")?;let mut next=BTreeMap::new();
         for (input,name) in names {next.insert(input.into(),values.remove(name).ok_or("prompt layer has no next state")?);}
         let kept=match (kept_conv,kept_step) {(Some((conv,history)),Some((step,decay,state)))=>Some(KeptRows {conv,history,step,decay,state}),_=>None};
         need(!keep || kept.is_some()==matches!(d.layers[layer].mixer,TokenMixer::Kda(_)),"recurrent layer kept no rows")?;
@@ -684,12 +956,14 @@ impl<'f,C:Compute> Decoder<'f,C> {
             // A projection that an earlier stage of this layer made is done. Else the stage that starts here makes it; the
             // shared row of a fold whose down step waits stays on its rank (`rows_fold_shared`; a pass that does not fold
             // pays the one flag `fold.waits` here).
-            Kind::Project=>{if !values.contains_key(&step.outputs[0].name) && !(fold.waits && self.rows_fold_shared(layer,index,plan,m,values,fold)?) {self.rows_project_stage(index,plan,m,values)?;}},
+            // LOCAL QUERY: the query rows of a prompt group's latent layer stay on their rank (`rows_query_local`; a pass
+            // that is not a prompt group pays the one flag `fold.group` here).
+            Kind::Project=>{if !values.contains_key(&step.outputs[0].name) && !(fold.waits && self.rows_fold_shared(layer,index,plan,m,values,fold)?)
+                && !(fold.group && self.rows_query_local(layer,index,plan,m,values)?) {self.rows_project_stage(index,plan,m,values)?;}},
             Kind::Norm=>{let name=&step.weights[0].name;let width=step.outputs[0].elements().map_err(|e|e.to_string())?;
                 let value=b.rows_norm(name,norm_shape(c,name,width)?,&values[&step.inputs[0]],m,&self.parameters[name])?;values.insert(step.outputs[0].name.clone(),value);},
-            Kind::SwiGlu=>{let elements=step.outputs[0].elements().map_err(|e|e.to_string())?;let mut s=shape(Op::SwiGlu);
-                s.rows=number(elements as u64*m as u64)?;s.bound=d.swiglu_limit as f32;
-                let value=b.operation(s,[Some(&values[&step.inputs[0]]),Some(&values[&step.inputs[1]]),None,None],&[])?;values.insert(step.outputs[0].name.clone(),value);},
+            // LOOKAHEAD: a SwiGLU that `rows_ahead` made behind the routed gate and up is done.
+            Kind::SwiGlu=>{if !values.contains_key(&step.outputs[0].name) {let value=self.rows_swiglu(step,m,values)?;values.insert(step.outputs[0].name.clone(),value);}},
             Kind::KdaPrepare|Kind::GatedNorm=>{let TokenMixer::Kda(k)=d.layers[layer].mixer else {return Err("recurrent operation requires a recurrent layer".into());};
                 let mut s=shape(if step.kind==Kind::KdaPrepare {Op::Prepare} else {Op::GatedNorm});s.epsilon=d.epsilon as f32;
                 s.heads=number(self.kda_layout(layer)?.local_heads() as u64)?;s.dim=number(k.head_dim)?;s.taps=number(k.conv)?;if step.kind==Kind::KdaPrepare {s.bound=k.gate_lower_bound as f32;}
@@ -721,8 +995,11 @@ impl<'f,C:Compute> Decoder<'f,C> {
                 for row in routes.chunks_exact(words) {ids.extend_from_slice(&row[..k]);chosen.extend_from_slice(&row[k..2*k]);}
                 values.insert(step.outputs[0].name.clone(),b.upload_known(&ids)?);values.insert(step.outputs[1].name.clone(),b.upload(&chosen)?);}},
             // ROWS FOLD: a routed down step that its fold can take (`rows_fold_waits`) runs at the fold step, below.
-            Kind::ExpertDown if self.rows_fold_waits(layer,index,plan,m,values)=>{fold.waits=true;fold.shared=None;},
-            Kind::ExpertProject|Kind::ExpertDown=>{skip=self.experts_group(index,plan,m,values)?;},
+            Kind::ExpertDown if self.rows_fold_waits(layer,index,plan,m,values)=>{fold.waits=true;fold.grouped=false;fold.shared=None;},
+            // GROUP FOLD: the grouped down step of a prompt group that its fold can take (`rows_group_fold_waits`) runs at
+            // the fold step, below, with the fold before the exchange.
+            Kind::ExpertDown if fold.group && self.rows_group_fold_waits(layer,index,plan,m,values)=>{fold.waits=true;fold.grouped=true;fold.shared=None;},
+            Kind::ExpertProject|Kind::ExpertDown=>{skip=self.experts_group(index,plan,m,values,None,Some((layer,&mut *fold)))?;},
             Kind::ExpertSum=>{let route=plan.steps.iter().find(|s|s.kind==Kind::Route).ok_or("prompt expert fold has no route")?;
                 let mut s=shape(Op::ExpertFold);s.rows=number(route.outputs[0].shape[0])?;s.cols=number(d.hidden)?;s.taps=u32::from(step.inputs.len()==4);
                 // ROWS FOLD: the down step of this layer waited (`fold.waits`; a pass that does not fold pays that one flag).
@@ -731,23 +1008,30 @@ impl<'f,C:Compute> Decoder<'f,C> {
                 // is row by row, so the words are the words of the fold after the gather (`Decoder::expert_fold` for one
                 // row). A compute that does not take the stage gets the down step now, as it was, and the fold below.
                 if fold.waits {
-                    fold.waits=false;
+                    fold.waits=false;let grouped=std::mem::take(&mut fold.grouped);
                     // The shared row: this rank's own rows when `rows_fold_shared` kept them here, else the gathered rows.
                     let kept=fold.shared.take();
                     let links=self.fold_links(layer,plan).filter(|links|links.fold==index).ok_or("prompt expert fold has no waiting down step")?;
                     let down=&plan.steps[links.down];
-                    let folded={
+                    let folded=if grouped {
+                        // GROUP FOLD: the grouped down step with this fold (`experts_group`): each rank places and folds its
+                        // own rows, and ONE exchange carries the folded rows. The fold is a chain a word, so the words are the
+                        // words of the fold after the gather. Done: the fold's output is here.
+                        self.experts_group(links.down,plan,m,values,Some((index,s,kept.as_ref())),None)?;
+                        values.contains_key(&step.outputs[0].name)
+                    } else {
                         let input=|name:&String|values.get(name).ok_or_else(||format!("{}: prompt expert fold input is absent",step.id));
                         let shared=match (step.inputs.get(3),kept.as_ref()) {(Some(_),Some(local))=>Some(local),(Some(name),None)=>Some(input(name)?),(None,_)=>None};
-                        b.rows_routed_fold(down,input(&step.inputs[0])?,input(&down.inputs[0])?,input(&step.inputs[1])?,shared,s,m)?};
-                    if let Some(value)=folded {values.insert(step.outputs[0].name.clone(),value);return Ok(Some(0));}
+                        let folded=b.rows_routed_fold(down,input(&step.inputs[0])?,input(&down.inputs[0])?,input(&step.inputs[1])?,shared,s,m)?;
+                        if let Some(value)=folded {values.insert(step.outputs[0].name.clone(),value);true} else {false}};
+                    if folded {return Ok(Some(0));}
                     // The stage is refused. The fold below reads whole rows: a shared row kept on its rank is made again,
-                    // with its exchange; then the down step, as it was.
+                    // with its exchange; then the down step, as it was (the grouped form made it when its stage was refused).
                     if kept.is_some() {
                         let (shared,_)=links.shared.ok_or("prompt expert fold has no shared projection")?;
                         self.rows_project_stage(shared,plan,m,values)?;
                     }
-                    self.experts_group(links.down,plan,m,values)?;
+                    if !grouped {self.experts_group(links.down,plan,m,values,None,None)?;}
                 }
                 let mut x=[None;5];for (slot,name) in step.inputs.iter().enumerate() {x[slot]=Some(&values[name]);}
                 let value=b.prompt(RowShape::wrapped(s,m).ok_or("prompt row count exceeds ABI")?,x,&[])?;values.insert(step.outputs[0].name.clone(),value);},
@@ -794,6 +1078,25 @@ impl<'f,C:Compute> Decoder<'f,C> {
         for (at,value) in ready.into_iter().zip(outputs) {values.insert(plan.steps[at].outputs[0].name.clone(),value);}
         Ok(())
     }
+    /// LOCAL QUERY. A latent layer's query projection is split by heads, and every reader of the query on a rank takes
+    /// only that rank's heads (`local_query`: the score step, or the absorbed tail in its place). So a prompt group needs
+    /// no exchange of it: each rank keeps the rows it made (`Compute::rows_project_owned`), which are its rows of the
+    /// gathered value, word for word. Measured on a pair: 11 exchanges of 32 MiB a rank in a group of 1,024 rows. True:
+    /// the projection `index` is that query, its rows are here in the local form, and the layer makes one exchange less.
+    /// False, before any work: another projection, a reader that is not a score step's query, a rank that owns every
+    /// head, or a compute that does not keep the rows; the stage then makes the projection with its exchange.
+    fn rows_query_local(&self,layer:usize,index:usize,plan:&LayerPlan,m:usize,values:&mut BTreeMap<String,C::Value>)->Result<bool> {
+        let step=&plan.steps[index];
+        // Every reader is a score step that reads it as its query, and nothing returns it or routes by it.
+        if !matches!(self.mixer(layer)?,TokenMixer::LatentAttention(_)) || !crate::sparse_heads::query_stays_local(plan,index) {return Ok(false);}
+        let name=&step.outputs[0].name;
+        let layout=self.sparse_layout(layer)?;let rows=layout.query_rows();let width=layout.total_heads()*layout.key_dim();
+        if rows.len()==width || step.outputs[0].elements().map_err(|e|e.to_string())?!=width {return Ok(false);}
+        let Some(input)=values.get(&step.inputs[0]) else {return Ok(false);};
+        let Some(local)=self.compute.rows_project_owned(self.checkpoint,&step.weights[0].name,input,m,true,rows.clone())? else {return Ok(false);};
+        need(self.compute.words(&local)==m*rows.len(),"local query rows extent differs")?;
+        values.insert(name.clone(),local);Ok(true)
+    }
     /// ROWS FOLD: the fold steps of `layer`, found once (`FoldLinks::of`) and kept: a layer's program has the same steps at
     /// every context. The two kinds are read back, so a program that differs is found again and never trusted.
     fn fold_links(&self,layer:usize,plan:&LayerPlan)->Option<FoldLinks> {
@@ -814,10 +1117,45 @@ impl<'f,C:Compute> Decoder<'f,C> {
     fn rows_fold_shared(&self,layer:usize,index:usize,plan:&LayerPlan,m:usize,values:&BTreeMap<String,C::Value>,fold:&mut RowsFold<C::Value>)->Result<bool> {
         let Some((at,round))=self.fold_links(layer,plan).and_then(|links|links.shared) else {return Ok(false);};
         if at!=index {return Ok(false);}
+        // LOOKAHEAD: the rows are here already (`rows_ahead` made them, by the call below, behind the routed gate and up).
+        if let Some(local)=fold.ahead.take() {fold.shared=Some(local);return Ok(true);}
         let step=&plan.steps[index];
         let Some(input)=values.get(&step.inputs[0]) else {return Ok(false);};
         let Some(local)=self.compute.rows_project_local(self.checkpoint,&step.weights[0].name,input,m,round)? else {return Ok(false);};
         fold.shared=Some(local);Ok(true)
+    }
+    /// The SwiGLU step `step` of `m` rows: one launch over all of them.
+    fn rows_swiglu(&self,step:&engine_model::plan::layer::Step,m:usize,values:&BTreeMap<String,C::Value>)->Result<C::Value> {
+        let elements=step.outputs[0].elements().map_err(|e|e.to_string())?;let mut s=shape(Op::SwiGlu);
+        s.rows=number(elements as u64*m as u64)?;s.bound=self.checkpoint.description().swiglu_limit as f32;
+        self.compute.operation(s,[Some(&values[&step.inputs[0]]),Some(&values[&step.inputs[1]]),None,None],&[])
+    }
+    /// LOOKAHEAD: what a prompt group queues behind its routed gate and up (`gate` is their first step) while their
+    /// exchange is open (`Compute::rows_experts_open`), so that it runs while the link carries their rows: the two later
+    /// steps of the layer that read nothing of that exchange and make no exchange themselves. They are the shared
+    /// expert's SwiGLU and this rank's own rows of its down projection (the call of `rows_fold_shared`; the layer's fold
+    /// reads only this rank's rows of it). Their inputs are complete here: the stage before the route gathered the
+    /// shared gate and up. Each is the launch its own step makes, on the same words, so its result has the same bits;
+    /// only its place in the queue is earlier. The SwiGLU's value takes its step's name, and that step finds it done.
+    /// The local rows wait in `fold.ahead` for the shared projection's step. Nothing is queued when the layer's fold
+    /// has no shared row of this form, when the SwiGLU's inputs are not here, or when the compute keeps no rows local
+    /// (the SwiGLU alone is then made ahead, and the projection keeps its stage and its exchange).
+    fn rows_ahead(&self,layer:usize,gate:usize,plan:&LayerPlan,m:usize,values:&mut BTreeMap<String,C::Value>,fold:&mut RowsFold<C::Value>)->Result<()> {
+        let Some((at,round))=self.fold_links(layer,plan).and_then(|links|links.shared) else {return Ok(());};
+        let project=&plan.steps[at];
+        let Some(swiglu)=plan.steps.get(gate+3..at).and_then(|steps|steps.iter().find(|step|step.kind==Kind::SwiGlu && step.inputs.len()==2 && step.outputs.len()==1 && step.outputs[0].name==project.inputs[0])) else {return Ok(());};
+        if values.contains_key(&swiglu.outputs[0].name) || !swiglu.inputs.iter().all(|name|values.contains_key(name)) {return Ok(());}
+        let middle=self.rows_swiglu(swiglu,m,values)?;
+        let local=self.compute.rows_project_local(self.checkpoint,&project.weights[0].name,&middle,m,round)?;
+        values.insert(swiglu.outputs[0].name.clone(),middle);fold.ahead=local;Ok(())
+    }
+    /// LOOKAHEAD: the work behind an open gate-and-up exchange (`rows_ahead`), then its close (`Compute::rows_experts_close`):
+    /// the middle takes its name and the gate, up and SwiGLU steps are done. The close always follows the open, also
+    /// when `rows_ahead` failed; `rows_ahead`'s own error is then the one reported.
+    fn experts_ahead(&self,layer:usize,gate:usize,plan:&LayerPlan,m:usize,values:&mut BTreeMap<String,C::Value>,fold:&mut RowsFold<C::Value>)->Result<usize> {
+        let queued=self.rows_ahead(layer,gate,plan,m,values,fold);
+        let middle=self.compute.rows_experts_close(queued.is_err());
+        queued?;values.insert("expert_middle_grouped".to_owned(),middle?);Ok(2)
     }
     /// ROWS FOLD: true when the routed down step `index` of this row pass waits for its fold (`Compute::rows_routed_fold`,
     /// called at the fold step in `rows_stateless`): the compute folds the rows of this pass, the fold is the only
@@ -827,6 +1165,14 @@ impl<'f,C:Compute> Decoder<'f,C> {
     /// (a prompt group, a verify pass, a batch step in the grouped form) pays the one flag `folds_rows` here.
     fn rows_fold_waits(&self,layer:usize,index:usize,plan:&LayerPlan,m:usize,values:&BTreeMap<String,C::Value>)->bool {
         self.compute.folds_rows(m) && self.fold_links(layer,plan).is_some_and(|links|links.down==index) && values.contains_key(&plan.steps[index].inputs[0])
+    }
+    /// GROUP FOLD: true when the grouped down step `index` of a prompt group waits for its fold (`Compute::rows_experts_fold`,
+    /// called from `experts_group` at the fold step): the compute folds the rows of a group, the fold is the only reader of
+    /// the down rows (`FoldLinks`), and the middle is here in the grouped order the gate and up steps kept
+    /// (`expert_middle_grouped`). Nothing between the two steps reads the down rows or the fold's output, so running the
+    /// down step later changes no value. A group whose compute does not fold pays the one flag `folds_groups` here.
+    fn rows_group_fold_waits(&self,layer:usize,index:usize,plan:&LayerPlan,m:usize,values:&BTreeMap<String,C::Value>)->bool {
+        self.compute.folds_groups(m) && self.fold_links(layer,plan).is_some_and(|links|links.down==index) && values.contains_key("expert_middle_grouped")
     }
     /// ROUTE ROWS: the layer's routed experts with the picks left on the device (`Compute::rows_routed`): one job a
     /// (token, pick), in that order, so nothing is grouped, permuted or placed back. Gate, up and their SwiGLU are one
@@ -848,11 +1194,10 @@ impl<'f,C:Compute> Decoder<'f,C> {
         let Some(middle)=b.rows_routed(&plan.steps[index..index+2],Some(bound),&values[&step.inputs[1]],&values[&step.inputs[0]],m)? else {return Ok(None);};
         values.insert(swiglu.outputs[0].name.clone(),middle);Ok(Some(2))
     }
-    /// Rows choosing one expert share one weight pass. Host routes only place
-    /// rows. Every output row returns to its own (token,slot) unchanged.
-    fn experts_group(&self,index:usize,plan:&LayerPlan,m:usize,values:&mut BTreeMap<String,C::Value>)->Result<usize> {
-        let b=&self.compute;let step=&plan.steps[index];
-        if b.routes_rows(m) && let Some(done)=self.experts_routed(index,plan,m,values)? {return Ok(done);}
+    /// The host tables of the grouped expert step `step` for `m` rows: the picks are read from the device, and the rows
+    /// of one expert become contiguous, in ascending expert order. The statements `experts_group` always ran first.
+    fn expert_tables(&self,plan:&LayerPlan,step:&engine_model::plan::layer::Step,m:usize,values:&BTreeMap<String,C::Value>)->Result<ExpertTables> {
+        let b=&self.compute;
         let ids=b.read(&values[&step.inputs[1]])?;let k=step.outputs[0].shape[0] as usize;need(ids.len()==m*k,"prompt route count differs")?;
         let host=std::time::Instant::now();
         let mut groups:BTreeMap<usize,Vec<usize>>=BTreeMap::new();
@@ -861,28 +1206,72 @@ impl<'f,C:Compute> Decoder<'f,C> {
             need(!row[..slot].contains(&id),"prompt route repeats an expert")?;groups.entry(id as usize).or_default().push(token*k+slot);
         }}
         if step.id=="expert_gate" {super::batch::note_expert_union(plan.layer,m*k,groups.len());b.note_batch_experts(m*k,groups.len());}
-        let width=step.weights[0].shape[1] as usize;let out_width=step.weights[0].shape[0] as usize;let down=step.kind==Kind::ExpertDown;
+        let down=step.kind==Kind::ExpertDown;
         // Rows of one expert become contiguous, in ascending expert order.
         let mut order=Vec::with_capacity(m*k);let mut spans=Vec::with_capacity(groups.len());
         for (&id,rows) in &groups {spans.push((id,order.len(),rows.len()));order.extend(rows.iter().map(|&row|if down {row} else {row/k} as f32));}
-        let permute=|source:&C::Value,table:&[f32],rows:usize,cols:usize,from:usize|->Result<C::Value> {
-            let table=b.upload(table)?;let mut s=row_shape(Row::PermuteRows,1)?;s.rows=number(rows as u64)?;s.cols=number(cols as u64)?;s.first=number(from as u64)?;
-            b.prompt(s,[Some(source),Some(&table),None,None,None],&[])};
         // Three numbers per output row: earlier rows, this expert's rows, row index.
         let mut grouped=Vec::with_capacity(3*m*k);let mut placed=vec![0.0f32;3*m*k];
         for &(id,at,count) in &spans {for (position,&row) in groups[&id].iter().enumerate() {
             grouped.extend_from_slice(&[at as f32,count as f32,position as f32]);placed[3*row..3*row+3].copy_from_slice(&[at as f32,count as f32,position as f32]);}}
-        fn names<'s>(step:&'s engine_model::plan::layer::Step,spans:&[(usize,usize,usize)])->Vec<(&'s str,usize)> {spans.iter().map(|&(id,_,count)|(step.weights[id].name.as_str(),count)).collect()}
         b.plan_cost("prompt_expert_tables",host.elapsed().as_nanos());
+        Ok(ExpertTables {groups,spans,order,grouped,placed})
+    }
+    /// Rows choosing one expert share one weight pass. Host routes only place
+    /// rows. Every output row returns to its own (token,slot) unchanged.
+    /// GROUP FOLD: `fold` names the fold of a down step that waited for it (its step, its shape, and this rank's rows of
+    /// the shared row when the compute kept them): the compute then gets the down step and the fold as one stage
+    /// (`Compute::rows_experts_fold`) and the fold's output is the result. A compute that refuses the stage gets the down
+    /// step as it was; the caller sees no fold output and runs the fold.
+    /// LOOKAHEAD: `ahead` is the layer and its fold state, given for the layer's own gate and up steps: see the gate branch.
+    #[allow(clippy::type_complexity)] // one private call; the tuple is the whole fold.
+    fn experts_group(&self,index:usize,plan:&LayerPlan,m:usize,values:&mut BTreeMap<String,C::Value>,fold:Option<(usize,Shape,Option<&C::Value>)>,ahead:Option<(usize,&mut RowsFold<C::Value>)>)->Result<usize> {
+        let b=&self.compute;let step=&plan.steps[index];
+        if b.routes_rows(m) && let Some(done)=self.experts_routed(index,plan,m,values)? {return Ok(done);}
+        let ExpertTables {groups,spans,order,grouped,placed}=self.expert_tables(plan,step,m,values)?;let k=step.outputs[0].shape[0] as usize;
+        let width=step.weights[0].shape[1] as usize;let out_width=step.weights[0].shape[0] as usize;let down=step.kind==Kind::ExpertDown;
+        let permute=|source:&C::Value,table:&[f32],rows:usize,cols:usize,from:usize|->Result<C::Value> {
+            let table=b.upload(table)?;let mut s=row_shape(Row::PermuteRows,1)?;s.rows=number(rows as u64)?;s.cols=number(cols as u64)?;s.first=number(from as u64)?;
+            b.prompt(s,[Some(source),Some(&table),None,None,None],&[])};
+        use expert_names as names;
         if !down && step.id=="expert_gate" {
             let up=&plan.steps[index+1];let swiglu=&plan.steps[index+2];need(up.id=="expert_up" && swiglu.kind==Kind::SwiGlu,"prompt expert program differs")?;
+            let (gates,ups,bound)=(names(step,&spans),names(up,&spans),self.checkpoint.description().swiglu_limit as f32);
+            // LOOKAHEAD: a prompt group whose compute leaves the link step of this exchange open (the device, when it
+            // folds a group's down rows first: GROUP FOLD) queues the shared expert's two steps behind it (`rows_ahead`)
+            // and closes it (`experts_ahead`). Those steps then run while the link carries the middle.
+            let mut ahead=ahead.filter(|(_,state)|state.group);
+            // GATHERED ROWS under LOOKAHEAD: the open exchange on rows the compute reads through `order`; no copy is made.
+            if let Some((layer,state))=ahead.as_mut() && b.rows_experts_open_gathered(&gates,(&ups,bound),&values[&step.inputs[0]],&order,&grouped)? {
+                return self.experts_ahead(*layer,index,plan,m,values,state);
+            }
+            // GATHERED ROWS: the compute reads each token's row through `order`; the copy below is not made.
+            if let Some(middle)=b.rows_experts_gathered(&gates,Some((&ups,bound)),&values[&step.inputs[0]],&order,&grouped)? {
+                values.insert("expert_middle_grouped".to_owned(),middle);return Ok(2);
+            }
             let source=permute(&values[&step.inputs[0]],&order,m*k,width,m)?;
-            if let Some(middle)=b.rows_experts(&names(step,&spans),Some((&names(up,&spans),self.checkpoint.description().swiglu_limit as f32)),&source,&grouped)? {
+            // LOOKAHEAD on the copied rows (a compute that does not take the gathered operands). `source` lives until
+            // this call returns, so past the close.
+            if let Some((layer,state))=ahead.as_mut() && b.rows_experts_open(&gates,(&ups,bound),&source,&grouped)? {
+                return self.experts_ahead(*layer,index,plan,m,values,state);
+            }
+            if let Some(middle)=b.rows_experts(&gates,Some((&ups,bound)),&source,&grouped)? {
                 values.insert("expert_middle_grouped".to_owned(),middle);return Ok(2);
             }
         }
         let held=values.remove("expert_middle_grouped");
         let source=match held {Some(v)=>v,None=>permute(&values[&step.inputs[0]],&order,m*k,width,if down {m*k} else {m})?};
+        if down&& let Some((sum,shape,kept))=fold {
+            let sum=&plan.steps[sum];need(sum.kind==Kind::ExpertSum && sum.inputs.len()>=3,"prompt expert fold step differs")?;
+            let folded={
+                let input=|name:&String|values.get(name).ok_or_else(||format!("{}: prompt expert fold input is absent",sum.id));
+                // The fold reads this rank's own rows of the shared row. Gathered rows are not that form: the stage is refused below.
+                match (sum.inputs.get(3),kept) {
+                    (Some(_),None)=>None,
+                    (shared,kept)=>b.rows_experts_fold(&names(step,&spans),&source,&placed,input(&sum.inputs[0])?,input(&sum.inputs[1])?,shared.and(kept),shape,m)?,
+                }};
+            if let Some(value)=folded {values.insert(sum.outputs[0].name.clone(),value);return Ok(0);}
+        }
         if down&& let Some(value)=b.rows_experts(&names(step,&spans),None,&source,&placed)? {values.insert(step.outputs[0].name.clone(),value);return Ok(0);}
         let mut parts=Vec::with_capacity(spans.len());
         for &(id,at,count) in &spans {

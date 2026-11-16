@@ -9,6 +9,10 @@ use super::*;
 use crate::bounded_decoder::ROW_STAGE_ROWS;
 // The stage's bound stays inside the entry's contract (2 to 4 source rows).
 const _:()=assert!(ROW_STAGE_ROWS>=2 && ROW_STAGE_ROWS<=4);
+/// MIXED ROWS: the longest row of a plain job that joins an MXFP8 row launch (its chain of this many adds must end inside the
+/// launch's MXFP8 read), and the fewest MXFP8 weights of that launch (q, k and v of a recurrent layer hold 50 million).
+pub(super) const RIDE_COLS:usize=4096;
+pub(super) const RIDE_BESIDE:usize=1<<24;
 impl<'b,'d> Weights<'b,'d> {
     /// The stage's MXFP8 jobs by the rows they read. Each group of two or more is one merged launch. Chosen by
     /// storage, shape and the identity of the input alone, so every rank makes the same groups.
@@ -61,8 +65,19 @@ impl<'b,'d> Weights<'b,'d> {
     /// One group of `mx_row_groups`: this rank's rows of each job, `[m,local rows]`, rounded, as `matrix_rows` returns
     /// them for an MXFP8 matrix. The quantizer owns complete 32-lane groups, so concatenated rows quantize independently
     /// (the same call as `project_rows`).
-    pub(super) fn mx_rows_launch(&mut self,b:&Backend<'d>,jobs:&[(&str,&DeviceVector<'_>,bool)],group:&[usize],m:usize,made:&mut [Option<(DeviceVector<'d>,bool)>])->Result<()> {
+    /// True when `mx_rows_launch` makes this group in ONE merged row launch (false: two rows over wide output planes, which
+    /// run faster as the existing small2 calls and share the quantized input as the prompt-row path already does).
+    pub(super) fn mx_rows_merged(&self,jobs:&[(&str,&DeviceVector<'_>,bool)],group:&[usize],m:usize)->bool {
+        !(m==2 && !group.is_empty() && group.iter().all(|&job|matches!(self.matrices[jobs[job].0].rows.count,4096|6144) && self.matrices[jobs[job].0].cols==4096))
+    }
+    /// `riders`: MIXED ROWS, the stage's small plain BF16 jobs that join the launch as plain descriptors (`round`: their flag).
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn mx_rows_launch(&mut self,b:&Backend<'d>,jobs:&[(&str,&DeviceVector<'_>,bool)],group:&[usize],riders:&[usize],round:bool,m:usize,made:&mut [Option<(DeviceVector<'d>,bool)>])->Result<()> {
         use spark_gpu_probe::{driver::ResidentProjection,causal_ops::{Shape as CausalShape,Op as CausalOp}};
+        if !self.mx_rows_merged(jobs,group,m) {
+            if !riders.is_empty() {return Err("row stage riders need the merged launch".into());}
+            return self.mx_rows_shared(b,jobs,group,m,made);
+        }
         let stamp=self.cost.start(b);let input=jobs[*group.first().ok_or("row stage group is empty")?].1;
         let cols=input.len().try_into().map_err(|_|"row stage columns exceed ABI")?;
         let quantize=CausalShape {op:CausalOp::Mxfp8Quantize,heads:0,dim:0,taps:0,rows:0,cols,epsilon:0.0,bound:0.0};
@@ -75,10 +90,20 @@ impl<'b,'d> Weights<'b,'d> {
             batch.push(ResidentProjection::Mxfp8 {matrix:projection.resident(),input:&decoded});
             words+=matrix.rows.count*m;bytes+=matrix.rows.count*(matrix.cols+matrix.cols/32);
         }
-        let mut output=b.vector(words)?;b.resident_projection_batch_rows(&batch,&mut output,true,m)?;drop(batch);
+        // MIXED ROWS: the riders after the MXFP8 descriptors (the entry runs the blocks of plain descriptors first whatever
+        // their place). An MXFP8 word is rounded whatever the flag says; the flag is the riders'.
+        for &job in riders {
+            let matrix=self.matrices.get(jobs[job].0).ok_or("row stage matrix is absent")?;
+            let Storage::Plain {bf16:Some(copy),..}=&matrix.storage else {return Err("row stage rider storage differs".into());};
+            if jobs[job].1.len()!=m*matrix.cols {return Err("row stage feature extent differs".into());}
+            batch.push(ResidentProjection::PlainBf16 {rows:matrix.rows.count,cols:matrix.cols,weight:copy,input:jobs[job].1});
+            words+=matrix.rows.count*m;bytes+=copy.len()*4;
+        }
+        if !riders.is_empty() {spark_gpu_probe::prompt_launches::record("plain_rows_ride");}
+        let mut output=b.vector(words)?;b.resident_projection_batch_rows(&batch,&mut output,riders.is_empty() || round,m)?;drop(batch);
         // A matrix's rows are one descriptor: [m,local rows] is one range of the launch's output.
         let output=output.into_resident_shared()?;let mut start=0;
-        for &job in group {let extent=self.matrices[jobs[job].0].rows.count*m;made[job]=Some((output.resident_range(start..start+extent)?,false));start+=extent;}
+        for &job in group.iter().chain(riders) {let extent=self.matrices[jobs[job].0].rows.count*m;made[job]=Some((output.resident_range(start..start+extent)?,false));start+=extent;}
         self.cost.record(||"projection_rows_stage".into(),stamp,b,bytes);Ok(())
     }
 }

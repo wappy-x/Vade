@@ -1262,3 +1262,15 @@ fn route_a_defaults_equal_controller_defaults_and_explicit_context_wins() {
     assert!(explicit.supplied_options.contains("--context"));
     assert_eq!((explicit.context, explicit.output), (262144, local.output));
 }
+
+#[test]
+fn saved_local_fp4_config_rejects_text_only_depths() {
+    let f=Fixture::new();f.configured();
+    let path=f.root.join("config");let saved=fs::read_to_string(&path).unwrap();
+    for depth in 4..=7 {
+        fs::write(&path,format!("{saved}mtp={depth}\n")).unwrap();
+        assert!(Config::load(&f.root).is_err(),"local FP4 must not take depth {depth}");
+        let options=UpOptions {fp4_local:true,diagnostic_unqualified_text:true,mtp:depth,mtp_explicit:true,..Default::default()};
+        assert!(Config::validate_options(&options).unwrap_err().contains("depth 0..3"));
+    }
+}

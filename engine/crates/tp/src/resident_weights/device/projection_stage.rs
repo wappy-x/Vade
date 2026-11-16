@@ -29,21 +29,19 @@ struct Defer(std::rc::Rc<std::cell::Cell<bool>>);
 impl Drop for Defer {fn drop(&mut self) {self.0.set(false);}}
 impl<'b,'d> Weights<'b,'d> {
     pub fn prepare_kda(&mut self,c:&CheckpointAdmission)->Result<()> {
-        let draft=c.description().with_draft_layer().map_err(|e|e.to_string())?;
-        let description=draft.as_ref().unwrap_or(c.description());
-        for (layer,spec) in description.layers.iter().enumerate() {
-            if !matches!(spec.mixer,engine_model::plan::description::TokenMixer::Kda(_)) {continue;}
-            let layout=crate::kda_heads::layout(spec.mixer,self.topology)?;
-            let plan=LayerPlan::new(description,layer,1,Topology {rank:0,parts:1}).map_err(|e|e.to_string())?;
-            for name in crate::kda_heads::projections(&plan,layout) {
-                let Some(matrix)=self.matrices.get(&name) else {continue;};
-                let rows=matrix.rows;let heads=layout.heads();
-                if rows.total%layout.total_heads()!=0 {return Err("recurrent projection head extent differs".into());}
-                let width=rows.total/layout.total_heads();
-                if rows.start!=heads.start*width || rows.count!=layout.local_heads()*width {return Err("recurrent projection ownership differs".into());}
-                self.kda_local.insert(name);
-            }
-        }Ok(())
+        let owner=std::ptr::from_ref(c) as usize;
+        if self.identity!=Some(owner) {return Err("resident owner is not prepared for this checkpoint".into());}
+        let topology=self.topology;let matrices=&self.matrices;
+        self.kda_plans.prepare(owner,|| {
+            let draft=c.description().with_draft_layer().map_err(|e|e.to_string())?;
+            let description=draft.as_ref().unwrap_or(c.description());let mut entries=Vec::new();
+            for (layer,spec) in description.layers.iter().enumerate() {
+                if !matches!(spec.mixer,engine_model::plan::description::TokenMixer::Kda(_)) {continue;}
+                let layout=crate::kda_heads::layout(spec.mixer,topology)?;
+                let plan=LayerPlan::new(description,layer,1,Topology {rank:0,parts:1}).map_err(|e|e.to_string())?;
+                entries.extend(crate::kda_heads::projections(&plan,layout).into_iter().map(|name|(name,layout)));
+            }Ok(entries)
+        },|name|matrices.get(name).map(|matrix|matrix.rows),&mut self.kda_local)
     }
     pub fn sparse_topology(&self)->Topology {self.topology}
     pub fn apply_owned(&mut self,name:&str,b:&Backend<'d>,input:&DeviceVector<'_>,tokens:usize,layout:crate::sparse_heads::Layout)->Result<DeviceVector<'d>> {
@@ -74,8 +72,10 @@ impl<'b,'d> Weights<'b,'d> {
             let output=gather_device(b,mailbox,&mut self.sequence,self.topology,&[(local,false)],&vec![row;tokens])?;
             return b.resident_join(&output.iter().map(|value|(value,value.len())).collect::<Vec<_>>(),&mut None,0);
         }
+        crate::exchange_trace::kind(||format!("attended heads={} dim={}",layout.total_heads(),layout.value_dim()));
         self.gather_mapped(b,local)?;
-        Self::rank_rows(b,self.exchange.as_ref().ok_or("attended exchange is absent")?,tokens,width,self.topology.parts as usize,true)
+        let out=Self::rank_rows(b,self.exchange.as_ref().ok_or("attended exchange is absent")?,tokens,width,self.topology.parts as usize,true)?;
+        crate::exchange_trace::reader();self.exchange_read(b)?;Ok(out)
     }
     /// Several `apply_matrix` calls of one row group as a stage: the split outputs share exchanges.
     /// Two forms, each with the words of the single calls:
@@ -132,21 +132,32 @@ impl<'b,'d> Weights<'b,'d> {
         // makes a whole stage where the one-row jobs needed two or three (9 jobs a launch: 2 matrices at 4 rows, 1 at
         // 5 to 8). A launch of serial chains costs its longest chain whatever it holds, so fewer launches is the gain.
         // Each word is the one-row body (`plain_warp::row_deep`), one thread a (weight row, source row).
+        //
+        // FOLD ROWS: a matrix with few rows and long rows (the router gate in FP32, the narrow BF16 groups) takes ONE fold
+        // launch for all 2 to 8 rows (`flash_resident_projection_fold_rows`, `_f32`): one job a matrix, a block reads a weight
+        // vector once and keeps one chain a (weight row, source row). The forms above ran one fold block set or one serial
+        // chain set a source row, so their time grew with the rows. Each word is the one-row fold's word for its source row
+        // (`plain_warp::rows_fold_rows`). Chosen by shape, storage and alignment alone (`projection_stage::fold_rows`).
         const FEW:usize=8;const SMALL:usize=8<<20;
-        #[derive(Clone,Copy,PartialEq)] enum Form {Fp32,Fold,Rows}
-        // Source rows a job of the row entry reads: the rows split in equal parts of 3 or 4 (the entry's contract is 2 to 4).
-        let part=match m {4=>4,6=>3,8=>4,_=>0};
+        #[derive(Clone,Copy,PartialEq)] enum Form {Fp32,Fold,Rows,FoldRowsF32,FoldRows}
+        // Choose only measured few-row forms; larger groups retain their prior parts.
+        let part=match m {2=>2,4=>4,6=>3,8=>4,_=>0};
         let form=|name:&str,input:&DeviceVector<'_>| {let matrix=&self.matrices[name];
+            let folds=|address:u64,segmented:bool|projection_stage::fold_rows(m,matrix.rows.count,matrix.cols) && !segmented
+                && spark_gpu_probe::plain_admission::fold_rows_admitted(matrix.rows.count,matrix.cols,address as usize,input.device_address() as usize,m);
+            if let Storage::Plain {weight,bf16:None,..}=&matrix.storage && folds(weight.device_address(),weight.is_segmented()) {return Form::FoldRowsF32;}
             let Storage::Plain {bf16:Some(copy),..}=&matrix.storage else {return Form::Fp32;};
+            if folds(copy.device_address(),copy.is_segmented()) {return Form::FoldRows;}
             // The ordered reader's envelope: whole 16-byte vectors of the packed copy and of every row view of the job.
             let admitted=|step:usize|!copy.is_segmented() && (0..m/step).all(|view|spark_gpu_probe::plain_admission::deep_admitted(matrix.rows.count,matrix.cols,
                 copy.device_address() as usize,input.device_address() as usize+view*step*matrix.cols*4));
+            let part=projection_stage::plain_rows_part(m,matrix.rows.count,matrix.cols);
             if part!=0 && admitted(part) {Form::Rows}
             else if spark_gpu_probe::plain_admission::plain_geometry(matrix.rows.count,matrix.cols).1 as usize==spark_gpu_probe::plain_admission::FOLD_THREADS && admitted(1) {Form::Fold}
             else {Form::Fp32}};
         let small=|round:bool,want:Form|jobs.iter().enumerate().filter(|(_,(name,input,flag))|m<=FEW && *flag==round && self.matrices[*name].cols.is_multiple_of(32)
             && matches!(&self.matrices[*name].storage,Storage::Plain {weight,..} if weight.len()*4<=SMALL) && form(name,input)==want).map(|(job,_)|job).collect::<Vec<_>>();
-        let merged=[false,true].into_iter().flat_map(|round|[Form::Fp32,Form::Fold,Form::Rows].into_iter().map(move |form|(round,form))).map(|(round,form)|(round,form,small(round,form))).collect::<Vec<_>>();
+        let mut merged=[false,true].into_iter().flat_map(|round|[Form::Fp32,Form::Fold,Form::Rows,Form::FoldRowsF32,Form::FoldRows].into_iter().map(move |form|(round,form))).map(|(round,form)|(round,form,small(round,form))).collect::<Vec<_>>();
         // ROW STAGE: MXFP8 projections that read the same rows take one merged row launch (`row_stage.rs`).
         let mx=self.mx_row_groups(jobs,m);
         // QUANTIZE SHARE: past the row stage, MXFP8 projections that read the same rows share their quantize (`row_stage.rs`).
@@ -160,11 +171,37 @@ impl<'b,'d> Weights<'b,'d> {
         if split>=2 && gathers.len()!=split {spark_gpu_probe::prompt_launches::record("row_stage");}
         // What a merged launch made for a job: its local rows, and whether they are [local rows,m].
         let mut made:Vec<Option<(DeviceVector<'d>,bool)>>=(0..jobs.len()).map(|_|None).collect();
+        // MIXED ROWS: the small plain BF16 jobs of a stage whose MXFP8 group takes the merged row launch join that launch as
+        // plain descriptors, as the one-row step's mixed batch holds them. The entry runs the blocks of plain descriptors
+        // first (`plain_admission::batch_block`), so their serial chains (4,096 adds, about 80 us) end inside the launch's
+        // MXFP8 read (about 265 us for q, k and v at 4 rows), and their own launch (a fold of about 40 us a stage) is gone.
+        // Each word is the one-row body (`plain_warp::row_deep`): the bytes of the fold forms (kernel-bench --rows-p1 holds
+        // this very batch, --shared-forms the forms). The plain descriptors of a launch share its round flag, so the riders
+        // are the jobs of ONE flag: the one with more rows. Chosen by shape, storage, alignment and the flag alone, so every
+        // rank makes the same launch.
+        // MEASURED on one box (kernel-bench --rows-p1 time, q, k and v with 384 plain rows of 4,096): the plain rows add
+        // 20 us to the launch at 2 rows, 19 us at 3, 24 us at 4, against a fold launch of about 40 us. They are not free:
+        // their chains take their share of the device beside the MXFP8 blocks. So only the fold-shaped jobs ride (few
+        // rows, long rows). A job of many short rows (4,096 x 128) would add more blocks than its own launch costs.
+        let ride=mx.iter().position(|group|self.mx_rows_merged(jobs,group,m) && group.iter().map(|&job|self.matrices[jobs[job].0].rows.count*self.matrices[jobs[job].0].cols).sum::<usize>()>=super::row_stage::RIDE_BESIDE);
+        let mut riders:Vec<usize>=Vec::new();let mut ride_round=true;
+        if let Some(at)=ride {
+            let rides=|job:usize|matches!(&self.matrices[jobs[job].0].storage,Storage::Plain {bf16:Some(copy),..} if self.matrices[jobs[job].0].cols<=super::row_stage::RIDE_COLS && !copy.is_segmented() && !jobs[job].1.is_segmented()
+                && spark_gpu_probe::plain_admission::deep_admitted(self.matrices[jobs[job].0].rows.count,self.matrices[jobs[job].0].cols,copy.device_address() as usize,jobs[job].1.device_address() as usize));
+            let offered=|flag:bool|merged.iter().filter(|(round,form,_)|*round==flag && matches!(form,Form::Fold|Form::FoldRows)).flat_map(|(_,_,list)|list.iter().copied()).filter(|&job|rides(job)).collect::<Vec<_>>();
+            let weight=|list:&[usize]|list.iter().map(|&job|self.matrices[jobs[job].0].rows.count).sum::<usize>();
+            let (rounded,raw)=(offered(true),offered(false));
+            ride_round=weight(&rounded)>=weight(&raw);
+            riders=if ride_round {rounded} else {raw};riders.sort_unstable();riders.truncate(9usize.saturating_sub(mx[at].len()));
+            for (_,_,list) in merged.iter_mut() {list.retain(|job|!riders.contains(job));}
+        }
         for (round,form,list) in &merged {
-            // A form with no job sends nothing. (The row entry's part is 0 outside 4, 6 and 8 rows: its list is empty there.)
+            // A form with no job sends nothing; every selected row form has a nonzero part.
             if list.is_empty() {continue;}
             // Source rows a job reads, and matrices a launch (9 jobs at most).
-            let step=if *form==Form::Rows {part} else {1};let views_a_job=m/step;
+            // A fold-rows job is one matrix with all its source rows.
+            let folds=matches!(form,Form::FoldRowsF32|Form::FoldRows);
+            let step=if *form==Form::Rows {part} else if folds {m} else {1};let views_a_job=m/step;
             for launch in list.chunks((9/views_a_job).max(1)) {
                 let stamp=self.cost.start(b);
                 let views=launch.iter().map(|&job| {let cols=self.matrices[jobs[job].0].cols;
@@ -174,19 +211,22 @@ impl<'b,'d> Weights<'b,'d> {
                     let matrix=&self.matrices[jobs[job].0];let Storage::Plain {weight,bf16,..}=&matrix.storage else {return Err("row stage plain storage differs".into());};
                     let (rows_local,cols)=(matrix.rows.count,matrix.cols);
                     match (form,bf16) {
-                        (Form::Fp32,_)=>{for input in rows {batch.push(spark_gpu_probe::driver::ResidentProjection::Plain {rows:rows_local,cols,weight,input});}bytes+=weight.len()*4;},
+                        (Form::Fp32|Form::FoldRowsF32,_)=>{for input in rows {batch.push(spark_gpu_probe::driver::ResidentProjection::Plain {rows:rows_local,cols,weight,input});}bytes+=weight.len()*4;},
                         (_,Some(copy))=>{for input in rows {batch.push(spark_gpu_probe::driver::ResidentProjection::PlainBf16 {rows:rows_local,cols,weight:copy,input});}bytes+=copy.len()*4;},
                         (_,None)=>return Err("row stage packed copy is absent".into()),
                     }
                     words+=rows_local*m;
                 }
                 let mut output=b.vector(words)?;
-                if *form==Form::Rows {b.resident_projection_batch_rows(&batch,&mut output,*round,step)?;} else {b.resident_projection_batch(&batch,&mut output,*round)?;}
+                if *form==Form::Rows {b.resident_projection_batch_rows(&batch,&mut output,*round,step)?;}
+                else if folds {b.resident_projection_fold_rows(&batch,&mut output,*round,m)?;}
+                else {b.resident_projection_batch(&batch,&mut output,*round)?;}
                 drop(batch);
                 // A matrix's rows are consecutive jobs, source rows in order: [m,local rows] is one range of the launch's output.
                 let output=output.into_resident_shared()?;let mut start=0;
                 for &job in launch {let extent=self.matrices[jobs[job].0].rows.count*m;made[job]=Some((output.resident_range(start..start+extent)?,false));start+=extent;}
-                self.cost.record(||String::from(match form {Form::Fp32=>"projection_mixed",Form::Fold=>"projection_fold",Form::Rows=>"projection_plain_rows"}),stamp,b,bytes);
+                self.cost.record(||String::from(match form {Form::Fp32=>"projection_mixed",Form::Fold=>"projection_fold",Form::Rows=>"projection_plain_rows",
+                    Form::FoldRowsF32|Form::FoldRows=>"projection_fold_rows"}),stamp,b,bytes);
             }
         }
         // Block-FP8 projections that read the same rows share ONE input round (two launches less for
@@ -237,7 +277,7 @@ impl<'b,'d> Weights<'b,'d> {
             }
             self.cost.settle(b)?;self.cost.record(||"projection_3".into(),stamp,b,bytes);
         }
-        for group in &mx {self.mx_rows_launch(b,jobs,group,m,&mut made)?;}
+        for (at,group) in mx.iter().enumerate() {self.mx_rows_launch(b,jobs,group,if ride==Some(at) {&riders} else {&[]},ride_round,m,&mut made)?;}
         for group in &shared {self.mx_rows_shared(b,jobs,group,m,&mut made)?;}
         // Each job's local rows. A whole (not split) output is done. A split one waits for its
         // gather: token-major for the mailbox; the host link keeps each producer's order.
@@ -265,6 +305,7 @@ impl<'b,'d> Weights<'b,'d> {
                 for &job in held {let total=self.matrices[jobs[job].0].rows.total*m;outputs[job]=Some(joined.resident_range(start..start+total)?);start+=total;}
             } else {
                 let blocks=held.iter().map(|&job|local[job].as_ref().ok_or("row stage lost a local part")).collect::<std::result::Result<Vec<_>,_>>()?;
+                crate::exchange_trace::kind(||format!("stage {}",held.iter().map(|&job|jobs[job].0).collect::<Vec<_>>().join("+")));
                 self.gather_mapped_parts(b,&blocks)?;
                 // Each projection's rank blocks side by side, in their producer's layout, out of the exchange buffer
                 // (the next gather writes it again).
@@ -278,6 +319,7 @@ impl<'b,'d> Weights<'b,'d> {
                 }
                 let mut joined=b.vector(to)?;
                 b.resident_scatter_copy(self.exchange.as_ref().ok_or("prompt exchange is absent")?,&mut joined,&placed)?;
+                crate::exchange_trace::reader();self.exchange_read(b)?;
                 let joined=joined.into_resident_shared()?;let mut start=0;
                 for &job in held {
                     let rows=self.matrices[jobs[job].0].rows;let extent=rows.total*m;

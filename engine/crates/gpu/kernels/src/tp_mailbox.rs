@@ -16,6 +16,20 @@ unsafe fn load_acquire(word: *const u32) -> u32 {
 unsafe fn store_release(word: *mut u32, v: u32) {
     asm!("st.release.sys.global.u32 [{p}], {v};", p = in(reg64) word, v = in(reg32) v);
 }
+/// A waiting take reads the sticky error word on its first miss and then on every `ERROR_EVERY`th, not on every miss.
+/// Each of the two words is a system-scope read that waits behind everything already queued in the memory system, and
+/// the two reads of one poll follow each other, so reading the error word every time doubles the time from the
+/// arrival of a message to the poll that sees it. A failed peer is seen at most `ERROR_EVERY` polls later (the
+/// take's timeout stays the backstop, as before); a mailbox that had already failed stops the take at its first miss.
+pub(crate) const ERROR_EVERY: u32 = 16;
+/// `error_due!(misses, error)`: count this miss and read the error word when it is due (inside the take's own block).
+macro_rules! error_due {
+    ($misses:ident, $error:expr) => {{
+        let due = $misses % ERROR_EVERY == 0;
+        $misses = $misses.wrapping_add(1);
+        due && load_acquire($error) != 0
+    }};
+}
 #[inline(always)]
 unsafe fn now_ns() -> u64 {
     let t: u64;
@@ -86,7 +100,8 @@ pub(crate) fn resident_tp_mailbox_put(src: *const u32, rows: u64, width: u64, ha
 
 /// Every CTA: thread 0 waits (acquire, with nanosleep backoff) until `seq_word` holds the low
 /// word of `seq`, at most the low 47 bits of `limit_ns` (ns; its high 16 bits cap the backoff,
-/// 0 = 2048 ns; bit 47 asks for four-word copies), or until `error` is set; on timeout it sets `error` and
+/// 0 = 2048 ns; bit 47 asks for four-word copies), or until `error` is set (read on the first miss and
+/// every `ERROR_EVERY`th, see `ERROR_EVERY`); on timeout it sets `error` and
 /// the CTA copies nothing. Then words
 /// of `src` (row-major, `half` per row) go to words `peer..peer + half` of each `width`-word
 /// row of `dst`, split over the grid.
@@ -107,9 +122,9 @@ pub(crate) fn resident_tp_mailbox_take(dst:*mut u32,rows:u64,width:u64,half:u64,
         let start = now_ns();
         let (limit, cap) = (limit_ns & ((1 << 47) - 1), (limit_ns >> 48) as u32);
         let cap = if cap == 0 { 2048 } else { cap };
-        let (mut ok, mut pause) = (1u32, 32u32.min(cap));
+        let (mut ok, mut pause, mut misses) = (1u32, 32u32.min(cap), 0u32);
         while load_acquire(seq_word) != seq as u32 {
-            if load_acquire(error) != 0 || now_ns().wrapping_sub(start) > limit {
+            if error_due!(misses, error) || now_ns().wrapping_sub(start) > limit {
                 store_release(error, 1);
                 ok = 0;
                 break;
@@ -186,9 +201,9 @@ pub extern "ptx-kernel" fn tp_mailbox_take_pair(x: *mut u32, y: *mut u32, rows: 
             let start = now_ns();
             let (limit, cap) = (limit_ns & ((1 << 47) - 1), (limit_ns >> 48) as u32);
             let cap = if cap == 0 { 2048 } else { cap };
-            let (mut ok, mut pause) = (1u32, 32u32.min(cap));
+            let (mut ok, mut pause, mut misses) = (1u32, 32u32.min(cap), 0u32);
             while load_acquire(seq_word) != seq as u32 {
-                if load_acquire(error) != 0 || now_ns().wrapping_sub(start) > limit {
+                if error_due!(misses, error) || now_ns().wrapping_sub(start) > limit {
                     store_release(error, 1);
                     ok = 0;
                     break;
@@ -297,16 +312,21 @@ pub(crate) fn resident_tp_mailbox_take_scatter(table:*const crate::kernel_params
     // each source range lies in the acquired receive slot and that target ranges are
     // disjoint inside one retained output. Table, output and mailbox outlive ordered
     // completion. Each word index has one thread (the step is grid-x times the block
-    // size). The row is read after the acquire: a timed-out CTA reads and writes nothing.
+    // size). The row is read BEFORE the wait: it is the host-staged table, complete before
+    // this launch on the ordered stream, and it does not depend on the message. So after
+    // the rows arrive only the rows themselves are read (one read less behind whatever
+    // else waits in the memory system). A timed-out CTA reads no slot word and writes nothing.
     unsafe {
     let sh = crate::ptx::shared::<4>();
+    let row = &*table.add(core::arch::nvptx::_block_idx_y() as usize);
+    let (dst, src, words) = (row.destination as *mut u32, row.source as *const u32, row.words as usize);
     if _thread_idx_x() == 0 {
         let start = now_ns();
         let (limit, cap) = (limit_ns & ((1 << 47) - 1), (limit_ns >> 48) as u32);
         let cap = if cap == 0 { 2048 } else { cap };
-        let (mut ok, mut pause) = (1u32, 32u32.min(cap));
+        let (mut ok, mut pause, mut misses) = (1u32, 32u32.min(cap), 0u32);
         while load_acquire(seq_word) != seq as u32 {
-            if load_acquire(error) != 0 || now_ns().wrapping_sub(start) > limit {
+            if error_due!(misses, error) || now_ns().wrapping_sub(start) > limit {
                 store_release(error, 1);
                 ok = 0;
                 break;
@@ -318,8 +338,6 @@ pub(crate) fn resident_tp_mailbox_take_scatter(table:*const crate::kernel_params
     }
     crate::ptx::sync();
     if crate::ptx::load(sh).to_bits() == 0 { return; }
-    let row = &*table.add(core::arch::nvptx::_block_idx_y() as usize);
-    let (dst, src, words) = (row.destination as *mut u32, row.source as *const u32, row.words as usize);
     let step = (_grid_dim_x() * _block_dim_x()) as usize;
     let mut i = (_block_idx_x() * _block_dim_x() + _thread_idx_x()) as usize;
     if quads(limit_ns >> 47 & 1 != 0, words, words, 0, src as usize, dst as usize) {

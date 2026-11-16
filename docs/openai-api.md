@@ -197,7 +197,15 @@ OpenAI schema read them correctly.
   Error streams keep their existing terminal usage format.
 - Each choice can carry `token_id`, the ID of the token that produced it.
 - Every reply carries a `vade` object with the sampling settings, drafting and
-  build identity that served it. Clients can ignore it.
+  build identity that served it. Clients can ignore it. The GLM text service
+  loads predictor depth 3 unless `--mtp` or `MTP` says otherwise; with no
+  drafting layer in the model, or too little free memory for it, the service
+  starts without drafting. At loaded
+  depth 3 or more, a greedy request of more than 64 tokens that omits `draft` and
+  `mtp_depth` is tried with drafting and keeps it only when it is faster. At
+  loaded depth 1 or 2 that request stays plain. A sampled request, a short
+  request, `mtp_depth` 0 and several chats at once stay plain.
+  `--mtp 0` turns drafting off.
 
 ### Usage
 

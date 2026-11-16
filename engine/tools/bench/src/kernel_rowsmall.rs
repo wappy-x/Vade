@@ -207,3 +207,5 @@ pub(crate) fn run(base_path: &str, candidate_path: &str, mode: &str) -> Result<(
     println!("ROWSMALL TIME DONE elapsed_s={:.1}", started.elapsed().as_secs_f64());
     Ok(())
 }
+
+#[path = "kernel_shared_plain_rows.rs"] pub(in super::super) mod shared_forms;

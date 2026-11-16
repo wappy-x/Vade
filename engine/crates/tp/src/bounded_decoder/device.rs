@@ -23,7 +23,9 @@ pub struct Device<'b,'d> {pub backend:&'b Backend<'d>,weights:Rc<RefCell<crate::
     /// Any other row pass starts with `rows_embedding` and reads 0.
     batch_route:Cell<u8>,
     /// Device bytes admission charged for the live sessions (`rows_charge`); usize::MAX until a service tells it.
-    group_charge:Cell<usize>,verify_route:Cell<bool>}
+    group_charge:Cell<usize>,verify_route:Cell<bool>,
+    /// GROUP SPARES: the prompt of the group that runs now goes on after it (`rows_follow`); spares are held for its next group.
+    group_follows:Cell<bool>,spares_kept:Cell<bool>}
 /// A projection's rows in the memo: its name, its rounding, and the topology (rank, parts).
 type Group=(String,bool,(u32,u32));
 type OriginKey=(Group,Lineage);
@@ -95,7 +97,7 @@ impl Clone for Device<'_,'_> {
         memo_bound:self.memo_bound.clone(),
         #[cfg(feature="kernel-bench")] probe:self.probe.clone(),
         #[cfg(feature="kernel-bench")] attention_calls:self.attention_calls.clone(),
-        blocks:self.blocks.clone(),mhc_host:self.mhc_host.clone(),mhc_fused:self.mhc_fused,stages:self.stages.clone(),cost:self.cost.clone(),memo:RefCell::new(Memo {limit:self.memo_bound.plan().map_or(0,|p|p.bytes()),..Memo::default()}),copies:RefCell::new(None),selection_checks:RefCell::new(Vec::new()),selection_read:RefCell::new(None),gathered:RefCell::new(None),ahead:RefCell::new(None),asked:RefCell::new(BTreeMap::new()),memo_epoch:Cell::new(0),ahead_counts:Cell::new([0;2]),selection_counts:Cell::new([0;2]),selection_shortcut:Cell::new(true),first_step:Cell::new(true),memo_share:Cell::new(true),asked_by_output:Cell::new(false),asked_counts:Cell::new([0;2]),screen_nan:Cell::new(None),screen_keep:Cell::new(false),row_workspace:RefCell::new(None),small_rows:Cell::new(false),source:self.source.clone(),programs:RefCell::new(BTreeMap::new()),serving:self.serving.as_ref().map(|_|RefCell::new(None)),state_copies:Cell::new(0),batch_keep:Cell::new(0),batch_route:Cell::new(0),group_charge:Cell::new(self.group_charge.get()),verify_route:Cell::new(false)}}
+        blocks:self.blocks.clone(),mhc_host:self.mhc_host.clone(),mhc_fused:self.mhc_fused,stages:self.stages.clone(),cost:self.cost.clone(),memo:RefCell::new(Memo {limit:self.memo_bound.plan().map_or(0,|p|p.bytes()),..Memo::default()}),copies:RefCell::new(None),selection_checks:RefCell::new(Vec::new()),selection_read:RefCell::new(None),gathered:RefCell::new(None),ahead:RefCell::new(None),asked:RefCell::new(BTreeMap::new()),memo_epoch:Cell::new(0),ahead_counts:Cell::new([0;2]),selection_counts:Cell::new([0;2]),selection_shortcut:Cell::new(true),first_step:Cell::new(true),memo_share:Cell::new(true),asked_by_output:Cell::new(false),asked_counts:Cell::new([0;2]),screen_nan:Cell::new(None),screen_keep:Cell::new(false),row_workspace:RefCell::new(None),small_rows:Cell::new(false),source:self.source.clone(),programs:RefCell::new(BTreeMap::new()),serving:self.serving.as_ref().map(|_|RefCell::new(None)),state_copies:Cell::new(0),batch_keep:Cell::new(0),batch_route:Cell::new(0),group_charge:Cell::new(self.group_charge.get()),verify_route:Cell::new(false),group_follows:Cell::new(false),spares_kept:Cell::new(false)}}
 }
 /// The last Gather this device read: its output vector, the identity of the rows it gathered
 /// from, and the row ids the device returned. Row `slot` of the output is row `ids[slot]` of the source.
@@ -146,7 +148,7 @@ impl<'b,'d> Device<'b,'d> {
             memo_bound:Rc::new(crate::projection_memo::Bound::default()),
             #[cfg(feature="kernel-bench")] probe:Rc::new(RefCell::new(None)),
             #[cfg(feature="kernel-bench")] attention_calls:Rc::new(Cell::new(0)),
-            norms:Rc::new(RefCell::new(BTreeMap::new())),blocks:Rc::new(RefCell::new(BTreeMap::new())),mhc_host:None,mhc_fused:false,stages:Rc::new(RefCell::new([[0;2];4])),cost:Rc::new(crate::resident_profile::Cost::new(cost)),memo:RefCell::new(Memo::default()),copies:RefCell::new(None),selection_checks:RefCell::new(Vec::new()),selection_read:RefCell::new(None),gathered:RefCell::new(None),ahead:RefCell::new(None),asked:RefCell::new(BTreeMap::new()),memo_epoch:Cell::new(0),ahead_counts:Cell::new([0;2]),selection_counts:Cell::new([0;2]),selection_shortcut:Cell::new(true),first_step:Cell::new(true),memo_share:Cell::new(true),asked_by_output:Cell::new(false),asked_counts:Cell::new([0;2]),screen_nan:Cell::new(None),screen_keep:Cell::new(false),row_workspace:RefCell::new(None),small_rows:Cell::new(false),source:Rc::new(Cell::new(0)),programs:RefCell::new(BTreeMap::new()),serving:None,state_copies:Cell::new(0),batch_keep:Cell::new(0),batch_route:Cell::new(0),group_charge:Cell::new(usize::MAX),verify_route:Cell::new(false)}
+            norms:Rc::new(RefCell::new(BTreeMap::new())),blocks:Rc::new(RefCell::new(BTreeMap::new())),mhc_host:None,mhc_fused:false,stages:Rc::new(RefCell::new([[0;2];4])),cost:Rc::new(crate::resident_profile::Cost::new(cost)),memo:RefCell::new(Memo::default()),copies:RefCell::new(None),selection_checks:RefCell::new(Vec::new()),selection_read:RefCell::new(None),gathered:RefCell::new(None),ahead:RefCell::new(None),asked:RefCell::new(BTreeMap::new()),memo_epoch:Cell::new(0),ahead_counts:Cell::new([0;2]),selection_counts:Cell::new([0;2]),selection_shortcut:Cell::new(true),first_step:Cell::new(true),memo_share:Cell::new(true),asked_by_output:Cell::new(false),asked_counts:Cell::new([0;2]),screen_nan:Cell::new(None),screen_keep:Cell::new(false),row_workspace:RefCell::new(None),small_rows:Cell::new(false),source:Rc::new(Cell::new(0)),programs:RefCell::new(BTreeMap::new()),serving:None,state_copies:Cell::new(0),batch_keep:Cell::new(0),batch_route:Cell::new(0),group_charge:Cell::new(usize::MAX),verify_route:Cell::new(false),group_follows:Cell::new(false),spares_kept:Cell::new(false)}
     }
     /// Wall counters only. This does not enable CUDA event profiling.
     pub fn with_serving_trace(mut self,enabled:bool)->Self {self.serving=enabled.then(||RefCell::new(None));self}
@@ -339,7 +341,7 @@ impl<'b,'d> Compute for Device<'b,'d> {
         eprintln!("SERVED TICK tick={tick} wall_ns={elapsed} allocation_ns={} wait_ns={} wait_calls={} launch_ns={} launch_calls={} download_ns={} upload_ns={} pack_ns={} graph_calls={}",
             s.allocation_ns,s.stream_wait_ns,s.stream_wait_calls,s.host_launch_ns,s.queued_calls,s.output_download_ns,s.weight_read_upload_ns,s.host_pack_ns,s.graph_launches);
     }}
-    fn plan_cost(&self,name:&str,ns:u128) {self.cost.host(name,ns);}
+    fn plan_cost(&self,name:&str,ns:u128) {self.cost.host(name,ns);crate::exchange_trace::host(name,ns);}
     fn trace_start(&self) {if self.cost.enabled() {self.backend.set_profiling(true);}}
     fn cost_report(&self,phase:&str) {#[cfg(feature="kernel-bench")] self.memo_receipt(phase);if self.cost.enabled() {eprintln!("SERVED COST phase={phase}");self.report();}}
     fn mhc_row_launches(&self)->u64 {spark_gpu_probe::driver::mhc_fused_row_launches()}
@@ -900,6 +902,29 @@ if start==0 && v.pending.as_ref().and_then(|p|p.borrow().state_prefix)==Some(len
         self.ready(x)?;
         let Some(out)=self.weights.borrow_mut().apply_experts(self.backend,first,second,&x.vector,places)? else {return Ok(None);};let words=out.len();Ok(Some(self.value(out,words)?))
     }
+    fn rows_experts_gathered(&self,first:&[(&str,usize)],second:Option<(&[(&str,usize)],f32)>,x:&Value<'b,'d>,order:&[f32],places:&[f32])->Result<Option<Value<'b,'d>>> {
+        self.ready(x)?;
+        let Some(out)=self.weights.borrow_mut().apply_experts_gathered(self.backend,first,second,&x.vector,order,places)? else {return Ok(None);};
+        gathered_seen(order.len(),x.vector.len());
+        let words=out.len();Ok(Some(self.value(out,words)?))
+    }
+    // LOOKAHEAD over GATHERED ROWS: the open exchange of `rows_experts_open`, with the gate rows read through the expert order table.
+    fn rows_experts_open_gathered(&self,first:&[(&str,usize)],second:(&[(&str,usize)],f32),x:&Value<'b,'d>,order:&[f32],places:&[f32])->Result<bool> {
+        if self.verify_route.get() {return Ok(false);}
+        self.ready(x)?;
+        let open=self.weights.borrow_mut().apply_experts_open(self.backend,first,second,&x.vector,Some(order),places)?;
+        if open {gathered_seen(order.len(),x.vector.len());}
+        Ok(open)
+    }
+    // LOOKAHEAD: the routed gate and up of a prompt group with the link step of their exchange left open (`Weights::apply_experts_open`).
+    fn rows_experts_open(&self,first:&[(&str,usize)],second:(&[(&str,usize)],f32),x:&Value<'b,'d>,places:&[f32])->Result<bool> {
+        if self.verify_route.get() {return Ok(false);}
+        self.ready(x)?;
+        self.weights.borrow_mut().apply_experts_open(self.backend,first,second,&x.vector,None,places)
+    }
+    fn rows_experts_close(&self,failed:bool)->Result<Value<'b,'d>> {
+        let out=self.weights.borrow_mut().apply_experts_close(self.backend,failed)?;let words=out.len();self.value(out,words)
+    }
     fn rows_routed(&self,steps:&[engine_model::plan::layer::Step],bound:Option<f32>,ids:&Value<'b,'d>,x:&Value<'b,'d>,m:usize)->Result<Option<Value<'b,'d>>> {
         if !self.verify_route.get() && self.batch_route.get()!=3 {return Ok(None);}
         self.ready(ids)?;self.ready(x)?;
@@ -930,18 +955,70 @@ if start==0 && v.pending.as_ref().and_then(|p|p.borrow().state_prefix)==Some(len
         let words=out.len();Ok(Some(self.value(out,words)?))
     }
     fn folds_rows(&self,m:usize)->bool {!self.verify_route.get() && self.routes_rows(m) && self.weights.borrow().folds_routed()}
+    // GROUP FOLD: a prompt group's rows (the decoder asks for no other pass). A verify pass keeps its routed form.
+    fn folds_groups(&self,m:usize)->bool {m>0 && !self.verify_route.get() && self.weights.borrow().folds_groups()}
+    fn rows_experts_fold(&self,first:&[(&str,usize)],x:&Value<'b,'d>,places:&[f32],ids:&Value<'b,'d>,weights:&Value<'b,'d>,shared:Option<&Value<'b,'d>>,fold:Shape,m:usize)->Result<Option<Value<'b,'d>>> {
+        if !self.folds_groups(m) {return Ok(None);}
+        self.ready(x)?;self.ready(ids)?;self.ready(weights)?;if let Some(shared)=shared {self.ready(shared)?;}
+        let Some(out)=self.weights.borrow_mut().apply_experts_fold(self.backend,first,&x.vector,places,&ids.vector,&weights.vector,shared.map(|shared|&*shared.vector),fold,m)? else {return Ok(None);};
+        let words=out.len();Ok(Some(self.value(out,words)?))
+    }
+    // WIDE COHORT: the gate and up step of the runs of a wide prompt group, one product launch a list for all of them.
+    #[allow(clippy::type_complexity)] // the trait's tuple a set.
+    fn rows_experts_gathered_wide(&self,sets:&[(&[(&str,usize)],&[(&str,usize)],f32,&Value<'b,'d>,&[f32],&[f32])])->Result<Option<Vec<Value<'b,'d>>>> {
+        for set in sets {self.ready(set.3)?;}
+        let calls=sets.iter().map(|&(first,second,bound,x,order,places)|(first,second,bound,&*x.vector,order,places)).collect::<Vec<_>>();
+        let Some(out)=self.weights.borrow_mut().apply_experts_gathered_wide(self.backend,&calls)? else {return Ok(None);};
+        out.into_iter().map(|value|{let words=value.len();self.value(value,words)}).collect::<Result<Vec<_>>>().map(Some)
+    }
+    // WIDE COHORT: the down step and its fold of the runs of a wide prompt group, one product launch for all of them.
+    #[allow(clippy::type_complexity)] // the trait's tuple a set.
+    fn rows_experts_fold_wide(&self,sets:&[(&[(&str,usize)],&Value<'b,'d>,&[f32],&Value<'b,'d>,&Value<'b,'d>,Option<&Value<'b,'d>>,Shape,usize)])->Result<Option<Vec<Value<'b,'d>>>> {
+        if sets.iter().any(|set|!self.folds_groups(set.7)) {return Ok(None);}
+        for set in sets {self.ready(set.1)?;self.ready(set.3)?;self.ready(set.4)?;if let Some(shared)=set.5 {self.ready(shared)?;}}
+        let calls=sets.iter().map(|&(first,x,places,ids,weights,shared,fold,m)|(first,&*x.vector,places,&*ids.vector,&*weights.vector,shared.map(|shared|&*shared.vector),fold,m)).collect::<Vec<_>>();
+        let Some(out)=self.weights.borrow_mut().apply_experts_fold_wide(self.backend,&calls)? else {return Ok(None);};
+        out.into_iter().map(|value|{let words=value.len();self.value(value,words)}).collect::<Result<Vec<_>>>().map(Some)
+    }
     fn rows_project_local(&self,_:&CheckpointAdmission,name:&str,x:&Value<'b,'d>,m:usize,round:bool)->Result<Option<Value<'b,'d>>> {
-        if !self.folds_rows(m) {return Ok(None);}
+        if !self.folds_rows(m) && !self.folds_groups(m) {return Ok(None);}
         self.ready(x)?;
         let Some(out)=self.weights.borrow_mut().apply_matrix_local(name,self.backend,&x.vector,m,round)? else {return Ok(None);};
         let words=out.len();Ok(Some(self.value(out,words)?))
+    }
+    // LOCAL QUERY: a prompt group's rows only (the decoder asks for no other pass), and only when this rank's rows of the
+    // matrix are exactly the rows its readers take.
+    fn rows_project_owned(&self,_:&CheckpointAdmission,name:&str,x:&Value<'b,'d>,m:usize,round:bool,rows:std::ops::Range<usize>)->Result<Option<Value<'b,'d>>> {
+        if !self.folds_groups(m) || !self.weights.borrow().owns_rows(name,&rows) {return Ok(None);}
+        self.ready(x)?;
+        let Some(out)=self.weights.borrow_mut().apply_matrix_local(name,self.backend,&x.vector,m,round)? else {return Ok(None);};
+        let words=out.len();if words!=m*rows.len() {return Err("local query rows extent differs".into());}
+        spark_gpu_probe::prompt_launches::record("prompt_query_local");
+        Ok(Some(self.value(out,words)?))
     }
     fn rows_verify(&self,on:bool) {self.verify_route.set(on);}
     fn warm_routed_rows(&self,steps:&[engine_model::plan::layer::Step],picks:usize,max_rows:usize)->Result<()> {
         self.weights.borrow_mut().warm_routed_rows(self.backend,steps,picks,max_rows)
     }
     fn rows_release(&self)->Result<()> {self.backend.release_group_spares()}
-    fn rows_keep(&self)->Result<()> {self.backend.keep_group_spares(super::POOL_ROOM)}
+    // GROUP SPARES: the end of a group whose prompt goes on drains, as every group's end does, and frees nothing. The
+    // flag is read once: a second call for the same group (a lease's return) trims.
+    fn rows_keep(&self)->Result<()> {
+        if self.group_follows.take() {self.spares_kept.set(true);spark_gpu_probe::prompt_launches::record("prompt_spares_kept");return self.backend.synchronize();}
+        self.spares_kept.set(false);self.backend.keep_group_spares(super::POOL_ROOM)
+    }
+    fn rows_follow(&self,follows:bool) {self.group_follows.set(follows);}
+    fn rows_settle(&self)->Result<()> {if self.spares_kept.take() {self.backend.keep_group_spares(super::POOL_ROOM)} else {Ok(())}}
+    fn rows_return_lease(&self)->Result<()> {
+        // WIDE COHORT: the operand scratch a wide group grew goes back with the lease, before the pool is trimmed.
+        self.backend.nv_tc_scratch_return();
+        self.rows_keep()?;
+        let stats=self.backend.vector_pool_stats();let (_,_,cap)=self.backend.vector_pool_bound();
+        // Vector statistics also include returns and reuses in the decode reserve.
+        let pooled=stats.returned_bytes.saturating_sub(stats.reused_bytes).saturating_sub(stats.evicted_bytes);
+        let (decode,_,decode_cap)=self.backend.decode_reserve_bound();let held=pooled.saturating_sub(decode);
+        eprintln!("TEXT PROMPT SCRATCH retained_spare_bytes={held} normal_cap_bytes={cap} room_bytes={} decode_spare_bytes={decode} decode_cap_bytes={decode_cap} pooled_spare_bytes={pooled}",super::POOL_ROOM);Ok(())
+    }
     fn rows_unrecorded(&self,pause:bool)->Result<bool> {
         let was=self.backend.pause_resident_launches(pause)?;if pause && !was {spark_gpu_probe::prompt_launches::record("rows_unrecorded");}Ok(was)
     }
@@ -950,7 +1027,7 @@ if start==0 && v.pending.as_ref().and_then(|p|p.borrow().state_prefix)==Some(len
     fn prompt_end(&self)->Result<()> {if self.first_step.get() && self.backend.decode_reserve_configured() {self.backend.keep_group_spares(super::POOL_ROOM+super::DECODE_RETURNS)?;}Ok(())}
     fn rows_charge(&self,bytes:usize) {self.group_charge.set(bytes);}
     fn rows_peak_begin(&self)->usize {self.backend.begin_group_peak()}
-    fn rows_peak_end(&self,whole:usize)->usize {self.backend.end_group_peak(whole)}
+    fn rows_peak_end(&self,whole:usize)->usize {crate::exchange_trace::report(self.sparse_topology().rank);self.backend.end_group_peak(whole)}
     fn rows_reserve(&self,words:usize)->Result<Value<'b,'d>> {
         let vector=if self.small_rows.get() {self.backend.resident_workspace(words.max(1),&mut self.row_workspace.borrow_mut())?}
             else {self.backend.vector(words.max(1))?};self.value(vector,words)
@@ -1070,4 +1147,9 @@ impl<'b,'d> Device<'b,'d> {
         }
         self.cost.record(||format!("operation_{:?}",s.op),stamp,self.backend,w.len()*4);self.record(3,started);Ok(value)
     }
+}
+/// GATHERED ROWS: one line a rank, at first use: a served log then shows that a group read its gate rows through the table.
+fn gathered_seen(rows:usize,source_words:usize) {
+    static SEEN:std::sync::atomic::AtomicBool=std::sync::atomic::AtomicBool::new(false);
+    if !SEEN.swap(true,std::sync::atomic::Ordering::Relaxed) {eprintln!("GATHERED ROWS rows={rows} source_words={source_words} first use: the gate rows were read through the expert order table, not copied");}
 }

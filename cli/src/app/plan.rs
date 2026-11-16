@@ -217,6 +217,15 @@ impl<R: Runner> App<R> {
         ] {
             fields.insert(format!("env_unset.{name}"), "1".into());
         }
+        // The engines of a two-Spark FP4-Local pair find the second rail of their cable by themselves when the start
+        // names none (or open the one `fabric_aux` names). TP_DUAL_RAIL=0 keeps the pair on one rail: the start then
+        // names its second rail `off`.
+        if session.two_sparks() && !crate::state::dual_rail_enabled()? {
+            for name in ["TP_AUX_LISTEN", "TP_AUX_NEXT"] {
+                fields.remove(&format!("env_unset.{name}"));
+                fields.insert(format!("env.{name}"), "off".into());
+            }
+        }
         if session.fp4_local {
             // Keep the checkpoint receipt in each rank's state folder, never in
             // the checkpoint. A chain starts every rank from no receipt, so

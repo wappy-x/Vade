@@ -201,6 +201,60 @@ pub(crate) fn prompt_fold(p:Arguments) {
     }
 }
 
+/// `PoolScoresRows` (the indexer's pool scores of a group of tokens): one warp per (token, pool), lane = head (heads beyond
+/// 32 in further rounds); the head terms are then added in ascending head order by broadcast, exactly the unit's `score+=`
+/// chain. This is `causal_fast::pool_scores`, the one-row kernel, with the token's own query row, its own head weights and its
+/// own causal pool count. The generic unit ran the 32 dots of a word one after the other in ONE thread, so a launch cost a
+/// chain of heads * dim terms whatever it held (a 4-row verify pass: 349 us in each index layer).
+#[export_name="prompt_pool_scores"]
+pub extern "ptx-kernel" fn entry_prompt_pool_scores(p:Arguments) {prompt_pool_scores(p)}
+#[inline(always)]
+pub(crate) fn prompt_pool_scores(p:Arguments) {
+    // SAFETY: The host (prompt_admission::pool_scores_admitted, after Shape::lengths) passes same-context contiguous owners
+    // that live through stream completion: x0 holds tokens*heads*dim query words, x1 rows*dim key words, x2 tokens*heads
+    // head weights; the private output has tokens*rows words, one per unit, at index = token*rows+pool, and overlaps no
+    // input. Reads stay inside those extents (token < tokens, head < heads, pool < rows, j < dim). Each output word has one
+    // writer (lane 0 of the unit's warp), and every unit below tokens*rows is stored, so the output needs no fill. All lanes
+    // of a warp run the same trip counts and reach every `shfl` together: the unit, its token and its pool test are the same
+    // on the 32 lanes. No shared memory, no barrier. Any grid is correct (the loop strides by the grid).
+    unsafe {
+        let s=p.shape;
+        if s.op!=Op::PoolScoresRows || s.heads==0 || s.dim==0 || s.taps==0 || s.rows==0 || core::arch::nvptx::_block_dim_x() as usize!=THREADS {core::arch::nvptx::trap();}
+        let (m,h,d,t,r,first)=(s.tokens as usize,s.heads as usize,s.dim as usize,s.taps as usize,s.rows as usize,s.first as usize);
+        let (x0,x1,x2)=(p.input[0] as *const f32,p.input[1] as *const f32,p.input[2] as *const f32);
+        let tid=core::arch::nvptx::_thread_idx_x() as usize;let lane=tid&31;
+        let units=m*r;
+        let mut index=core::arch::nvptx::_block_idx_x() as usize*(THREADS/32)+tid/32;
+        let stride=core::arch::nvptx::_grid_dim_x() as usize*(THREADS/32);
+        while index<units {
+            let (token,pool)=(index/r,index%r);
+            let mut score=0.0f32;
+            // A pool that is not complete at the token's context scores zero, as in the unit.
+            if pool<(first+token)/t {
+                let mut round_start=0;
+                while round_start<h {
+                    let head=round_start+lane;
+                    let mut term=0.0f32;
+                    if head<h {
+                        let mut dot=0.0f32;let a=x0.add((token*h+head)*d);let b=x1.add(pool*d);
+                        let mut j=0;while j<d {dot+=*a.add(j)**b.add(j);j+=1;}
+                        term=(*x2.add(token*h+head)*(1.0/root(h as f32)))*(dot*(1.0/root(d as f32))).max(0.0);
+                    }
+                    let mut source=0u32;
+                    while source<32 {
+                        let value:f32;asm!("shfl.sync.idx.b32 {o}, {v}, {s}, 31, -1;",o=out(reg32)value,v=in(reg32)term,s=in(reg32)source,options(nomem,nostack));
+                        if round_start+(source as usize)<h {score+=value;}
+                        source+=1;
+                    }
+                    round_start+=32;
+                }
+            }
+            if lane==0 {*(p.output as *mut f32).add(index)=score;}
+            index+=stride;
+        }
+    }
+}
+
 /// Tokens one thread of `prompt_conv` walks.
 const CONV_RUN:usize=crate::prompt_admission::CONV_RUN;
 /// `ConvRows` for taps = TAPS: a thread owns (plane, channel) and a run of consecutive tokens; the TAPS inputs of a token

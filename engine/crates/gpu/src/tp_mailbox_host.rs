@@ -47,6 +47,23 @@ pub static GATHERS: AtomicU64 = AtomicU64::new(0);
 pub static REDUCE_TAKES: AtomicU64 = AtomicU64::new(0);
 /// (gathers, REDUCE takes) so far.
 pub fn exchanges() -> (u64, u64) { (GATHERS.load(Ordering::Relaxed), REDUCE_TAKES.load(Ordering::Relaxed)) }
+/// Print only: the write doorbells of this process time every message from the return of its post to the reap of
+/// its write completion. The completion is the peer's acknowledgement that its NIC placed the message. So the time
+/// holds the rows' way to the peer, the acknowledgement's way back and the wait for this thread's next reap, and no
+/// kernel time. The clock is read after the post returns, so the post call is not in it, and a thread that loses its
+/// core between the two measures too short: the mean is the number to read, the least is not a bound. Messages of at
+/// most `ACK_SMALL` bytes, then larger ones, each as (count, summed ns, least ns).
+pub static ACKS: [AtomicU64; 6] = [const { AtomicU64::new(0) }; 6];
+/// The size that splits `ACKS` (bytes): one row of a decode step is under it, the routed experts' product is over it.
+pub const ACK_SMALL: usize = 16 << 10;
+/// `ACKS` so far.
+pub fn acks() -> [u64; 6] { std::array::from_fn(|i| ACKS[i].load(Ordering::Relaxed)) }
+fn ack(bytes: usize, ns: u64) {
+    let class = if bytes <= ACK_SMALL { 0 } else { 3 };
+    ACKS[class].fetch_add(1, Ordering::Relaxed);
+    ACKS[class + 1].fetch_add(ns, Ordering::Relaxed);
+    ACKS[class + 2].try_update(Ordering::Relaxed, Ordering::Relaxed, |least| (least == 0 || ns < least).then_some(ns.max(1))).ok();
+}
 /// The words one inline write moves and the peer word it starts at. `from` = the rows and the trailer (it ends at the
 /// send slot's end), `floor` = the send slot's first word, `to_end` = the receive slot's end, `packet` = the wire's
 /// packet size in words. The write starts early enough for everything before the trailer to be whole packets (the words
@@ -222,8 +239,19 @@ impl TpMailboxHost<'_> {
             None => None,
         };
         let mut idle = IdleLinger { bell, open: None, spent: Duration::ZERO, served: false };
+        // When each slot's message was posted, and its bytes, for `ACKS` (a slot is posted again only after its last
+        // message completed, so one entry a slot is enough).
+        let mut sent_at = [(Instant::now(), 0usize); TP_MAILBOX_SLOTS];
+        let acked = |from: u64, to: u64, sent_at: &[(Instant, usize); TP_MAILBOX_SLOTS]| {
+            if to > from {
+                let now = Instant::now();
+                for id in from + 1..=to { let (at, bytes) = sent_at[id as usize % TP_MAILBOX_SLOTS]; ack(bytes, now.duration_since(at).as_nanos() as u64); }
+            }
+        };
         while !stop.load(Ordering::Relaxed) {
+            let before = done;
             reap(link, &mut done)?;
+            acked(before, done, &sent_at);
             if self.sent(next) == next as u32 {
                 idle.close();
                 if self.error() {
@@ -238,7 +266,9 @@ impl TpMailboxHost<'_> {
                         return Err(format!("tensor split message {} incomplete when message {next} reuses its slot", next - slots));
                     }
                     pace(&mut paced, timing.spin);
+                    let before = done;
                     reap(link, &mut done)?;
+                    acked(before, done, &sent_at);
                 }
                 let slot = next as usize % TP_MAILBOX_SLOTS;
                 let from = self.send_slot(slot);
@@ -257,9 +287,10 @@ impl TpMailboxHost<'_> {
                     self.stage_flag(next);
                     link.post(from..from + len / 4, self.recv_slot(slot), FLAG_OUT + slot, RECV_SEQ + slot, next)?;
                 }
-                next += 1;
-                (active, pause) = (Instant::now(), Duration::from_micros(1));
                 posted = Instant::now();
+                sent_at[slot] = (posted, len);
+                next += 1;
+                (active, pause) = (posted, Duration::from_micros(1));
                 idle.posted();
                 continue;
             }
@@ -580,6 +611,32 @@ mod tests {
             if let Some(t) = bell.thread.get() { t.unpark(); }
             doorbell.join().unwrap().unwrap();
         });
+        assert!(!torn.load(Ordering::Relaxed));
+    }
+    /// A message's write completion adds a count and its time to its size class. The counters belong to the process
+    /// and other tests of this binary ring doorbells too, so this checks growth by at least its own five messages
+    /// (three small, two large), not exact counts.
+    #[test]
+    fn write_completions_are_timed_in_their_size_class() {
+        let slot_words = ACK_SMALL / 4 + 4;
+        let (m0, m1, stop, torn) = (mailbox(slot_words), mailbox(slot_words), AtomicBool::new(false), AtomicBool::new(false));
+        let nic = Nic { local: &m0, peer: &m1, tag: tag0, queue: Default::default(), flying: Default::default(), seed: 9, posts: Vec::new(), torn: &torn, fail_post: false };
+        let before = acks();
+        std::thread::scope(|scope| {
+            let doorbell = scope.spawn(|| run_write(TpMailboxHost::new(&m0, slot_words), nic, &stop));
+            let mut g = Gpu { m: &m0, slot_words, sent: 0, taken: 0, tag: tag0, peer_tag: tag1, bell: None };
+            for (seq, words) in [(1u64, 4), (2, ACK_SMALL / 4), (3, ACK_SMALL / 4 + 4), (4, 4), (5, slot_words)] {
+                g.put(words);
+                until(|| m1[RECV_SEQ + seq as usize % TP_MAILBOX_SLOTS].load(Ordering::Acquire) == seq as u32);
+            }
+            // Three messages of at most ACK_SMALL bytes and two larger ones, each counted when its completion is reaped.
+            until(|| { let now = acks(); now[0] - before[0] >= 3 && now[3] - before[3] >= 2 });
+            stop.store(true, Ordering::Relaxed);
+            doorbell.join().unwrap().unwrap();
+        });
+        let now = acks();
+        assert!(now[1] > before[1] && now[4] > before[4], "no time was summed: {before:?} {now:?}");
+        assert!(now[2] != 0 && now[5] != 0 && now[2] <= now[1] && now[5] <= now[4], "the least time is not kept: {now:?}");
         assert!(!torn.load(Ordering::Relaxed));
     }
     /// A queued put the GPU has not published yet is not idle: that wait is not charged, and the message counts once, after its post.

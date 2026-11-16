@@ -120,7 +120,8 @@ pub fn run(args:&[String],checkpoint:CheckpointAdmission,root:&Path,output_setti
         placement.pin_decode();
         startup::step("prompt_group");
         // The largest prompt group this budget funds, agreed by the ranks; its buffers are in the workspace below.
-        let engine=engine.negotiate_prompt_group(budget)?.with_memo_bound()?;
+        // Before the group is chosen: a server whose latent layers are all absorbed is not charged the expanded rows it never makes.
+        let engine=engine.with_absorbed_charges()?.negotiate_prompt_group(budget)?.with_memo_bound()?;
         startup::step("memory_admission");
         let resident=backend.accounted_bytes();let workspace=engine.workspace_reservation_bytes();
         let local=budget.saturating_sub(resident).saturating_sub(workspace);

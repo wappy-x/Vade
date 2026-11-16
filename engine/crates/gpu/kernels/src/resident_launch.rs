@@ -20,16 +20,21 @@ fn run<const KIND:u32>(table:*const Command,index:u64) {
             k if k==Kind::MxRows4 as u32=>crate::mx_rows_small::rows::<4,2,4>(p.cast::<crate::next_params::MxProjection>().read()),
             k if k==Kind::MxRows8 as u32=>crate::mx_rows_small::rows::<8,2,2>(p.cast::<crate::next_params::MxProjection>().read()),
             k if k==Kind::MxRows8w as u32=>crate::mx_rows_small::rows::<8,2,4>(p.cast::<crate::next_params::MxProjection>().read()),
+            k if k==Kind::MxRowsTile as u32=>crate::mx_rows_tile::tile(p.cast::<crate::next_params::MxProjection>().read()),
             k if k==Kind::MixedRows as u32=>crate::next_decode::resident_projection_bf16_rows::<true>(p.cast::<crate::next_params::ResidentProjectionBatch>().read()),
+            k if k==Kind::FoldRows as u32=>crate::next_decode::resident_projection_fold_rows::<true,false>(p.cast::<crate::next_params::ResidentProjectionBatch>().read()),
+            k if k==Kind::FoldRowsF32 as u32=>crate::next_decode::resident_projection_fold_rows::<false,false>(p.cast::<crate::next_params::ResidentProjectionBatch>().read()),
             k if k==Kind::Fp8RowsSmall as u32=>crate::fp8_rows_small::fp8_rows_small(p.cast::<crate::expert_ops::GroupArguments>().read()),
             k if k==Kind::Fp8RowsMulti as u32=>crate::fp8_rows_multi::fp8_rows_multi(p.cast::<crate::expert_ops::GroupArguments>().read()),
             k if k==Kind::Fp8RowsFew as u32=>crate::fp8_rows_few::fp8_rows_few(p.cast::<crate::expert_ops::GroupArguments>().read()),
+            k if k==Kind::Fp8RowsShare as u32=>crate::fp8_rows_share::fp8_rows_share(p.cast::<crate::expert_ops::GroupArguments>().read()),
             k if k==Kind::PlainRowsSmall as u32=>crate::plain_rows_small::plain_rows_small(p.cast::<crate::prompt_ops::Arguments>().read()),
             k if k==Kind::PromptRows as u32=>crate::prompt_operation::prompt_rows(p.cast::<crate::prompt_ops::Arguments>().read()),
             k if k==Kind::RowPrepare as u32=>crate::prompt_fast::prompt_prepare(p.cast::<crate::prompt_ops::Arguments>().read()),
             k if k==Kind::RowGatedNorm as u32=>crate::prompt_fast::prompt_gated_norm(p.cast::<crate::prompt_ops::Arguments>().read()),
             k if k==Kind::RowRoute as u32=>crate::prompt_fast::prompt_route(p.cast::<crate::prompt_ops::Arguments>().read()),
             k if k==Kind::RowFold as u32=>crate::prompt_fast::prompt_fold(p.cast::<crate::prompt_ops::Arguments>().read()),
+            k if k==Kind::RowPoolScores as u32=>crate::prompt_fast::prompt_pool_scores(p.cast::<crate::prompt_ops::Arguments>().read()),
             k if k==Kind::RowPlace as u32=>crate::prompt_move::prompt_place(p.cast::<crate::prompt_ops::Arguments>().read()),
             k if k==Kind::RowPermute as u32=>crate::prompt_move::prompt_permute(p.cast::<crate::prompt_ops::Arguments>().read()),
             k if k==Kind::RowSelect as u32=>crate::select_fast::prompt_select_rows(p.cast::<crate::prompt_ops::Arguments>().read()),
@@ -132,15 +137,20 @@ entry!(resident_launch_mx_rows_small4,Kind::MxRows4 as u32);
 entry!(resident_launch_mx_rows_small8,Kind::MxRows8 as u32);
 entry!(resident_launch_mx_rows_small8w,Kind::MxRows8w as u32);
 entry!(resident_launch_flash_resident_projection_bf16_rows,Kind::MixedRows as u32);
+entry!(resident_launch_flash_resident_projection_fold_rows,Kind::FoldRows as u32);
+entry!(resident_launch_flash_resident_projection_fold_rows_f32,Kind::FoldRowsF32 as u32);
 entry!(resident_launch_fp8_rows_small,Kind::Fp8RowsSmall as u32);
 entry!(resident_launch_fp8_rows_multi,Kind::Fp8RowsMulti as u32);
 entry!(resident_launch_fp8_rows_few,Kind::Fp8RowsFew as u32);
+entry!(resident_launch_fp8_rows_share,Kind::Fp8RowsShare as u32);
+entry!(resident_launch_mx_rows_tile,Kind::MxRowsTile as u32);
 entry!(resident_launch_plain_rows_small,Kind::PlainRowsSmall as u32);
 entry!(resident_launch_prompt_rows,Kind::PromptRows as u32);
 entry!(resident_launch_prompt_prepare,Kind::RowPrepare as u32);
 entry!(resident_launch_prompt_gated_norm,Kind::RowGatedNorm as u32);
 entry!(resident_launch_prompt_route,Kind::RowRoute as u32);
 entry!(resident_launch_prompt_fold,Kind::RowFold as u32);
+entry!(resident_launch_prompt_pool_scores,Kind::RowPoolScores as u32);
 entry!(resident_launch_prompt_place,Kind::RowPlace as u32);
 entry!(resident_launch_prompt_permute,Kind::RowPermute as u32);
 entry!(resident_launch_prompt_select_rows,Kind::RowSelect as u32);

@@ -274,6 +274,19 @@ impl Context {
         self.deferred_frees.borrow_mut().push((address, bytes, host, reuse));
     }
     fn has_deferred(&self)->bool {!self.capturing.get() && !self.deferred_frees.borrow().is_empty()}
+    /// LOOKAHEAD: frees the deferred buffers that were dropped before `mark` (a value of `deferred_total`), and only
+    /// them. The caller has waited for every stream command queued before it read the mark. A buffer dropped by then is
+    /// named by no later command, so this frees what a drain at the mark would have freed. Buffers dropped after the mark
+    /// stay listed for a real drain. If a drain emptied the list since the mark, no entry is older than the mark and
+    /// nothing is freed. `deferred_total` counts every entry ever listed, so the list's first entry has the number
+    /// `deferred_total - len`.
+    fn release_deferred_before(&self, mark: usize) {
+        if self.capturing.get() || self.resident_unsubmitted.get() { return; }
+        let frees = { let mut list = self.deferred_frees.borrow_mut();
+            let count = crate::allocation_budget::deferred_before(self.deferred_total.get(), list.len(), mark);
+            list.drain(..count).collect::<Vec<_>>() };
+        for (address, bytes, host, reuse) in frees { self.free(address, bytes, host, reuse); }
+    }
     fn release_deferred(&self) {
         if self.capturing.get() || self.resident_unsubmitted.get() || self.deferred_frees.borrow().is_empty() { return; }
         if self.pending.get() {

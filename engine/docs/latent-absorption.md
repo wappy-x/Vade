@@ -55,7 +55,12 @@ and `g+24`. The chunks run in the order 0, 4, 2, 6, 1, 5, 3, 7. A thread then
 needs three held values for each dot product to join the 32 sums exactly as
 the joins at distances 16, 8, 4, 2, and 1 do. Scores and values read the
 selected cache rows directly, in each token's original selection order. There
-is no gathered cache copy for each token. The tile changes no product, sum
+is no gathered cache copy for each token. Two blocks run on one SM at a
+time: the build caps the kernel at 128 registers a thread, and without the
+cap one block fills the SM. To fit, a thread keeps the 32 running sums of a
+chunk in registers and the three held values in its local memory, and it
+loads a quad's operands one row at a time (values: one column at a time).
+The tile changes no product, sum
 membership, join, or rounding boundary. Empty selections return positive
 zero. The workspace charge covers the two FP32 latent planes for the largest
 layer.

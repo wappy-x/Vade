@@ -236,31 +236,46 @@ pub struct Ring {
     relay:[Option<crate::rdma::Mailbox>;2],
     #[cfg(target_os="linux")]
     peer_receive:Option<(usize,usize,usize,usize)>,
+    /// RECEIVE FIRST: the receive of the next rank-block gather is posted already (`post_rank_blocks_receive`):
+    /// (buffer address, buffer bytes, rails). The gather posts only its send. The unsafe posting caller keeps this
+    /// storage live and unmoved and finishes prior readers. Every other wire entry refuses this state and aborts
+    /// the endpoints before returning. Abort drops the registrations before the caller can release the storage.
+    first_receive:Option<(usize,usize,usize)>,
     aux:Option<Box<Ring>>,
 }
 impl Ring {
-    /// Connect one rank. The second rail opens only when `TP_AUX_LISTEN` and
-    /// `TP_AUX_NEXT` are both configured; without them the wire protocol is
-    /// unchanged, and any failure to bring up the second rail falls back to one
-    /// rail with one clear log line.
+    /// Connect one rank. A start that names its second rail (`TP_AUX_LISTEN` and
+    /// `TP_AUX_NEXT`, both) opens that rail; the word `off` in both keeps one rail.
+    /// A pair on RDMA that names nothing finds the second rail of its cable by
+    /// itself (`second_rail`). Any failure to bring up the second rail falls back
+    /// to one rail with one clear log line.
     pub fn connect(rank: usize, world: usize, listen: SocketAddr, next: SocketAddr) -> Result<Self> {
         let path = match std::env::var("TP_TOPOLOGY").as_deref() {
             Ok("path") => true, Ok("ring") | Err(_) => false, _ => return Err("TP_TOPOLOGY must be ring or path".into()),
         };
+        // SECOND RAIL: `closed`: this rank offers no rail of its own choice, because its start names one (even a
+        // half or an invalid one: the start then keeps its old outcome) or says `off`. `said`: a line above already
+        // told why this rank is on one rail.
+        let (mut closed, mut said) = (true, false);
         let aux = match (std::env::var("TP_AUX_LISTEN").ok(), std::env::var("TP_AUX_NEXT").ok()) {
+            (Some(listen), Some(next)) if listen == "off" && next == "off" => None,
             (Some(listen), Some(next)) => match (listen.parse(), next.parse()) {
                 (Ok(l), Ok(n)) => Some((l, n)),
                 _ => {
                     eprintln!("tp_aux rank={rank} world={world} fallback=single_rail reason=invalid auxiliary socket address");
+                    said = true;
                     None
                 }
             },
-            (None, None) => None,
+            (None, None) => { closed = false; None }
             _ => {
                 eprintln!("tp_aux rank={rank} world={world} fallback=single_rail reason=both auxiliary endpoints must be supplied");
+                said = true;
                 None
             }
         };
+        #[cfg(not(target_os="linux"))]
+        let _ = (closed, said);
         let rdma_allowed = std::env::var("TP_RDMA").as_deref() != Ok("0");
         let mut ring = Self::connect_options(rank, world, listen, next, path)?;
         if world > 1 {
@@ -270,6 +285,17 @@ impl Ring {
             let rdma = rdma_allowed && false;
             #[cfg(target_os="linux")]
             if rdma { ring.initialise_rdma(true, TIMEOUT)?; }
+            // SECOND RAIL: every pair on RDMA trades its offers here, so the two ranks stay in step whatever each was
+            // started with. A rank that named its rail keeps it. A pair that stays on one rail says why, in one line.
+            #[cfg(target_os="linux")]
+            let aux = if rdma && ring.link.is_pair() {
+                let own = if closed { crate::second_rail::Offer::Closed } else { ring.rail_offer() };
+                // A closed rank finds nothing (`second_rail::pick`), so a named rail is never replaced.
+                match ring.second_rail(&own, listen.port())? {
+                    (Some(found), _) => { eprintln!("tp_aux rank={rank} world={world} second_rail=found"); Some(found) }
+                    (None, why) => { if aux.is_none() && !said { eprintln!("tp_aux rank={rank} world={world} second_rail=none reason={why}"); } aux }
+                }
+            } else { aux };
             if let Some((aux_listen, aux_next)) = aux {
                 ring.aux = Self::open_configured_aux(rank, world, aux_listen, aux_next, path, rdma);
             }
@@ -289,6 +315,42 @@ impl Ring {
             ring.aux = Self::open_configured_aux(slot, members, aux_listen, aux_next, path, false);
         }
         Ok(ring)
+    }
+    /// SECOND RAIL: this rank's own fast links other than the one the pair talks on (`second_rail::candidates`),
+    /// read from this box. Nothing is sent and nothing is scanned. An unreadable link table offers nothing.
+    #[cfg(target_os="linux")]
+    fn rail_offer(&self) -> crate::second_rail::Offer {
+        let primary = self.tx.as_ref().or(self.rx.as_ref()).and_then(|s| s.local_addr().ok()).map(|a| a.ip());
+        let (Some(std::net::IpAddr::V4(primary)), Ok(links)) = (primary, crate::discovery::links()) else {
+            return crate::second_rail::Offer::Open(Vec::new());
+        };
+        // `discovery::links` lists links of 100 Gb/s and more that report a speed: a link that is down reports none.
+        // The host path of a link: the PCI domain of its device. Two rails of one cable sit on two domains.
+        let path = |interface: &str| std::fs::read_link(format!("/sys/class/net/{interface}/device")).ok()
+            .and_then(|device| device.file_name().and_then(|name| name.to_string_lossy().split(':').next().map(str::to_owned)))
+            .unwrap_or_default();
+        let links = links.iter().map(|l| crate::second_rail::Link { address: l.address, prefix: l.prefix, path: path(&l.interface), mbps: l.mbps }).collect::<Vec<_>>();
+        crate::second_rail::Offer::Open(crate::second_rail::candidates(&links, primary))
+    }
+    /// SECOND RAIL: trade this rank's offer for the other rank's on the link the pair holds, and choose. Returns the
+    /// rail both ranks chose as (this rank's listen address, the other rank's), on the port after `port`, or none
+    /// with the reason for the startup line. Both ranks of a pair call this at the same point of their start, each
+    /// with its own offer.
+    #[cfg(any(target_os="linux", test))]
+    #[allow(clippy::type_complexity)]
+    fn second_rail(&mut self, own: &crate::second_rail::Offer, port: u16) -> Result<(Option<(SocketAddr, SocketAddr)>, &'static str)> {
+        use crate::second_rail::{OFFER_BYTES, decode, encode, pick, why_not};
+        if !self.link.is_pair() { return Err("a second rail is found by a pair only".into()); }
+        let mut offers = vec![0u8; 2 * OFFER_BYTES];
+        offers[self.rank * OFFER_BYTES..(self.rank + 1) * OFFER_BYTES].copy_from_slice(&encode(own));
+        let (exchanges, elapsed) = (self.exchanges, self.elapsed);
+        self.all_gather(&mut offers, OFFER_BYTES)?;
+        // The trade is part of the start, not of the work the counters describe.
+        self.exchanges = exchanges; self.elapsed = elapsed;
+        let peer = decode(&offers[(1 - self.rank) * OFFER_BYTES..(2 - self.rank) * OFFER_BYTES]);
+        let Some((own, peer)) = pick(self.rank, own, &peer) else { return Ok((None, why_not(own, &peer))); };
+        let Some(port) = port.checked_add(1) else { return Ok((None, "no port is left after the port of the first link")); };
+        Ok((Some((SocketAddr::from((own, port)), SocketAddr::from((peer, port)))), ""))
     }
     fn open_configured_aux(slot: usize, members: usize, listen: SocketAddr, next: SocketAddr, path: bool, rdma: bool) -> Option<Box<Self>> {
         match Self::try_open_configured_aux(slot, members, listen, next, path, rdma) {
@@ -370,7 +432,7 @@ impl Ring {
     /// the bytes of every command stay the same, and no collective reads these mailboxes.
     #[cfg(target_os="linux")]
     #[allow(clippy::possible_missing_else)] // dense one-line guards.
-    pub fn open_command_relay(&mut self)->Result<()> {
+    pub fn open_command_relay(&mut self)->Result<()> {self.require_no_first_receive()?;
         if !command_relay_world(self.world,self.link.is_path()) { return Err("the command relay needs a path of four or more ranks".into()); }
         let mut right=self.tx.as_ref().map(crate::rdma::Mailbox::prepare).transpose()?;
         let mut left=self.rx.as_ref().map(crate::rdma::Mailbox::prepare).transpose()?;
@@ -383,7 +445,7 @@ impl Ring {
     pub fn connect_options(rank: usize, world: usize, listen: SocketAddr, next: SocketAddr, path: bool) -> Result<Self> {
         crate::runtime::pin()?;
         if world == 0 || world > 64 || rank >= world { return Err("rank must be less than world in 1..=64".into()); }
-        let mut ring = Self { rank, world, tx: None, rx: None, link: PeerLayout::new(world, path), packed: Vec::new(), unpacked: Vec::new(), exchanges: 0, elapsed: Duration::ZERO, reduction_bytes:0,reduction_elapsed:Duration::ZERO, #[cfg(target_os="linux")]rdma:[None,None],#[cfg(target_os="linux")]mailbox:[None,None],#[cfg(target_os="linux")]relay:[None,None],#[cfg(target_os="linux")]peer_receive:None,aux:None };
+        let mut ring = Self { rank, world, tx: None, rx: None, link: PeerLayout::new(world, path), packed: Vec::new(), unpacked: Vec::new(), exchanges: 0, elapsed: Duration::ZERO, reduction_bytes:0,reduction_elapsed:Duration::ZERO, #[cfg(target_os="linux")]rdma:[None,None],#[cfg(target_os="linux")]mailbox:[None,None],#[cfg(target_os="linux")]relay:[None,None],#[cfg(target_os="linux")]peer_receive:None,first_receive:None,aux:None };
         if world == 1 { return Ok(ring); }
         let deadline = Instant::now() + NEXT_CONNECT_WAIT.with(|w| w.take()).unwrap_or(TIMEOUT);
         let run_hash = crate::runtime::run_hash();
@@ -440,17 +502,23 @@ impl Ring {
     pub fn rank(&self) -> usize { self.rank }
     /// Fail the complete service transport, including workers parked in command().
     pub fn abort(&mut self) {
+        self.first_receive=None;
         for stream in self.tx.iter().chain(self.rx.iter()) { let _=stream.shutdown(std::net::Shutdown::Both); }
         if let Some(aux)=&mut self.aux { aux.abort(); }
         #[cfg(target_os="linux")]
         { self.mailbox=[None,None];self.relay=[None,None];self.rdma=[None,None];self.peer_receive=None; }
+    }
+    /// Refuse an intervening wire operation while a receive owns the next gather.
+    fn require_no_first_receive(&mut self)->Result<()> {
+        if self.first_receive.is_some() {self.abort();return Err("a posted rank-block receive requires its gather next".into());}
+        Ok(())
     }
     pub fn world(&self) -> usize { self.world }
     pub fn topology(&self) -> &'static str { if self.link.is_path() { "path" } else { "ring" } }
     pub fn algorithm(&self) -> &'static str { "duplex" }
     pub fn uses_rdma(&self)->bool {#[cfg(target_os="linux")]{self.rdma.iter().any(Option::is_some)}#[cfg(not(target_os="linux"))]{false}}
     pub fn clear_registered(&mut self){#[cfg(target_os="linux")]{
-        if self.peer_receive.is_some(){self.abort();}
+        if self.peer_receive.is_some()||self.first_receive.is_some(){self.abort();}
         for e in self.rdma.iter_mut().flatten(){e.clear_regions();}for m in self.mailbox.iter_mut().chain(self.relay.iter_mut()).flatten(){m.clear_registered();}
     }if let Some(aux)=&mut self.aux{aux.clear_registered();}}
 
@@ -493,7 +561,7 @@ impl Ring {
 
     /// Queue every piece on both rails before waiting. The caller keeps these
     /// disjoint slots pinned and unchanged until the complete batch returns.
-    pub fn transfer_from_last_batch(&mut self, destination: usize, buffers: &mut [&mut [u8]]) -> Result<()> {
+    pub fn transfer_from_last_batch(&mut self, destination: usize, buffers: &mut [&mut [u8]]) -> Result<()> {self.require_no_first_receive()?;
         if destination >= self.world || buffers.len() > 256 || buffers.iter().any(|b| b.len() > u32::MAX as usize) {
             return Err("invalid final-rank transfer batch".into());
         }
@@ -536,7 +604,7 @@ impl Ring {
 
     /// Forward a buffer from the final rank down to one destination. Every rank
     /// calls in the same order; the final rank supplies bytes, others receive.
-    pub fn transfer_from_last(&mut self, destination: usize, bytes: &mut [u8]) -> Result<()> {
+    pub fn transfer_from_last(&mut self, destination: usize, bytes: &mut [u8]) -> Result<()> {self.require_no_first_receive()?;
         if destination >= self.world || bytes.len() > u32::MAX as usize {
             return Err("invalid final-rank transfer destination or length".into());
         }
@@ -616,7 +684,7 @@ impl Ring {
         #[cfg(target_os="linux")]
         for endpoint in self.rdma.iter_mut().chain(self.aux.iter_mut().flat_map(|r|r.rdma.iter_mut())).flatten() {endpoint.retain_regions(false);}
     }
-    pub fn all_gather(&mut self, buffer: &mut [u8], row_bytes: usize) -> Result<()> {
+    pub fn all_gather(&mut self, buffer: &mut [u8], row_bytes: usize) -> Result<()> {self.require_no_first_receive()?;
         if row_bytes == 0 || !buffer.len().is_multiple_of(row_bytes) { return Err("invalid all-gather row width".into()); }
         let total = buffer.len() / row_bytes;
         let world = self.world;
@@ -646,6 +714,9 @@ impl Ring {
     }
     fn gather_ranges_inner(&mut self, buffer: &mut [u8], range: &impl Fn(usize) -> std::ops::Range<usize>) -> Result<()> {
         if self.world == 1 { return Ok(()); }
+        // RECEIVE FIRST: a receive posted for this gather is on the pair's RDMA link, so the gather takes that link.
+        #[cfg(target_os="linux")]
+        if self.first_receive.is_some(){return self.gather_rdma_ranges(buffer.as_mut_ptr(),buffer.len(),buffer.len(),1,None,range);}
         #[cfg(target_os="linux")]
         if (0..self.world).all(|r|self.has_mailbox(range(r).len())){return self.gather_mailbox(buffer,&range);}
         #[cfg(target_os="linux")]
@@ -731,7 +802,7 @@ impl Ring {
     /// # Safety
     /// `base` must point to `16 * block` bytes of mapped rank slots. The memory
     /// must stay allocated and unmoved while the peer can write it.
-    pub unsafe fn prepare_peer_write(&mut self,base:*mut f32,block:usize)->Result<()> {
+    pub unsafe fn prepare_peer_write(&mut self,base:*mut f32,block:usize)->Result<()> {self.require_no_first_receive()?;
         #[cfg(target_os="linux")]
         if self.link.is_pair()&&self.uses_rdma()&&block<=65536 {
             let bytes=block.checked_mul(16).ok_or("mapped pair size overflow")?;
@@ -744,7 +815,7 @@ impl Ring {
     /// # Safety
     /// `base` and `block` must name the slots of the posted peer receive. The
     /// memory must stay allocated and unmoved until the write completes.
-    pub unsafe fn write_peer_prefix(&mut self,base:*mut f32,block:usize,prefix:usize)->Result<()> {
+    pub unsafe fn write_peer_prefix(&mut self,base:*mut f32,block:usize,prefix:usize)->Result<()> {self.require_no_first_receive()?;
         #[cfg(target_os="linux")]
         if self.link.is_pair()&&self.uses_rdma() {
             let Some((address,bytes,old,slot))=self.peer_receive else{return Err("missing mapped receive".into());};
@@ -766,7 +837,7 @@ impl Ring {
     /// `base` must point to the mapped slots for `block` rows. The slots must
     /// stay allocated and unmoved through `gather_blocks`, and the previous GPU
     /// read of the peer slot must be complete.
-    pub unsafe fn post_peer_receive(&mut self,base:*mut f32,block:usize,slot:usize)->Result<()> {
+    pub unsafe fn post_peer_receive(&mut self,base:*mut f32,block:usize,slot:usize)->Result<()> {self.require_no_first_receive()?;
         #[cfg(target_os="linux")]
         {
             if !self.link.is_pair()||!self.uses_rdma(){return Ok(());}
@@ -788,7 +859,7 @@ impl Ring {
         #[cfg(not(target_os="linux"))]
         {let _=(base,block,slot);Ok(())}
     }
-    pub fn gather_blocks(&mut self,output:&mut [f32],block:usize,_tokens:usize)->Result<()> {
+    pub fn gather_blocks(&mut self,output:&mut [f32],block:usize,_tokens:usize)->Result<()> {self.require_no_first_receive()?;
         if block.checked_mul(self.world)!=Some(output.len()){return Err("rank block shape mismatch".into());}
         #[cfg(target_os="linux")]
         if self.uses_rdma()&&(self.peer_receive.is_some()||!self.has_mailbox(block*4)){
@@ -803,7 +874,7 @@ impl Ring {
     }
     /// Small reductions fit in CPU cache; avoid three device copies and a
     /// reduction launch at each layer boundary. Addition remains rank ordered.
-    pub fn reduce_small(&mut self,output:&mut [f32])->Result<()> {
+    pub fn reduce_small(&mut self,output:&mut [f32])->Result<()> {self.require_no_first_receive()?;
         if self.world==1||output.is_empty(){return Ok(());}
         #[cfg(target_os="linux")]
         if self.link.is_pair()&&self.mailbox[0].as_ref().is_some_and(|m|m.supports(output.len())) {
@@ -875,6 +946,13 @@ impl Ring {
         // block exchanges stripe across both cable rails when the sibling QP is open.
         let write_pair=prepared.is_some()&&self.link.is_pair()&&width<=65536;
         let rails=active_rdma_rails(world,self.link.is_pair(),prepared.is_some(),write_pair,aux.is_some(),range);
+        // RECEIVE FIRST: this gather's receive was posted before the caller's GPU wait (`post_rank_blocks_receive`), for
+        // this buffer and these rails. Only the send is left. Anything else is a caller error and fails the transport:
+        // a posted receive must not take another message.
+        let first=self.first_receive.take();
+        if first.is_some_and(|posted|prepared.is_some()||projection_width.is_some()||!self.link.is_pair()||tokens!=1||posted!=(base as usize,bytes,rails)) {
+            self.aux=aux;self.abort();return Err("posted rank-block receive differs from its gather".into());
+        }
         let rounds=if self.link.is_pair(){1}else if self.link.is_path(){self.world-1}else{self.world/2};
         let result=(||{
             for step in 0..rounds {
@@ -889,7 +967,7 @@ impl Ring {
                     if let Some((_,allocation,prefix,slot))=prepared.filter(|_|width<=65536) {
                         let start=own.start.max((rank*width+prefix)*4).min(own.end);
                         unsafe{endpoints[0].as_mut().unwrap().write(base,allocation,start..own.end,start+slot*width*8,true)?;}
-                    } else {unsafe{endpoints[0].as_mut().unwrap().post(base,bytes,stride,tokens,own,if prepared.is_some(){0..0}else{peer})?};}
+                    } else {unsafe{endpoints[0].as_mut().unwrap().post(base,bytes,stride,tokens,own,if prepared.is_some()||first.is_some(){0..0}else{peer})?};}
                 } else {
                     let clockwise=self.link.is_path()||step<self.world/2;let counter=self.link.is_path()||step<(self.world-1)/2;
                     let sr=if clockwise{owner(-(step as isize))}else{0..0};let rl=if clockwise{owner(-(step as isize)-1)}else{0..0};
@@ -906,9 +984,50 @@ impl Ring {
         if result.is_err(){self.abort();}
         self.elapsed+=start.elapsed();self.exchanges+=1;result
     }
+    /// RECEIVE FIRST. Post the receive of the next `gather_rank_blocks` now, before the caller waits for its own GPU. A
+    /// rank that finishes first then sends to a posted receive. Without it the receive is posted only at the gather; the
+    /// first sender is refused (receiver not ready) and sends again: about one refusal an exchange and about 0.3 ms on
+    /// most exchanges, measured on a pair. Posts nothing and returns false where the gather would not take the pair's
+    /// RDMA link for these blocks: one rank, a path or a ring, no RDMA, or blocks that fit the mailbox.
+    ///
+    /// # Safety
+    /// `buffer` is the storage of the next `gather_rank_blocks` call, with the same `units`, `width` and `tokens`, and
+    /// that call is the next call on this ring. The storage stays allocated and unmoved through it. Every read of the
+    /// other rank's block that was queued before now has finished: the wire may write that block from now on.
+    pub unsafe fn post_rank_blocks_receive(&mut self,buffer:*mut f32,units:usize,width:usize,tokens:usize)->Result<bool> {self.require_no_first_receive()?;
+        #[cfg(target_os="linux")]
+        {
+            let world=self.world;
+            let Some(bytes)=units.checked_mul(width).and_then(|n|n.checked_mul(tokens)).and_then(|n|n.checked_mul(4)) else {return Err("rank block shape mismatch".into());};
+            let range=|rank:usize|{let r=rows(units,rank,world);r.start*width*tokens*4..r.end*width*tokens*4};
+            // The gather takes the mailbox for blocks that fit it (`gather_ranges_inner`): then there is nothing to post.
+            let fits=(0..world).all(|r|self.has_mailbox(range(r).len()));
+            if !self.link.is_pair()||!self.uses_rdma()||fits {return Ok(false);}
+            if self.peer_receive.is_some()||self.first_receive.is_some() {self.abort();return Err("a receive is already posted".into());}
+            // The rails and the stripes of `gather_rdma_ranges` for these blocks.
+            let rails=active_rdma_rails(world,true,false,false,self.aux.is_some(),&range);
+            let start=Instant::now();let peer=range(1-self.rank);let mut aux=self.aux.take();
+            let result=(||{
+                for (rail,endpoints) in std::iter::once(&mut self.rdma).chain(aux.as_mut().map(|r|&mut r.rdma)).take(rails).enumerate() {
+                    // SAFETY: the caller keeps `buffer` allocated and unmoved through the gather, and no reader of the peer block is left.
+                    unsafe{endpoints[0].as_mut().ok_or("missing pair rail")?.post(buffer.cast(),bytes,bytes,1,0..0,rail_stripe(peer.clone(),rail,rails))?;}
+                }
+                Ok(())
+            })();
+            self.aux=aux;self.elapsed+=start.elapsed();
+            if result.is_err() {self.abort();} else {self.first_receive=Some((buffer as usize,bytes,rails));}
+            result.map(|()|true)
+        }
+        #[cfg(not(target_os="linux"))]
+        {let _=(buffer,units,width,tokens);Ok(false)}
+    }
     /// Exchange rank-major blocks in caller-owned pinned storage. GPU copies
     /// perform the row interleave after the NIC has completed both rails.
     pub fn gather_rank_blocks(&mut self,buffer:&mut [f32],units:usize,width:usize,tokens:usize)->Result<()> {
+        if self.first_receive.is_some_and(|(address,bytes,_)|address!=buffer.as_ptr() as usize || bytes!=std::mem::size_of_val(buffer)
+            || units.checked_mul(width).and_then(|n|n.checked_mul(tokens))!=Some(buffer.len())) {
+            self.abort();return Err("posted rank-block receive differs from its gather".into());
+        }
         if units.checked_mul(width).and_then(|n|n.checked_mul(tokens))!=Some(buffer.len()) {
             return Err("rank block shape mismatch".into());
         }
@@ -925,7 +1044,7 @@ impl Ring {
     }
     /// Read device operands directly into the reusable rank-major exchange.
     pub fn gather_batch_with(&mut self, units:usize, width:usize, tokens:usize,
-        read:impl FnOnce(&mut [f32])->Result<()>)->Result<&[f32]> {
+        read:impl FnOnce(&mut [f32])->Result<()>)->Result<&[f32]> {self.require_no_first_receive()?;
         let total = units.checked_mul(width).and_then(|n| n.checked_mul(tokens)).ok_or("batch gather overflow")?;
         let own = rows(units, self.rank, self.world);
         if width == 0 || tokens == 0 { return Err("batch gather shape mismatch".into()); }
@@ -967,7 +1086,7 @@ impl Ring {
         let _ = bytes;
         spark_engine::collective::Path::Tcp
     }
-    fn command_phase(&mut self, bytes: &mut [u8], idle: bool) -> Result<()> {
+    fn command_phase(&mut self, bytes: &mut [u8], idle: bool) -> Result<()> {self.require_no_first_receive()?;
         #[cfg(target_os="linux")]
         {
             let n=bytes.len();let route=command_route(self.link.is_pair(),||self.has_mailbox(n),||self.has_relay(n));
@@ -997,7 +1116,7 @@ impl Ring {
         for s in self.tx.iter().chain(self.rx.iter()) { s.set_nonblocking(true).map_err(|e| e.to_string())?; }
         result.map_err(|e: String| format!("TP peer {} command receive/send phase: {e}", if self.rank == 0 { 1 } else { self.rank - 1 }))
     }
-    pub fn barrier(&mut self) -> Result<()> {
+    pub fn barrier(&mut self) -> Result<()> {self.require_no_first_receive()?;
         if self.world == 1 { return Ok(()); }
         // Arrive toward rank zero, release toward the last rank. Model loading
         // gets a separate blocking deadline, without entering the spin pump.
@@ -1033,7 +1152,7 @@ impl Ring {
     /// longer (14 of 22 starts). A rank proceeds only when the other rank's word has arrived, as before. Model
     /// load, three ranks or more, and a pair without a mailbox keep `barrier`. The deadline is BARRIER_TIMEOUT and
     /// the error starts with "rank barrier:" in both forms; a rank that is gone ends the wait within 100 ms.
-    pub fn step_barrier(&mut self) -> Result<()> {
+    pub fn step_barrier(&mut self) -> Result<()> {self.require_no_first_receive()?;
         #[cfg(target_os="linux")]
         {
             let pair = self.link.is_pair().then_some(()).filter(|()| step_barrier_on_mailbox());
@@ -1129,6 +1248,107 @@ mod tests {
         let elapsed=started.elapsed();let budget=AUX_CONNECT_TIMEOUT+2*AUX_RDMA_TIMEOUT;
         assert!(elapsed>=AUX_RDMA_TIMEOUT,"the stalled setup returned after {elapsed:?}, before its timeout");
         assert!(elapsed<budget && budget<TIMEOUT,"auxiliary RDMA setup took {elapsed:?}");
+    }
+    /// SECOND RAIL: the two ranks trade their offers on the link they hold and reach one answer.
+    #[test]
+    fn a_pair_trades_rail_offers_and_both_ranks_choose_the_same_rail_or_none() {
+        use crate::second_rail::{Candidate,Offer};
+        // Addresses built from their parts (a documentation range).
+        let at=|net:u8,host:u8|std::net::Ipv4Addr::new(198,51,net,host);
+        let open=|host:u8|Offer::Open(vec![Candidate{address:at(2,host),prefix:24,apart:true}]);
+        // (rank 0's offer, rank 1's offer, the port of the first link, a rail is found)
+        let cases=[(open(1),open(2),29960u16,true),(Offer::Closed,open(2),29960,false),(open(1),Offer::Closed,29960,false),
+            (open(1),Offer::Open(Vec::new()),29960,false),(Offer::Closed,Offer::Closed,29960,false),(open(1),open(2),u16::MAX,false)];
+        for path in [false,true] { for (zero,one,port,found) in &cases {
+            let listeners=(0..2).map(|_|TcpListener::bind("127.0.0.1:0").unwrap()).collect::<Vec<_>>();
+            let addresses=listeners.iter().map(|s|s.local_addr().unwrap()).collect::<Vec<_>>();drop(listeners);
+            let rails=std::thread::scope(|scope| {
+                let workers=(0..2).map(|rank| {let (addresses,offer)=(&addresses,[zero,one][rank]);scope.spawn(move || {
+                    let mut ring=Ring::connect_options(rank,2,addresses[rank],addresses[1-rank],path).unwrap();
+                    let (rail,why)=ring.second_rail(offer,*port).unwrap();
+                    // A pair that stays on one rail has a reason for its startup line; a pair with a rail has none.
+                    assert_eq!(rail.is_some(),why.is_empty());
+                    // The trade leaves the ring as a start expects it: nothing counted, and the next collective in step.
+                    assert_eq!((ring.exchanges,ring.elapsed),(0,Duration::ZERO));
+                    assert_eq!(ring.gather_batch_f32(&[rank as f32],2,1,1).unwrap(),[0.0,1.0]);
+                    rail
+                })}).collect::<Vec<_>>();
+                workers.into_iter().map(|w|w.join().unwrap()).collect::<Vec<_>>()
+            });
+            if *found {
+                let (zero,one)=(SocketAddr::from((at(2,1),29961)),SocketAddr::from((at(2,2),29961)));
+                assert_eq!(rails,[Some((zero,one)),Some((one,zero))],"path={path}");
+            } else {assert_eq!(rails,[None,None],"path={path} port={port}");}
+        }}
+        // Only a pair finds a rail this way.
+        let mut one=Ring::connect_options(0,1,"127.0.0.1:1".parse().unwrap(),"127.0.0.1:1".parse().unwrap(),false).unwrap();
+        assert!(one.second_rail(&open(1),29960).is_err());
+    }
+    /// The stripe of a pair gather over its rails, as `gather_rdma_ranges` sends it and as it and
+    /// `post_rank_blocks_receive` post its receives: every byte of a rank's block rides exactly one rail and lands at
+    /// its own place, at every size, and the two ranks always agree on the number of rails.
+    #[test]
+    fn every_byte_of_a_pair_gather_rides_exactly_one_rail_at_every_size() {
+        let floor=PAIR_GATHER_FLOOR_BYTES;
+        // Every size from 1 byte to a little over a page, then each power of two up to 64 MiB with its neighbours, the
+        // floor with one byte and one word under and over it, and the message sizes of a served 8,192-token read.
+        let mut sizes=(1..=4100usize).collect::<Vec<_>>();
+        for shift in 13..=26 {let n=1usize<<shift;sizes.extend([n-4,n-1,n,n+1,n+4]);}
+        sizes.extend([floor-4,floor-1,floor,floor+1,floor+4,309_760,4_784_128,8_978_432,24<<20,64<<20]);
+        // One block of a rank, striped: the stripes are in order, touch, start and end with the block, and cut on a word
+        // when the block is whole words. Returns them.
+        let stripes=|block:std::ops::Range<usize>,rails:usize| {
+            let parts=(0..rails).map(|rail|rail_stripe(block.clone(),rail,rails)).collect::<Vec<_>>();
+            assert_eq!((parts[0].start,parts[rails-1].end),(block.start,block.end));
+            for pair in parts.windows(2) {assert_eq!(pair[0].end,pair[1].start);}
+            if block.len().is_multiple_of(4) {for part in &parts {assert!((part.start-block.start).is_multiple_of(4) && part.len().is_multiple_of(4));}}
+            parts
+        };
+        for &own in &sizes { for other in [own,own+4,own.saturating_sub(4).max(1),floor,floor-4,1] { for has_aux in [false,true] {
+            // The exchange buffer of a pair: rank 0's block, then rank 1's.
+            let range=|rank:usize|[0..own,own..own+other][rank].clone();
+            let rails=active_rdma_rails(2,true,false,false,has_aux,&range);
+            // Two rails exactly when the second rail is open and both blocks reach the floor: at the floor and over it
+            // yes, one byte under it no. The rule reads only the two sizes, so both ranks get the same number.
+            assert_eq!(rails,if has_aux && own>=floor && other>=floor {2} else {1},"own={own} other={other}");
+            for sender in 0..2 {
+                let block=range(sender);let sent=stripes(block.clone(),rails);
+                // The receiver posts the same stripes of the sender's block, rail by rail (the same call on both ranks).
+                let posted=(0..rails).map(|rail|rail_stripe(range(sender),rail,rails)).collect::<Vec<_>>();
+                assert_eq!(sent,posted);
+                assert_eq!(sent.iter().map(|part|part.len()).sum::<usize>(),block.len());
+                if rails==2 {assert!(sent.iter().all(|part|!part.is_empty()),"a rail with no bytes at own={own} other={other}");}
+            }
+        }}}
+        // The bytes themselves, for every small size and the first sizes of two rails: each rank's block is copied
+        // stripe by stripe into the other rank's buffer; every byte arrives once, at its own offset, with its own value.
+        let carry=|own:usize,other:usize,rails:usize,swap:bool| {
+            let range=|rank:usize|[0..own,own..own+other][rank].clone();
+            // One element stands for one byte and holds its own place and sender, so a byte at a wrong place always shows.
+            let value=|rank:usize,at:usize|(at as u64)<<1|rank as u64;
+            let mut ok=true;
+            for sender in 0..2 {
+                let source=(0..own+other).map(|at|value(sender,at)).collect::<Vec<_>>();
+                let (mut landed,mut writes)=(vec![u64::MAX;own+other],vec![0u8;own+other]);
+                let sent=(0..rails).map(|rail|rail_stripe(range(sender),rail,rails)).collect::<Vec<_>>();
+                for rail in 0..rails {
+                    // `swap`: the wrong-on-purpose form, a sender that puts each stripe on the other rail.
+                    let (from,to)=(sent[if swap {rails-1-rail} else {rail}].clone(),sent[rail].clone());
+                    let n=from.len().min(to.len());
+                    landed[to.start..to.start+n].copy_from_slice(&source[from.start..from.start+n]);
+                    for count in &mut writes[to.start..to.start+n] {*count+=1;}
+                }
+                let block=range(sender);
+                ok&=block.clone().all(|at|writes[at]==1 && landed[at]==source[at]);
+                ok&=(0..own+other).filter(|at|!block.contains(at)).all(|at|writes[at]==0);
+            }
+            ok
+        };
+        for own in (1..=600usize).chain([4096,4099]) { for other in [own,own+4,own+1] { for rails in 1..=2 {
+            assert!(carry(own,other,rails,false),"own={own} other={other} rails={rails}");
+            // The control: swapped stripes must be seen by this same check, whenever there is more than one stripe to swap.
+            if rails==2 && own>=2 {assert!(!carry(own,other,rails,true),"a swapped stripe went unseen at own={own} other={other}");}
+        }}}
     }
     #[test]
     fn command_relay_only_from_four_ranks_and_the_pair_asks_main_only() {
@@ -1272,3 +1492,5 @@ mod tests {
     }
 }
 
+
+#[cfg(test)] #[path="receive_guard_tests.rs"] mod receive_guard_tests;

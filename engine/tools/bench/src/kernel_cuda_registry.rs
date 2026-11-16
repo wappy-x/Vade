@@ -20,6 +20,8 @@ pub(super) use fp4cohort::run as fp4_cohort;
 #[path = "kernel_mxquant.rs"] mod mxquant;
 pub(super) use mxquant::run as mx_quant;
 #[path = "kernel_poolscores.rs"] mod poolscores;
+#[path = "kernel_latenttile.rs"] mod latenttile;
+pub(super) use latenttile::run as latent_tile;
 #[path = "kernel_steptile.rs"] mod steptile;
 pub(super) use steptile::run as step_tile;
 pub(super) use poolscores::run as pool_scores;

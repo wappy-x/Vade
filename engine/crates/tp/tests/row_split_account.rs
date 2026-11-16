@@ -100,7 +100,7 @@ fn the_account_keeps_the_proposal_length_and_the_draft_length_of_the_same_cycles
         // Cycle two: three tokens proposed, the scheduler cuts the proposal after its first token. The pass has two rows.
         let (tokens,entry)=propose(&mut session,prompt,plain[4]);assert_eq!(tokens.len(),3);
         let rows=[plain[4],tokens[0]];let kept=1+usize::from(tokens[0]==plain[5]);
-        let Predictions::Logits(logits)=one_pass(engine,&mut session,&rows) else {panic!("a pass of rows answers with logits")};assert_eq!(logits.len(),2);
+        let Predictions::Greedy(ids)=one_pass(engine,&mut session,&rows) else {panic!("a greedy pass of rows answers with IDs")};assert_eq!(ids.len(),2);assert_eq!(ids[0],plain[5]);
         session.draft_target().unwrap().truncate(entry+kept).unwrap();
         let account=session.proposer_account();
         assert_eq!((account.cycles,account.proposed_tokens,account.drafted_rows,account.kept_rows),(1,3,1,kept as u64));

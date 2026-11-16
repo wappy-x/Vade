@@ -68,7 +68,8 @@ impl<'a> Backend<'a> {
         for (start,bytes) in borrowed {let borrowed_end=start.checked_add(bytes as u64).ok_or("resident projection batch operand address overflow")?;
             if output.device_address()<borrowed_end && start<end {return Err("resident projection batch output aliases an operand".into());}
         }
-        let entry=if folded {"flash_resident_projection_plain_bf16"} else if bf16 {"flash_resident_projection_bf16"} else {"flash_resident_projection_batch"};
+        let scalar_fold=!bf16 && crate::plain_admission::batch_fold(&batch);
+        let entry=if scalar_fold {"project_f32_ordered"} else if folded {"flash_resident_projection_plain_bf16"} else if bf16 {"flash_resident_projection_bf16"} else {"flash_resident_projection_batch"};
         self.require_arm_kernels(&[entry])?;
         // No fill: the region is fully written by flash_resident_projection_batch before any read.
         self.skip_fill(output)?;self.resident_completion()?;
@@ -76,13 +77,24 @@ impl<'a> Backend<'a> {
         // views or exact same-context contiguous FP32/BF16 owners. BF16 rows
         // have half as many storage words; mixed precision is rejected. The
         // fold admits complete aligned rows, four rows per 160-thread block.
+        // The repeated FP32 matrix uses the same fold, once per descriptor. Its
+        // original checked output spans stay disjoint; no intermediate copy or
+        // allocation is needed. The selector excludes rounded and mixed jobs.
         // The other entries keep 128 threads and their original row schedules.
         // Exact output length, checked address sums,
         // and retained private storage fund disjoint output spans. Each span is fully written by this kernel with raw stores before any read of it (fill_free). All borrowed
         // owners and the by-value descriptor batch live through stream completion.
         // An owned queue defers dropped allocations through submission and its
         // real drain. Ordinary callers retain the same completion guarantee.
-        let launched=unsafe {self.launch_flash(entry,batch.layer.ends[batch.layer.count as usize],if folded {crate::plain_admission::FOLD_THREADS as u32} else {128},&mut [parameter(&mut batch)])};
+        let launched=unsafe {
+            if scalar_fold {
+                batch.layer.projections[..batch.layer.count as usize].iter_mut().try_for_each(|p| {
+                    let (blocks,threads)=crate::plain_admission::plain_geometry(p.rows as usize,p.cols as usize);
+                    self.launch_flash(entry,blocks,threads,&mut [parameter(&mut p.weights),parameter(&mut p.input),parameter(&mut p.output),parameter(&mut p.rows),parameter(&mut p.cols)])
+                })
+            } else {self.launch_flash(entry,batch.layer.ends[batch.layer.count as usize],if folded {crate::plain_admission::FOLD_THREADS as u32} else {128},&mut [parameter(&mut batch)])}
+        };
+        if scalar_fold && launched.is_ok() {crate::prompt_launches::record("shared_plain_fold");}
         let completed=self.resident_completion();launched.and(completed)
     }
     /// ROW STAGE: the merged launch of `resident_projection_batch` for `tokens` = 2 to 4 source rows (a verify pass). Each job
@@ -142,6 +154,64 @@ impl<'a> Backend<'a> {
         // the by-value descriptor batch live through stream completion (the owned queue defers dropped allocations;
         // ordinary callers complete here).
         let launched=unsafe {self.launch_flash(entry,batch.layer.ends[batch.layer.count as usize],128,&mut [parameter(&mut batch)])};
+        let completed=self.resident_completion();launched.and(completed)
+    }
+    /// FOLD ROWS: one fold launch for `tokens` = 2 to 8 source rows of plain matrices with few rows and long rows (the router gate,
+    /// the narrow BF16 groups). Each job is ONE matrix: it reads `[tokens][cols]` FP32 words and writes `[tokens][rows]` words at
+    /// its place in `output`, jobs in order. A block reads a weight vector once for all source rows; every output word keeps the
+    /// one-row fold's arithmetic and order for its own source row (`plain_warp::rows_fold_rows`; kernel-bench --fold-rows compares
+    /// every byte with the one-row forms, a source row alone). All jobs hold FP32 weights or all hold BF16 patterns. The caller
+    /// admits by shape, storage and alignment (`plain_admission::fold_rows_admitted`); a job outside the envelope here is an
+    /// error, never another path.
+    pub fn resident_projection_fold_rows(&self,jobs:&[ResidentProjection<'_,'_,'a>],output:&mut DeviceVector<'_>,round:bool,tokens:usize)->Result<(),String> {
+        use crate::next_params::{MxProjection,ResidentProjectionBatch};
+        self.require_resident_stream()?;
+        if jobs.is_empty() || jobs.len()>9 || !(2..=crate::plain_admission::FOLD_ROWS_MAX_TOKENS).contains(&tokens) {return Err("resident projection fold rows count differs".into());}
+        let bf16=matches!(jobs[0],ResidentProjection::PlainBf16 {..});
+        let mut batch=ResidentProjectionBatch {round:u32::from(round),..Default::default()};let mut offset=0usize;let mut borrowed=Vec::new();
+        for job in jobs {
+            let (rows,cols,weight,scales,input)=match job {
+                ResidentProjection::Plain {rows,cols,weight,input} if !bf16=>{
+                    let words=rows.checked_mul(*cols).ok_or("resident fold rows weight overflow")?;self.check_vector(weight,words)?;(*rows,*cols,*weight,4,*input)
+                },
+                ResidentProjection::PlainBf16 {rows,cols,weight,input} if bf16=>{
+                    let elements=rows.checked_mul(*cols).ok_or("resident fold rows weight overflow")?;self.check_vector(weight,elements.div_ceil(2))?;(*rows,*cols,*weight,2,*input)
+                },
+                _=>return Err("resident projection fold rows take plain weights of one precision".into()),
+            };
+            if weight.is_segmented() || !crate::plain_admission::fold_rows_admitted(rows,cols,weight.device_address() as usize,input.device_address() as usize,tokens) {
+                return Err("resident fold rows shape differs from the fold envelope".into());
+            }
+            borrowed.push((weight.device_address(),weight.len()*4));
+            self.check_vector(input,tokens.checked_mul(cols).ok_or("resident fold rows input overflow")?)?;
+            if input.is_segmented() {return Err("resident fold rows input must be contiguous".into());}
+            borrowed.push((input.device_address(),input.len()*4));
+            let end=rows.checked_mul(tokens).and_then(|words|offset.checked_add(words)).ok_or("resident fold rows output overflow")?;
+            if end>output.len() {return Err("resident fold rows output is short".into());}
+            let address=output.device_address().checked_add((offset*4) as u64).ok_or("resident fold rows address overflow")?;
+            batch.push_fold_rows(MxProjection {weights:weight.device_address(),scales,input:input.device_address(),output:address,
+                rows:rows.try_into().map_err(|_|"resident fold rows exceed ABI")?,cols:cols.try_into().map_err(|_|"resident fold rows columns exceed ABI")?,
+                tokens:tokens as u32,input_bf16:0,round:0})?;
+            offset=end;
+        }
+        self.check_vector(output,offset)?;if output.is_segmented() {return Err("resident fold rows output must be contiguous".into());}
+        let end=output.device_address().checked_add((offset*4) as u64).ok_or("resident fold rows output address overflow")?;
+        for (start,bytes) in borrowed {let borrowed_end=start.checked_add(bytes as u64).ok_or("resident fold rows operand address overflow")?;
+            if output.device_address()<borrowed_end && start<end {return Err("resident fold rows output aliases an operand".into());}
+        }
+        let entry=if bf16 {"flash_resident_projection_fold_rows"} else {"flash_resident_projection_fold_rows_f32"};self.require_arm_kernels(&[entry])?;
+        // No fill: every word of the region is written by the entry before any read (the live folding lane of each
+        // (source row, weight row) stores its one word; the grid covers every weight row once and a block runs every source row).
+        self.skip_fill(output)?;self.resident_completion()?;crate::prompt_launches::record("fold_rows");
+        // SAFETY: Every descriptor is an exact same-context contiguous FP32 or BF16 owner inside the fold-rows envelope
+        // (`fold_rows_admitted`: 1 to 512 rows, 1,024 to 8,192 columns in whole 32-column groups, 16-byte aligned weights and
+        // source rows), with `tokens` in 2..=8, `tokens * cols` initialized input words and `tokens * rows` output words;
+        // one weight precision a batch, matching the entry (`push_fold_rows` and `MxLayer::push` refuse anything else).
+        // `push_fold_rows` gives a descriptor rows.div_ceil(4) blocks of FOLD_THREADS threads: the entry's grid contract.
+        // Exact output length, checked address sums and retained private storage fund disjoint output spans, each fully
+        // written before any read. All borrowed owners and the by-value descriptor batch live through stream completion
+        // (the owned queue defers dropped allocations; ordinary callers complete here).
+        let launched=unsafe {self.launch_flash(entry,batch.layer.ends[batch.layer.count as usize],crate::plain_admission::FOLD_THREADS as u32,&mut [parameter(&mut batch)])};
         let completed=self.resident_completion();launched.and(completed)
     }
     /// The arena of `load_weight_arena` from bytes the caller already read. The parts cover the arena from 0 to `bytes`

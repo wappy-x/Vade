@@ -1,5 +1,5 @@
 //! Host bits and independent ledger oracles. These tests do not establish device exactness.
-use engine_model::plan::{ConfigPlan,TextDescription,description::TokenMixer,layer::Topology};
+use engine_model::plan::{ConfigPlan,TextDescription,description::TokenMixer,layer::{Kind,LayerPlan,Topology}};
 use spark_gpu_probe::{causal_ops::{self,Op,Shape},prompt_ops::{self,Op as Row,Shape as RowShape}};
 use spark_tp::{admission_plan::SessionChargePlan,sparse_heads::{self,Layout}};
 
@@ -204,4 +204,36 @@ fn malformed_shapes_packets_and_unsupported_complete_unit_splits_are_refused() {
     assert!(sparse_heads::gather_attended(&[(left,&words),(layout(4,3,2,1,2),&words)],1).is_err());
     assert!(sparse_heads::gather_attended(&[(left,&words),(right,&words)],usize::MAX).is_err());
     assert_eq!(sparse_heads::gather_attended::<u32>(&[(left,&[]),(right,&[])],0).unwrap(),Vec::<u32>::new());
+}
+
+/// LOCAL QUERY: in every layer of the model's program, at one rank and at two, the one projection whose rows may stay on
+/// their rank is the latent layer's query (`q_b_proj`): a score step is its only reader, as its query. No other step
+/// passes: not the indexer's query (the pool scores read every head on every rank), not a projection that a norm, a
+/// pool, the route or the residual reads. A program whose query has a second reader, or that returns it, does not pass.
+#[test]
+fn only_the_query_projection_of_a_latent_layer_may_stay_on_its_rank() {
+    let description=description();let mut latent=0;
+    for parts in [1,2] {for layer in 0..description.layers.len() {
+        let plan=LayerPlan::new(&description,layer,8,Topology {rank:0,parts}).unwrap();
+        let local=(0..plan.steps.len()).filter(|&index|sparse_heads::query_stays_local(&plan,index)).collect::<Vec<_>>();
+        let TokenMixer::LatentAttention(spec)=description.layers[layer].mixer else {assert!(local.is_empty(),"layer {layer} has no latent query");continue;};
+        assert_eq!(local.len(),1,"layer {layer}");latent+=1;
+        let step=&plan.steps[local[0]];
+        assert!(step.weights[0].name.ends_with("self_attn.q_b_proj.weight"),"{}",step.weights[0].name);
+        assert_eq!(step.outputs[0].elements().unwrap() as u64,spec.heads*spec.key_dim);
+        // The extent a rank keeps is the extent `local_query` takes for it.
+        let owned=Layout::new(spec.heads,spec.key_dim,spec.value_dim,Topology {rank:0,parts}).unwrap();
+        assert_eq!(owned.query_rows().len() as u64*u64::from(parts),spec.heads*spec.key_dim);
+        // Wrong on purpose: a second reader, a reader that takes it in another place, a program that returns it.
+        let name=step.outputs[0].name.clone();
+        let scores=plan.steps.iter().position(|other|other.kind==Kind::Scores).unwrap();
+        let mut second=plan.clone();let at=second.steps.iter().position(|other|other.kind==Kind::Softmax).unwrap();second.steps[at].inputs.push(name.clone());
+        assert!(!sparse_heads::query_stays_local(&second,local[0]));
+        let mut moved=plan.clone();moved.steps[scores].inputs.swap(0,1);assert!(!sparse_heads::query_stays_local(&moved,local[0]));
+        let mut twice=plan.clone();twice.steps[scores].inputs.push(name.clone());assert!(!sparse_heads::query_stays_local(&twice,local[0]));
+        let mut returned=plan.clone();returned.returns.push(name.clone());assert!(!sparse_heads::query_stays_local(&returned,local[0]));
+        let mut unread=plan.clone();unread.steps[scores].inputs[0]="other".into();assert!(!sparse_heads::query_stays_local(&unread,local[0]));
+        assert!(!sparse_heads::query_stays_local(&plan,plan.steps.len()));
+    }}
+    assert_eq!(latent,22);
 }

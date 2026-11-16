@@ -123,8 +123,20 @@ and neutral penalties. The engine falls back to full scores if needed.
 ## Drafting
 
 By default, a sampled request does not draft. The engine decodes it one token
-at a time, and the reply's `vade.draft` is `plain`. Greedy requests still
-draft.
+at a time, and the reply's `vade.draft` is `plain`. The GLM text service
+(`vade up --sparks 2 --diagnostic-unqualified-text`) loads the predictor at
+depth 3 unless `--mtp` or `MTP` says otherwise; with no drafting layer in
+the model, or too little free memory for it, the service starts without
+drafting. On that service, a greedy
+request of more than 64 tokens that omits `draft` and `mtp_depth` gets a
+default trial when the loaded depth is 3 or more: it is tried with drafting and keeps
+it only when it is faster. The default trial does not run for a request with
+`mtp_depth` 0, 1 or 2 and no `draft` field, for a request of 64 tokens or
+fewer, for a sampled request, for several chats at once, or on a service
+started with `--mtp 1` or `--mtp 2`. Those requests decode plain. A request
+with `draft` set to `strict` asks for drafting at its own depth, up to the
+loaded depth; the trial's depth and length conditions do not apply to it.
+`--mtp 0` turns drafting off.
 
 The test switch `VADE_MTP_SAMPLED=1` keeps drafting on for sampled requests
 on one chat. The model then checks each drafted row with the same rule as an

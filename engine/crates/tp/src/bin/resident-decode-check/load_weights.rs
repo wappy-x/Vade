@@ -7,7 +7,22 @@ pub(super) fn check(root:&Path,rank:&str,parts:&str,out:&Path)->Result<()> {
     topology.validate().map_err(|error|error.to_string())?;
     fs::create_dir(out).map_err(|error|error.to_string())?;let checkpoint=open_checkpoint(root)?;
     with_backend(0,spark_gpu_probe::layer_ptx()?,usize::MAX,|backend| {
-        let load=Instant::now();let weights=spark_tp::resident_weights::Weights::load_for_proof(&checkpoint,backend,topology)?;
+        let load=Instant::now();let mut weights=spark_tp::resident_weights::Weights::load_for_proof(&checkpoint,backend,topology)?;
+        eprintln!("LOADER MEMORY stage=base rank={rank} allocated_bytes={} pinned_staging_bytes={} peak_pinned_staging_bytes={}",backend.allocated_bytes(),backend.pinned_staging_bytes(),backend.peak_pinned_staging_bytes());
+        // Include appended predictor matrices. They use prepare_names, which also streams slabs.
+        // Match enable_predictor's matrix list; CPU parameters are not resident device weights.
+        if let Some(description)=checkpoint.description().with_draft_layer().map_err(|e|e.to_string())? {
+            use engine_model::plan::layer::{LayerPlan,Kind};
+            let layer=checkpoint.description().layers.len();
+            let plan=LayerPlan::new(&description,layer,1,engine_model::plan::layer::Topology {rank:0,parts:1}).map_err(|e|e.to_string())?;
+            let mut names=Vec::new();
+            for step in plan.steps {if matches!(step.kind,Kind::Project|Kind::ExpertProject|Kind::ExpertDown|Kind::ExpandKv) {
+                names.extend(step.weights.into_iter().map(|weight|weight.name));
+            }}
+            names.push(format!("model.language_model.layers.{layer}.eh_proj.weight"));
+            weights.prepare_names(&checkpoint,backend,&names)?;
+        }
+        eprintln!("LOADER MEMORY stage=predictor rank={rank} allocated_bytes={} pinned_staging_bytes={} peak_pinned_staging_bytes={}",backend.allocated_bytes(),backend.pinned_staging_bytes(),backend.peak_pinned_staging_bytes());
         let load_seconds=load.elapsed().as_secs_f64();let hashing=Instant::now();
         let workers=std::thread::available_parallelism().map_or(1,|count|count.get().min(4));
         type Job=(String,String,usize,usize,Vec<u8>);

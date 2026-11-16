@@ -130,6 +130,8 @@ fn run() -> Result<()> {
         if shared { environment.push_str("export TP_RDMA=0 SEQPAR_RDMA=0; "); }
         environment.push_str("unset TP_AUX_LISTEN TP_AUX_NEXT; ");
         if dual { environment.push_str(&format!("export TP_AUX_LISTEN={} TP_AUX_NEXT={}; ", quote(&aux_listen[rank]), quote(&aux_next[rank]))); }
+        // This launcher chose the rails. `off` keeps a pair of ranks from finding a second rail by itself.
+        else { environment.push_str("export TP_AUX_LISTEN=off TP_AUX_NEXT=off; "); }
         // SSH encrypts stdin; keep the secret out of process arguments and logs.
         let authenticate = if secret.is_some() { "IFS= read -r SEQPAR_CONTROL_SECRET || exit 1; export SEQPAR_CONTROL_SECRET; " } else { "" };
         let command = format!("{authenticate}{environment}export TP_TOPOLOGY={topology} TP_WATCH_STDIN=1 TP_RUN_ID={run_id}; cd {directory} && exec target/release/{} {rank} {world} {} {} {tail}", args[0], quote(&listen[rank]), quote(&next[rank]));

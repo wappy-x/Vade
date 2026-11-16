@@ -45,12 +45,12 @@ fn first_arithmetic(calls:&[Call])->Option<Kind> {calls.iter().map(|call|call.gr
 /// The ramp's count. `append_resident_bytes` counts a command as it is recorded and `flush_resident_launches` counts the
 /// recorded calls again to cut the parts. Both must give the same number for the same calls, or the part that recording
 /// asks for is never a part that a flush captured. A fused causal chain is one command: its three members count as one
-/// from the moment they fuse.
+/// from the moment they fuse. A grouped launch is one command the same way: the member it absorbs is not counted again.
 fn arithmetic(kind:Kind)->bool {
     matches!(kind,Kind::AbsorbDense|Kind::AbsorbAttention
-        |Kind::Causal|Kind::Expert|Kind::Plain|Kind::PlainBf16|Kind::Mx|Kind::Mixed|Kind::MixedBf16|Kind::PlainBatch|Kind::NvStream|Kind::CausalFast|Kind::CausalChain
-        |Kind::NvTile|Kind::DeviceRoute|Kind::NvQuarters|Kind::MxRows2|Kind::MxRows4|Kind::MxRows8|Kind::MxRows8w
-        |Kind::MixedRows|Kind::Fp8RowsSmall|Kind::Fp8RowsMulti|Kind::Fp8RowsFew|Kind::PlainRowsSmall|Kind::DeviceRouteRows)
+        |Kind::Causal|Kind::Expert|Kind::Plain|Kind::PlainBf16|Kind::Mx|Kind::Mixed|Kind::MixedBf16|Kind::PlainBatch|Kind::NvStream|Kind::CausalFast|Kind::CausalChain|Kind::CausalGroup
+        |Kind::NvTile|Kind::DeviceRoute|Kind::NvQuarters|Kind::MxRows2|Kind::MxRows4|Kind::MxRows8|Kind::MxRows8w|Kind::MxRowsTile
+        |Kind::MixedRows|Kind::FoldRows|Kind::FoldRowsF32|Kind::Fp8RowsSmall|Kind::Fp8RowsMulti|Kind::Fp8RowsFew|Kind::Fp8RowsShare|Kind::PlainRowsSmall|Kind::DeviceRouteRows)
 }
 fn zero_grid(zeros:&[(usize,u64,u32,bool)])->Option<Grid> {
     let longest=zeros.iter().map(|z|z.2).max()?;Some(Grid {kind:Kind::Copy,blocks:longest.div_ceil(128),rows:zeros.len() as u32,planes:1,threads:128,shared:0,lane:MAIN})
@@ -84,7 +84,7 @@ pub(super) struct Recorder<'a> {enabled:bool,paused:bool,rows:bool,row_pass:bool
     lane_side:bool,lane_open:bool,lane_join:bool,lane_fork:Option<(Stream<'a>,Event<'a>,Event<'a>)>,
     // `drained_at`: the piece clock at the last real stream wait. A piece used at or before it has no replay in flight.
     // `updates` (print only): pieces whose retained executable took new launch grids in place, with no capture of a new one.
-    drained_at:u64,updates:u64}
+    drained_at:u64,updates:u64,causal_group_seen:bool}
 impl Recorder<'_> {
     /// The ramp starts again (`Backend::feed_resident_launches`: the caller says the device is fed; no stream wait proves it).
     fn fed(&mut self) {self.fed=0;self.tail=false;}
@@ -206,15 +206,60 @@ impl<'a> Backend<'a> {
         }
         r.calls.push(Call {grid:Grid {kind,blocks:grid[0],rows:grid[1],planes:grid[2],threads:grid[3],shared:grid[4],lane},command,copy_bytes});
         }
-        if arithmetic(kind) {r.heavy+=1;
-            // Submit this part now only when its executable exists: a capture
-            // must first drain the stream, and that would stop the device.
-            // Never while a side call waits for its join: the flush keeps them in one part.
-            let limit=if leaves_alone(r.fed,r.tail,first_arithmetic(&r.calls)) {1} else {part_limit(r.fed,r.tail)};
-            if r.heavy==limit && !r.lane_open {let key=zero_grid(&r.zeros).into_iter().chain(r.calls.iter().map(|c|c.grid)).collect::<Vec<_>>();
-                if r.pieces.contains_key(&key) {r.ramp[0]+=1;r.early=true;drop(r);return self.flush_resident_launches();}
-                r.ramp[1]+=1;r.missed=true;}
-        }Ok(())
+        if !arithmetic(kind) {return Ok(());}
+        r.heavy+=1;drop(r);
+        // Chain fusion has already run. Grouping is the next step, and only with the call just before this one.
+        let grouped=self.group_last_causal()?;
+        self.finish_recorded_part(grouped)
+    }
+    /// Two to eight same-shape recurrent calls become one `CausalGroup`. The decision is `resident_causal_group::plan`
+    /// (host tests cover independence, positions, join and leave, and a swapped table). A join stays the group's lane.
+    fn group_last_causal(&self)->Result<bool,String> {
+        let plan=crate::resident_causal_group::after_stage(|| {
+            let r=self.recorder.borrow();let n=r.calls.len();if n<2 {return None;}
+            let previous=&r.calls[n-2];let incoming=&r.calls[n-1];
+            crate::resident_causal_group::plan(
+                crate::resident_causal_group::Launch {command:&previous.command,blocks:previous.grid.blocks,rows:previous.grid.rows,planes:previous.grid.planes,threads:previous.grid.threads,shared:previous.grid.shared,lane:previous.grid.lane},
+                crate::resident_causal_group::Launch {command:&incoming.command,blocks:incoming.grid.blocks,rows:incoming.grid.rows,planes:incoming.grid.planes,threads:incoming.grid.threads,shared:incoming.grid.shared,lane:incoming.grid.lane},
+                &r.staged)
+        },|| {
+            // Allocation can flush these calls and install a stage during that flush.
+            // Keep that stage: captured graphs can already hold its address.
+            if self.recorder.borrow().stage.is_none() {
+                let stage=self.vector((COMMAND_BYTES+STAGE_BYTES)/4)?;
+                crate::resident_causal_group::install_stage(&mut self.recorder.borrow_mut().stage,stage);
+                return Ok(true);
+            }
+            Ok(false)
+        })?;
+        let Some(plan)=plan else {return Ok(false);};
+        let mut r=self.recorder.borrow_mut();
+        let address=r.stage.as_ref().ok_or("resident stage area is absent")?.device_address()+STAGE_BASE as u64+u64::from(plan.offset);
+        r.staged.extend_from_slice(&plan.append);
+        let mut command=Command::new(Kind::CausalGroup);command.word(0,address);command.put(8,&plan.n.to_ne_bytes());command.put(12,&plan.member_kind.to_ne_bytes());command.put(16,&plan.offset.to_ne_bytes());command.put(20,&plan.blocks.to_ne_bytes());
+        let grid=Grid {kind:Kind::CausalGroup,blocks:plan.blocks,rows:plan.n,planes:1,threads:plan.threads,shared:plan.shared,lane:plan.lane};
+        if plan.replace==1 {
+            // The previous call is already the group. Drop only the member just pushed and keep the group's place.
+            r.calls.pop();let at=r.calls.len()-1;
+            for zero in &mut r.zeros {if zero.0>at {zero.0=at;}}
+            let previous=r.calls.last_mut().unwrap();previous.command=command;previous.grid=grid;previous.copy_bytes=0;
+        } else {
+            let keep=r.calls.len()-plan.replace as usize;r.calls.truncate(keep);
+            for zero in &mut r.zeros {if zero.0>keep {zero.0=zero.0.saturating_sub(plan.replace as usize-1).max(keep);}}
+            r.calls.push(Call {grid,command,copy_bytes:0});
+        }
+        Ok(true)
+    }
+    fn finish_recorded_part(&self,grouped:bool)->Result<(),String> {
+        let mut r=self.recorder.borrow_mut();if grouped {r.heavy=r.heavy.saturating_sub(1);}
+        // Submit this part now only when its executable exists: a capture
+        // must first drain the stream, and that would stop the device.
+        // Never while a side call waits for its join: the flush keeps them in one part.
+        let limit=if leaves_alone(r.fed,r.tail,first_arithmetic(&r.calls)) {1} else {part_limit(r.fed,r.tail)};
+        if r.heavy==limit && !r.lane_open {let key=zero_grid(&r.zeros).into_iter().chain(r.calls.iter().map(|c|c.grid)).collect::<Vec<_>>();
+            if r.pieces.contains_key(&key) {r.ramp[0]+=1;r.early=true;drop(r);return self.flush_resident_launches();}
+            r.ramp[1]+=1;r.missed=true;}
+        Ok(())
     }
     /// A new allocation is fresh until the next recorded command. No pending
     /// command names it: an owned queue keeps every freed allocation out of the
@@ -306,11 +351,13 @@ impl<'a> Backend<'a> {
         // borrowed host pointer enters the retained command. Queue-owned GPU
         // operands survive all deferred submission and completion boundaries.
         let command=unsafe {match name {
-            _ if row.is_some()=>{let kind=row.unwrap();let command=match kind {
-                Kind::MxRows2|Kind::MxRows4|Kind::MxRows8|Kind::MxRows8w=>encode::mx_rows(args[0].cast::<crate::next_params::MxProjection>().read_unaligned(),kind),
-                Kind::MixedRows=>encode::mixed(args[0].cast::<crate::next_params::ResidentProjectionBatch>().read_unaligned(),kind),
+            // The MXFP8 tile is recorded only for the row groups of a decode step (at most 8 tokens, `small_choice::mx`); a prompt's tile launches
+            // stay direct, as before.
+            _ if row.is_some_and(|kind|kind!=Kind::MxRowsTile || args[0].cast::<crate::next_params::MxProjection>().read_unaligned().tokens<=8)=>{let kind=row.unwrap();let command=match kind {
+                Kind::MxRows2|Kind::MxRows4|Kind::MxRows8|Kind::MxRows8w|Kind::MxRowsTile=>encode::mx_rows(args[0].cast::<crate::next_params::MxProjection>().read_unaligned(),kind),
+                Kind::MixedRows|Kind::FoldRows|Kind::FoldRowsF32=>encode::mixed(args[0].cast::<crate::next_params::ResidentProjectionBatch>().read_unaligned(),kind),
                 Kind::DeviceRouteRows=>encode::route_rows(args[0].cast::<crate::device_route::BuildRows>().read_unaligned()),
-                Kind::Fp8RowsSmall|Kind::Fp8RowsMulti|Kind::Fp8RowsFew=>encode::group_rows(args[0].cast::<crate::expert_ops::GroupArguments>().read_unaligned(),kind),
+                Kind::Fp8RowsSmall|Kind::Fp8RowsMulti|Kind::Fp8RowsFew|Kind::Fp8RowsShare=>encode::group_rows(args[0].cast::<crate::expert_ops::GroupArguments>().read_unaligned(),kind),
                 _=>encode::prompt_rows(args[0].cast::<crate::prompt_ops::Arguments>().read_unaligned(),kind),
             };Some((kind,command))},
             "latent_absorption"|"latent_absorption_scores"|"latent_absorption_values"=>{
@@ -372,7 +419,9 @@ impl<'a> Backend<'a> {
             let rows=table.as_chunks::<24>().0.iter().map(|row|(u64::from_ne_bytes(row[0..8].try_into().unwrap()),u64::from_ne_bytes(row[8..16].try_into().unwrap()),u32::from_ne_bytes(row[16..20].try_into().unwrap()))).collect::<Vec<_>>();
             if self.fuse_fresh_fills(&rows)? {return Ok(true);}
         }
-        if self.recorder.borrow().stage.is_none() {let stage=self.vector((COMMAND_BYTES+STAGE_BYTES)/4)?;self.recorder.borrow_mut().stage=Some(stage);}
+        // Allocation can flush the recorded calls and install a stage during that flush.
+        // Keep that stage: captured graphs can already hold its address.
+        if self.recorder.borrow().stage.is_none() {let stage=self.vector((COMMAND_BYTES+STAGE_BYTES)/4)?;crate::resident_causal_group::install_stage(&mut self.recorder.borrow_mut().stage,stage);}
         let (nodes,full)={let r=self.recorder.borrow();(r.calls.len()>=crate::GraphAllowance::FLASH_MAX_NODES-1,stage_full(r.staged.len(),bytes))};
         if nodes || full {
             if full {self.recorder.borrow_mut().copies.stage_full_flushes+=1;}
@@ -600,6 +649,9 @@ impl<'a> Backend<'a> {
                 }
             });
             if result.is_ok() {let mut r=self.recorder.borrow_mut();
+                if let Some(call)=calls.iter().find(|call|!r.causal_group_seen && call.grid.kind==Kind::CausalGroup) {
+                    eprintln!("RESIDENT CAUSAL GROUP submitted=1 members={}",call.grid.rows);r.causal_group_seen=true;
+                }
                 for call in first.iter().chain(calls) {let index=match call.grid.kind {Kind::Copy=>0,Kind::CopyWords=>1,Kind::ZeroWords=>2,_=>continue};
                     r.copies.launches[index]+=1;r.copies.bytes[index]+=call.copy_bytes;}
                 if let Some(call)=first {r.copies.merged_zero_launches+=1;r.copies.merged_zero_bytes+=call.copy_bytes;}

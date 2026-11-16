@@ -759,7 +759,8 @@ fn unqualified_text_never_binds_a_remote_http_listener() {
     for value in ["0.0.0.0:18080","[::]:18080","192.0.2.1:18080"] {assert!(diagnostic_text_bind(value.parse().unwrap()).is_err());}
 }
 /// What the text service takes after REQUESTS. Its refusals print this list.
-pub const TEXT_OPTIONS:&str="the text service takes --diagnostic-unqualified-text, --mtp 0..3, --api-key-file PATH, --diagnostic-serving-trace and one of --prompt-keep (the default) or --no-prompt-keep, each one time";
+/// The largest `--mtp` is `spark_engine::draft::PREDICTOR_DEPTH_MAX`; a test holds this text and that number together.
+pub const TEXT_OPTIONS:&str="the text service takes --diagnostic-unqualified-text, --mtp 0..7, --api-key-file PATH, --diagnostic-serving-trace and one of --prompt-keep (the default) or --no-prompt-keep, each one time";
 /// Extract the diagnostic served API gate before normal option validation. Option values stay opaque.
 pub fn boundary_gate_options(args:&[String])->Result<(Option<std::path::PathBuf>,Vec<String>),String> {
     let mut gate=None;let mut kept=Vec::new();let mut args=args.iter();
@@ -792,7 +793,8 @@ pub fn text_options(args:&[String])->Result<(Option<std::path::PathBuf>,Option<u
         // are one choice: a second one of either is refused. Every rank gets the same choice.
         "--prompt-keep" if keep.is_none()=>keep=Some(true),
         "--no-prompt-keep" if keep.is_none()=>keep=Some(false),
-        "--mtp" if mtp.is_none()=>{let value=options.next().ok_or("--mtp needs a depth")?;mtp=Some(value.parse::<usize>().ok().filter(|depth|*depth<=3).ok_or("text service --mtp takes a depth of 0 to 3")?);},
+        "--mtp" if mtp.is_none()=>{let value=options.next().ok_or("--mtp needs a depth")?;let largest=spark_engine::draft::PREDICTOR_DEPTH_MAX;
+            mtp=Some(value.parse::<usize>().ok().filter(|depth|*depth<=largest).ok_or_else(||format!("text service --mtp takes a depth of 0 to {largest}"))?);},
         _=>return Err(format!("unsupported text service option: {option}; {TEXT_OPTIONS}")),
     }}
     Ok((key,mtp,trace,keep.unwrap_or(true)))
@@ -928,9 +930,11 @@ fn text_options_take_the_four_names_and_refuse_the_rest_with_the_list() {
         let error=text_options(&values(refused)).unwrap_err();
         assert!(error.starts_with(&format!("unsupported text service option: {}; ",refused[0])) && error.ends_with(TEXT_OPTIONS),"{error}");
     }
-    for name in ["--diagnostic-unqualified-text","--mtp 0..3","--api-key-file PATH","--diagnostic-serving-trace"] {assert!(TEXT_OPTIONS.contains(name),"{name}");}
-    // A depth outside 0 to 3, or an option without its value, keeps its own refusal.
-    for depth in ["4","-1","x"] {assert_eq!(text_options(&values(&["--mtp",depth])).unwrap_err(),"text service --mtp takes a depth of 0 to 3");}
+    let largest=spark_engine::draft::PREDICTOR_DEPTH_MAX;assert_eq!(largest,7);
+    for name in ["--diagnostic-unqualified-text",&format!("--mtp 0..{largest}"),"--api-key-file PATH","--diagnostic-serving-trace"] {assert!(TEXT_OPTIONS.contains(name),"{name}");}
+    // Every depth up to the largest is taken. A depth outside 0 to 7, or an option without its value, keeps its own refusal.
+    for depth in 0..=largest {assert_eq!(text_options(&values(&["--mtp",&depth.to_string()])).unwrap().1,Some(depth));}
+    for depth in [(largest+1).to_string(),"-1".to_owned(),"x".to_owned()] {assert_eq!(text_options(&values(&["--mtp",&depth])).unwrap_err(),"text service --mtp takes a depth of 0 to 7");}
     assert_eq!(text_options(&values(&["--mtp"])).unwrap_err(),"--mtp needs a depth");
     assert_eq!(text_options(&values(&["--api-key-file"])).unwrap_err(),"--api-key-file needs a path");
 }
@@ -962,8 +966,8 @@ pub fn text_drafting_words(default_depth:usize,predictor:usize)->String {
 #[test]
 fn the_text_start_line_names_the_default_draft_and_the_loaded_predictor_depth() {
     use spark_tp::row_split::TRIAL_DEPTH;
-    for predictor in 0..=3 {
-        // The default depth as the text service sets it from the loaded predictor depth.
+    for predictor in 0..=spark_engine::draft::PREDICTOR_DEPTH_MAX {
+        // The default depth as the text service sets it from the loaded predictor depth: TRIAL_DEPTH, also for a deeper predictor.
         let default_depth=if predictor>=TRIAL_DEPTH {TRIAL_DEPTH} else {0};
         let words=if predictor>=TRIAL_DEPTH {format!("default_draft=trial default_depth={TRIAL_DEPTH} predictor_depth={predictor}")} else {format!("default_draft=plain predictor_depth={predictor}")};
         assert_eq!(text_drafting_words(default_depth,predictor),words);

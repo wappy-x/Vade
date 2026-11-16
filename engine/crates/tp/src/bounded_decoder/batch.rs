@@ -48,13 +48,12 @@ pub(super) fn note_expert_union(layer:usize,picks:usize,distinct:usize) {
 }
 /// For each layer: (picks, different experts) of every row pass so far.
 pub fn expert_union_counts()->Vec<[u64;2]> {EXPERT_PICKS.iter().map(|counts|[counts[0].load(Ordering::Relaxed),counts[1].load(Ordering::Relaxed)]).collect()}
-/// ROUTED CHATS: most chats of a batch step whose routed experts run once a chat (`Decoder::routed_span`). Measured on
-/// the real model (two Sparks, 2026-11-12). Check tool, ms a step, grouped row forms against once a chat: 2 chats 84.25
-/// against 77.52, 3 chats 105.22 against 100.77, 4 chats 123.77 against 126.10, 8 chats 190.69 against 220.45. In the
-/// server the grouped forms' waits cost less than in the tool: 3 chats 95.24 against 99.57 ms a step, so only a batch
-/// of 2 takes this path (77.94 ms a step). Once a chat pays an exchange and a weight read for each chat. Bits do not
-/// depend on this number.
-pub const ROUTED_CHATS:usize=2;
+/// Most rows whose routed span runs as a plain step. Two or more chats use the existing grouped
+/// row path, so copies can share expert reads. Each output retains its own ordered arithmetic.
+/// The prior two-chat path repeated the full routed span: matched main trace pair-main-trace-01
+/// measured 18.241 ms in NVFP4 kernels against 9.460 ms for one chat. The served comparison is
+/// recorded in `engine/docs/pair-row-study.md`.
+pub const ROUTED_CHATS:usize=1;
 /// Steps that read one chat's history. Every other step of a layer depends on its row alone.
 fn reads_history(kind:Kind)->bool {
     matches!(kind,Kind::Conv|Kind::KdaStep|Kind::CacheAppend|Kind::Pool|Kind::ScorePools|Kind::Select|Kind::Gather|Kind::ExpandKv|Kind::Scores|Kind::Softmax|Kind::Values)
@@ -159,7 +158,7 @@ impl<'f,C:Compute> Decoder<'f,C> {
             }
             let end=routed.unwrap_or_else(||index+plan.steps[index..].iter().take_while(|step|reads_history(step.kind)).count());
             skip=end-index-1;
-            // CHAT ROWS takes a history span of five or more chats; a routed span (two chats) runs once a chat.
+            // CHAT ROWS takes a history span of five or more chats; a single-row routed span runs as a plain step.
             if routed.is_none() && self.chat_rows(layer,index..end,&plan,contexts,states,held,&mut values,&mut chats,table)? {continue;}
             for (chat,own) in chats.iter_mut().enumerate() {
                 self.chat_inputs((chat,n),&plan.steps[index..end],&values,own)?;

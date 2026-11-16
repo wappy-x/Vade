@@ -319,6 +319,58 @@ pub(crate) fn resident_flash_resident_projection_plain_bf16(batch:crate::next_pa
         }
     }
 }
+/// FOLD ROWS: the plain fold batch for 2 to 8 source rows (several chats in a step, a drafting check). The descriptors are plain
+/// matrices in the fold envelope (`plain_admission::fold_rows_admitted`), each with `tokens` = N source rows: input
+/// `[token][cols]` FP32, output `[token][rows]`. A block owns FOLD_ROWS weight rows of one descriptor and ALL its source rows: a
+/// weight vector is read once and multiplied into one product vector a source row (`plain_warp::rows_fold_rows`). Every output
+/// word is the one-row fold's word for that source row alone: the same products in the same ascending chain from 0.0, then the
+/// same BF16 round when the batch asks for it. BF16 = true reads BF16 weight patterns (`flash_resident_projection_fold_rows`),
+/// false FP32 weights (`flash_resident_projection_fold_rows_f32`). POISON (bench only) fills the block's shared memory with NaN
+/// first, so a read of a slot word that no producer wrote turns the output into NaN.
+/// Grid: `ends[count]` blocks of FOLD_THREADS threads, `rows.div_ceil(FOLD_ROWS)` blocks a descriptor.
+#[inline(always)]
+pub(crate) fn resident_projection_fold_rows<const BF16:bool,const POISON:bool>(batch:crate::next_params::ResidentProjectionBatch) {
+    // SAFETY: The host admits only complete aligned plain matrices in the fold-rows envelope (`push_fold_rows`,
+    // `Backend::resident_projection_fold_rows`): FP32 weights or BF16 patterns as the entry says, `tokens` in 2..=8 on every
+    // descriptor, `tokens * cols` initialized FP32 input words and `tokens * rows` private output words a descriptor, outputs
+    // aliasing no operand and no other output, owners retained through stream completion. Every block has FOLD_THREADS threads
+    // (the body traps otherwise) and owns FOLD_ROWS weight rows of one checked descriptor (`batch_block` is a bijection on the
+    // grid; all descriptors are plain). All threads enter the fold's barriers: the token count and the first row are the same on
+    // every thread of a block. The block's shared area covers its two product slots for every layout. Only a live folding lane
+    // writes, once, the one output word of its own (source row, weight row), after its own unchanged ascending add chain.
+    unsafe {
+        let layer=batch.layer;let block=_block_idx_x() as u32;
+        let (job,rest)=crate::plain_admission::batch_block(layer.ends,batch.plain,layer.count as usize,block);
+        let mut p=layer.projections[0];nine!(I,{if job==I {p=layer.projections[I];}});
+        let (rows,cols,tokens)=(p.rows as usize,p.cols as usize,p.tokens as usize);
+        if core::arch::nvptx::_block_dim_x() as usize!=crate::plain_admission::FOLD_THREADS || batch.plain&(1<<job)==0
+            || !crate::plain_admission::fold_rows_admitted(rows,cols,p.weights as usize,p.input as usize,tokens) {core::arch::nvptx::trap();}
+        let first=rest as usize*crate::plain_admission::FOLD_ROWS;let thread=_thread_idx_x() as usize;
+        let smem=crate::ptx::shared::<{crate::plain_admission::FOLD_ROWS_BYTES}>();
+        if POISON {
+            let mut at=thread;while at<crate::plain_admission::FOLD_ROWS_BYTES/4 {asm!("st.shared.u32 [{a}], {v};",a=in(reg32)(smem+(at*4) as u32),v=in(reg32)0x7fc0_0000u32);at+=crate::plain_admission::FOLD_THREADS;}
+            asm!("bar.sync 0;");
+        }
+        let sum=match crate::plain_admission::fold_rows_layout(tokens) {
+            2=>crate::plain_warp::rows_fold_rows::<BF16,2>(p.weights as _,p.input as _,cols,first,rows,tokens,smem),
+            4=>crate::plain_warp::rows_fold_rows::<BF16,4>(p.weights as _,p.input as _,cols,first,rows,tokens,smem),
+            _=>crate::plain_warp::rows_fold_rows::<BF16,8>(p.weights as _,p.input as _,cols,first,rows,tokens,smem),
+        };
+        let (token,row)=(thread/crate::plain_admission::FOLD_ROWS,first+thread%crate::plain_admission::FOLD_ROWS);
+        if thread<32 && token<tokens && row<rows {
+            *(p.output as *mut f32).add(token*rows+row)=if batch.round!=0 {rb(sum)} else {sum};
+        }
+    }
+}
+#[no_mangle]
+pub extern "ptx-kernel" fn flash_resident_projection_fold_rows(batch:crate::next_params::ResidentProjectionBatch) {resident_projection_fold_rows::<true,false>(batch)}
+#[no_mangle]
+pub extern "ptx-kernel" fn flash_resident_projection_fold_rows_f32(batch:crate::next_params::ResidentProjectionBatch) {resident_projection_fold_rows::<false,false>(batch)}
+/// Device check only (kernel-bench --fold-rows): the same bodies from NaN-filled shared memory.
+#[no_mangle]
+pub extern "ptx-kernel" fn flash_resident_projection_fold_rows_poisoned(batch:crate::next_params::ResidentProjectionBatch) {resident_projection_fold_rows::<true,true>(batch)}
+#[no_mangle]
+pub extern "ptx-kernel" fn flash_resident_projection_fold_rows_f32_poisoned(batch:crate::next_params::ResidentProjectionBatch) {resident_projection_fold_rows::<false,true>(batch)}
 /// M2..16 rounded GDN or M2..8 general projections: packed pair conversion.
 /// # Safety
 /// Same buffers/grid contract as flash_next_mxfp8_m1; M is 2..16.

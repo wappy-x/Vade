@@ -24,7 +24,8 @@ pub fn transpose_sweep() -> Vec<(u32, u32)> {
 pub fn writes_every_word(is_transpose: bool, rows: u32, cols: u32, kernel: Option<&str>) -> bool {
     // `pool_scores_tile` stores every word: a score, or zero for a pool that is not complete (kernel-bench --pool-scores, poisoned outputs).
     // `step_rows_tile` stores every word: each token's output and the state (kernel-bench --step-tile, poisoned outputs).
-    match kernel { Some("plain_rows_small") | Some("pool_scores_tile") | Some("step_rows_tile") => true, Some(_) => false, None => is_transpose && transpose_fill_free(rows, cols) }
+    // `prompt_pool_scores` stores every word from lane 0 of its warp: a score, or zero (kernel-bench --pool-scores, poisoned outputs).
+    match kernel { Some("plain_rows_small") | Some("pool_scores_tile") | Some("prompt_pool_scores") | Some("step_rows_tile") => true, Some(_) => false, None => is_transpose && transpose_fill_free(rows, cols) }
 }
 #[cfg(test)]
 mod tests {

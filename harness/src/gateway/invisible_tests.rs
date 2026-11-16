@@ -553,6 +553,11 @@ fn a_head_the_gateway_cannot_forward_gets_a_400_not_a_close_or_a_502() {
     std::fs::remove_file(stats).unwrap();
 }
 
+/// The slow-bytes tests: three bytes, one a step, against one total deadline. The last byte
+/// leaves at two steps, 600 ms before the deadline.
+const SLOW_BYTES_DEADLINE: Duration = Duration::from_millis(900);
+const SLOW_BYTE_STEP: Duration = Duration::from_millis(150);
+
 #[test]
 fn slow_request_bytes_hit_the_standalone_total_receive_deadline() {
     let upstream = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
@@ -564,13 +569,16 @@ fn slow_request_bytes_hit_the_standalone_total_receive_deadline() {
         let socket = listener.accept().unwrap().0;
         let mut metrics = Metrics::new(false);
         let mut recording = None;
-        let _ = forward_with_timeout(socket, &runtime, &Access::default(), &mut metrics, (None, &mut recording), Duration::from_millis(120));
+        let _ = forward_with_timeout(socket, &runtime, &Access::default(), &mut metrics, (None, &mut recording), SLOW_BYTES_DEADLINE);
     });
     let mut client = TcpStream::connect(address).unwrap();
-    client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    // Every byte is sent well before the deadline. A byte that arrives after the server gave up
+    // makes it reset the connection, and the client then loses the 408 (seen on a hosted Mac
+    // with 50 ms steps against a 120 ms deadline).
     for byte in b"GET" {
         let _ = client.write_all(&[*byte]);
-        thread::sleep(Duration::from_millis(50));
+        thread::sleep(SLOW_BYTE_STEP);
     }
     let mut reply = String::new();
     client.read_to_string(&mut reply).unwrap();

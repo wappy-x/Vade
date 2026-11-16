@@ -105,6 +105,239 @@ fn mlaunch_multi(g: &Gpu, f: H, fx: &Multi, out: u64) -> Result<()> {
     let mut a = margs(fx, out);
     g.launch(f, [(fx.rows.div_ceil(32) * fx.counts.len()) as u32, 1, 1], 128, 0, &mut [a.as_mut_ptr().cast()])
 }
+static SHARE_PAD: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// `fp8_rows_share`: `32 * ceil(m / 2) + 128` threads, `ceil(rows/16)` blocks for each part, static shared memory. Every part has the same count `m`.
+fn mlaunch_share(g: &Gpu, f: H, fx: &Multi, out: u64) -> Result<()> {
+    let mut a = margs(fx, out); let m = fx.counts[0];
+    // Dynamic shared bytes: 3 raw weight stages, 3 scale stages, two product buffers, 3 activation stages (2 from 5 tokens) of 2 * ceil(m / 2) rows
+    // of 132 words. `SHARE_PAD`: more bytes than the kernel needs (mode `sharepad`: how many blocks an SM holds decides the launch time).
+    let shared = 3 * 16 * 128 + 3 * 128 * 4 + 2 * 16 * 132 * 4 + (if m > 4 { 2 } else { 3 }) * 2 * m.div_ceil(2) * 132 * 4 + SHARE_PAD.load(std::sync::atomic::Ordering::Relaxed);
+    g.launch(f, [(fx.rows.div_ceil(16) * fx.counts.len()) as u32, 1, 1], (32 * m.div_ceil(2) + 128) as u32, shared as u32, &mut [a.as_mut_ptr().cast()])
+}
+/// One launch table: a part for each weight set of `pool`, `m` tokens each, on the token rows `x` given by the caller.
+/// `same_rows`: every part reads rows 0..m; otherwise part `e` reads rows `e*m..e*m+m`.
+#[allow(clippy::too_many_arguments)]
+fn table_of(g: &mut Gpu, rows: usize, cols: usize, br: usize, bc: usize, pool: &[(u64, u64)], m: usize, same_rows: bool, x: &[Vec<f32>]) -> Result<Multi> {
+    let mut table = vec![]; let (mut first, mut first_row) = (0usize, 0usize);
+    for &(w, s) in pool {
+        let mut en = entry(Geometry { rows, cols, br, bc, tokens: m }, w, s);
+        en[56..60].copy_from_slice(&(first as u32).to_le_bytes()); en[60..64].copy_from_slice(&(first_row as u32).to_le_bytes()); table.extend(en);
+        first += rows * m; if !same_rows { first_row += m; }
+    }
+    let flat: Vec<f32> = x.iter().flatten().copied().collect();
+    let xb = Buf::new(g, &le(&flat))?; let tb = Buf::new(g, &table)?; let l = Buf::new(g, &le(&lut()))?;
+    Ok(Multi { rows, cols, counts: vec![m; pool.len()], table: tb.address, input: xb.address, lutp: l.address, units: first })
+}
+/// The six rank-local block-FP8 matrices of the model: label, rows, cols, matrices of one launch (gate and up read the same rows), launches a decode step.
+const SHARE_SHAPES: [(&str, usize, usize, usize, f64); 6] = [("gate_up", 1024, 4096, 2, 42.0), ("down", 2048, 2048, 1, 42.0), ("o_proj", 2048, 16384, 1, 11.0),
+    ("q_b", 8192, 1536, 1, 11.0), ("q_a", 768, 4096, 1, 11.0), ("kv_a", 256, 4096, 1, 11.0)];
+/// `share`: the byte proof of `fp8_rows_share` (2 to 8 tokens a part, every part the same count).
+/// 1. Every launch against `expert_group` on the same table, from poisoned outputs between guards: every weight code, every listed shape and block
+///    shape of `small_sweep`, the model's shapes with five activation classes; one part, 2 to 4 parts on the same rows, parts on their own rows.
+/// 2. A row alone (the one-row tile `fp8_rows_small`, one token) equals that row in the group, for every slot; the same rows in reverse order give
+///    each row the bytes it had in its other slot; a matrix alone equals the matrix beside another in one launch.
+/// 3. Wrong on purpose: a row alone compared with ANOTHER slot must differ; the reversed launch compared slot by slot must differ; a changed row must change.
+/// 4. A changed neighbor leaves every other row's bytes as they were.
+/// One recorded launch as a decode step makes it: a resident launch wrapper (`resident_launch_<entry>`) reads its arguments from a command
+/// (kind word, 12 reserved bytes, the argument struct at offset 16; 1,040 bytes) and runs the entry's body.
+pub(super) fn launch_wrapped(g: &mut Gpu, wrapper: H, kind: u32, arguments: &[u8], grid: [u32; 3], threads: u32, shared: u32) -> Result<()> {
+    let table = command_of(g, kind, arguments)?; launch_command(g, wrapper, table, grid, threads, shared)
+}
+/// The uploaded command of a recorded launch (made before a graph capture) and its launch.
+pub(super) fn command_of(g: &mut Gpu, kind: u32, arguments: &[u8]) -> Result<u64> {
+    let mut command = vec![0u8; 1040]; command[..4].copy_from_slice(&kind.to_le_bytes()); command[16..16 + arguments.len()].copy_from_slice(arguments);
+    g.upload(&command)
+}
+pub(super) fn launch_command(g: &Gpu, wrapper: H, table: u64, grid: [u32; 3], threads: u32, shared: u32) -> Result<()> {
+    let (mut table, mut index) = (table, 0u64);
+    g.launch(wrapper, grid, threads, shared, &mut [super::super::ptr(&mut table), super::super::ptr(&mut index)])
+}
+/// The recorded wrapper of `fp8_rows_share` (Kind 67) against the direct entry on the six served tables at 2 to 8 tokens: same bytes, and the
+/// launch itself is accepted (block size, registers, shared memory).
+fn share_wrapper(g: &mut Gpu, share: H, wrapper: H) -> Result<()> {
+    let mut comparisons = 0u64;
+    for &(label, rows, cols, parts, _) in &SHARE_SHAPES { for m in 2..=8usize {
+        let fx = build_table(g, rows, cols, 128, 128, &vec![m; parts], 0, 0, 7100 + m as u64 * 3 + rows as u64, None, parts > 1)?;
+        let (oa, ob) = (Buf::new(g, &vec![0u8; fx.units * 4])?, Buf::new(g, &vec![0u8; fx.units * 4])?);
+        oa.poison(g)?; ob.poison(g)?;
+        mlaunch_share(g, share, &fx, oa.address)?;
+        let shared = 3 * 16 * 128 + 3 * 128 * 4 + 2 * 16 * 132 * 4 + (if m > 4 { 2 } else { 3 }) * 2 * m.div_ceil(2) * 132 * 4;
+        launch_wrapped(g, wrapper, 67, &margs(&fx, ob.address), [(rows.div_ceil(16) * parts) as u32, 1, 1], (32 * m.div_ceil(2) + 128) as u32, shared as u32).map_err(|e| format!("FP8SHARE WRAPPER LAUNCH FAIL {label} tokens={m}: {e}"))?;
+        g.sync().map_err(|e| format!("FP8SHARE WRAPPER RUN FAIL {label} tokens={m}: {e}"))?;
+        if oa.read(g)? != ob.read(g)? { return Err(format!("FP8SHARE WRAPPER BYTE FAIL {label} tokens={m}")); }
+        comparisons += 1; g.clear()?;
+    } }
+    println!("FP8SHARE WRAPPER PASS resident_launch_fp8_rows_share equals fp8_rows_share comparisons={comparisons}");
+    Ok(())
+}
+fn share_bytes(g: &mut Gpu, reference: H, small: H, share: H) -> Result<()> {
+    use std::cell::Cell;
+    let started = Instant::now();
+    let (comparisons, compared, alone, controls, neighbors) = (Cell::new(0u64), Cell::new(0u64), Cell::new(0u64), Cell::new(0u64), Cell::new(0u64));
+    let run = |g: &mut Gpu, f: H, fx: &Multi, which: u32| -> Result<Vec<u8>> {
+        let out = Buf::new(g, &vec![0xff; fx.units * 4])?; out.poison(g)?;
+        match which { 0 => mlaunch_reference(g, f, fx, out.address)?, 1 => mlaunch_small(g, f, fx, out.address)?, _ => mlaunch_share(g, f, fx, out.address)? }
+        g.sync()?;
+        let bytes = out.read(g)?;
+        if bytes[..16] != GUARD || bytes[bytes.len() - 16..] != GUARD { return Err("FP8SHARE guard changed".into()); }
+        Ok(bytes[16..bytes.len() - 16].to_vec())
+    };
+    let check = |g: &mut Gpu, fx: &Multi, label: &str| -> Result<Vec<u8>> {
+        let (x, y) = (run(g, reference, fx, 0)?, run(g, share, fx, 2)?);
+        if x != y { let at = x.iter().zip(&y).position(|(p, q)| p != q).map(|i| (i / 4, i)); return Err(format!("FP8SHARE BYTE FAIL {label} rows={} cols={} parts={:?} first_word_and_byte={at:?}", fx.rows, fx.cols, fx.counts)); }
+        comparisons.set(comparisons.get() + 1); compared.set(compared.get() + (fx.units * 4) as u64); Ok(y)
+    };
+    // The tables of one shape: one part, parts on the same rows, parts on their own rows.
+    let lists = |m: usize, wide: bool| -> Vec<(usize, bool)> { let mut v = vec![(1usize, false), (2, true)]; if wide { v.extend([(3, true), (4, true), (2, false), (3, false)]); } let _ = m; v };
+    // Every weight code (mode 1 gives each row a shifted code ramp), several scale blocks.
+    for &(rows, cols, br, bc) in &[(256usize, 512usize, 16usize, 32usize), (300, 272, 1, 16), (257, 128, 128, 128)] {
+        for kind in 0..5u32 { for m in 2..=8usize { for (parts, same) in lists(m, true) {
+            let fx = build_table(g, rows, cols, br, bc, &vec![m; parts], 1, kind, 11 + kind as u64 + 7 * m as u64, None, same)?; check(g, &fx, "all-codes")?;
+        } } g.clear()?; }
+    }
+    println!("FP8SHARE all-codes ok comparisons={} elapsed_s={:.1}", comparisons.get(), started.elapsed().as_secs_f64());
+    // Every listed (rows, cols) and block shape of `small_sweep`, 2 to 8 tokens. Four weight and scale sets are shared by the parts of a launch.
+    let mut seed = 500u64;
+    for &rows in e::FP8_ROWS { for &cols in e::FP8_COLS {
+        if rows * cols > e::FP8_MAX_BYTES { continue; }
+        let mut r2 = Rng(3 + rows as u64 * 17 + cols as u64);
+        let mut wset = vec![];
+        for _ in 0..4 { let w: Vec<u8> = (0..rows * cols).map(|_| (r2.next() >> 8) as u8).collect(); wset.push(Buf::new(g, &w)?.address); }
+        for &(br, bc) in e::FP8_BLOCKS {
+            let mut pool = vec![];
+            for &w in &wset {
+                let scales: Vec<f32> = (0..rows.div_ceil(br) * cols.div_ceil(bc)).enumerate().map(|(k, _)| { let x = r2.next(); let ex = (x % 24) as i32 - 14; scale_of(k, (1.0 + ((x >> 8) % 1000) as f32 / 1000.0) * 2f32.powi(ex), x) }).collect();
+                pool.push((w, Buf::new(g, &le(&scales))?.address));
+            }
+            for m in 2..=8usize { for (parts, same) in lists(m, m == 2 || m == 5 || m == 8) {
+                if !e::fp8_parts_swept(rows, cols, parts) { continue; }
+                seed += 1; let fx = build_table(g, rows, cols, br, bc, &vec![m; parts], 0, (seed % 5) as u32, seed, Some(&pool), same)?; check(g, &fx, "sweep")?;
+            } }
+        }
+        g.clear()?;
+    } }
+    println!("FP8SHARE sweep ok comparisons={} elapsed_s={:.1}", comparisons.get(), started.elapsed().as_secs_f64());
+    for &(label, rows, cols, _, _) in &SHARE_SHAPES {
+        // Two weight sets with plain scales (no zero, infinity or denormal), so a control that must differ cannot meet two equal NaN words.
+        let mut r2 = Rng(77 + rows as u64 * 13 + cols as u64); let mut pool = vec![];
+        for _ in 0..2 {
+            let w: Vec<u8> = (0..rows * cols).map(|_| { let b = (r2.next() >> 8) as u8; if b & 127 == 127 { b ^ 1 } else { b } }).collect();
+            let sc: Vec<f32> = (0..rows.div_ceil(128) * cols.div_ceil(128)).map(|_| 0.001 * (1.0 + r2.unit().abs())).collect();
+            pool.push((Buf::new(g, &w)?.address, Buf::new(g, &le(&sc))?.address));
+        }
+        for m in 2..=8usize {
+            // The model's tables against the reference, five activation classes.
+            for kind in 0..5u32 { for (parts, same) in lists(m, false) {
+                let fx = build_table(g, rows, cols, 128, 128, &vec![m; parts], 0, kind, 900 + rows as u64 + m as u64 + kind as u64, None, same)?; check(g, &fx, "real")?;
+            } }
+            // `activations` seeds its generator with `seed | 1`: rows need seeds two apart.
+            let x: Vec<Vec<f32>> = (0..m).map(|t| activations(0, cols, 4000 + 64 * m as u64 + 2 * t as u64)).collect();
+            let word = |bytes: &[u8], at: usize| -> [u8; 4] { [bytes[at * 4], bytes[at * 4 + 1], bytes[at * 4 + 2], bytes[at * 4 + 3]] };
+            let group = table_of(g, rows, cols, 128, 128, &pool[..1], m, false, &x)?; let y = check(g, &group, "group")?;
+            // A row alone, through the one-row tile, against its slot and (wrong on purpose) against the next slot.
+            for t in 0..m {
+                let one = table_of(g, rows, cols, 128, 128, &pool[..1], 1, false, &x[t..t + 1])?; let z = run(g, small, &one, 1)?;
+                if (0..rows).any(|r| word(&z, r) != word(&y, r * m + t)) { return Err(format!("FP8SHARE ALONE FAIL {label} tokens={m} slot={t}")); }
+                alone.set(alone.get() + 1);
+                if (0..rows).all(|r| word(&z, r) == word(&y, r * m + (t + 1) % m)) { return Err(format!("FP8SHARE CONTROL did not fail: {label} tokens={m} a row alone equals another slot")); }
+                controls.set(controls.get() + 1);
+            }
+            // The same rows in reverse order: a row keeps its bytes in its other slot; slot by slot the launch must differ.
+            let reversed: Vec<Vec<f32>> = x.iter().rev().cloned().collect();
+            let back = table_of(g, rows, cols, 128, 128, &pool[..1], m, false, &reversed)?; let yr = check(g, &back, "reversed")?;
+            if (0..rows).any(|r| (0..m).any(|t| word(&yr, r * m + t) != word(&y, r * m + m - 1 - t))) { return Err(format!("FP8SHARE SLOT FAIL {label} tokens={m}: a row changed with its slot")); }
+            alone.set(alone.get() + 1);
+            if yr == y { return Err(format!("FP8SHARE CONTROL did not fail: {label} tokens={m} reversed rows gave the same bytes")); }
+            controls.set(controls.get() + 1);
+            // One changed row: its own words change, every other row keeps its bytes.
+            let j = m / 2; let mut changed = x.clone(); changed[j] = activations(0, cols, 9000 + 2 * m as u64);
+            let other = table_of(g, rows, cols, 128, 128, &pool[..1], m, false, &changed)?; let y2 = check(g, &other, "neighbor")?;
+            for t in 0..m {
+                let same = (0..rows).all(|r| word(&y2, r * m + t) == word(&y, r * m + t));
+                if t == j { if same { return Err(format!("FP8SHARE CONTROL did not fail: {label} tokens={m} a changed row kept its bytes")); } controls.set(controls.get() + 1); }
+                else { if !same { return Err(format!("FP8SHARE NEIGHBOR FAIL {label} tokens={m} slot={t}")); } neighbors.set(neighbors.get() + 1); }
+            }
+            // A matrix alone equals the matrix beside another one on the same rows in ONE launch.
+            let both = table_of(g, rows, cols, 128, 128, &pool, m, true, &x)?; let y3 = check(g, &both, "two-parts")?;
+            if y3[..rows * m * 4] != y[..] { return Err(format!("FP8SHARE PART FAIL {label} tokens={m}: a matrix changed beside another")); }
+            alone.set(alone.get() + 1);
+            if y3[rows * m * 4..] == y[..] { return Err(format!("FP8SHARE CONTROL did not fail: {label} tokens={m} the second matrix gave the first one's bytes")); }
+            controls.set(controls.get() + 1);
+        }
+        g.clear()?;
+    }
+    println!("FP8SHARE BYTES PASS comparisons={} output_bytes={} row_alone_and_slot_checks={} controls_failed_as_they_must={} neighbor_checks={} elapsed_s={:.1}",
+        comparisons.get(), compared.get(), alone.get(), controls.get(), neighbors.get(), started.elapsed().as_secs_f64());
+    Ok(())
+}
+/// `sharetime`: us a launch by device graph stamps, weights rotated over 256 MB: the one-row tile (one token), the form the host picks today for
+/// `m` tokens (`small_choice::group`), and `fp8_rows_share`. The step lines are ESTIMATES: launch time times launches a decode step.
+fn share_time(g: &mut Gpu, small: H, multi_fn: H, few_fn: H, share: H, wrappers: [H; 4], quick: bool) -> Result<()> {
+    use super::super::{capture_graph, sample, ptr, TIMER};
+    let tm = g.module(TIMER.as_bytes())?; let timer = g.function(tm, "kb_stamp")?;
+    let mut step = [[0f64; 4]; 9];
+    for &(label, rows, cols, parts, calls) in SHARE_SHAPES.iter().take(if quick { 2 } else { SHARE_SHAPES.len() }) {
+        let copies = (256usize << 20).div_ceil(rows * cols * parts).clamp(2, 96);
+        let mut pools = vec![];
+        for c in 0..copies {
+            let mut rng = Rng(701 + c as u64); let mut pool = vec![];
+            for _ in 0..parts {
+                let w: Vec<u8> = (0..rows * cols).map(|_| { let b = (rng.next() >> 8) as u8; if b & 127 == 127 { b ^ 1 } else { b } }).collect();
+                let sc: Vec<f32> = (0..rows.div_ceil(128) * cols.div_ceil(128)).map(|_| 0.001 * (1.0 + rng.unit().abs())).collect();
+                pool.push((g.upload(&w)?, g.upload(&le(&sc))?));
+            }
+            pools.push(pool);
+        }
+        for m in 2..=8usize {
+            if quick && !matches!(m, 4 | 6 | 8) { continue; }
+            // The host's choice for this table (mirror of `small_choice::group`): 0 small, 1 multi, 2 few.
+            let two_wins = matches!((rows, cols), (1024, 4096) | (2048, 2048) | (2048, 16384) | (8192, 1536));
+            let current = if parts > 1 || m >= 5 { 1 } else if m == 2 { if two_wins { 2 } else { 0 } } else if rows <= 768 { 0 } else if rows * cols <= 4_194_304 { 2 } else { 1 };
+            let mut sets = vec![];
+            for (c, pool) in pools.iter().enumerate() {
+                let many = build_table(g, rows, cols, 128, 128, &vec![m; parts], 0, 0, 601 + c as u64, Some(pool), parts > 1)?;
+                let one = build_table(g, rows, cols, 128, 128, &vec![1; parts], 0, 0, 601 + c as u64, Some(pool), false)?;
+                let out = Buf::new(g, &vec![0u8; many.units * 4])?;
+                // The same two launches as a decode step records them: the wrapper kernel reads its arguments from a command.
+                let (now_kind, share_command) = ([47u32, 48, 49][current], command_of(g, 67, &margs(&many, out.address))?);
+                let now_command = command_of(g, now_kind, &margs(&many, out.address))?;
+                sets.push((many, one, out, now_command, share_command));
+            }
+            let jobs = m * parts; let blocks16 = (rows.div_ceil(16) * parts) as u32;
+            let now_dims = [((rows.div_ceil(16) * jobs) as u32, 160u32, SMALL_SHARED), ((rows.div_ceil(32) * parts) as u32, 128, 0), (blocks16, 128, 0)][current];
+            let share_shared = (3 * 16 * 128 + 3 * 128 * 4 + 2 * 16 * 132 * 4 + (if m > 4 { 2 } else { 3 }) * 2 * m.div_ceil(2) * 132 * 4) as u32;
+            let times = g.upload(&[0; 16])?; let mut samples = vec![Vec::new(); 5];
+            {
+                let g = &*g; let mut graphs = Vec::new();
+                for a in 0..5 { graphs.push(capture_graph(g, || {
+                    let mut stamp = times; g.launch(timer, [1, 1, 1], 1, 0, &mut [ptr(&mut stamp)])?;
+                    for (many, one, out, now_command, share_command) in &sets { match (a, current) {
+                        (0, _) => mlaunch_small(g, small, one, out.address)?,
+                        (1, 0) => mlaunch_small(g, small, many, out.address)?, (1, 1) => mlaunch_multi(g, multi_fn, many, out.address)?, (1, _) => mlaunch_few(g, few_fn, many, out.address)?,
+                        (2, _) => mlaunch_share(g, share, many, out.address)?,
+                        (3, _) => launch_command(g, wrappers[current], *now_command, [now_dims.0, 1, 1], now_dims.1, now_dims.2)?,
+                        _ => launch_command(g, wrappers[3], *share_command, [blocks16, 1, 1], (32 * m.div_ceil(2) + 128) as u32, share_shared)?,
+                    } }
+                    stamp = times + 8; g.launch(timer, [1, 1, 1], 1, 0, &mut [ptr(&mut stamp)])?; Ok(())
+                })?); }
+                for _ in 0..3 { for graph in &graphs { sample(graph, times)?; } }
+                for repeat in 0..11 { for k in 0..5 { let a = (k + repeat) % 5; samples[a].push(sample(&graphs[a], times)?.1 / copies as f64); } }
+            }
+            // `rule`: the host rule of `fp8_small::share_wins` (the tables and counts where the share entry was faster).
+            let rule = matches!((rows, cols, m), (1024, 4096, 2..=6) | (2048, 2048, 2..=8) | (2048, 16384, 2..=5) | (8192, 1536, 2..=8) | (768, 4096, 3..=8) | (256, 4096, 5..=8));
+            let [one_us, now_us, share_us, now_wrapped_us, share_wrapped_us] = [median(samples[0].clone()), median(samples[1].clone()), median(samples[2].clone()), median(samples[3].clone()), median(samples[4].clone())];
+            for (a, us) in [one_us, now_us, share_us, if rule { share_us } else { now_us }].into_iter().enumerate() { step[m][a] += us * calls / 1e3; }
+            println!("FP8SHARE TIME pad={} family={label} rows={rows} cols={cols} parts={parts} tokens={m} one_row_us={one_us:.3} current={} current_us={now_us:.3} share_us={share_us:.3} current_wrapped_us={now_wrapped_us:.3} share_wrapped_us={share_wrapped_us:.3} share_over_one_row={:.3} share_over_current={:.3} host_rule={} copies={copies} clock=graph_stamps",
+                SHARE_PAD.load(std::sync::atomic::Ordering::Relaxed), ["fp8_rows_small", "fp8_rows_multi", "fp8_rows_few"][current], share_us / one_us, share_us / now_us, if rule { "share" } else { "current" });
+        }
+        g.clear()?;
+    }
+    for (m, s) in step.iter().enumerate().skip(2) {
+        if quick { continue; }
+        println!("FP8SHARE STEP tokens={m} ESTIMATE ms_a_step (launch us x launches a step): one_row={:.3} current={:.3} share_everywhere={:.3} host_rule={:.3} saved_by_the_rule={:.3}", s[0], s[1], s[2], s[3], s[1] - s[3]);
+    }
+    Ok(())
+}
 /// `pair`: one part against two parts of the same shape in ONE launch (two block-FP8 matrices that read the same rows), us a launch, 1 to 8 tokens.
 /// Arms: small, multi, few with one part; small, multi, few with two parts. `fp8_rows_few` takes 1 to 4 tokens a part.
 /// The two-part multi arm runs the row stage's table (both parts on the same rows); small and few find a part by its input row, so their two-part
@@ -146,6 +379,17 @@ pub(crate) fn run(base_path: &str, candidate_path: &str, mode: &str) -> Result<(
     let mut g = Gpu::new()?; let (ma, mb) = (g.module(&a)?, g.module(&b)?);
     let reference = g.function(ma, "expert_group")?; let tile = g.function(ma, "fp8_rows_tile")?; let small = g.function(mb, "fp8_rows_small")?; let multi_fn = g.function(mb, "fp8_rows_multi")?; let few_fn = g.function(mb, "fp8_rows_few")?;
     if mode == "pair" { return pair_time(&mut g, small, multi_fn, few_fn); }
+    if mode == "share" { let (share, wrapper) = (g.function(mb, "fp8_rows_share")?, g.function(mb, "resident_launch_fp8_rows_share")?); share_bytes(&mut g, reference, small, share)?; return share_wrapper(&mut g, share, wrapper); }
+    let wrappers = |g: &mut Gpu| -> Result<[H; 4]> { Ok([g.function(mb, "resident_launch_fp8_rows_small")?, g.function(mb, "resident_launch_fp8_rows_multi")?, g.function(mb, "resident_launch_fp8_rows_few")?, g.function(mb, "resident_launch_fp8_rows_share")?]) };
+    if mode == "sharetime" { let share = g.function(mb, "fp8_rows_share")?; let w = wrappers(&mut g)?; return share_time(&mut g, small, multi_fn, few_fn, share, w, false); }
+    // `sharepad`: gate and up and down at 4, 6 and 8 tokens with more dynamic shared memory than the kernel needs: where the launch time jumps is
+    // where an SM holds one block less.
+    if mode == "sharepad" {
+        let share = g.function(mb, "fp8_rows_share")?;
+        let w = wrappers(&mut g)?;
+        for pad in [0usize, 1056, 2112, 3168, 4224, 6336, 10560] { SHARE_PAD.store(pad, std::sync::atomic::Ordering::Relaxed); share_time(&mut g, small, multi_fn, few_fn, share, w, true)?; }
+        return Ok(());
+    }
     let started = Instant::now();
     if !time {
         let (comparisons, compared) = (std::cell::Cell::new(0u64), std::cell::Cell::new(0u64));
@@ -240,3 +484,5 @@ pub(crate) fn run(base_path: &str, candidate_path: &str, mode: &str) -> Result<(
     println!("FP8SMALL TIME DONE elapsed_s={:.1}", started.elapsed().as_secs_f64());
     Ok(())
 }
+
+#[path = "kernel_shared_fp8.rs"] pub(in super::super) mod shared_forms;

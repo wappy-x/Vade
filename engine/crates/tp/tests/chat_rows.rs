@@ -9,7 +9,7 @@
 use spark_tp::bounded_decoder::{ChatGather,Compute,Decoder,Host,chat_attention_layers};
 use engine_model::{plan::{admission::CheckpointAdmission,description::TokenMixer},safetensors::Dtype};
 use spark_gpu_probe::{causal_ops::Shape,prompt_ops::Shape as RowShape};
-use std::cell::Cell;
+use std::cell::{Cell,RefCell};
 #[allow(dead_code,reason="the shared fixture has more forms than this test uses")]
 #[path="support/attention_checkpoint.rs"] mod fixture;
 type V=Vec<f32>;
@@ -42,7 +42,7 @@ struct Absorbing {
     /// The largest count of selected rows a row group saw: the test must not pass on empty selections alone.
     most:Cell<usize>,
     /// A chat's attended rows land one slot late in the group's output: the fault the test must catch.
-    shifted:bool}
+    shifted:bool,selections:RefCell<Vec<Vec<u32>>>,selection_uploads:Cell<usize>,selection_reads:Cell<usize>,bad_selection:Option<u8>}
 impl Compute for Absorbing {
     type Value=V;type Pass=<Host as Compute>::Pass;
     fn mhc_row_launches(&self)->u64 {0}
@@ -77,8 +77,15 @@ impl Compute for Absorbing {
     fn select_known(&self,ids:&V,count:&V,row:&[f32])->spark_tp::Result<()> {Host.select_known(ids,count,row)}
     fn prompt_end(&self)->spark_tp::Result<()> {Ok(())} fn prompt_seeds(&self)->bool {false}
     fn prepare_beside(&self,c:&CheckpointAdmission,_:usize)->spark_tp::Result<()> {self.prepare(c)}
-    fn upload(&self,v:&[f32])->spark_tp::Result<V> {Host.upload(v)}
-    fn read(&self,v:&V)->spark_tp::Result<V> {Host.read(v)}
+    fn upload(&self,v:&[f32])->spark_tp::Result<V> {
+        let bits=v.iter().map(|v|v.to_bits()).collect::<Vec<_>>();
+        if self.selections.borrow().contains(&bits) {self.selection_uploads.set(self.selection_uploads.get()+1);}
+        Host.upload(v)
+    }
+    fn read(&self,v:&V)->spark_tp::Result<V> {
+        if self.selections.borrow().contains(&v.iter().map(|v|v.to_bits()).collect()) {self.selection_reads.set(self.selection_reads.get()+1);}
+        Host.read(v)
+    }
     fn words(&self,v:&V)->usize {v.len()}
     fn range(&self,v:&V,start:usize,len:usize)->spark_tp::Result<V> {Host.range(v,start,len)}
     fn join(&self,v:&[&V])->spark_tp::Result<V> {Host.join(v)}
@@ -90,10 +97,47 @@ impl Compute for Absorbing {
     fn mx(&self,p:&spark_tp::mxfp8_projection::Mxfp8Projection<'_>,x:&V)->spark_tp::Result<V> {Host.mx(p,x)}
     fn round(&self,x:&V)->spark_tp::Result<V> {Host.round(x)}
     fn mean(&self,x:&V,s:u32,h:u32)->spark_tp::Result<V> {Host.mean(x,s,h)}
-    fn prompt(&self,s:RowShape,x:[Option<&V>;5],w:&[f32])->spark_tp::Result<V> {Host.prompt(s,x,w)}
+    fn prompt(&self,s:RowShape,x:[Option<&V>;5],w:&[f32])->spark_tp::Result<V> {
+        let mut out=Host.prompt(s,x,w)?;
+        if s.op==spark_gpu_probe::prompt_ops::Op::SelectRows {
+            match self.bad_selection {Some(0)=>out[s.slots as usize]=f32::NAN,Some(1)=>out[0]=s.first as f32,Some(2)=>out[0]=0.5,_=>{}}
+            self.selections.borrow_mut().push(out.iter().map(|v|v.to_bits()).collect());
+        }
+        Ok(out)
+    }
     fn rows_norm(&self,name:&str,s:spark_gpu_probe::norm_boundary::NormShape,x:&V,m:usize,w:&[f32])->spark_tp::Result<V> {Host.rows_norm(name,s,x,m,w)}
     fn rows_begin(&self,key:(usize,usize),p:&spark_tp::layer_operands::ResidualBlockOperands,x:&V,m:usize)->spark_tp::Result<(Self::Pass,V)> {Host.rows_begin(key,p,x,m)}
     fn rows_finish(&self,p:Self::Pass,x:&V,m:usize)->spark_tp::Result<V> {Host.rows_finish(p,x,m)}
+}
+#[test]
+fn absorbed_prompt_checks_selection_without_reading_or_uploading_the_table() {
+    use spark_tp::bounded_decoder::HeadRows;
+    let c=fixture::Checkpoint::new_with_capacity(Dtype::Bf16,true,80);
+    let compute=Absorbing::default();let decoder=Decoder::new(&c.admission,&compute,80).unwrap();
+    let tokens=(0..17).map(|i|(i%7+1) as u32).collect::<Vec<_>>();let zero=decoder.zero_state().unwrap();
+    let (rows,next)=decoder.prefill_rows(&tokens,&zero,HeadRows::All).unwrap();
+    assert!(!compute.selections.borrow().is_empty(),"the selection path must run");
+    assert_eq!(compute.selection_uploads.get(),0,"a validated device selection must not be uploaded again");
+    assert_eq!(compute.selection_reads.get(),0,"only compact validation statuses may cross to the host");
+    let scalar=Absorbing::default();let reference=Decoder::new(&c.admission,&scalar,80).unwrap();
+    let mut state=reference.zero_state().unwrap();
+    for (token,row) in tokens.into_iter().zip(rows) {
+        let (want,_,after)=reference.step(token,&state,|_,_|Ok(())).unwrap();state=after;
+        assert_eq!(row.iter().map(|v|v.to_bits()).collect::<Vec<_>>(),want.iter().map(|v|v.to_bits()).collect::<Vec<_>>());
+    }
+    assert_eq!(next.position,state.position);
+}
+#[test]
+fn absorbed_prompt_refuses_bad_counts_fractional_ids_and_future_rows_before_attention() {
+    use spark_tp::bounded_decoder::HeadRows;
+    let c=fixture::Checkpoint::new_with_capacity(Dtype::Bf16,true,80);
+    for bad in 0..3 {
+        let compute=Absorbing {bad_selection:Some(bad),..Absorbing::default()};
+        let decoder=Decoder::new(&c.admission,&compute,80).unwrap();
+        let error=decoder.prefill_rows(&[1;17],&decoder.zero_state().unwrap(),HeadRows::All).err().expect("bad selection must fail");
+        assert_eq!(error,"absorbed prompt selection is invalid");
+        assert_eq!(compute.selection_reads.get(),0,"a bad table must also be checked on the device");
+    }
 }
 /// A run of batch steps whose cohort changes: 1 to 8 chats, down again and up again, the chats rotating so that a chat
 /// leaves, returns, and stands in another slot at another position. Every chat keeps the logit bits, the ID and the next

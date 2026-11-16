@@ -1003,6 +1003,22 @@ fn run() -> Result<()> {
             #[cfg(not(target_os = "linux"))]
             return Err(format!("plain probe needs Linux with CUDA: {base} {candidate} {names} {mode}"));
         }
+        if flag == "--shared-forms" {
+            let path = args.next().ok_or("--shared-forms needs an image")?;
+            #[cfg(target_os = "linux")]
+            return cuda::plainp::shared_forms::run(&path);
+            #[cfg(not(target_os = "linux"))]
+            return Err(format!("shared forms need Linux with CUDA: {path}"));
+        }
+        if flag == "--fold-rows" {
+            let base = args.next().ok_or("--fold-rows needs a baseline and a candidate image")?;
+            let candidate = args.next().ok_or("--fold-rows needs a candidate image")?;
+            let mode = args.next().unwrap_or_else(|| "both".to_string());
+            #[cfg(target_os = "linux")]
+            return cuda::plainp::foldrows::run(&base, &candidate, &mode);
+            #[cfg(not(target_os = "linux"))]
+            return Err(format!("fold rows check needs Linux with CUDA: {base} {candidate} {mode}"));
+        }
         if flag == "--rows-p1" {
             let base = args.next().ok_or("--rows-p1 needs a baseline and a candidate image")?;
             let candidate = args.next().ok_or("--rows-p1 needs a candidate image")?;
@@ -1016,7 +1032,7 @@ fn run() -> Result<()> {
             let base = args.next().ok_or("--mx-small needs a baseline and a candidate image")?;
             let candidate = args.next().ok_or("--mx-small needs a candidate image")?;
             #[cfg(target_os = "linux")]
-            return cuda::mx_small(&base, &candidate, args.next().as_deref() == Some("time"));
+            return cuda::mx_small(&base, &candidate, args.next().as_deref().unwrap_or(""));
             #[cfg(not(target_os = "linux"))]
             return Err(format!("mx small check needs Linux with CUDA: {base} {candidate}"));
         }
@@ -1085,6 +1101,15 @@ fn run() -> Result<()> {
             return cuda::step_tile(&base, &candidate, &mode);
             #[cfg(not(target_os = "linux"))]
             return Err(format!("step tile check needs Linux with CUDA: {base} {candidate} {mode}"));
+        }
+        if flag == "--latent-tile" {
+            let base = args.next().ok_or("--latent-tile needs a baseline and a candidate image")?;
+            let candidate = args.next().ok_or("--latent-tile needs a candidate image")?;
+            let mode = args.next().unwrap_or_else(|| "all".into());
+            #[cfg(target_os = "linux")]
+            return cuda::latent_tile(&base, &candidate, &mode);
+            #[cfg(not(target_os = "linux"))]
+            return Err(format!("latent tile check needs Linux with CUDA: {base} {candidate} {mode}"));
         }
         if flag == "--pool-scores" {
             let base = args.next().ok_or("--pool-scores needs a baseline and a candidate image")?;

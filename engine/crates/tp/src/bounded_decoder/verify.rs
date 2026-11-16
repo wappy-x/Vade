@@ -7,7 +7,8 @@ use crate::Result;
 pub const CARRIED_ROWS:usize=8;
 /// Largest number of new rows in one pass.
 pub const VERIFY_ROWS:usize=16;
-/// Kept rows that may wait for the predictor layer's cache. Older ones leave a gap in it.
+/// Kept rows that may wait for the predictor layer's cache. Older ones leave a gap in it. The check pass of a
+/// proposal deeper than 3 has more rows than this: such a proposal leaves room for every row of its own pass (`propose`).
 pub const TRAIL_ROWS:usize=4;
 /// Last prompt rows that start the predictor layer's cache of a chat. Each runs the cache half
 /// of the layer once before the first proposal, so the bound is also the most a request pays
@@ -66,8 +67,18 @@ impl<V> Verify<V> {
     pub fn carried(&self)->usize {if self.ahead.is_some() {0} else {self.open.len()}}
     /// Append rows and return the logits of each. Row `i` is exact when the tokens
     /// before it are the tokens plain decoding chose.
+    pub fn rows<C:Compute<Value=V>>(&mut self,decoder:&Decoder<'_,C>,tokens:&[u32])->Result<Vec<Vec<f32>>> {self.rows_head(decoder,tokens,None)}
+    /// The same pass for a greedy caller, for 2 rows or more: each new row answers with the ID its head picks, taken
+    /// where the logits are, and no logits are read (`Decoder::prefill_rows_open_greedy`). The same state, kept rows
+    /// and trail as `rows`. One row with nothing carried is `row_greedy`; one row behind carried rows is `rows`.
+    pub fn rows_greedy<C:Compute<Value=V>>(&mut self,decoder:&Decoder<'_,C>,tokens:&[u32])->Result<Vec<u32>> {
+        if tokens.len()<2 {return Err("greedy verify rows are 2 or more".into());}
+        let mut ids=Vec::new();self.rows_head(decoder,tokens,Some(&mut ids))?;
+        if ids.len()!=tokens.len() {return Err("verify greedy row count differs".into());}Ok(ids)
+    }
+    /// `picked`: the new rows answer with their IDs, pushed there, and the result is empty (`rows_greedy`).
     #[allow(clippy::needless_range_loop)] // index loops keep the arithmetic order.
-    pub fn rows<C:Compute<Value=V>>(&mut self,decoder:&Decoder<'_,C>,tokens:&[u32])->Result<Vec<Vec<f32>>> {
+    fn rows_head<C:Compute<Value=V>>(&mut self,decoder:&Decoder<'_,C>,tokens:&[u32],picked:Option<&mut Vec<u32>>)->Result<Vec<Vec<f32>>> {
         if tokens.is_empty() || tokens.len()>VERIFY_ROWS {return Err("verify row count differs".into());}
         self.kept=None;if let Some(ahead)=self.ahead.take() {self.state=ahead;self.open.clear();}
         if self.open.len()>CARRIED_ROWS {let (_,next)=decoder.prefill_rows(&self.open,&self.state,HeadRows::Last)?;self.state=next;self.open.clear();}
@@ -79,8 +90,11 @@ impl<V> Verify<V> {
             return Ok(vec![logits]);
         }
         let carried=self.open.len();let mut all=self.open.clone();all.extend_from_slice(tokens);
-        let (logits,next,kept)=decoder.prefill_rows_open(&all,&self.state,HeadRows::From(carried))?;
-        if logits.len()!=tokens.len() {return Err("verify logits row count differs".into());}
+        let (logits,next,kept)=match picked {
+            Some(ids)=>{let (best,next,kept)=decoder.prefill_rows_open_greedy(&all,&self.state,carried)?;*ids=best;(Vec::new(),next,kept)},
+            None=>{let (logits,next,kept)=decoder.prefill_rows_open(&all,&self.state,HeadRows::From(carried))?;
+                if logits.len()!=tokens.len() {return Err("verify logits row count differs".into());}(logits,next,kept)},
+        };
         if self.tracking {for row in carried..all.len() {let [before,after]=decoder.open_hidden(&kept,row)?;self.push_trail(all[row],if PROPOSER_HIDDEN==0 {before} else {after});}}
         else {self.hidden=Some(decoder.open_hidden(&kept,all.len()-1)?);}
         self.open=all;self.ahead=Some(next);self.kept=Some(kept);Ok(logits)
@@ -149,7 +163,10 @@ impl<V> Verify<V> {
         if self.trail.is_empty() || depth==0 {return Ok((Vec::new(),0.0));}
         let (cache,waited)=self.catch_up(decoder,self.trail.len()-1)?;
         let (tokens,after)=decoder.propose_after(&self.trail[self.trail.len()-1].1,next,depth,cache.as_ref())?;
-        self.predictor=Some(after);self.trail.clear();self.trail_cap=TRAIL_ROWS;self.plane=None;Ok((tokens,waited))
+        // The pass that checks this proposal has up to `depth`+1 rows, and each kept one waits here for the next
+        // proposal. With less room a deep pass would push its own first rows off the trail and leave a gap in the
+        // layer's cache at every cycle. Up to depth 3 this is TRAIL_ROWS, as before. Both ranks get the same depth.
+        self.predictor=Some(after);self.trail.clear();self.trail_cap=TRAIL_ROWS.max(depth+1);self.plane=None;Ok((tokens,waited))
     }
     /// Check what a proposal of `depth` tokens `depth` rows back on the trail would have matched against the kept
     /// tokens that followed it (ending at `best`), stopping the chain on the first wrong token. The rows before that

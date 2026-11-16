@@ -292,6 +292,87 @@ fn mid_gather_failure_on_second_rail_is_bounded_and_loud() {
     assert!(err1.contains("rail") || err1.contains("closed") || err1.contains("reset") || err1.contains("pipe"), "unexpected error: {err1}");
 }
 
+std::thread_local! {static EARLY_RECEIVE_DEVICE:std::cell::RefCell<Option<String>>=const {std::cell::RefCell::new(None)};}
+
+/// The explicit device entry accepts its rank endpoints and fault through stdin. Normal tests never read stdin.
+#[test]
+#[ignore = "requires two RDMA ranks and fixture input"]
+fn device_early_receive_fault_probe() {
+    let mut line=String::new();std::io::stdin().read_line(&mut line).unwrap();assert!(!line.trim().is_empty());
+    EARLY_RECEIVE_DEVICE.with(|v|*v.borrow_mut()=Some(line));
+    a_ring_without_rdma_posts_no_early_receive_and_gathers_as_before();
+    EARLY_RECEIVE_DEVICE.with(|v|*v.borrow_mut()=None);
+}
+
+/// RECEIVE FIRST on a link with no RDMA (every host test): nothing is posted, the answer says so, and the gather after it
+/// exchanges the blocks as before. One rank alone asks; the other rank never does, which the wire must not notice.
+#[test]
+fn a_ring_without_rdma_posts_no_early_receive_and_gathers_as_before() {
+    let parts = 2;
+    // Opt-in device fixture: one process on each rank, using the normal production connection setup.
+    // Stdin: rank, own socket, peer socket, fault (none, command, wrong-buffer, peer-abort).
+    let device=EARLY_RECEIVE_DEVICE.with(|v|v.borrow().clone()).map(|line| {
+        let fields=line.split_whitespace().collect::<Vec<_>>();assert_eq!(fields.len(),4);
+        (fields[0].parse::<usize>().unwrap(),fields[1].parse::<SocketAddr>().unwrap(),fields[2].parse::<SocketAddr>().unwrap(),fields[3].to_owned())
+    });
+    let addresses = free_ports(parts);
+    std::thread::scope(|scope| {
+        let handles = (0..parts).filter(|slot|device.as_ref().is_none_or(|d|d.0==*slot)).map(|slot| {
+            let addresses = &addresses;let device=&device;
+            scope.spawn(move || {
+                // A separate fixture socket confirms both receives are posted before a fault. It never uses the ring.
+                let sync=device.as_ref().filter(|d|d.0==0 && d.3!="none").map(|d| {
+                    let mut address=d.1;address.set_port(address.port()+1);TcpListener::bind(address).unwrap()
+                });
+                let mut ring = if let Some(d)=device {Ring::connect(slot,parts,d.1,d.2).unwrap()}
+                    else {Ring::connect_options(slot, parts, addresses[slot], addresses[(slot + 1) % parts], false).unwrap()};
+                if device.is_some() {assert!(ring.uses_rdma(),"device fixture requires RDMA");}
+                for words in [3usize, 4096, 300_000] {
+                    for round in 0..3 {
+                        let mut exchange = vec![f32::NAN; parts * words];
+                        for i in 0..words { exchange[slot * words + i] = (round * 7 + slot * words + i) as f32; }
+                        let fault=device.as_ref().filter(|_|words==300_000 && round==2).map_or("none",|d|d.3.as_str());
+                        if slot == 0 || device.is_some() {
+                            // SAFETY: `exchange` stays allocated and fixed through the gather or abort below. No prior
+                            // reader remains. Fault cases abort the endpoints before this storage can be released.
+                            let posted = unsafe { ring.post_rank_blocks_receive(exchange.as_mut_ptr(), parts, 1, words) }.unwrap();
+                            if device.is_none() {assert!(!posted, "a link with no RDMA has no receive to post");}
+                            else if words==300_000 {assert!(posted,"large device exchange must post its receive");}
+                        }
+                        if fault!="none" {
+                            if let Some(listener)=&sync {
+                                let (mut socket,_)=listener.accept().unwrap();socket.read_exact(&mut [0]).unwrap();socket.write_all(&[1]).unwrap();
+                            } else {
+                                let mut address=device.as_ref().unwrap().2;address.set_port(address.port()+1);
+                                let mut socket=TcpStream::connect(address).unwrap();socket.write_all(&[1]).unwrap();socket.read_exact(&mut [0]).unwrap();
+                            }
+                        }
+                        let start=std::time::Instant::now();
+                        if fault=="peer-abort" && slot==1 {ring.abort();println!("EARLY RECEIVE injected peer abort");return;}
+                        if fault!="none" && slot==0 {
+                            let result=match fault {
+                                "command"=>ring.command(&mut [0]),
+                                "wrong-buffer"=>ring.gather_rank_blocks(&mut vec![0.;parts*words],parts,1,words),
+                                "peer-abort"=>ring.gather_rank_blocks(&mut exchange,parts,1,words),
+                                _=>panic!("unknown fault"),
+                            };
+                            let error=result.expect_err("device fault must fail loudly");
+                            assert!(start.elapsed()<Duration::from_secs(5),"fault did not fail promptly");
+                            println!("EARLY RECEIVE FAULT PASS fault={fault} rank={slot} error={error}");return;
+                        }
+                        let result=ring.gather_rank_blocks(&mut exchange, parts, 1, words);
+                        if fault!="none" {assert!(result.is_err(),"peer must observe the aborted transport");println!("EARLY RECEIVE FAULT PASS fault={fault} rank={slot}");return;}
+                        result.unwrap();
+                        assert!(exchange.iter().enumerate().all(|(i, &v)| v == (round * 7 + i) as f32), "slot={slot} words={words} round={round}");
+                        println!("EARLY RECEIVE BYTES PASS rank={slot} words={words} round={round}");
+                    }
+                }
+            })
+        }).collect::<Vec<_>>();
+        for handle in handles { handle.join().unwrap(); }
+    });
+}
+
 // Child helper invoked by subprocess wire tests below; ignored during normal test discovery.
 #[test]
 #[ignore]

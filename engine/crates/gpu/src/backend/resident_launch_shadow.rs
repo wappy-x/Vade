@@ -29,7 +29,7 @@ fn install(recorder:&mut Recorder<'_>,index:usize,window:crate::bus_shadow::Wind
         if index>0 && recorder.calls[index-1].grid.kind==Kind::ShadowSide {recorder.shadow[2]+=1;return false;}
         let g=recorder.calls[index].grid;
         if let Some(command)=crate::bus_shadow::side(&recorder.calls[index].command,[g.blocks,g.rows,g.planes,g.threads,g.shared],window,stage_base,&recorder.staged) {
-            recorder.calls.insert(index,Call {grid:Grid {kind:Kind::ShadowSide,blocks:crate::bus_shadow::BLOCKS,rows:1,planes:1,threads:256,shared:0,lane:MAIN},command,copy_bytes:0});
+            recorder.calls.insert(index,Call {grid:Grid {kind:Kind::ShadowSide,blocks:crate::bus_shadow::SIDE_BLOCKS,rows:1,planes:1,threads:256,shared:0,lane:MAIN},command,copy_bytes:0});
             for bell in &mut recorder.bells {if bell.0>=index {bell.0+=1;}}
             for zero in &mut recorder.zeros {if zero.0>=index {zero.0+=1;}}
             for fill in &mut recorder.waiting {if fill.0>=index {fill.0+=1;}}

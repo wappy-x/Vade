@@ -33,6 +33,8 @@ fn inline(payload: &Piece, seq: &Piece) -> bool {
     payload.from.len() > 1 && seq.from.start + 1 == payload.from.end && seq.to + 1 == payload.to + payload.from.len()
 }
 
+/// Bytes a work request may carry inside itself: the one sequence word of a message's second write.
+const FLAG_BYTES: u32 = 4;
 /// `hello`: GID (16), queue pair number (4), path MTU code (4), mailbox address (8), key (4),
 /// mailbox bytes (4).
 pub const HELLO: usize = 40;
@@ -65,7 +67,7 @@ impl<'m> TpRdma<'m> {
             r.pd = present((verbs.alloc_pd)(r.context), "allocate PD")?;
             r.cq = present((verbs.create_cq)(r.context, 64, ptr::null_mut(), ptr::null_mut(), 0), "create CQ")?;
             let mut init = Init { user: ptr::null_mut(), send_cq: r.cq, recv_cq: r.cq, srq: ptr::null_mut(),
-                cap: Cap { send: 64, recv: 1, send_sge: 1, recv_sge: 1, inline: 0 }, kind: 2, signal_all: 0 };
+                cap: Cap { send: 64, recv: 1, send_sge: 1, recv_sge: 1, inline: FLAG_BYTES }, kind: 2, signal_all: 0 };
             r.qp = present((verbs.create_qp)(r.pd, &mut init), "create RC QP")?;
             let mut attr = Attr { state: 1, port: 1, access: 2, ..Default::default() };
             code((verbs.modify_qp)(r.qp, &mut attr, (1 << 0) | (1 << 3) | (1 << 4) | (1 << 5)), "QP INIT")?;
@@ -119,7 +121,10 @@ impl TpDoorbell for TpRdma<'_> {
         let sge = |p: &Piece| Sge { address: self.words[p.from.start..].as_ptr() as u64, length: (p.from.len() * 4) as u32, key: lkey };
         let (mut first, mut second) = (sge(&payload), sge(&seq));
         let remote = |p: &Piece| [address + (p.to * 4) as u64, key as u64, 0, 0];
-        let mut last = Send { id, next: ptr::null_mut(), sg: &mut second, count: 1, opcode: 0, flags: 2, imm: 0, wr: remote(&seq), qp_type: 0, padding: 0, tail: [0; 6] };
+        // The sequence word's write carries its four bytes inside the work request (IBV_SEND_INLINE, 8): the NIC does
+        // not read them from host memory first, so the word that the peer's take polls for leaves one bus read earlier.
+        // The bytes are copied when the request is posted; the doorbell stages the word before it posts.
+        let mut last = Send { id, next: ptr::null_mut(), sg: &mut second, count: 1, opcode: 0, flags: 2 | 8, imm: 0, wr: remote(&seq), qp_type: 0, padding: 0, tail: [0; 6] };
         let mut wr = Send { id: 0, next: &mut last, sg: &mut first, count: 1, opcode: 0, flags: 0, imm: 0, wr: remote(&payload), qp_type: 0, padding: 0, tail: [0; 6] };
         if inline(&payload, &seq) {
             (wr.id, wr.flags, wr.next) = (id, 2, ptr::null_mut());

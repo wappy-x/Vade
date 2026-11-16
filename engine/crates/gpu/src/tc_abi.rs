@@ -80,6 +80,27 @@ pub struct NvQuantizePack {
     pub rows: u32,
     pub cols: u32,
 }
+/// `nv_quantize_gather` (the production image): `nv_quantize_pack` of rows that are still where they were made. Row r of
+/// the operands is row `index[r]` of `input`, so the rows are not copied into expert order first (`Op::PermuteRows`).
+/// The same bytes as `nv_quantize_pack` of the copied rows: the copy moves words, and a row's bytes depend on that row
+/// and its input scale only.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct NvQuantizeGather {
+    /// `source_rows` activation rows of `cols` FP32 words.
+    pub input: u64,
+    /// Output: rows * cols / 2 bytes of codes and rows * cols / 16 bytes of scale codes (both 4-byte aligned).
+    pub codes: u64,
+    pub scales: u64,
+    /// `rows` FP32 words: the calibrated input scale of the part that owns each row.
+    pub activations: u64,
+    /// `rows` FP32 words: the input row of each operand row, the table `Op::PermuteRows` reads (a float cast to an index).
+    pub index: u64,
+    pub rows: u32,
+    pub cols: u32,
+    pub source_rows: u32,
+    pub pad: u32,
+}
 /// One thread a 16-column block: ceil(rows * cols / 16 / NV_QUANTIZE_PACK_THREADS) blocks.
 pub const NV_QUANTIZE_PACK_THREADS: u32 = 128;
 pub fn nv_quantize_pack_blocks(rows: usize, cols: usize) -> Option<u32> {

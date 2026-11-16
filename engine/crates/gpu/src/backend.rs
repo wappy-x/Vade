@@ -23,6 +23,7 @@ pub use fp8::{Fp8GroupedScratch, Fp8RoutingFlag};
 #[path = "backend/mhc.rs"] mod mhc; pub use mhc::{Bf16Vector,ResidentMhc,MhcPass}; use kernels::AbKernels; #[path = "backend/mhc_boundary.rs"] mod mhc_boundary; pub use mhc_boundary::{ResidentMhcBoundary,MhcBoundaryPass,MhcHostLink,Shadow,ShadowRange,GpuMark,fused_launches as mhc_fused_launches,fused_row_launches as mhc_fused_row_launches};
 #[path = "backend/tc_family.rs"] mod tc_family; #[cfg(feature="kernel-bench")] #[path = "backend/launch_split.rs"] mod launch_split; #[path = "backend/pair_split.rs"] mod pair_split;
 #[path = "backend/nv_capture.rs"] pub(crate) mod nv_capture;
+#[cfg(test)] #[path="backend/lookahead_device.rs"] mod lookahead_device; #[path="backend/start.rs"] mod start;
 #[path = "backend/text_edges.rs"] mod text_edges; pub use text_edges::ResidentTextEdges; #[path = "backend/norm.rs"] mod norm; pub use norm::{ResidentNorm,NormOutput}; #[path = "backend/mxfp8_projection.rs"] mod mxfp8_projection; pub use mxfp8_projection::{ResidentMxfp8Projection,Mxfp8ProjectionPass,ResidentProjection};
 
 pub struct Matrix<'a> { buffer: Buffer<'a>, rows: usize, cols: usize, packed: bool, packed_blocked: bool, stride: usize, row_offset: usize, column_offset: usize, scalar_f32: bool, fp8_scales: Option<Buffer<'a>>, fp8_fragments: bool }
@@ -378,23 +379,7 @@ pub fn with_backend_mode<R>(ordinal: i32, ptx: &CStr, budget: usize, mode: Matve
     let context_ms = start.elapsed().as_secs_f64() * 1000.0;
     context.budget.set(budget);
     let result = (|| {
-        let start = Instant::now();
-        let module = Module::load(&context, ptx)?;
-        let ptx_load_ms = start.elapsed().as_secs_f64() * 1000.0;
-        let start = Instant::now();
-        let matvec_function = module.function("matvec_bf16_f32_warp32")?;
-        let requested_vec8 = mode == MatvecMode::Vec8;
-        let vec8 = module.function("matvec_bf16_f32_vec8").ok();
-        if requested_vec8 && vec8.is_none() { return Err("PTX has no vec8 kernel".into()); }
-        let backend = Backend { context: &context, module, mode, tc: tc_family::TcState::new(), vec8: Cell::new(vec8), ab: RefCell::new(None), arm_x: Cell::new(false), use_vec8: Cell::new(requested_vec8), batch: RefCell::new(None), multi: RefCell::new(None),
-            moe: RefCell::new(None), fp8: RefCell::new(None), fp4: RefCell::new(None), decode_partials: RefCell::new(None),
-            flash_input: RefCell::new(None), flash_mixed: RefCell::new(None), dense_offer: Cell::new(None),
-            uploads: RefCell::new(UploadStaging { buffer: Pinned::new(&context, crate::staging::UPLOAD_BYTES)?, capacity: crate::staging::UPLOAD_BYTES, used: 0 }),
-            segment: Cell::new(None), capture_position: Cell::new(0), capture_base: Cell::new(0), prompt_order: Cell::new(false), programmatic: Cell::new(false),
-            recorder: RefCell::new(resident_launch::Recorder::default()), side_launch: Cell::new(ptr::null_mut()), spin_waits: Cell::new(false), profiling: Cell::new(false), profile_kind: Cell::new(None), stats: RefCell::new(BackendStats::default()),
-            stream: Stream::new(&context)?, matvec_function: Cell::new(matvec_function), layers: LayerKernels::load(&context), timings: RefCell::new(Vec::new()) };
-        eprintln!("gpu_backend startup context_ms={context_ms:.3} ptx_load_ms={ptx_load_ms:.3} kernel_setup_ms={:.3} device_bytes={} pinned_staging_bytes={}",
-            start.elapsed().as_secs_f64() * 1000.0, backend.allocated_bytes(), backend.pinned_staging_bytes());
+        let backend=Backend::load(&context,ptx,mode,context_ms)?;
         run(&backend).inspect_err(|_| crate::teardown::arm())
     })();
     if result.is_err() { crate::teardown::arm(); }

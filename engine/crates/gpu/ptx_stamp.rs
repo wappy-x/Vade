@@ -138,9 +138,14 @@ pub fn stamp(root: &Path, ptx: &Path, variant: Variant) -> io::Result<()> {
 /// 192-CTA persistent grid is one wave (unbounded ptxas takes 134-136 -> three per SM).
 /// fp4_prefill_tc_down (256 threads): 128 keeps two CTAs (16 warps) per SM.
 /// mx_rows_tile (384 threads): 160 registers fit one 12-warp block per SM (unbounded ptxas takes 200: no 384-thread block would launch).
+/// resident_launch_mx_rows_tile: the recorded wrapper of the same body needs the same cap. Without it the wrapper does not launch at all
+/// (CUDA 701 on one Spark, `kernel-bench --mx-small`, run shareb-mx-wrap-07; a decode step of 8 chats stopped at its first graph).
+/// latent_absorption_tile (256 threads): 128 keeps two CTAs (16 warps) per SM; unbounded it runs one. Measured on the
+/// device with the same output bytes: the cap alone 1.10 to 1.19 times the speed, with the low-register form of the
+/// kernel 1.22 to 1.39 (docs/latent-absorption.md). 112 and 85 spill and are slower than no cap.
 #[allow(dead_code)]
 // The project block can have 1024 threads; 64 registers allow that block to launch.
-const REGISTER_CAPS: [(&str, u32); 24] = [("mx_rows_tile", 160), ("resident_launch_mx", 40), ("mhc_boundary_project", 64),
+const REGISTER_CAPS: [(&str, u32); 26] = [("mx_rows_tile", 160), ("resident_launch_mx_rows_tile", 160), ("latent_absorption_tile", 128), ("resident_launch_mx", 40), ("mhc_boundary_project", 64),
     // Absorbed attention values: 1024-thread blocks, eager and recorded (the recorded entry also holds the 128-thread
     // scores arm). 64 registers is the most a 1024-thread block can launch with; the driver takes 40 and 48 today.
     ("latent_absorption_values", 64), ("resident_launch_absorb_attention", 64),
@@ -186,6 +191,17 @@ pub fn verify(root: &Path, ptx: &Path, bytes: &[u8], variant: Variant) -> io::Re
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn latent_tile_cap_keeps_two_blocks_an_sm() {
+        // An SM has 65,536 registers (the other entries of the table). Two 256-thread blocks need 128 or fewer a thread.
+        let cap=REGISTER_CAPS.iter().find(|(name,_)|*name=="latent_absorption_tile").expect("the latent tile has a register cap").1;
+        assert!(2*256*cap<=65_536 && 3*256*cap>65_536,"cap {cap}");
+        // The stamp writes the cap between the entry's parameter list and its body.
+        let image:String=REGISTER_CAPS.iter().map(|(name,_)|format!(".visible .entry {name}(\n\t.param .b64 p\n)\n{{\n\tret;\n}}\n")).collect();
+        let capped=String::from_utf8(cap_registers(image.into_bytes()).unwrap()).unwrap();
+        let entry=capped.find(".entry latent_absorption_tile(").unwrap();let body=entry+capped[entry..].find("\n{").unwrap();
+        assert!(capped[entry..body].ends_with(&format!(")\n.maxnreg {cap}")),"{}",&capped[entry..body]);
+    }
     #[test]
     fn kernel_external_modules_are_part_of_the_ptx_identity() {
         let manifest=Path::new(env!("CARGO_MANIFEST_DIR"));

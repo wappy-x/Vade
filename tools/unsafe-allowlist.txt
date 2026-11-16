@@ -2284,9 +2284,10 @@ engine/crates/gpu/kernels	src/plain_bf16.rs	fn:resident_project_bf16_ordered	blo
 engine/crates/gpu/kernels	src/plain_bf16.rs	fn:rows_warp_bf16	fn:1	ruling 2026-11-06 12:46
 # lane READ-2 2026-11-06, ROUTER-FOLD: new block rows_fold (producer warps, one folding lane a row, named barriers); orchestrator ruling 2026-11-06 19:28:15 ACCEPTED
 engine/crates/gpu/kernels	src/plain_warp.rs	fn:rows_fold	block:1	ruling 2026-11-06 19:28
+engine/crates/gpu/kernels	src/plain_warp.rs	fn:rows_fold_rows	block:1
 engine/crates/gpu/kernels	src/fp8_tile.rs	fn:project	block:1
 engine/crates/gpu/kernels	src/nv_rows_tile.rs	fn:nv_rows_tile	block:1
-engine/crates/gpu/kernels	src/mx_rows_tile.rs	fn:mx_rows_tile	block:1
+engine/crates/gpu/kernels	src/mx_rows_tile.rs	fn:tile	block:1
 engine/crates/gpu/kernels	src/scores_rows_tile.rs	fn:scores_rows_tile	block:1
 engine/crates/gpu/kernels	src/step_rows_block.rs	fn:step_rows_block	block:1
 engine/crates/gpu/kernels	src/transpose_tiles.rs	fn:transpose_tiles	block:1
@@ -2324,6 +2325,7 @@ engine/crates/gpu/kernels	src/prompt_fast.rs	fn:conv_run	block:1
 engine/crates/gpu/kernels	src/prompt_fast.rs	fn:prompt_conv	block:1
 engine/crates/gpu/kernels	src/prompt_fast.rs	fn:prompt_fold	block:1
 engine/crates/gpu/kernels	src/prompt_fast.rs	fn:prompt_gated_norm	block:1
+engine/crates/gpu/kernels	src/prompt_fast.rs	fn:prompt_pool_scores	block:1
 engine/crates/gpu/kernels	src/prompt_fast.rs	fn:prompt_prepare	block:1
 engine/crates/gpu/kernels	src/prompt_fast.rs	fn:prompt_route	block:1
 engine/crates/gpu/kernels	src/prompt_move.rs	fn:prompt_permute	block:1
@@ -2337,6 +2339,7 @@ engine/crates/gpu/kernels	src/fp8_rows_small.rs	fn:project	block:1
 # orchestrator ruling 2026-11-06 09:57, FP8-FEW-b 04a78c41e: allowed pending receipts; conditions: the host provides one valid aligned GroupEntry and live contiguous immutable input, weight and scale owners in the right context with the rows, cols and block shape admitted by few_admitted, which equals the swept set; the device sweep on 04a78c41e prints PASS with its comparison count before any train; the paired measure for a train is short-chat ms a step and the FP8 row
 engine/crates/gpu/kernels	src/fp8_rows_few.rs	fn:fp8_rows_few	block:1	ruling 2026-11-06 09:57
 engine/crates/gpu/kernels	src/fp8_rows_multi.rs	fn:fp8_rows_multi	block:1
+engine/crates/gpu/kernels	src/fp8_rows_share.rs	fn:fp8_rows_share	block:1
 # ROWS-MX (branch lane-rows-mx, draft): `project` became `rows` (the entry wrapper: thread and block indices only) and `wave` (the body, also called by the merged row launch). A reviewer's read of the two rows is owed before a merge (UNSAFE-ROWS-rows-mx.md).
 engine/crates/gpu/kernels	src/mx_rows_small.rs	fn:rows	block:1
 engine/crates/gpu/kernels	src/mx_rows_small.rs	fn:wave	block:1
@@ -2353,6 +2356,7 @@ engine/crates/gpu/kernels	src/mhc_boundary_chain.rs	fn:resident_mhc_boundary_rms
 engine/crates/gpu/kernels	src/mhc_boundary_fused.rs	fn:resident_mhc_boundary_finish	block:1
 engine/crates/gpu/kernels	src/mx_rows_small.rs	fn:decode	block:1
 engine/crates/gpu/kernels	src/resident_causal_chain.rs	fn:resident_launch_causal_chain	block:1
+engine/crates/gpu/kernels	src/resident_causal_group.rs	fn:resident_launch_causal_group	block:1
 engine/crates/gpu/kernels	src/resident_norm_tail.rs	fn:resident_launch_norm_tail	block:1
 engine/crates/gpu/kernels	src/resident_pointwise.rs	fn:resident_launch_pointwise	block:1
 engine/crates/gpu/kernels	src/scores_rows_tile.rs	fn:scores_rows_tile_packed	block:1
@@ -2390,7 +2394,9 @@ engine/crates/gpu/kernels	src/pair_split.rs	fn:resident_nv_quarter_fold	block:1	
 engine/crates/gpu/kernels	src/pair_split.rs	fn:resident_tp_reduce_take	block:1	ruling 2026-11-11 11:05
 # runner ruling 2026-11-11 07:08 (night block STATE.md: the two new unsafe rows of ROW STAGE MX are allowed after a reviewer read, one commit, before merge): the N-row twin of the merged projection launch. One unsafe block each, with a SAFETY contract directly above the block.
 engine/crates/gpu	src/backend/mxfp8_projection.rs	impl:Backend::fn:resident_projection_batch_rows	block:1
+engine/crates/gpu	src/backend/mxfp8_projection.rs	impl:Backend::fn:resident_projection_fold_rows	block:1
 engine/crates/gpu/kernels	src/next_decode.rs	fn:resident_projection_bf16_rows	block:1
+engine/crates/gpu/kernels	src/next_decode.rs	fn:resident_projection_fold_rows	block:1
 # EXPERT GLUE (HOUR-PROMPT-L, 2026-11-11): the device version of the fold of the routed experts that rounds its rows as it reads them (the round launch inside; `dim` = FOLD_ROUNDS). One kernel body, one unsafe block, SAFETY contract above the block. Rule: night block STATE.md line 157, allowed after a reviewer read (UNSAFE-ROWS-hour-glue.md in the hour folder).
 engine/crates/gpu/kernels	src/causal_fast.rs	fn:expert_fold	block:1
 # POOL SCORES TILE (PROMPT-TC, 2026-11-11): the indexer pool scores of a prompt group in shared-memory tiles (Op::PoolScoresRows; the method and the stage layout of scores_rows_tile, every chain as prompt_ops::unit makes it). One kernel body, one unsafe block, SAFETY contract above the block: checked extents from Shape::lengths, 16-byte aligned queries and keys (the block traps otherwise), one writer a word, every word stored, shared reads and writes inside the block's own two-stage array, a uniform early return before the first barrier. Device proof: kernel-bench --pool-scores (every word = the generic unit of main's image, from poisoned outputs). Row asked of the chief of staff in PROMPT-TC.log 20:53; a reviewer's ALLOW is owed before merge.
@@ -2398,4 +2404,10 @@ engine/crates/gpu/kernels	src/pool_scores_tile.rs	fn:pool_scores_tile	block:1
 # STEP ROWS TILE (ROWS-MHC, 2026-11-12): the recurrent update of a prompt group (Op::StepRows, head size 128, 17 to 1,024 tokens) with each thread's column in registers and the tokens' vectors staged ahead by asynchronous copies; the fold lines of step_rows_block as straight-line code. One kernel body, one unsafe block, SAFETY contract above the block: checked extents from Shape::lengths, the grid of step_rows_block (the block traps on any other head size or block size), one writer a word, every output word stored. Device proof: kernel-bench --step-tile, every word equal to step_rows_block of main's image with both outputs poisoned (ROWS-MHC.log, UNSAFE-ROWS-step-rows.md).
 engine/crates/gpu/kernels	src/step_rows_tile.rs	fn:step_rows_tile	block:1
 # PROMPT-NVFP4 2026-11-13: the one-pass operands of a dense NVFP4 prompt group (nv_quantize_pack: FP32 rows straight to the packed codes and scale bytes; the arithmetic is the safe function expert_ops::quantize_packed). One kernel body, one unsafe block, SAFETY contract above the block: checked extents (rows * cols input words, rows scale words, rows * cols / 2 code bytes, rows * cols / 16 scale bytes), 4-byte aligned owners (the block traps otherwise), one writer a byte, every byte stored, inputs read only. Host checks: Backend::nv_rows_tc (its one unsafe block, already listed, now picks the operand launch) and Backend::nv_quantize_pack_bytes (safe launch boundary). Device proof: resident-decode-check nv-quantize-pack (every byte = the CPU twin = the two-step path of main). A reviewer's ALLOW is owed before merge.
-engine/crates/gpu/kernels	src/nv_quantize_pack.rs	fn:nv_quantize_pack	block:1
+# GATHERED ROWS 2026-11-15 (night2-book-1): the operands of a dense NVFP4 prompt group read through the expert order table (nv_quantize_gather: the pass of nv_quantize_pack with the input row taken from an index word, so the rows are not copied into expert order first; the arithmetic is the same safe function expert_ops::quantize_packed_with). Both entries now call ONE body (fn blocks, never inlined: a second instance of the quantizer changed the compiled code of six other kernels of the image, measured), so the file has ONE unsafe block, in that body, and the two entries are safe calls of it (the row fn:nv_quantize_pack block:1 above is replaced by fn:blocks block:1). SAFETY contract above the block: checked extents (source_rows * cols input words, rows index words or no index, rows scale words, rows * cols / 2 code bytes, rows * cols / 16 scale bytes), 4-byte aligned owners and the block size (the block traps otherwise), an input row at or beyond source_rows traps before any read of the input, one writer a byte, every byte stored, inputs read only; nv_quantize_pack gives it no index and rows input rows (its old contract), nv_quantize_gather an index, and a gathered launch without an index traps. Host checks: Backend::nv_rows_tc (its one unsafe block, already listed, now picks one of four operand launches). Device proof: kernel-bench --reading-probe OLD NEW quantize-gather (every operand byte of nv_quantize_gather and of the candidate's nv_quantize_pack = prompt_permute + nv_quantize_pack of the base image, 16 to 1,024 tokens, with a wrong table as the control that must fail). A reviewer's ALLOW is owed before merge.
+engine/crates/gpu/kernels	src/nv_quantize_pack.rs	fn:blocks	block:1
+# RECEIVE FIRST 2026-11-15 (night2-land, pull request 246), LEAD RULING 2026-11-15 22:14: ALLOW the four sites below (the receive of a host-staged prompt exchange is posted before the wait for this rank's GPU). Read by the lead at the train head 0f06af3389 and by the reviewer (SOUND, four of four, blocking none). Why sound: the receive range is overflow-checked and lies inside the caller's buffer; the gather compares address, bytes and rails with the post and aborts the ring on any difference; a second open post aborts; the buffer is new after a drain, or the host waited for the mark its last reader set; any error after the post aborts the ring. Proof on devices: the answers equal main with the path counted in use (golden check, four loads 48 of 48 lists, context 32,768 18 of 18 lists, the 8K read bracket). The three block rows are the first new unsafe blocks outside the GPU crate since the freeze: they pass by the gate rule of the same commit (a block outside the GPU crate needs its own ruling line on its row and a SAFETY contract directly above it). The same ruling confirms the three FOLD ROWS rows of pull request 249 (plain_warp.rs fn:rows_fold_rows, next_decode.rs and mxfp8_projection.rs fn:resident_projection_fold_rows): read by the lead, SOUND by the reviewer. Owed, not blocking: a device fault run of the early post; a guard against a ring command between the post and its gather; device refusals of wrong-bound fold-rows launches.
+engine/crates/tp	src/resident_weights.rs	mod:device::impl:Weights::fn:receive_first	block:1	ruling 2026-11-15 22:14
+engine/crates/tp	src/transport.rs	impl:Ring::fn:post_rank_blocks_receive	block:1	ruling 2026-11-15 22:14
+engine/crates/tp	src/transport.rs	impl:Ring::fn:post_rank_blocks_receive	fn:1	ruling 2026-11-15 22:14
+engine/crates/tp	tests/prompt_exchange.rs	fn:a_ring_without_rdma_posts_no_early_receive_and_gathers_as_before	block:1	ruling 2026-11-15 22:14

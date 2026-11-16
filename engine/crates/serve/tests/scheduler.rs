@@ -15,6 +15,7 @@ use std::{
 // A host pause of this length can still fire the guard; it is not a speed assertion.
 const HANG_GUARD: Duration = Duration::from_secs(600);
 include!("support/scheduler_engine.rs");
+include!("support/draft_admission.rs");
 // Typed hybrid scheduling contract, without GPU arithmetic or per-token sleeps.
 type PrefillTrace = Arc<Mutex<Vec<Vec<usize>>>>;
 /// The model, its prompt pass trace and the start of its last loop turn.

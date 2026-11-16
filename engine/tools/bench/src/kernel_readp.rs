@@ -155,6 +155,8 @@ pub(crate) fn run(base_path: &str, candidate_path: &str, mode: &str) -> Result<(
         }
         return Ok(());
     }
+    if mode == "group-fold" { return group_fold(&mut g, ma, mb, started); }
+    if mode == "quantize-gather" { return quantize_gather(&mut g, ma, mb, started); }
     if let Some(which) = mode.strip_prefix("list-") { MODULE_A.with(|c| c.set(ma)); return list_bytes(&mut g, base, mb, which, started); }
     if let Some(which) = mode.strip_prefix("fast-bytes-") { return fast_bytes(&mut g, base, mb, which, started); }
     if mode == "mhc-bytes" || mode == "mhc-time" || mode=="mhc-host-oracle" {
@@ -162,6 +164,7 @@ pub(crate) fn run(base_path: &str, candidate_path: &str, mode: &str) -> Result<(
         return if mode != "mhc-time" { mhc_bytes(&mut g, project, mb, started,mode=="mhc-host-oracle") } else { mhc_time(&mut g, project, mb) };
     }
     if mode == "fast-time" { return fast_time(&mut g, base, mb); }
+    if mode == "mhc-tile" { return mhc_tile(&mut g, ma, mb, started); }
     Err(format!("READP unknown mode {mode}"))
 }
 
@@ -426,6 +429,73 @@ fn mhc_time(g: &mut Gpu, base: H, mb: H) -> Result<()> {
     }
     Ok(())
 }
+/// The token-tiled boundary of the baseline image against the candidate image's (the same entry names in both): the bytes of the
+/// residual, normalized and coefficient planes at the model's shape (9 to 1,024 rows) and at small shapes around it, a
+/// wrong-on-purpose control (one weight word negated: the coefficient plane must differ and the other two must not), then the time
+/// of each launch of a boundary, alternating.
+fn mhc_tile(g: &mut Gpu, ma: H, mb: H, started: Instant) -> Result<()> {
+    let tile = [g.function(ma, "mhc_project_tile")?, g.function(mb, "mhc_project_tile")?];
+    let resid = [g.function(ma, "mhc_residual_rows")?, g.function(mb, "mhc_residual_rows")?];
+    let finish = [g.function(ma, "mhc_boundary_finish")?, g.function(mb, "mhc_boundary_finish")?];
+    let mk = |g: &mut Gpu, n: usize| -> Result<Buffer> { let b = Buffer::new(g, &vec![f32::NAN; n])?; b.poison(g)?; Ok(b) };
+    let run = |g: &Gpu, arm: usize, x: &Boundary, blocks: u32| -> Result<()> {
+        let mut y = *x; let (rows, wide) = (x.shape.rows as usize, (x.shape.streams * x.shape.hidden) as usize);
+        g.launch(resid[arm], [(rows * wide).div_ceil(256) as u32, 1, 1], 256, 0, &mut [ptr(&mut y)])?;
+        g.launch(tile[arm], [blocks, 1, 1], 256, 0, &mut [ptr(&mut y)])
+    };
+    let (mut cases, mut total, mut controls) = (0u64, 0u64, 0u64);
+    let shapes: [(usize, usize, usize); 20] = [(9, 4, 4096), (16, 4, 4096), (17, 4, 4096), (255, 4, 4096), (256, 4, 4096), (257, 4, 4096), (1000, 4, 4096), (1024, 4, 4096),
+        (33, 1, 4096), (33, 2, 4096), (33, 3, 4096), (65, 4, 1), (65, 4, 2), (65, 4, 7), (65, 2, 2), (65, 1, 4), (65, 4, 113), (65, 4, 224), (129, 4, 1000), (40, 3, 1028)];
+    let kinds: [(u32, u32); 6] = [(0, 0), (5, 5), (2, 2), (4, 0), (6, 8), (1, 1)];
+    for &(rows, streams, hidden) in &shapes {
+        let (wide, count) = (streams * hidden, streams * (streams + 2));
+        for previous in [false, true] { for (ki, &(ik, wk)) in kinds.iter().enumerate() {
+            if rows * wide > 800_000 && ki > 1 { continue; }
+            let f = mfixture(g, rows, streams, hidden, previous, ik, wk, 7700 + cases)?; let blocks = rows.div_ceil(8) as u32;
+            let (ra, na, ca) = (mk(g, rows * wide)?, mk(g, rows * wide)?, mk(g, rows * count)?);
+            let x = mboundary(&f, &ra, &na, &ca); run(g, 0, &x, blocks)?; g.sync()?;
+            let want = [ra.read(g)?, na.read(g)?, ca.read(g)?];
+            for &grid in &[blocks, blocks + 5] {
+                let (rb, nb, cb) = (mk(g, rows * wide)?, mk(g, rows * wide)?, mk(g, rows * count)?);
+                let y = mboundary(&f, &rb, &nb, &cb); run(g, 1, &y, grid)?; g.sync()?;
+                for (name, w, got) in [("residual", &want[0], rb.read(g)?), ("normalized", &want[1], nb.read(g)?), ("coefficients", &want[2], cb.read(g)?)] {
+                    if *w != got { return Err(format!("READP MHC TILE BYTE FAIL rows={rows} n={streams} h={hidden} previous={previous} kinds={ik},{wk} plane={name} blocks={grid} first_diff_word={:?}", w.iter().zip(&got).position(|(p, q)| p != q).map(|i| i.saturating_sub(16) / 4))); }
+                    if got[..16] != GUARD || got[got.len() - 16..] != GUARD { return Err(format!("READP MHC TILE guard changed rows={rows} n={streams} h={hidden} plane={name}")); }
+                    total += 1;
+                }
+            }
+            cases += 1;
+            // Wrong on purpose, once a shape: the last weight word negated. The comparison must see it in the coefficients only.
+            if ki == 0 && previous {
+                let mut words = g.read(f.weights.address, count * wide * 4)?; let last = words.len() - 1; words[last] ^= 0x80;
+                let wrong = Buffer::new(g, &words.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect::<Vec<_>>())?;
+                let (rb, nb, cb) = (mk(g, rows * wide)?, mk(g, rows * wide)?, mk(g, rows * count)?);
+                let mut y = mboundary(&f, &rb, &nb, &cb); y.weights = wrong.address; run(g, 1, &y, blocks)?; g.sync()?;
+                let differ = want[2].chunks_exact(4).zip(cb.read(g)?.chunks_exact(4)).filter(|(p, q)| p != q).count();
+                if want[0] != rb.read(g)? || want[1] != nb.read(g)? || differ == 0 { return Err(format!("READP MHC TILE CONTROL NOT SEEN rows={rows} n={streams} h={hidden} coefficient_words_differ={differ}")); }
+                println!("READP MHC TILE CONTROL SEEN rows={rows} n={streams} h={hidden} coefficient_words_differ={differ} of {}", rows * count); controls += 1;
+            }
+            g.clear()?;
+        } }
+        println!("READP mhc tile rows={rows} n={streams} h={hidden} ok cases={cases} comparisons={total} elapsed_s={:.1}", started.elapsed().as_secs_f64());
+    }
+    println!("READP MHC TILE BYTES PASS cases={cases} comparisons={total} controls={controls} digest={} elapsed_s={:.1}", sha256::digest(format!("mhctile{cases}{total}{controls}").as_bytes()), started.elapsed().as_secs_f64());
+    for &rows in &[1024usize, 256, 64] {
+        let f = mfixture(g, rows, 4, 4096, true, 0, 0, 91)?; let s = f.shape; let (wide, count, hidden) = (16384usize, 24usize, 4096usize);
+        let (r, m, c) = (Buffer::new(g, &vec![0.0; rows * wide])?, Buffer::new(g, &vec![0.0; rows * wide])?, Buffer::new(g, &vec![0.0; rows * count])?);
+        let (collapsed, partials, output) = (Buffer::new(g, &vec![0.0; rows * hidden])?, Buffer::new(g, &vec![0.0; rows * hidden.div_ceil(128)])?, Buffer::new(g, &vec![0.0; rows * hidden])?);
+        let norm = Buffer::new(g, &pattern(0, hidden, 17))?;
+        let mut b = mboundary(&f, &r, &m, &c); b.collapsed = collapsed.address; b.norm_partials = partials.address; b.output = output.address; b.norm_weight = norm.address; b.norm_bf16 = 1;
+        let blocks = rows.div_ceil(8) as u32; let cells = [(rows * wide).div_ceil(256) as u32, 1, 1];
+        { let mut x = b; g.launch(resid[0], cells, 256, 0, &mut [ptr(&mut x)])?; g.sync()?; }
+        pair(g, &format!("mhc tile alone rows={rows}"), &mut |g, arm| { let mut x = b; g.launch(tile[arm], [blocks, 1, 1], 256, 0, &mut [ptr(&mut x)]) })?;
+        pair(g, &format!("mhc residual alone rows={rows}"), &mut |g, arm| { let mut x = b; g.launch(resid[arm], cells, 256, 0, &mut [ptr(&mut x)]) })?;
+        pair(g, &format!("mhc residual+tile rows={rows}"), &mut |g, arm| run(g, arm, &b, blocks))?;
+        pair(g, &format!("mhc boundary (residual, tile, finish) rows={rows}"), &mut |g, arm| { run(g, arm, &b, blocks)?; let mut x = b; g.launch(finish[arm], [s.rows, 1, 1], mhc_threads(s), 0, &mut [ptr(&mut x)]) })?;
+        g.clear()?;
+    }
+    Ok(())
+}
 
 // The sweeps of the standing rule: they iterate `swept.rs` and nothing else, so the host test that compares the predicates of
 // prompt_admission with those lists is a test of what these modes run. Every token count 1..=256 of the model's shape.
@@ -442,6 +512,24 @@ fn list_bytes(g: &mut Gpu, base: H, mb: H, which: &str, started: Instant) -> Res
             }
             for (tokens, d, parts) in swept::place_cases() {
                 cases += 1; total += place_case(g, base, cl, &Place { tokens, k: swept::ROUTED, experts: 288, d, parts }, 9000 + cases * 31, &[(1u32 << 20, 1u32 << 20), (2, 3)])?; g.clear()?; tick(cases, total, "place");
+            }
+        }
+        // GROUP FOLD: only the tuples the group fold added to the two lists (the tile place of ONE part; the fold of one rank's
+        // width), so their proof is one short run. "move" and "route-fold" above still hold every tuple.
+        "place-one" => {
+            let cl = g.function(mb, "prompt_place")?;
+            for (tokens, d, parts) in swept::place_cases().into_iter().filter(|case| case.2 == 1) {
+                cases += 1; total += place_case(g, base, cl, &Place { tokens, k: swept::ROUTED, experts: 288, d, parts }, 9000 + cases * 31, &[(1u32 << 20, 1u32 << 20), (2, 3)])?; g.clear()?; tick(cases, total, "place");
+            }
+        }
+        "fold-local" => {
+            let cf = g.function(mb, "prompt_fold")?;
+            for (m, r, k, t) in swept::fold_cases().into_iter().filter(|case| case.2 == swept::FOLD_LOCAL) {
+                let inner = Inner { op: EXPERT_FOLD, heads: 0, dim: 0, taps: t as u32, rows: r as u32, cols: k as u32, epsilon: 0.0, bound: 0.0 };
+                for &(idk, ik, wk) in &[(0u32, 0u32, 0u32), (1, 5, 5), (0, 4, 0)] {
+                    let fx = wfixture(g, wshape(m, inner), ik, wk, idk, 900 + cases)?;
+                    cases += 1; total += fast_compare(g, base, cf, &fx, &[fast_blocks(fx.shape), 2], &format!("list fold m={m} ids={idk} kinds={ik},{wk}"))?; g.clear()?; tick(cases, total, "fold");
+                }
             }
         }
         "prepare" => {
@@ -495,7 +583,206 @@ fn list_bytes(g: &mut Gpu, base: H, mb: H, which: &str, started: Instant) -> Res
     println!("READP LIST BYTES PASS {which} cases={cases} comparisons={total} digest={} elapsed_s={:.1}", sha256::digest(format!("{which}{cases}{total}").as_bytes()), started.elapsed().as_secs_f64());
     Ok(())
 }
+/// Finished BF16 words (the low 16 bits are zero), finite, both signs, with exact and negative zeros.
+fn finished(n: usize, seed: u64) -> Vec<f32> {
+    let mut r = Rng(seed | 1);
+    (0..n).map(|_| match r.next() % 64 { 0 => 0.0, 1 => -0.0, _ => f32::from_bits(((r.next() % 8001) as f32 / 1000.0 - 4.0).to_bits() & 0xffff_0000) }).collect()
+}
+/// The wrapped fold of `m` tokens in runs of at most `GROUP_MAX` tokens, as `prompt_chunks::runs` cuts a group: each run reads and
+/// writes the words of its own tokens.
+#[allow(clippy::too_many_arguments)]
+fn fold_runs(g: &Gpu, f: H, ids: u64, weights: u64, rows: u64, shared: u64, out: u64, m: usize, k: usize, width: usize) -> Result<()> {
+    let at = |words: usize| (words * 4) as u64; let mut first = 0;
+    while first < m {
+        let n = (m - first).min(swept::GROUP_MAX);
+        let shape = wshape(n, Inner { op: EXPERT_FOLD, heads: 0, dim: 0, taps: 1, rows: k as u32, cols: width as u32, epsilon: 0.0, bound: 0.0 });
+        let mut a = args(shape, [ids + at(first * k), weights + at(first * k), rows + at(first * k * width), shared + at(first * width), 4], [n * k, n * k, n * k * width, n * width, 0], out + at(first * width), n * width, 1);
+        g.launch(f, [fast_blocks(shape), 1, 1], 128, 0, &mut [ptr(&mut a)])?; first += n;
+    }
+    Ok(())
+}
+/// GROUP FOLD: the down rows of a routed layer of a prompt group at the model's shape on a pair (8 picks of 288 experts, 2,048 of
+/// the 4,096 rows a rank), in main's order and in the cut's order, on one device, at 16, 64, 256, 512 and 1,024 tokens.
+/// Main (the BASE image): both ranks' blocks lie in the exchange, the tile place of two parts sets every (token, pick) row
+/// whole, the fold folds the whole rows with the gathered shared row. The cut (the candidate image): each rank places its own
+/// block (the tile place with ONE part) and folds its own rows with its own rows of the shared row; the folded rows of the two
+/// ranks lie in the exchange and RankRows sets a token's rows side by side. The output bytes must be equal. Wrong on purpose,
+/// twice: a rank that folds the other rank's rows of the shared row, and a rank that places the other rank's block, must NOT
+/// give those bytes. Then the launches of one rank are timed, main's against the cut's. What this does not run: the link.
+fn group_fold(g: &mut Gpu, ma: H, mb: H, started: Instant) -> Result<()> {
+    // Op::RankRows: the 27th operation of prompt_ops::Op (after ScoresMapPacked = 20 and the five Absorb operations 21 to 25).
+    const RANK_ROWS: u32 = 26;
+    let (k, d, parts) = (swept::ROUTED, swept::FOLD_LOCAL, 2usize); let cols = d * parts;
+    let (old_place, old_fold) = (g.function(ma, "prompt_place")?, g.function(ma, "prompt_fold")?);
+    let (place, fold, permute) = (g.function(mb, "prompt_place")?, g.function(mb, "prompt_fold")?, g.function(mb, "prompt_permute")?);
+    let at = |words: usize| (words * 4) as u64; let mut cases = 0u64;
+    for (case, &m) in [16usize, 64, 256, 512, 1024].iter().enumerate() {
+        let seed = 4100 + case as u64 * 97;
+        let c = Place { tokens: m, k, experts: 288, d, parts }; let (places, rows) = grouping(&c, seed); let slots = d * rows;
+        // A token's picks in slot order: distinct experts, the IDs the fold orders its chain by.
+        let table = place_table(&places);
+        let mut owner = vec![0.0f32; rows]; { let mut expert = 0usize; let mut left = 0usize; let mut starts = vec![];
+            for row in 0..rows { starts.push((places[3 * row] as usize, places[3 * row + 1] as usize)); } starts.sort_unstable(); starts.dedup();
+            for slot in 0..rows { while left == 0 { left = starts[expert].1; expert += 1; } owner[table[3 * rows + slot] as usize] = expert as f32; left -= 1; } }
+        for token in 0..m { let row = &owner[token * k..(token + 1) * k]; if (0..k).any(|pick| row[..pick].contains(&row[pick])) { return Err(format!("READP GROUP FOLD fixture m={m}: a token names an expert twice")); } }
+        let exchange = Buffer::new(g, &finished(slots * parts, seed * 5 + 1))?; let tile_table = Buffer::new(g, &table)?;
+        let ids = Buffer::new(g, &owner)?; let weights = Buffer::new(g, &finished(rows, seed * 5 + 2).iter().map(|v| v / 8.0).collect::<Vec<_>>())?;
+        let whole_shared = finished(m * cols, seed * 5 + 3); let shared = Buffer::new(g, &whole_shared)?;
+        let mut own_shared = vec![];
+        for rank in 0..parts { own_shared.push(Buffer::new(g, &(0..m).flat_map(|token| whole_shared[token * cols + rank * d..token * cols + (rank + 1) * d].iter().copied()).collect::<Vec<_>>())?); }
+        let shape = |taps: usize| PShape { op: PLACE_TILE, tokens: 1, heads: 0, dim: d as u32, taps: taps as u32, rows: rows as u32, cols: (d * taps) as u32, first: 0, slots: slots as u32, inner: empty() };
+        // Main's order, the BASE image.
+        let whole = Buffer::new(g, &vec![f32::NAN; rows * cols])?; whole.poison(g)?;
+        let want_b = Buffer::new(g, &vec![f32::NAN; m * cols])?; want_b.poison(g)?;
+        let main = |g: &Gpu, out: &Buffer| -> Result<()> {
+            let mut a = args(shape(parts), [exchange.address, tile_table.address, 4, 4, 4], [slots * parts, 4 * rows, 0, 0, 0], whole.address, rows * cols, 1);
+            g.launch(old_place, [rows.div_ceil(32) as u32, (cols / 32) as u32, 1], 256, 0, &mut [ptr(&mut a)])?;
+            fold_runs(g, old_fold, ids.address, weights.address, whole.address, shared.address, out.address, m, k, cols)
+        };
+        main(g, &want_b)?; g.sync()?; let want = want_b.read(g)?;
+        // The cut's order, the candidate image: `blocks[rank]` and `planes[rank]` name the block and the shared rows a rank reads.
+        let own = [Buffer::new(g, &vec![f32::NAN; rows * d])?, Buffer::new(g, &vec![f32::NAN; rows * d])?];
+        let folded = Buffer::new(g, &vec![f32::NAN; parts * m * d])?;
+        let one = |g: &Gpu, rank: usize, block: usize, plane: usize| -> Result<()> {
+            let mut a = args(shape(1), [exchange.address + at(block * slots), tile_table.address, 4, 4, 4], [slots, 4 * rows, 0, 0, 0], own[rank].address, rows * d, 1);
+            g.launch(place, [rows.div_ceil(32) as u32, (d / 32) as u32, 1], 256, 0, &mut [ptr(&mut a)])?;
+            fold_runs(g, fold, ids.address, weights.address, own[rank].address, own_shared[plane].address, folded.address + at(rank * m * d), m, k, d)
+        };
+        let gather = |g: &Gpu, out: &Buffer| -> Result<()> {
+            let s = PShape { op: RANK_ROWS, tokens: m as u32, heads: 0, dim: 0, taps: 0, rows: parts as u32, cols: d as u32, first: 0, slots: 0, inner: empty() };
+            let mut a = args(s, [folded.address, 4, 4, 4, 4], [parts * m * d, 0, 0, 0, 0], out.address, parts * m * d, 1);
+            g.launch(permute, [(parts * m) as u32, 1, 1], 256, 0, &mut [ptr(&mut a)])
+        };
+        let cut = |g: &Gpu, blocks: [usize; 2], planes: [usize; 2]| -> Result<Vec<u8>> {
+            for b in &own { b.poison(g)?; } folded.poison(g)?;
+            let out = &want_b; out.poison(g)?;
+            for rank in 0..parts { one(g, rank, blocks[rank], planes[rank])?; }
+            gather(g, out)?; g.sync()?; out.read(g)
+        };
+        let got = cut(g, [0, 1], [0, 1])?;
+        if got != want { return Err(format!("READP GROUP FOLD BYTE FAIL m={m} first_diff_word={:?}", want.iter().zip(&got).position(|(p, q)| p != q).map(|i| i.saturating_sub(16) / 4))); }
+        if got[..16] != GUARD || got[got.len() - 16..] != GUARD { return Err(format!("READP GROUP FOLD guard changed m={m}")); }
+        if cut(g, [0, 1], [1, 0])? == want { return Err(format!("READP GROUP FOLD CONTROL FAIL m={m}: the other rank's shared rows gave the same bytes")); }
+        if cut(g, [1, 0], [0, 1])? == want { return Err(format!("READP GROUP FOLD CONTROL FAIL m={m}: the other rank's block gave the same bytes")); }
+        if cut(g, [0, 1], [0, 1])? != want { return Err(format!("READP GROUP FOLD BYTE FAIL m={m}: the second run differs")); }
+        cases += 1;
+        println!("READP GROUP FOLD m={m} rows={rows} same_bytes=true control_shared=differs control_block=differs sha256={} elapsed_s={:.1}", sha256::digest(&want), started.elapsed().as_secs_f64());
+        // One rank's launches: main places both ranks' rows and folds whole rows; the cut places and folds its own rows, then sets the folded rows side by side.
+        pair(g, &format!("group-fold m={m} one rank: place+fold (main) against place+fold+rank rows (cut)"), &mut |g, arm| {
+            if arm == 0 { main(g, &want_b) } else { one(g, 0, 0, 0)?; gather(g, &want_b) } })?;
+        g.clear()?;
+    }
+    println!("READP GROUP FOLD BYTES PASS cases={cases} elapsed_s={:.1}", started.elapsed().as_secs_f64());
+    Ok(())
+}
 /// Alternating timing of the two arms (0 baseline, 1 candidate): median of nine batches of eight launches.
+/// Mirror of gpu/src/tc_abi.rs `NvQuantizePack` and `NvQuantizeGather` (repr(C)).
+#[repr(C)] #[derive(Clone, Copy)]
+struct QPack { input: u64, codes: u64, scales: u64, activations: u64, rows: u32, cols: u32 }
+#[repr(C)] #[derive(Clone, Copy)]
+struct QGather { input: u64, codes: u64, scales: u64, activations: u64, index: u64, rows: u32, cols: u32, source_rows: u32, pad: u32 }
+/// GATHERED ROWS: the operands of a prompt group's gate rows, old against new, byte for byte.
+/// OLD arm (the baseline image, what the host did): `prompt_permute` copies every token's row into expert order and
+/// `nv_quantize_pack` reads the copy. NEW arm (the candidate image): `nv_quantize_gather` reads each row where it lies,
+/// through the same table. The old arm writes into zero-filled operand arrays and the new arm into arrays filled with
+/// 0xff, so a byte the new kernel does not store differs. The guards around every array must be whole.
+/// The candidate image's `nv_quantize_pack` is a changed entry too (both entries call one body there): it runs on the old
+/// arm's copy and must give the old bytes.
+/// CONTROL, wrong on purpose: the new kernel with one table word that names another row must NOT give the old bytes;
+/// a control that passes makes the proof void.
+fn quantize_gather(g: &mut Gpu, ma: H, mb: H, started: Instant) -> Result<()> {
+    let (old_permute, old_pack, new, new_pack) = (g.function(ma, "prompt_permute")?, g.function(ma, "nv_quantize_pack")?, g.function(mb, "nv_quantize_gather")?, g.function(mb, "nv_quantize_pack")?);
+    let (mut cases, mut total) = (0u64, 0u64);
+    // (tokens, picks, experts, cols, raw bit patterns): the model's group is 8 picks of 256 experts and 4,096 columns.
+    for &(tokens, k, experts, cols, raw) in &[(1usize, 1usize, 1usize, 16usize, false), (3, 2, 4, 48, false), (16, 8, 256, 4096, false), (64, 8, 256, 4096, false), (64, 8, 256, 4096, true),
+        (256, 8, 256, 4096, false), (512, 8, 256, 4096, false), (1024, 8, 256, 4096, false), (1024, 8, 256, 2048, false), (1024, 8, 256, 4096, true)] {
+        cases += 1; let seed = cases * 131;
+        let (places, rows) = grouping(&Place { tokens, k, experts, d: 32, parts: 1 }, seed);
+        // The gate table of rows.rs: the row at slot `earlier + position` reads the row of its token.
+        let mut order = vec![0.0f32; rows];
+        for row in 0..rows { order[places[3 * row] as usize + places[3 * row + 2] as usize] = (row / k) as f32; }
+        let mut r = Rng(seed | 1);
+        // Activation rows: plain values with whole blocks of zeros (the zero block scale), or every bit pattern.
+        let values: Vec<f32> = if raw { bits(tokens * cols, seed) } else { (0..tokens * cols).map(|i| if (i / 16) % 37 == 5 { 0.0 } else { ((r.next() % (1 << 20)) as f32 / 65536.0 - 8.0) * if i % 3 == 0 { 0.01 } else { 1.0 } }).collect() };
+        // One input scale a slot: the slots of one expert share it, as the parts of a group do.
+        let scales_in: Vec<f32> = (0..rows).map(|slot| 0.004 + ((order[slot] as usize * 7 + slot / 3) % 11) as f32 * 0.0031).collect();
+        let source = Buffer::new(g, &values)?; let table = Buffer::new(g, &order)?; let acts = Buffer::new(g, &scales_in)?;
+        let (code_words, scale_words) = (rows * cols / 8, (rows * cols / 16).div_ceil(4));
+        let blocks = (rows * cols / 16).div_ceil(128) as u32;
+        // OLD: copy, then quantize and pack the copy.
+        let copy = Buffer::new(g, &vec![0.0; rows * cols])?;
+        let shape = PShape { op: PERMUTE, tokens: 1, heads: 0, dim: 0, taps: 0, rows: rows as u32, cols: cols as u32, first: tokens as u32, slots: 0, inner: empty() };
+        let mut move_args = args(shape, [source.address, table.address, 4, 4, 4], [tokens * cols, rows, 0, 0, 0], copy.address, rows * cols, 1);
+        let (old_codes, old_scales) = (Buffer::new(g, &vec![0.0; code_words])?, Buffer::new(g, &vec![0.0; scale_words])?);
+        let mut pack = QPack { input: copy.address, codes: old_codes.address, scales: old_scales.address, activations: acts.address, rows: rows as u32, cols: cols as u32 };
+        if cols % 4 == 0 { g.launch(old_permute, [rows as u32, 1, 1], 256, 0, &mut [ptr(&mut move_args)])?; } else { return Err("READP QGATHER case columns must be a multiple of 4".into()); }
+        g.launch(old_pack, [blocks, 1, 1], 128, 0, &mut [ptr(&mut pack)])?; g.sync()?;
+        let (want_codes, want_scales) = (old_codes.read(g)?, old_scales.read(g)?);
+        // NEW: one launch on the rows where they lie, into poisoned arrays.
+        let (new_codes, new_scales) = (Buffer::new(g, &vec![0.0; code_words])?, Buffer::new(g, &vec![0.0; scale_words])?);
+        let gather = |g: &Gpu, index: u64| -> Result<(Vec<u8>, Vec<u8>)> {
+            new_codes.poison(g)?; new_scales.poison(g)?;
+            let mut a = QGather { input: source.address, codes: new_codes.address, scales: new_scales.address, activations: acts.address, index, rows: rows as u32, cols: cols as u32, source_rows: tokens as u32, pad: 0 };
+            g.launch(new, [blocks, 1, 1], 128, 0, &mut [ptr(&mut a)])?; g.sync()?;
+            Ok((new_codes.read(g)?, new_scales.read(g)?))
+        };
+        // The candidate's `nv_quantize_pack` on the old arm's copy: the changed entry against the base's, into poisoned arrays.
+        new_codes.poison(g)?; new_scales.poison(g)?;
+        let mut repack = QPack { codes: new_codes.address, scales: new_scales.address, ..pack };
+        g.launch(new_pack, [blocks, 1, 1], 128, 0, &mut [ptr(&mut repack)])?; g.sync()?;
+        let (pack_codes, pack_scales) = (new_codes.read(g)?, new_scales.read(g)?);
+        let (got_codes, got_scales) = gather(g, table.address)?;
+        // The scale array holds whole words: the bytes past rows * cols / 16 keep each arm's fill, so compare the stored bytes.
+        let stored = 16 + rows * cols / 16;
+        if pack_codes != want_codes || pack_scales[..stored] != want_scales[..stored] {
+            return Err(format!("READP QPACK BYTE FAIL (the candidate's nv_quantize_pack against the base's) tokens={tokens} k={k} cols={cols} raw={raw} first_code_byte={:?}", want_codes.iter().zip(&pack_codes).position(|(p, q)| p != q).map(|i| i.saturating_sub(16))));
+        }
+        if got_codes != want_codes || got_scales[..stored] != want_scales[..stored] {
+            return Err(format!("READP QGATHER BYTE FAIL tokens={tokens} k={k} cols={cols} raw={raw} first_code_byte={:?} first_scale_byte={:?}",
+                want_codes.iter().zip(&got_codes).position(|(p, q)| p != q).map(|i| i.saturating_sub(16)), want_scales[..stored].iter().zip(&got_scales[..stored]).position(|(p, q)| p != q).map(|i| i.saturating_sub(16))));
+        }
+        for (name, bytes) in [("codes", &got_codes), ("scales", &got_scales), ("old codes", &want_codes), ("old scales", &want_scales)] {
+            if bytes[..16] != GUARD || bytes[bytes.len() - 16..] != GUARD { return Err(format!("READP QGATHER guard changed array={name} tokens={tokens} cols={cols}")); }
+        }
+        // The inputs are read only: the source rows, the table and the scales keep their bytes and their guards.
+        if source.read(g)?[16..16 + source.bytes] != le(&values) || table.read(g)?[16..16 + table.bytes] != le(&order) || acts.read(g)?[16..16 + acts.bytes] != le(&scales_in) { return Err(format!("READP QGATHER an input changed tokens={tokens} cols={cols}")); }
+        total += 4;
+        // CONTROL: one table word names another row with other words. The bytes must differ from the old arm's.
+        let mut control = "skipped (one source row)".to_string();
+        if tokens > 1 {
+            let slot = rows / 2; let other = (order[slot] as usize + 1) % tokens;
+            if values[other * cols..(other + 1) * cols].iter().zip(&values[order[slot] as usize * cols..(order[slot] as usize + 1) * cols]).all(|(p, q)| p.to_bits() == q.to_bits()) { return Err("READP QGATHER control rows are equal: the control cannot fail".into()); }
+            let mut wrong = order.clone(); wrong[slot] = other as f32; let wrong_table = Buffer::new(g, &wrong)?;
+            let (bad_codes, bad_scales) = gather(g, wrong_table.address)?;
+            if bad_codes == want_codes && bad_scales[..stored] == want_scales[..stored] { return Err(format!("READP QGATHER CONTROL DID NOT FAIL tokens={tokens} cols={cols}: a wrong table gave the old bytes, the proof is void")); }
+            let at = want_codes.iter().zip(&bad_codes).position(|(p, q)| p != q).map(|i| i.saturating_sub(16));
+            control = format!("fails as it must (slot {slot} reads row {other}; first different code byte {at:?}, its row {:?})", at.map(|i| i / (cols / 2)));
+        }
+        println!("READP QGATHER tokens={tokens} rows={rows} cols={cols} raw={raw} ok: {} code bytes and {} scale bytes equal, from nv_quantize_gather and from the candidate's nv_quantize_pack; control {control}; elapsed_s={:.1}", rows * cols / 2, rows * cols / 16, started.elapsed().as_secs_f64());
+        // Time of the model's shapes: the copy and the quantize of the copy against the one gathered launch.
+        if !raw && cols >= 2048 {
+            let label = format!("gate operands tokens={tokens} rows={rows} cols={cols} (old = prompt_permute + nv_quantize_pack, new = nv_quantize_gather)");
+            pair(g, &label, &mut |g, arm| if arm == 0 {
+                let (mut m, mut q) = (move_args, pack); g.launch(old_permute, [rows as u32, 1, 1], 256, 0, &mut [ptr(&mut m)])?; g.launch(old_pack, [blocks, 1, 1], 128, 0, &mut [ptr(&mut q)])
+            } else {
+                let mut a = QGather { input: source.address, codes: new_codes.address, scales: new_scales.address, activations: acts.address, index: table.address, rows: rows as u32, cols: cols as u32, source_rows: tokens as u32, pad: 0 };
+                g.launch(new, [blocks, 1, 1], 128, 0, &mut [ptr(&mut a)])
+            })?;
+            // The changed entry alone: the base's `nv_quantize_pack` against the candidate's, both on the copy (the down rows take it).
+            let label = format!("nv_quantize_pack tokens={tokens} rows={rows} cols={cols} (old = the base's entry, new = the candidate's entry, both on the copy)");
+            pair(g, &label, &mut |g, arm| { let mut q = pack; g.launch(if arm == 0 { old_pack } else { new_pack }, [blocks, 1, 1], 128, 0, &mut [ptr(&mut q)]) })?;
+            // The quantize alone, old kernel on the copy against the new kernel through the table.
+            let label = format!("quantize alone tokens={tokens} rows={rows} cols={cols} (old = nv_quantize_pack on the copy, new = nv_quantize_gather)");
+            pair(g, &label, &mut |g, arm| if arm == 0 { let mut q = pack; g.launch(old_pack, [blocks, 1, 1], 128, 0, &mut [ptr(&mut q)]) } else {
+                let mut a = QGather { input: source.address, codes: new_codes.address, scales: new_scales.address, activations: acts.address, index: table.address, rows: rows as u32, cols: cols as u32, source_rows: tokens as u32, pad: 0 };
+                g.launch(new, [blocks, 1, 1], 128, 0, &mut [ptr(&mut a)])
+            })?;
+        }
+        g.clear()?;
+    }
+    println!("READP QGATHER BYTES PASS cases={cases} comparisons={total} elapsed_s={:.1}", started.elapsed().as_secs_f64());
+    Ok(())
+}
 fn pair(g: &Gpu, label: &str, run: &mut dyn FnMut(&Gpu, usize) -> Result<()>) -> Result<()> {
     let mut t = [vec![], vec![]];
     for repeat in 0..9 { for k in 0..2 { let arm = (k + repeat) % 2; run(g, arm)?; g.sync()?; let n = 8usize; let t0 = Instant::now(); for _ in 0..n { run(g, arm)?; } g.sync()?; t[arm].push(t0.elapsed().as_secs_f64() * 1e6 / n as f64); } }

@@ -77,6 +77,9 @@ impl SessionChargePlan {
         let vocab=usize::try_from(description.vocab).ok().and_then(|v|v.checked_mul(16)).ok_or("vocabulary charge overflow")?;
         Ok(Self {state:StateChargePlan::new(description,capacity)?,expanded_row,expanded_layouts:None,tail_row,vocab})
     }
+    /// For a server whose latent layers all took the absorbed form (`bounded_decoder::LatentRows::Absorbed`): no request
+    /// of it holds an expanded row, so none is charged from here on.
+    pub fn drop_expanded_rows(&mut self) {self.expanded_row=0;self.expanded_layouts=Some(Vec::new());}
     pub fn state_bytes(&self,tokens:usize)->Result<usize> {self.state.bytes(tokens)}
     pub fn expanded_bytes(&self,tokens:usize)->usize {
         let rows=tokens.min(RESERVED_ROWS);
