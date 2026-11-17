@@ -10,7 +10,7 @@ ptxas_sha256=a1941a04ca4fd233b2fbe50c625b1e72b3d5f79ebe80209a272c85482dfbb487
 # The compiler's own defaults, written out. Without -m64 -O3 only the note that
 # records the flags differs; every code section is the same. The PTX carries each
 # .maxnreg, so no register limit is added here.
-ptxas_args='--gpu-name=sm_121 -m64 -O3'
+ptxas_args='--gpu-name=sm_121a -m64 -O3'
 name=cuda_nvcc-linux-sbsa-$version-archive
 url=https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvcc/linux-sbsa/$name.tar.xz
 
@@ -78,7 +78,7 @@ if [ "$ptxas_only" = true ]; then
 fi
 
 cp "$ptx" "$work/out/flash.ptx"
-sed -n '1,40p' "$work/out/flash.ptx" | grep -q '^\.target sm_121$' || fail 'PTX does not target the GB10 (sm_121)'
+sed -n '1,40p' "$work/out/flash.ptx" | grep -q '^\.target sm_121a$' || fail 'PTX does not target the GB10 (sm_121a)'
 before=$(digest "$work/out/flash.ptx")
 # A relative name, so that no producer path can reach the image. Word splitting of
 # ptxas_args is wanted here.
@@ -89,7 +89,7 @@ cmp -s "$ptx" "$work/out/flash.ptx" || fail 'PTX changed during the compile'
 [ -s "$work/out/flash.cubin" ] || fail 'ptxas wrote no image'
 cat > "$work/out/flash.cubin.conf" <<CONF
 format=vade-cubin-v1
-target=sm_121
+target=sm_121a
 ptx_sha256=$before
 cubin_sha256=$(digest "$work/out/flash.cubin")
 min_driver_api=13000

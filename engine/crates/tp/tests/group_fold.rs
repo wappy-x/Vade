@@ -55,11 +55,14 @@ struct Grouping<'c> {c:&'c CheckpointAdmission,shared:BTreeSet<String>,
     /// Opens on rows read through the table, and every `PermuteRows` the caller ran.
     opens_gathered:Cell<usize>,permutes:Cell<usize>,
     /// WIDE COHORT counters coexist with the independent LOOKAHEAD fixture.
-    wide:u8,shared_gates:Cell<[usize;2]>,shared_folds:Cell<[usize;2]>,lone_gates:Cell<usize>}
+    wide:u8,shared_gates:Cell<[usize;2]>,shared_folds:Cell<[usize;2]>,lone_gates:Cell<usize>,sealed:Cell<[usize;2]>,
+    route_roots:RefCell<Vec<(usize,usize,usize)>>,unread_ids:RefCell<BTreeSet<usize>>,native_calls:Cell<[usize;2]>}
+/// The stand-in seals packed middle rows with this word.
+const SEAL:f32=1234.5;
 impl<'c> Grouping<'c> {
     fn new(c:&'c CheckpointAdmission,shared:&BTreeSet<String>,folds:bool,local:bool,stage:Stage)->Self {
         Self {c,shared:shared.clone(),folds,local,stage,flags:Cell::new(0),kept:Cell::new(0),gathered:Cell::new(0),stages:Cell::new(0),rows:Cell::new(0),downs:Cell::new(0),folds_apart:Cell::new(0),
-            ahead:false,open:RefCell::new(None),opens:Cell::new(0),closes:Cell::new(0),failed:Cell::new(0),between:RefCell::new(Vec::new()),zero_close:false,fails:false,gathers:false,shifted:false,opens_gathered:Cell::new(0),permutes:Cell::new(0),wide:0,shared_gates:Cell::new([0;2]),shared_folds:Cell::new([0;2]),lone_gates:Cell::new(0)}
+            ahead:false,open:RefCell::new(None),opens:Cell::new(0),closes:Cell::new(0),failed:Cell::new(0),between:RefCell::new(Vec::new()),zero_close:false,fails:false,gathers:false,shifted:false,opens_gathered:Cell::new(0),permutes:Cell::new(0),wide:0,shared_gates:Cell::new([0;2]),shared_folds:Cell::new([0;2]),lone_gates:Cell::new(0),sealed:Cell::new([0;2]),route_roots:RefCell::new(Vec::new()),unread_ids:RefCell::new(BTreeSet::new()),native_calls:Cell::new([0;2])}
     }
     fn sharing(mut self,wide:u8)->Self {self.wide=wide;self}
     /// The same compute, which leaves the link step of the routed gate and up open, as the device does for a group it folds.
@@ -89,6 +92,30 @@ impl<'c> Grouping<'c> {
 }
 impl Compute for Grouping<'_> {
     type Value=V;type Pass=<Host as Compute>::Pass;
+    fn rows_experts_device_wide(&self,steps:&[engine_model::plan::layer::Step],bound:f32,sets:&[(usize,&V,&V)],reader:(Shape,Option<&str>))->spark_tp::Result<Option<Vec<V>>> {
+        if !matches!(self.wide,4|6) {return Ok(None);}
+        assert_eq!(steps.len(),3);assert!(reader.1.is_some());
+        let mut made=Vec::new();
+        for &(m,input,ids) in sets {
+            let route=spark_gpu_probe::prompt_route::reference(ids,spark_gpu_probe::prompt_route::Shape {rows:m as u32,picks:reader.0.rows,experts:steps[0].weights.len() as u32})?;
+            let lists=steps[..2].iter().map(|step|route.counts.iter().enumerate().filter(|(_,n)|**n>0).map(|(e,n)|(step.weights[e].name.as_str(),*n as usize)).collect::<Vec<_>>()).collect::<Vec<_>>();
+            let mut middle=self.rows_experts_gathered(&lists[0],Some((&lists[1],bound)),input,&route.order,&route.grouped[..3*ids.len()])?.unwrap();middle.push(SEAL);made.push(middle);
+        }
+        let mut calls=self.native_calls.get();calls[0]+=1;self.native_calls.set(calls);Ok(Some(made))
+    }
+    #[allow(clippy::type_complexity)]
+    fn rows_experts_fold_device_wide(&self,step:&engine_model::plan::layer::Step,sets:&[(usize,&V,&V,&V,Option<&V>)],fold:Shape)->spark_tp::Result<Option<Vec<V>>> {
+        if !matches!(self.wide,4|6) {return Ok(None);}
+        let mut made=Vec::new();
+        for &(m,middle,ids,weights,shared) in sets {
+            assert_eq!(middle.last(),Some(&SEAL));
+            let route=spark_gpu_probe::prompt_route::reference(ids,spark_gpu_probe::prompt_route::Shape {rows:m as u32,picks:fold.rows,experts:step.weights.len() as u32})?;
+            let list=route.counts.iter().enumerate().filter(|(_,n)|**n>0).map(|(e,n)|(step.weights[e].name.as_str(),*n as usize)).collect::<Vec<_>>();
+            made.push(self.rows_experts_fold(&list,&middle[..middle.len()-1].to_vec(),&route.placed[..3*ids.len()],ids,weights,shared,fold,m)?.unwrap());
+            self.unread_ids.borrow_mut().remove(&(ids.as_ptr() as usize));
+        }
+        let mut calls=self.native_calls.get();calls[1]+=1;self.native_calls.set(calls);Ok(Some(made))
+    }
     fn rows_experts(&self,first:&[(&str,usize)],second:Option<(&[(&str,usize)],f32)>,source:&V,places:&[f32])->spark_tp::Result<Option<V>> {
         self.none_open("an expert exchange");
         let a=self.experts(first,source,places);
@@ -112,11 +139,32 @@ impl Compute for Grouping<'_> {
         self.lone_gates.set(before);let [calls,rows]=self.shared_gates.get();self.shared_gates.set([calls+1,rows+sets.len()]);
         Ok(Some(if self.wide==3 {made.into_iter().map(|rows|vec![0.0;rows.len()]).collect()} else {made}))
     }
+    // PACKED MIDDLE: the stand-in for a private form of the fold: the plain rows with one seal word after them. Any reader
+    // but the shared fold finds an extent that is not whole rows (every stand-in above asserts its source extent).
+    fn rows_experts_gathered_wide_for(&self,sets:&[(&[(&str,usize)],&[(&str,usize)],f32,&V,&[f32],&[f32])],down:&[&[(&str,usize)]],(fold,shared):(Shape,Option<&str>))->spark_tp::Result<Option<Vec<V>>> {
+        let Some(mut made)=self.rows_experts_gathered_wide(sets)? else {return Ok(None);};
+        assert_eq!(fold.taps,u32::from(shared.is_some_and(|name|self.shared.contains(name))),"the producer gets the fold's shared projection");
+        assert_eq!(down.len(),sets.len(),"one down list a row set");
+        for (set,list) in sets.iter().zip(down) {
+            let m=set.3.len()/self.extent(set.0[0].0).1;
+            assert_eq!(fold.rows as usize,set.4.len()/m,"the producer gets the fold's real pick count");
+            assert_eq!(fold.cols as usize,self.extent(list[0].0).0,"the producer gets the fold's real output width");
+            // The down list names the experts of the gate list, count for count, and reads the rows the gate list makes.
+            assert_eq!(list.iter().map(|v|v.1).collect::<Vec<_>>(),set.0.iter().map(|v|v.1).collect::<Vec<_>>());
+            for ((down,_),(gate,_)) in list.iter().zip(set.0) {assert_ne!(down,gate);assert_eq!(self.extent(down).1,self.extent(gate).0,"{down} reads the rows of {gate}");}
+        }
+        for rows in made.iter_mut() {rows.push(SEAL);}
+        let [calls,opened]=self.sealed.get();self.sealed.set([calls+1,opened]);
+        Ok(Some(made))
+    }
     fn rows_experts_fold_wide(&self,sets:&[(&[(&str,usize)],&V,&[f32],&V,&V,Option<&V>,Shape,usize)])->spark_tp::Result<Option<Vec<V>>> {
         if self.wide<2 {return Ok(None);}
         assert!(sets.len()>=2,"the shared form is asked for two or more runs");
         let (stages,rows)=(self.stages.get(),self.rows.get());
-        let made=sets.iter().map(|&(first,source,places,ids,weights,shared,fold,m)|Ok(self.rows_experts_fold(first,source,places,ids,weights,shared,fold,m)?.expect("the stand-in folds every run"))).collect::<spark_tp::Result<Vec<V>>>()?;
+        // PACKED MIDDLE: a sealed source is opened here and nowhere else.
+        let opened=sets.iter().map(|&(first,source,..)|{let words=first.iter().map(|v|v.1).sum::<usize>()*self.extent(first[0].0).1;
+            if source.len()==words+1 {assert_eq!(source[words].to_bits(),SEAL.to_bits());let [calls,opened]=self.sealed.get();self.sealed.set([calls,opened+1]);source[..words].to_vec()} else {source.clone()}}).collect::<Vec<V>>();
+        let made=sets.iter().zip(&opened).map(|(&(first,_,places,ids,weights,shared,fold,m),source)|Ok(self.rows_experts_fold(first,source,places,ids,weights,shared,fold,m)?.expect("the stand-in folds every run"))).collect::<spark_tp::Result<Vec<V>>>()?;
         self.stages.set(stages);self.rows.set(rows);let [calls,runs]=self.shared_folds.get();self.shared_folds.set([calls+1,runs+sets.len()]);
         Ok(Some(made))
     }
@@ -183,7 +231,9 @@ impl Compute for Grouping<'_> {
     fn prompt(&self,s:RowShape,x:[Option<&V>;5],w:&[f32])->spark_tp::Result<V> {
         if s.op==Row::Wrapped && s.inner.op==Op::ExpertFold {self.folds_apart.set(self.folds_apart.get()+1);}
         if s.op==Row::PermuteRows {self.permutes.set(self.permutes.get()+1);}
-        Host.prompt(s,x,w)
+        let out=Host.prompt(s,x,w)?;
+        if matches!(self.wide,4|5) && s.op==Row::Wrapped && s.inner.op==Op::Route {self.route_roots.borrow_mut().push((out.as_ptr() as usize,s.inner.lengths().unwrap().3,s.inner.cols as usize));}
+        Ok(out)
     }
     fn mhc_row_launches(&self)->u64 {0}
     fn rows_greedy(&self,_:&Self::Value,_:usize)->spark_tp::Result<Option<Vec<u32>>> {Ok(None)}
@@ -193,10 +243,16 @@ impl Compute for Grouping<'_> {
     fn prompt_end(&self)->spark_tp::Result<()> {Ok(())} fn prompt_seeds(&self)->bool {false}
     fn prepare_beside(&self,c:&CheckpointAdmission,_:usize)->spark_tp::Result<()> {self.prepare(c)}
     fn upload(&self,v:&[f32])->spark_tp::Result<V> {Host.upload(v)}
-    fn read(&self,v:&V)->spark_tp::Result<V> {Host.read(v)}
+    fn read(&self,v:&V)->spark_tp::Result<V> {if self.unread_ids.borrow().contains(&(v.as_ptr() as usize)) || self.route_roots.borrow().iter().any(|r|r.0==v.as_ptr() as usize) {return Err("host read of routing IDs".into());}Host.read(v)}
     fn words(&self,v:&V)->usize {v.len()}
-    fn range(&self,v:&V,start:usize,len:usize)->spark_tp::Result<V> {Host.range(v,start,len)}
-    fn join(&self,v:&[&V])->spark_tp::Result<V> {Host.join(v)}
+    fn range(&self,v:&V,start:usize,len:usize)->spark_tp::Result<V> {
+        let out=Host.range(v,start,len)?;
+        if self.route_roots.borrow().iter().any(|&(p,words,k)|p==v.as_ptr() as usize && start.is_multiple_of(words) && len==k) {self.unread_ids.borrow_mut().insert(out.as_ptr() as usize);}Ok(out)
+    }
+    fn join(&self,v:&[&V])->spark_tp::Result<V> {
+        let out=Host.join(v)?;let ids=v.iter().any(|v|self.unread_ids.borrow().contains(&(v.as_ptr() as usize)));
+        if ids {let mut unread=self.unread_ids.borrow_mut();for v in v {unread.remove(&(v.as_ptr() as usize));}unread.insert(out.as_ptr() as usize);self.route_roots.borrow_mut().clear();}Ok(out)
+    }
     fn zeros(&self,n:usize)->spark_tp::Result<V> {Host.zeros(n)}
     fn operation(&self,s:Shape,x:[Option<&V>;4],w:&[f32])->spark_tp::Result<V> {
         if self.open.borrow().is_some() {self.between.borrow_mut().push(if s.op==Op::SwiGlu {"swiglu"} else {"other"});}
@@ -388,6 +444,8 @@ fn the_runs_of_a_wide_group_share_the_expert_product_launches_and_keep_their_bit
     let wide=compute(2);
     assert_eq!(read(&wide,rows),expected,"a wide group that shares its expert launches must keep every bit");
     assert_eq!((wide.shared_gates.get(),wide.shared_folds.get()),([routed,2*routed],[routed,2*routed]));
+    // PACKED MIDDLE: every shared gate of a group that folds is asked for the fold's private form, and only the shared fold opens it.
+    assert_eq!(wide.sealed.get(),[routed,2*routed]);
     assert_eq!((wide.lone_gates.get(),wide.stages.get(),wide.downs.get(),wide.folds_apart.get()),(0,0,0,0),"every expert step of a wide group went through the shared forms");
     // A compute that does not share: each run takes its own gate call and its own fold stage, and every bit is kept.
     let lone=compute(1);
@@ -397,6 +455,60 @@ fn the_runs_of_a_wide_group_share_the_expert_product_launches_and_keep_their_bit
     let zeros=compute(3);
     assert_ne!(read(&zeros,rows)[0],expected[0],"the shared gate answer was not used");
     assert_eq!(zeros.shared_gates.get(),[routed,2*routed]);
+    // The decoder may not read either set's IDs before or after the private
+    // middle. Exercise the real Split<&C> forwarding chain as serving does.
+    struct Local;
+    impl spark_tp::row_split::Exchange for Local {
+        fn topology(&self)->Topology {Topology {rank:0,parts:1}}
+        fn gather(&mut self,v:&[f32],_:usize)->spark_tp::Result<V> {Ok(v.to_vec())}
+        fn command(&mut self,_:&mut [u8])->spark_tp::Result<()> {Ok(())}
+        fn complete(&mut self)->spark_tp::Result<()> {Ok(())}
+    }
+    let native=compute(4);let split=spark_tp::row_split::Split::new(&native,Local).unwrap();
+    let read_split=|width:usize| {
+        let decoder=Decoder::new(&c.admission,&split,context).unwrap();let mut state=decoder.zero_state().unwrap();let mut last=Vec::new();
+        for chunk in tokens.chunks(width) {let (mut logits,next)=decoder.prefill_rows(chunk,&state,HeadRows::Last).unwrap();state=next;last=logits.pop().unwrap();}
+        let mut all=vec![last.iter().map(|v|v.to_bits()).collect::<Vec<_>>()];for layer in &state.layers {for value in layer.values() {all.push(value.iter().map(|v|v.to_bits()).collect());}}all
+    };
+    assert_eq!(read_split(rows),expected);assert_eq!(native.native_calls.get(),[routed,routed]);
+    assert_eq!(read_split(PROMPT_GROUP_MAX),expected);assert_eq!(native.native_calls.get(),[3*routed,3*routed]);
+    // With the same forbidden-read guard and the hook refused, the legacy path
+    // must fail. This shows that the guard can detect the removed boundary.
+    let refuses=compute(5);let decoder=Decoder::new(&c.admission,&refuses,context).unwrap();
+    let error=decoder.prefill_rows(&tokens,&decoder.zero_state().unwrap(),HeadRows::Last).err().expect("refused native hook must read IDs");assert!(error.contains("host read of routing IDs"),"{error}");
+}
+/// A prompt group that keeps its rows (`prefill_rows_open`: a prefix-cache snapshot) runs its down step alone, with no
+/// fold waiting for it, so its gate and up must not make the device's private middle: the down step would read that
+/// middle as whole rows (on the device: "prompt expert input extent differs", the k32 burst failure). Mode 6 is the
+/// native hooks of mode 4 without its forbidden-ID-read guard, which the legacy path of such a pass must pass.
+#[test]
+fn a_prompt_group_that_keeps_its_rows_takes_no_private_middle_and_keeps_its_bits() {
+    let rows=24;let context=(rows+8) as u64;
+    let c=fixture::Checkpoint::new_with_capacity(Dtype::Bf16,true,context);let d=c.admission.description();
+    let (mut shared,mut routed)=(BTreeSet::new(),0usize);
+    for layer in 0..d.layers.len() {
+        let plan=LayerPlan::new(d,layer,1,Topology {rank:0,parts:1}).unwrap();
+        let Some(sum)=plan.steps.iter().find(|step|step.kind==Kind::ExpertSum) else {continue;};
+        routed+=1;
+        let down=plan.steps.iter().find(|step|step.kind==Kind::Project && step.outputs[0].name==sum.inputs[3]).expect("the shared row is one projection");
+        shared.insert(down.weights[0].name.clone());
+    }
+    assert!(routed>0);
+    let tokens=(0..rows).map(|i|((i*5+2)%16) as u32).collect::<Vec<_>>();
+    let compute=|wide:u8|Grouping::new(&c.admission,&shared,true,true,Stage::Folds).sharing(wide);
+    let state_bits=|state:&spark_tp::bounded_decoder::State<V>|state.layers.iter().flat_map(|layer|layer.values().map(|v|v.iter().map(|x|x.to_bits()).collect::<Vec<_>>())).collect::<Vec<_>>();
+    let open=|compute:&Grouping<'_>|{let decoder=Decoder::new(compute.c,compute,context).unwrap();
+        let (logits,state,_)=decoder.prefill_rows_open(&tokens,&decoder.zero_state().unwrap(),HeadRows::All).unwrap();(bits(&logits),state_bits(&state))};
+    let plain=|compute:&Grouping<'_>|{let decoder=Decoder::new(compute.c,compute,context).unwrap();
+        let (logits,state)=decoder.prefill_rows(&tokens,&decoder.zero_state().unwrap(),HeadRows::All).unwrap();(bits(&logits),state_bits(&state))};
+    let lone=compute(1);let expected=open(&lone);
+    // The kept group: no native call; every bit equals the compute without native hooks.
+    let native=compute(6);
+    assert_eq!(open(&native),expected,"a kept prompt group must keep every bit");
+    assert_eq!(native.native_calls.get(),[0,0],"a kept prompt group must not make the private middle");
+    // Control: the same compute takes both native stages for the same group when it does not keep rows, with equal bits.
+    assert_eq!(plain(&native),plain(&lone));
+    assert_eq!(native.native_calls.get(),[routed,routed],"the native hooks of mode 6 are live");
 }
 /// GROUP FOLD twin (no device): the words of the device path's own order, from the host references of its kernels. Each
 /// rank's expert rows lie as the expert launch group leaves them (an expert's rows contiguous, feature-major). Main:

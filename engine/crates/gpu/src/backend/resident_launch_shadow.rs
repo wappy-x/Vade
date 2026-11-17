@@ -1,8 +1,12 @@
 use super::*;
 /// A command that reads weights at the bus rate. A prefetch for a later target is not placed across one: it would run
 /// beside it on the bus.
+/// The row launches of 2 to 8 token rows (ROW SHADOW, `bus_shadow::rows`) read weights at the bus rate too; no one-row step
+/// records them, so the one-row list above is unchanged.
 fn boundary(kind:Kind)->bool {
-    matches!(kind,Kind::Expert|Kind::Plain|Kind::PlainBf16|Kind::Mx|Kind::Mixed|Kind::NvStream|Kind::NvTile|Kind::NvQuarters|Kind::DeviceRoute|Kind::Prepare|Kind::Collapse|Kind::Combine)
+    matches!(kind,Kind::Expert|Kind::Fp8Tile|Kind::Plain|Kind::PlainBf16|Kind::Mx|Kind::Mixed|Kind::NvStream|Kind::NvTile|Kind::NvQuarters|Kind::DeviceRoute|Kind::Prepare|Kind::Collapse|Kind::Combine)
+        || matches!(kind,Kind::MxRows2|Kind::MxRows4|Kind::MxRows8|Kind::MxRows8w|Kind::MxRowsTile|Kind::MixedRows|Kind::FoldRows|Kind::FoldRowsF32
+            |Kind::Fp8RowsSmall|Kind::Fp8RowsMulti|Kind::Fp8RowsFew|Kind::Fp8RowsShare|Kind::PlainRowsSmall)
 }
 /// The BF16 forms of the mixed and plain batch launches read as the FP32 mixed launch does, so they are boundaries too.
 /// They are named apart so that a prefetch they stop is counted (`shadow[0]`, print only).
@@ -43,7 +47,9 @@ fn install(recorder:&mut Recorder<'_>,index:usize,window:crate::bus_shadow::Wind
     grid.rows=dimensions[1];crate::bus_shadow::record(window.ids!=0);true
 }
 pub(super) fn static_target(recorder:&mut Recorder<'_>,target:&Command) {
-    let Some(window)=crate::bus_shadow::mx(target).or_else(||if recorder.side_off {None} else {crate::bus_shadow::more(target).or_else(||crate::bus_shadow::batch(target))}) else {return;};
+    let stage_base=recorder.stage.as_ref().map_or(0,|stage|stage.device_address()+STAGE_BASE as u64);
+    let Some(window)=crate::bus_shadow::mx(target).or_else(||if recorder.side_off {None} else {crate::bus_shadow::more(target).or_else(||crate::bus_shadow::batch(target))
+        .or_else(||crate::bus_shadow::rows(target,stage_base,&recorder.staged))}) else {return;};
     let all=0..recorder.calls.len();if let Some(index)=take_for(recorder,all) {install(recorder,index,window);}
 }
 pub(super) fn routed_target(recorder:&mut Recorder<'_>,window:crate::bus_shadow::Window) {

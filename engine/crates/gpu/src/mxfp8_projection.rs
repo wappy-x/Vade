@@ -42,6 +42,35 @@ impl Shape {
             accumulator.push(v);output.push(rounded);
         }Ok((accumulator,output))
     }
+    /// `reference` on the tensor-core word (`next_params::MX_TC`; CPU twin `tc_twin_mx`, contract
+    /// `docs/tc-dense-contract.md`, section MXFP8): the accumulator of every row and its one RN-even BF16 epilogue. The
+    /// same refusals as `reference` (extents, a non-finite input, a NaN scale or weight code, a non-finite word).
+    /// The word encodes each 32-column activation group to E4M3 codes and one scale; for the groups the activation
+    /// quantizer wrote (every dynamic projection's input) that is a second spelling of the same values.
+    pub fn reference_tc(self,weights:&[u8],scales:&[u8],input:&[f32])->Result<(Vec<f32>,Vec<f32>),String> {
+        self.check_input(input)?;
+        if weights.len()!=self.weight_bytes() || scales.len()!=self.scale_bytes() {
+            return Err("MXFP8 reference requires complete selected rows and scale groups".into());
+        }
+        if scales.contains(&255) || weights.iter().any(|w|w&127==127) {return Err("nonfinite MXFP8 reference operand".into());}
+        let encoded=crate::tc_twin_mx::encode_row(input);
+        let mut accumulator=Vec::with_capacity(self.rows);let mut output=Vec::with_capacity(self.rows);
+        for (w,s) in weights.chunks_exact(self.cols).zip(scales.chunks_exact(self.cols/32)) {
+            let v=f32::from_bits(crate::tc_twin_mx::word_encoded(w,s,&encoded));
+            if !v.is_finite() {return Err("nonfinite MXFP8 reference output".into());}
+            let rounded=bf16::rounded(v);
+            if !rounded.is_finite() {return Err("MXFP8 epilogue is not finite BF16".into());}
+            accumulator.push(v);output.push(rounded);
+        }Ok((accumulator,output))
+    }
+    /// `reference` or `reference_tc`, by the word function of the binding (`next_params::MX_SCALAR` or `MX_TC`).
+    pub fn reference_mode(self,mode:u32,weights:&[u8],scales:&[u8],input:&[f32])->Result<(Vec<f32>,Vec<f32>),String> {
+        match mode {
+            crate::next_params::MX_SCALAR=>self.reference(weights,scales,input),
+            crate::next_params::MX_TC=>self.reference_tc(weights,scales,input),
+            _=>Err("unknown MXFP8 word function".into()),
+        }
+    }
 }
 #[cfg(test)]
 mod tests {
@@ -65,6 +94,37 @@ mod tests {
         for _ in 0..3 {assert_eq!(row.0[0].to_bits(),all.0[2].to_bits());}
         input.fill(0.0);input[511]=2.0;
         assert_eq!(s.reference(&vec![0x38;1536],&[127;48],&input).unwrap().1,[2.0;3]);
+    }
+    /// The tensor-core word on a quantized row is the twin's word, is the same for a row alone and among rows, and differs from
+    /// the scalar word in its sum order (a cancelling row that the scalar tree and the four ranges split differently).
+    #[test]
+    fn the_tensor_core_reference_is_the_twin_word_for_each_row_alone() {
+        use crate::tc_twin_mx as twin;
+        let (rows,cols)=(5usize,512usize);let mut r=twin::Rng(77);
+        let weights:Vec<u8>=(0..rows*cols).map(|i|twin::weight_code(&mut r,i,i/cols)).collect();
+        let scales:Vec<u8>=(0..rows*cols/32).map(|i|(120+i%9) as u8).collect();
+        let mut input=Vec::new();for group in 0..cols/32 {input.extend(twin::activation_group(&mut r,group*32,group%7));}
+        // The projection's input contract: finite values (the activation classes of the twin include non-finite ones).
+        for v in &mut input {if !v.is_finite() {*v=1.5;}}
+        let s=Shape::new(rows,cols,WeightType::F32).unwrap();
+        let (acc,out)=s.reference_tc(&weights,&scales,&input).unwrap();
+        for row in 0..rows {
+            let (w,sc)=(&weights[row*cols..(row+1)*cols],&scales[row*cols/32..(row+1)*cols/32]);
+            assert_eq!(acc[row].to_bits(),twin::word(w,sc,&input),"row {row}");
+            assert_eq!(out[row].to_bits(),bf16::rounded(acc[row]).to_bits());
+            let alone=Shape::new(1,cols,WeightType::F32).unwrap().reference_tc(w,sc,&input).unwrap();
+            assert_eq!(alone.0[0].to_bits(),acc[row].to_bits());
+        }
+        assert_eq!(s.reference_mode(crate::next_params::MX_TC,&weights,&scales,&input).unwrap().0,acc);
+        assert_eq!(s.reference_mode(crate::next_params::MX_SCALAR,&weights,&scales,&input).unwrap().0,s.reference(&weights,&scales,&input).unwrap().0);
+        assert!(s.reference_mode(2,&weights,&scales,&input).is_err());
+        // Refusals, as the scalar reference.
+        let one=Shape::new(1,32,WeightType::F32).unwrap();
+        assert!(one.reference_tc(&[0x38;31],&[127],&[1.0;32]).is_err() && one.reference_tc(&[0x38;32],&[],&[1.0;32]).is_err());
+        assert!(one.reference_tc(&[0x7f;32],&[127],&[1.0;32]).is_err() && one.reference_tc(&[0x38;32],&[255],&[1.0;32]).is_err());
+        assert!(one.reference_tc(&[0x38;32],&[127],&[f32::NAN;32]).is_err());
+        // 32 ones times 0.5: one step of 16.0, scales 2^0.
+        assert_eq!(one.reference_tc(&[0x38;32],&[127],&[0.5;32]).unwrap().0,[16.0]);
     }
     #[test]
     fn malformed_extents_nonfinite_values_and_bf16_overflow_refuse() {

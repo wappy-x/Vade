@@ -72,9 +72,19 @@ impl<'b,'d> Weights<'b,'d> {
         let a=self.matrices.get(name).and_then(|m|m.absorbed.as_ref()).ok_or("absorbed projection is not resident")?;
         if (shape.heads,shape.dim,shape.taps,shape.cols)!=(a.shape.heads,a.shape.dim,a.shape.taps,a.shape.cols) {return Err("absorbed prompt geometry differs".into());}
         let q=b.prompt_operation(Shape {op:Op::AbsorbQuery,..shape},[Some(query),None,None,None,None],Some(&a.weight))?;
-        let scores=b.prompt_operation(Shape {op:Op::AbsorbScores,..shape},[Some(&q),Some(latent),Some(selected),None,None],None)?;
+        let inputs=[q.device_address(),latent.device_address(),selected.device_address(),4,4];
+        let use_packed=spark_gpu_probe::latent_absorb_rows::third(Shape {op:Op::AbsorbScoresPacked,..shape},inputs,4,q.device_address()).is_some();
+        // The cache producer writes BF16 words (tc-dense-contract, group1). The lossless pack checks that invariant,
+        // copies their high halves, and is shared by scores and values. It never rounds or changes a cache operand.
+        let packed=if use_packed {
+            let words=shape.rows.checked_mul(shape.cols).ok_or("packed latent cache extent overflow")?;
+            let pack=Shape {cols:words,..Shape::new(Op::WirePackBf16,1).ok_or("packed latent cache shape overflow")?};
+            Some(b.prompt_operation(pack,[Some(latent),None,None,None,None],None)?)
+        } else {None};
+        let cache=packed.as_ref().unwrap_or(latent);
+        let scores=b.prompt_operation(Shape {op:if use_packed {Op::AbsorbScoresPacked} else {Op::AbsorbScores},..shape},[Some(&q),Some(cache),Some(selected),None,None],None)?;
         let probability=b.prompt_operation(Shape {op:Op::AbsorbSoftmax,cols:shape.first,..shape},[Some(&scores),Some(selected),None,None,None],None)?;
-        let values=b.prompt_operation(Shape {op:Op::AbsorbValues,..shape},[Some(&probability),Some(latent),Some(selected),None,None],None)?;
+        let values=b.prompt_operation(Shape {op:if use_packed {Op::AbsorbValuesPacked} else {Op::AbsorbValues},..shape},[Some(&probability),Some(cache),Some(selected),None,None],None)?;
         b.prompt_operation(Shape {op:Op::AbsorbProject,..shape},[Some(&values),Some(selected),None,None,None],Some(&a.weight))
     }
     pub fn has_absorption(&self,name:&str)->bool {self.matrices.get(name).is_some_and(|m|m.absorbed.is_some())}

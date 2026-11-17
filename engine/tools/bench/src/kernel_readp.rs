@@ -156,7 +156,10 @@ pub(crate) fn run(base_path: &str, candidate_path: &str, mode: &str) -> Result<(
         return Ok(());
     }
     if mode == "group-fold" { return group_fold(&mut g, ma, mb, started); }
+    if mode == "decay" { return decay(&mut g,ma,mb,started); }
+    if mode == "attx" { mhc_block(&mut g,ma,mb,started,true)?;return decay(&mut g,ma,mb,started); }
     if mode == "quantize-gather" { return quantize_gather(&mut g, ma, mb, started); }
+    if mode == "packed-middle" { return packed_middle::bytes(&mut g, ma, mb, started); }
     if let Some(which) = mode.strip_prefix("list-") { MODULE_A.with(|c| c.set(ma)); return list_bytes(&mut g, base, mb, which, started); }
     if let Some(which) = mode.strip_prefix("fast-bytes-") { return fast_bytes(&mut g, base, mb, which, started); }
     if mode == "mhc-bytes" || mode == "mhc-time" || mode=="mhc-host-oracle" {
@@ -165,6 +168,9 @@ pub(crate) fn run(base_path: &str, candidate_path: &str, mode: &str) -> Result<(
     }
     if mode == "fast-time" { return fast_time(&mut g, base, mb); }
     if mode == "mhc-tile" { return mhc_tile(&mut g, ma, mb, started); }
+    if mode == "mhc-cap" { mhc_block(&mut g, ma, mb, started, false)?; return mhc_block(&mut g, ma, mb, started, true); }
+    if mode == "mhc-combine" { return mhc_block(&mut g, ma, mb, started, true); }
+    if mode == "mhc-block" { return mhc_block(&mut g, ma, mb, started, false); }
     Err(format!("READP unknown mode {mode}"))
 }
 
@@ -497,6 +503,89 @@ fn mhc_tile(g: &mut Gpu, ma: H, mb: H, started: Instant) -> Result<()> {
     Ok(())
 }
 
+/// Full six-plane proof of the fused prompt boundary, with an observable pre-gate-base control.
+fn mhc_block(g: &mut Gpu, ma: H, mb: H, started: Instant, fused_base: bool) -> Result<()> {
+    let (old_resid, old_tile, old_finish) = (g.function(ma, "mhc_residual_rows")?, g.function(ma, "mhc_project_tile")?, g.function(ma, "mhc_boundary_finish")?);
+    let block = g.function(mb, "mhc_boundary_block")?;
+    let parent = if fused_base { Some(g.function(ma, "mhc_boundary_block")?) } else { None };
+    println!("READP MHC CAP fused_base={fused_base}");
+    let mk = |g: &mut Gpu, n: usize| -> Result<Buffer> { let b = Buffer::new(g, &vec![f32::NAN; n])?; b.poison(g)?; Ok(b) };
+    let old = |g: &Gpu, x: &Boundary| -> Result<()> {
+        let mut y = *x;
+        if let Some(f) = parent { return g.launch(f, [x.shape.rows, 1, 1], 256, 0, &mut [ptr(&mut y)]); }
+        let (rows, wide) = (x.shape.rows as usize, (x.shape.streams * x.shape.hidden) as usize);
+        g.launch(old_resid, [(rows * wide).div_ceil(256) as u32, 1, 1], 256, 0, &mut [ptr(&mut y)])?;
+        g.launch(old_tile, [rows.div_ceil(8) as u32, 1, 1], 256, 0, &mut [ptr(&mut y)])?;
+        g.launch(old_finish, [x.shape.rows, 1, 1], mhc_threads(x.shape), 0, &mut [ptr(&mut y)])
+    };
+    let new = |g: &Gpu, x: &Boundary, blocks: u32, shared: u32| -> Result<()> { let mut y = *x; g.launch(block, [blocks, 1, 1], 256, shared, &mut [ptr(&mut y)]) };
+    struct Planes { b: [Buffer; 6] }
+    let planes = |g: &mut Gpu, rows: usize, wide: usize, count: usize, hidden: usize| -> Result<Planes> {
+        Ok(Planes { b: [mk(g, rows * wide)?, mk(g, rows * wide)?, mk(g, rows * count)?, mk(g, rows * hidden)?, mk(g, rows * hidden.div_ceil(128))?, mk(g, rows * hidden)?] })
+    };
+    let bind = |f: &MFx, q: &Planes, norm: &Buffer, bf16: u32| -> Boundary {
+        let mut x = mboundary(f, &q.b[0], &q.b[1], &q.b[2]); x.collapsed = q.b[3].address; x.norm_partials = q.b[4].address; x.output = q.b[5].address; x.norm_weight = norm.address; x.norm_bf16 = bf16; x
+    };
+    const NAMES: [&str; 6] = ["residual", "normalized", "coefficients", "collapsed", "partials", "output"];
+    let (mut cases, mut total, mut controls) = (0u64, 0u64, 0u64);
+    let shapes: [(usize, usize, usize); 25] = [(1, 4, 4096), (2, 4, 4096), (4, 4, 4096), (8, 4, 4096), (9, 4, 4096), (16, 4, 4096), (17, 4, 4096), (255, 4, 4096), (256, 4, 4096), (257, 4, 4096), (1000, 4, 4096), (1024, 4, 4096), (2048, 4, 4096),
+        (33, 1, 4096), (33, 2, 4096), (33, 3, 4096), (65, 4, 1), (65, 4, 2), (65, 4, 7), (65, 2, 2), (65, 1, 4), (65, 4, 113), (65, 4, 224), (129, 4, 1000), (40, 3, 1028)];
+    let kinds: [(u32, u32); 6] = [(0, 0), (5, 5), (2, 2), (4, 0), (6, 8), (1, 1)];
+    for &(rows, streams, hidden) in &shapes {
+        let (wide, count) = (streams * hidden, streams * (streams + 2));
+        for previous in [false, true] { for (ki, &(ik, wk)) in kinds.iter().enumerate() {
+            if rows * wide > 800_000 && ki > 1 { continue; }
+            for bf16 in [0u32, 1] {
+            let f = mfixture(g, rows, streams, hidden, previous, ik, wk, 8800 + cases)?; let norm = Buffer::new(g, &pattern(wk, hidden, 8800 + cases * 3))?;
+
+            let a = planes(g, rows, wide, count, hidden)?; old(g, &bind(&f, &a, &norm, bf16))?; g.sync()?;
+            let mut want = Vec::new(); for q in &a.b { want.push(q.read(g)?); }
+            for &(grid, shared, stored) in &[(rows as u32, 0u32, true), (rows as u32 + 5, 16384, true), (rows as u32, 0, false)] {
+                let b = planes(g, rows, wide, count, hidden)?; let mut y = bind(&f, &b, &norm, bf16);
+                let before = b.b[1].read(g)?; if !stored { y.mixing_normalized = 0; }
+                new(g, &y, grid, shared)?; g.sync()?;
+                for (i, q) in b.b.iter().enumerate() {
+                    let got = q.read(g)?; let expected = if i == 1 && !stored { &before } else { &want[i] };
+                    if *expected != got { return Err(format!("READP MHC BLOCK BYTE FAIL rows={rows} n={streams} h={hidden} previous={previous} kinds={ik},{wk} bf16={bf16} plane={} blocks={grid} stored={stored} first_diff_word={:?}", NAMES[i], expected.iter().zip(&got).position(|(p, q)| p != q).map(|i| i.saturating_sub(16) / 4))); }
+                    if got[..16] != GUARD || got[got.len() - 16..] != GUARD { return Err(format!("READP MHC BLOCK guard changed rows={rows} n={streams} h={hidden} plane={}", NAMES[i])); }
+                    total += 1;
+                }
+            }
+            cases += 1;
+            // A one-stream Sinkhorn matrix is constant, so changing a mixing weight can vanish even when computed correctly.
+            // Change the first pre gate's base to the opposite saturation instead. Pattern 0 has finite, bounded dot products;
+            // +/-MAX dominates them. The activated gate must change, while the residual and normalized planes stay unchanged.
+            if ki == 0 && previous {
+                let gate = f32::from_le_bytes(want[2][16..20].try_into().unwrap());
+                let mut words = g.read(f.base.address, count * 4)?;
+                words[..4].copy_from_slice(&(if gate.to_bits() == f.shape.eps.to_bits() { f32::MAX } else { -f32::MAX }).to_le_bytes());
+                let wrong = Buffer::new(g, &words.chunks_exact(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect::<Vec<_>>())?;
+                let b = planes(g, rows, wide, count, hidden)?; let mut y = bind(&f, &b, &norm, bf16); y.base = wrong.address;
+                new(g, &y, rows as u32, 0)?; g.sync()?;
+                let differ = want[2].chunks_exact(4).zip(b.b[2].read(g)?.chunks_exact(4)).filter(|(p, q)| p != q).count();
+                if want[0] != b.b[0].read(g)? || want[1] != b.b[1].read(g)? || differ == 0 { return Err(format!("READP MHC BLOCK CONTROL NOT SEEN rows={rows} n={streams} h={hidden} coefficient_words_differ={differ}")); }
+                println!("READP MHC BLOCK CONTROL SEEN rows={rows} n={streams} h={hidden} coefficient_words_differ={differ} of {}", rows * count); controls += 1;
+            }
+            g.clear()?;
+            }
+        } }
+        println!("READP mhc block rows={rows} n={streams} h={hidden} ok cases={cases} comparisons={total} elapsed_s={:.1}", started.elapsed().as_secs_f64());
+    }
+    println!("READP MHC BLOCK BYTES PASS cases={cases} comparisons={total} controls={controls} digest={} elapsed_s={:.1}", sha256::digest(format!("mhcblock{cases}{total}{controls}").as_bytes()), started.elapsed().as_secs_f64());
+    for &rows in &[2048usize, 1024, 256, 64] {
+        let f = mfixture(g, rows, 4, 4096, true, 0, 0, 91)?; let norm = Buffer::new(g, &pattern(0, 4096, 17))?;
+        let q = planes(g, rows, 16384, 24, 4096)?; let b = bind(&f, &q, &norm, 1); let mut skip = b; skip.mixing_normalized = 0;
+        for &shared in &[0u32, 8192, 16384, 24576, 32768, 40960] {
+            pair(g, &format!("mhc boundary rows={rows} baseline_fused={fused_base}, shared={shared}"), &mut |g, arm| if arm == 0 { old(g, &b) } else { new(g, &b, rows as u32, shared) })?;
+        }
+        for &shared in &[0u32, 16384, 32768] {
+            pair(g, &format!("mhc boundary rows={rows} baseline_fused={fused_base}, no normalized plane, shared={shared}"), &mut |g, arm| if arm == 0 { old(g, &b) } else { new(g, &skip, rows as u32, shared) })?;
+        }
+        g.clear()?;
+    }
+    Ok(())
+}
+
 // The sweeps of the standing rule: they iterate `swept.rs` and nothing else, so the host test that compares the predicates of
 // prompt_admission with those lists is a test of what these modes run. Every token count 1..=256 of the model's shape.
 thread_local! { static MODULE_A: std::cell::Cell<H> = const { std::cell::Cell::new(std::ptr::null_mut()) }; }
@@ -679,6 +768,7 @@ fn group_fold(g: &mut Gpu, ma: H, mb: H, started: Instant) -> Result<()> {
 /// Mirror of gpu/src/tc_abi.rs `NvQuantizePack` and `NvQuantizeGather` (repr(C)).
 #[repr(C)] #[derive(Clone, Copy)]
 struct QPack { input: u64, codes: u64, scales: u64, activations: u64, rows: u32, cols: u32 }
+#[path = "kernel_packed_middle.rs"] mod packed_middle;
 #[repr(C)] #[derive(Clone, Copy)]
 struct QGather { input: u64, codes: u64, scales: u64, activations: u64, index: u64, rows: u32, cols: u32, source_rows: u32, pad: u32 }
 /// GATHERED ROWS: the operands of a prompt group's gate rows, old against new, byte for byte.
@@ -788,4 +878,80 @@ fn pair(g: &Gpu, label: &str, run: &mut dyn FnMut(&Gpu, usize) -> Result<()>) ->
     for repeat in 0..9 { for k in 0..2 { let arm = (k + repeat) % 2; run(g, arm)?; g.sync()?; let n = 8usize; let t0 = Instant::now(); for _ in 0..n { run(g, arm)?; } g.sync()?; t[arm].push(t0.elapsed().as_secs_f64() * 1e6 / n as f64); } }
     let (tb, tc) = (median(t[0].clone()), median(t[1].clone()));
     println!("READP TIME {label} base_us={tb:.1} cand_us={tc:.1} speedup={:.2}", tb / tc); Ok(())
+}
+
+/// StepDecay against the unchanged generic word, at every admitted token count.
+fn decay(g:&mut Gpu,ma:H,mb:H,started:Instant)->Result<()> {
+    let base=g.function(ma,"prompt_rows")?;let candidate=g.function(mb,"prompt_prepare")?;
+    let (mut cases,mut compared,mut controls)=(0usize,0usize,0usize);
+    for m in (1usize..=256).chain([512,768,1024]) {for h in [32usize,64] {for kind in [0u32,2,4,5] {
+        let words=m*h*128;let length=m*h*513;
+        let values=pattern(kind,length,71+m as u64*13+h as u64);
+        let source=Buffer::new(g,&values)?;
+        let a=Buffer::new(g,&vec![0.0;words])?;let b=Buffer::new(g,&vec![0.0;words])?;
+        let s=PShape {op:6,tokens:m as u32,heads:h as u32,dim:128,taps:0,rows:0,cols:0,first:0,slots:0,inner:empty()};
+        let make=|out:&Buffer|args(s,[source.address,4,4,4,4],[length,0,0,0,0],out.address,words,1);
+        let mut old=make(&a);base_launch(g,base,&mut old)?;g.sync()?;let want=a.read(g)?;
+        for grid in [words.div_ceil(512) as u32,(words.div_ceil(512)/3+1) as u32] {
+            b.poison(g)?;let mut new=make(&b);g.launch(candidate,[grid,1,1],128,0,&mut [ptr(&mut new)])?;g.sync()?;
+            let got=b.read(g)?;
+            if got!=want || got[..16]!=GUARD || got[got.len()-16..]!=GUARD {return Err(format!("DECAY BYTE FAIL m={m} heads={h} kind={kind} grid={grid}"));}
+            compared+=words;
+        }
+        if kind==0 && (m==1 || m==1024) {
+            let mut wrong=values.clone();wrong[3*128]=87.0;let wrong=Buffer::new(g,&wrong)?;
+            let mut new=make(&b);new.input[0]=wrong.address;g.launch(candidate,[words.div_ceil(512) as u32,1,1],128,0,&mut [ptr(&mut new)])?;g.sync()?;
+            if b.read(g)?==want {return Err(format!("DECAY wrong-input control not seen m={m} heads={h}"));}
+            let mut new=make(&b);g.launch(candidate,[words.div_ceil(512) as u32,1,1],128,0,&mut [ptr(&mut new)])?;g.sync()?;
+            if b.read(g)?!=want {return Err("DECAY restored repeat differs".into());}controls+=1;
+        }
+        if kind==0 && m==1024 {
+            pair(g,&format!("decay m={m} heads={h}"),&mut |g,arm| {let mut p=make(if arm==0 {&a} else {&b});if arm==0 {base_launch(g,base,&mut p)} else {g.launch(candidate,[words.div_ceil(512) as u32,1,1],128,0,&mut [ptr(&mut p)])}})?;
+        }
+        cases+=1;g.clear()?;
+    }}if m%64==0 || m==1 {println!("DECAY progress rows={m} cases={cases} words={compared} elapsed_s={:.1}",started.elapsed().as_secs_f64());}}
+    println!("DECAY BYTES PASS cases={cases} words={compared} controls={controls} elapsed_s={:.1}",started.elapsed().as_secs_f64());Ok(())
+}
+
+
+/// The production 1024-row boundary with both optional plane choices recorded.
+pub(in crate::cuda) fn diag_replay(g:&mut Gpu,module:H)->Result<()> {
+ let f=g.function(module,"mhc_boundary_block")?;
+ for previous in [false,true] {for stored in [false,true] {
+  let rows=1024usize;let fx=mfixture(g,rows,4,4096,previous,0,0,91)?;
+  let sizes=[rows*16384,rows*16384,rows*24,rows*4096,rows*32,rows*4096];let mut p=vec![];
+  for size in sizes {p.push(Buffer::new(g,&vec![0.0;size])?);}
+  let norm=Buffer::new(g,&vec![1.0;4096])?;let mut b=mboundary(&fx,&p[0],&p[1],&p[2]);
+  b.collapsed=p[3].address;b.norm_partials=p[4].address;b.output=p[5].address;b.norm_weight=norm.address;b.norm_bf16=0;if !stored{b.mixing_normalized=0;}
+  let launch=|g:&Gpu|{let mut b=b;g.launch(f,[rows as u32,1,1],256,0,&mut [ptr(&mut b)])};
+  super::diag_limits::replay(g,"mhc_boundary_block",&format!("M={rows} streams=4 hidden=4096 coefficients=24 iterations=20 previous={previous} normalized_store={stored}"),p[5].address,rows*4096,None,&launch)?;
+  for (i,q) in p.iter().enumerate(){println!("DIAG MHC plane={i} checksum={}",sha256::digest(&q.read(g)?));}g.clear()?;
+ }}Ok(())
+}
+
+pub(in crate::cuda) fn diag_rest(g:&mut Gpu,module:H)->Result<()> {
+ let place=g.function(module,"prompt_place")?;
+ for d in [1024usize,2048] {
+  let c=Place{tokens:1024,k:8,experts:288,d,parts:1};let (p,rows)=grouping(&c,71);let table=Buffer::new(g,&place_table(&p))?;
+  let input=Buffer::new(g,&vec![1.0;rows*d])?;let out=Buffer::new(g,&vec![f32::NAN;rows*d])?;
+  let shape=PShape{op:PLACE_TILE,tokens:1,heads:0,dim:d as u32,taps:1,rows:rows as u32,cols:d as u32,first:0,slots:(rows*d)as u32,inner:empty()};
+  let a=args(shape,[input.address,table.address,0,0,0],[rows*d,rows*4,0,0,0],out.address,rows*d,1);
+  let launch=|g:&Gpu|{let mut a=a;g.launch(place,[rows.div_ceil(32)as u32,(d/32)as u32,1],256,0,&mut [ptr(&mut a)])};
+  super::diag_limits::replay(g,"prompt_place",&format!("routed_rows={rows} cols={d} parts=1"),out.address,rows*d,Some(1f32.to_bits()),&launch)?;g.clear()?;
+ }
+ let plain=g.function(module,"plain_rows_tile")?;
+ for(n,k,calls)in[(128usize,4096usize,544usize),(4096,128,544),(144,4096,336),(2048,1536,88)] {
+  let m=1024usize;let input=Buffer::new(g,&vec![1.0;m*k])?;let weight=Buffer::new(g,&vec![1.0;n*k])?;let out=Buffer::new(g,&vec![f32::NAN;m*n])?;
+  let shape=PShape{op:1,tokens:m as u32,heads:0,dim:0,taps:0,rows:n as u32,cols:k as u32,first:0,slots:0,inner:empty()};
+  let mut a=args(shape,[input.address,0,0,0,0],[m*k,0,0,0,0],out.address,n*m,1);a.weight=weight.address;a.weights=(n*k)as u64;
+  let launch=|g:&Gpu|{let mut a=a;g.launch(plain,[(m.div_ceil(64)*n.div_ceil(64))as u32,1,1],256,0,&mut [ptr(&mut a)])};
+  super::diag_limits::replay(g,"plain_rows_tile",&format!("M={m} N={n} K={k} trace_calls={calls}"),out.address,m*n,Some((k as f32).to_bits()),&launch)?;g.clear()?;
+ }
+ let round=g.function(module,"bf16_lanes_round")?;
+ #[repr(C)]#[derive(Clone,Copy)]struct Cast{input:u64,output:u64,words:u32}
+ for(gx,calls)in[(32768usize,1800usize),(16384,720),(1024,544),(256,272),(512,176),(12288,176),(128,88),(4096,88),(131072,88),(49152,48),(605,3)]{
+  let words=gx*128;let x=Buffer::new(g,&vec![1.0001;words])?;let out=Buffer::new(g,&vec![f32::NAN;words])?;let a=Cast{input:x.address,output:out.address,words:words as u32};
+  let launch=|g:&Gpu|{let mut a=a;g.launch(round,[gx as u32,1,1],128,0,&mut [ptr(&mut a)])};
+  super::diag_limits::replay(g,"bf16_lanes_round",&format!("words={words} trace_calls={calls}"),out.address,words,Some(1f32.to_bits()),&launch)?;g.clear()?;
+ }Ok(())
 }

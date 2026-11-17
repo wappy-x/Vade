@@ -64,8 +64,9 @@ fn build(variant: ptx_stamp::Variant, manifest: &Path, bin: Option<&OsStr>, sear
     // build-std fetches compiler dependencies on the first build. Keep each variant
     // at its workspace path, even with CARGO_TARGET_DIR; FP4 never touches production.
     // `cargo run` points CARGO at the host toolchain; the nightly build sets its own.
-    // Block-scaled FP4 needs the architecture-specific target. Keep the ordinary
-    // FP8/BF16 build unchanged; PTX 8.8 is supported by the installed CUDA driver.
+    // The block-scaled tensor-core steps (FP4, and MXFP8 since 2026-11-16) need the
+    // architecture-specific target, so every variant has it (`ptx_stamp.rs`); PTX 8.8
+    // is supported by the installed CUDA driver.
     let mut build = vec!["build", "-Z", "build-std=core", "-p", variant.package()];
     if !variant.features().is_empty() { build.extend(["--features", variant.features()]); }
     build.extend(["--release", "--target", TARGET, "--target-dir", variant.target_dir()]);

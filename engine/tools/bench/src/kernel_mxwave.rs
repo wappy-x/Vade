@@ -9,7 +9,7 @@ use super::super::{Gpu, Result, ptr, sha256};
 use std::time::Instant;
 /// Mirrors gpu/src/next_params.rs (repr(C)); the size checks below pin the layout.
 #[repr(C)] #[derive(Clone, Copy, Default)]
-struct MxProjection { weights: u64, scales: u64, input: u64, output: u64, rows: u32, cols: u32, tokens: u32, input_bf16: u32, round: u32 }
+struct MxProjection { weights: u64, scales: u64, input: u64, output: u64, rows: u32, cols: u32, tokens: u32, input_bf16: u32, round: u32, mode: u32 }
 #[repr(C)] #[derive(Clone, Copy, Default)]
 struct MxLayer { projections: [MxProjection; 9], ends: [u32; 10], count: u32 }
 fn layer_bytes(l: &MxLayer) -> Vec<u8> {
@@ -53,7 +53,7 @@ pub(crate) fn run(base_path: &str, candidate_path: &str) -> Result<()> {
             let outs = [g.upload(&vec![0xffu8; n * 4])?, g.upload(&vec![0xffu8; n * 4])?, g.upload(&vec![0xffu8; n * 4])?];
             let layer = |copy: usize, out: u64| -> MxLayer {
                 let mut l = MxLayer::default();
-                l.projections[0] = MxProjection { weights: copies_w[copy], scales: copies_s[copy], input: x, output: out, rows, cols, tokens: 1, input_bf16: bf16, round: output_round };
+                l.projections[0] = MxProjection { weights: copies_w[copy], scales: copies_s[copy], input: x, output: out, rows, cols, tokens: 1, input_bf16: bf16, round: output_round, mode: 0 };
                 l.ends[1] = rows.div_ceil(4); l.count = 1; l
             };
             let blocks = rows.div_ceil(4);

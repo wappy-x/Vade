@@ -16,7 +16,7 @@ impl Fixture {
         for (key,name) in [("engine","flash-serve"),("ptx","flash.ptx"),("harness","vade-harness"),("vade","vade")] {
             manifest.insert(format!("{key}_sha256"),sha256::digest(&files[name]));
         }
-        files.insert("flash.cubin.conf".into(),format!("format=vade-cubin-v1\ntarget=sm_121\nptx_sha256={}\ncubin_sha256={}\nmin_driver_api=13000\nptxas_version=13.0.88\nptxas_sha256={}\nptxas_args=--gpu-name=sm_121 -m64 -O3\n",
+        files.insert("flash.cubin.conf".into(),format!("format=vade-cubin-v1\ntarget=sm_121a\nptx_sha256={}\ncubin_sha256={}\nmin_driver_api=13000\nptxas_version=13.0.88\nptxas_sha256={}\nptxas_args=--gpu-name=sm_121a -m64 -O3\n",
             manifest["ptx_sha256"],"a".repeat(64),"b".repeat(64)).into_bytes());
         Self {files,manifest}
     }
@@ -104,7 +104,7 @@ fn error(raw: Vec<u8>, expected: &str) { assert_eq!(check(&raw,&[]).unwrap_err()
 #[test] fn cubin_manifest_must_name_the_bundled_ptx() {
     let conf = String::from_utf8(Fixture::new().files["flash.cubin.conf"].clone()).unwrap();
     let ptx = conf.lines().find_map(|l| l.strip_prefix("ptx_sha256=")).unwrap().to_owned();
-    for (bad,expected) in [(conf.replace(&ptx,&"c".repeat(64)),"cubin names other PTX bytes"),(conf.replace("sm_121\n","sm_121a\n"),"wrong cubin format or target"),
+    for (bad,expected) in [(conf.replace(&ptx,&"c".repeat(64)),"cubin names other PTX bytes"),(conf.replace("target=sm_121a\n","target=sm_121\n"),"wrong cubin format or target"),
         (conf.replace(&"a".repeat(64),"short"),"invalid cubin hash"),(conf.replace("min_driver_api=13000\n",""),"invalid cubin fields"),(format!("{conf}extra=field\n"),"invalid cubin fields"),
         (format!("{conf}malformed\n"),"invalid cubin fields")] {
         let mut f = Fixture::new(); f.files.insert("flash.cubin.conf".into(),bad.into_bytes()); error(f.valid(),expected);

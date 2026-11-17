@@ -78,13 +78,9 @@ pub struct Group<'a> {
 /// SHARED ROWS: FP8 parts of one shape that all read the same rows (`fp8_small::shared_admitted`) take ONE `fp8_rows_multi` launch; no other kernel here takes a table that is not cumulative.
 pub fn group(g: &Group) -> Option<(&'static str, u32, u32, u32)> {
     if g.words != 1 { return None; }
-    // SHARE ROWS first: ONE block-FP8 part of 2 to 8 tokens, or two parts of one shape on the same rows (`fp8_small::share_admitted`), where the
-    // device bench shows `fp8_rows_share` ahead of the older forms (`fp8_small::share_wins`). The words are the same; only who computes them differs.
-    if g.all_fp8 && (g.cumulative || g.shared_rows) && fp8_small::share_admitted(g.fp8, g.input, !g.cumulative) && fp8_small::share_wins(g.fp8[0].rows, g.fp8[0].cols, g.fp8.len(), g.fp8[0].tokens) {
-        return Some(("fp8_rows_share", fp8_small::share_blocks(g.fp8)?, fp8_small::share_threads(g.fp8[0].tokens), fp8_small::share_shared(g.fp8[0].tokens)));
-    }
+    // All served block FP8 paths use the tensor-core word. The scalar-word share entry remains bench-only.
     if !g.cumulative {
-        if g.shared_rows && g.all_fp8 && fp8_small::shared_admitted(g.fp8, g.input) { return Some(("fp8_rows_multi", fp8_small::multi_blocks(g.fp8)?, fp8_small::MULTI_THREADS, 0)); }
+        if g.shared_rows && g.all_fp8 && fp8_small::shared_admitted(g.fp8, g.input) { return Some(("fp8_rows_multi", fp8_small::multi_blocks(g.fp8)?, fp8_small::threads(g.fp8), fp8_small::shared(g.fp8))); }
         return None;
     }
     if g.all_nv && nv_small::admitted(g.nv, g.input) { return Some(("nv_rows_small", nv_small::blocks(g.nv)?, nv_small::THREADS, nv_small::SHARED)); }
@@ -92,14 +88,14 @@ pub fn group(g: &Group) -> Option<(&'static str, u32, u32, u32)> {
         let longest = g.fp8.iter().map(|p| p.tokens).max().unwrap_or(0);
         // The served bracket supports the new choices only for two rows.
         if longest==2 && g.fp8.first().is_some_and(|p|fp8_small::two_wins(p.rows,p.cols)) && fp8_small::few_admitted(g.fp8,g.input) {
-            return Some(("fp8_rows_few",fp8_small::few_blocks(g.fp8)?,fp8_small::FEW_THREADS,0));
+            return Some(("fp8_rows_few",fp8_small::few_blocks(g.fp8)?,fp8_small::threads(g.fp8),fp8_small::shared(g.fp8)));
         }
         // One part of 3 or 4 tokens over at most FP8_SMALL_RULE_ROWS rows (the model's q_a 768 x 4096 and kv_a 256 x 4096): fp8_rows_small is faster than fp8_rows_multi there
         // (29 against 51 and 23 against 49 us at 3 tokens; one Spark 07:35, kernel-bench --fp8-small time), because multi has one block for 32 rows of the part.
         let few_rows = g.fp8.len() == 1 && (3..=4).contains(&longest) && g.fp8[0].rows <= fp8_small::SMALL_RULE_ROWS;
-        if (longest <= 2 || few_rows) && fp8_small::admitted(g.fp8, g.input) { return Some(("fp8_rows_small", fp8_small::blocks(g.fp8)?, fp8_small::THREADS, fp8_small::SHARED)); }
-        if (3..=4).contains(&longest) && fp8_small::few_wins(g.fp8[0].rows, g.fp8[0].cols, longest) && fp8_small::few_admitted(g.fp8, g.input) { return Some(("fp8_rows_few", fp8_small::few_blocks(g.fp8)?, fp8_small::FEW_THREADS, 0)); }
-        if longest >= 3 && fp8_small::multi_admitted(g.fp8, g.input) { return Some(("fp8_rows_multi", fp8_small::multi_blocks(g.fp8)?, fp8_small::MULTI_THREADS, 0)); }
+        if (longest <= 2 || few_rows) && fp8_small::admitted(g.fp8, g.input) { return Some(("fp8_rows_small", fp8_small::blocks(g.fp8)?, fp8_small::threads(g.fp8), fp8_small::shared(g.fp8))); }
+        if (3..=4).contains(&longest) && fp8_small::few_wins(g.fp8[0].rows, g.fp8[0].cols, longest) && fp8_small::few_admitted(g.fp8, g.input) { return Some(("fp8_rows_few", fp8_small::few_blocks(g.fp8)?, fp8_small::threads(g.fp8), fp8_small::shared(g.fp8))); }
+        if longest >= 3 && fp8_small::multi_admitted(g.fp8, g.input) { return Some(("fp8_rows_multi", fp8_small::multi_blocks(g.fp8)?, fp8_small::threads(g.fp8), fp8_small::shared(g.fp8))); }
     }
     None
 }
@@ -169,21 +165,14 @@ mod tests {
         assert_eq!(pick(&[], &fp8(1024, 4096, &[1, 2, 2, 1]), false, true, 1, true), Some("fp8_rows_small"));
         assert_eq!(pick(&[], &fp8(1024, 4096, &[1, 2, 3, 1]), false, true, 1, true), Some("fp8_rows_multi"), "one part of 3 tokens among several decides multi: few is for ONE part");
         // 3 or 4 tokens over more than 768 rows: fp8_rows_few up to 4 MB of weights, else multi; 5 tokens and more: multi.
-        // SHARE-B: the timed single tables (down and q_b at 2 to 8 tokens, o_proj at 2 to 5) and q_a from 3 tokens take `fp8_rows_share`; ONE part
-        // of 1,024 x 4,096 was not timed and keeps few; o_proj at 6 to 8 tokens keeps multi.
-        for (rows, cols, tokens, want) in [(1024, 4096, 3, "fp8_rows_few"), (2048, 2048, 3, "fp8_rows_share"), (2048, 16384, 3, "fp8_rows_share"), (8192, 1536, 3, "fp8_rows_share"),
-            (1024, 4096, 4, "fp8_rows_few"), (2048, 2048, 4, "fp8_rows_share"), (2048, 16384, 4, "fp8_rows_share"), (8192, 1536, 4, "fp8_rows_share"), (1024, 4096, 5, "fp8_rows_multi"), (768, 4096, 4, "fp8_rows_share"),
-            (2048, 2048, 2, "fp8_rows_share"), (2048, 16384, 2, "fp8_rows_share"), (8192, 1536, 2, "fp8_rows_share"), (1024, 4096, 2, "fp8_rows_few"),
-            (2048, 2048, 5, "fp8_rows_share"), (2048, 16384, 5, "fp8_rows_share"), (8192, 1536, 5, "fp8_rows_share"), (2048, 2048, 8, "fp8_rows_share"), (2048, 16384, 6, "fp8_rows_multi"), (2048, 16384, 8, "fp8_rows_multi"), (8192, 1536, 8, "fp8_rows_share"),
-            (2048, 2048, 9, "fp8_rows_multi"), (8192, 1536, 9, "fp8_rows_multi")] {
+        for (rows, cols, tokens, want) in [(1024, 4096, 3, "fp8_rows_few"), (2048, 2048, 3, "fp8_rows_few"), (2048, 16384, 3, "fp8_rows_multi"), (8192, 1536, 3, "fp8_rows_multi"),
+            (1024, 4096, 4, "fp8_rows_few"), (2048, 2048, 4, "fp8_rows_few"), (2048, 16384, 4, "fp8_rows_multi"), (8192, 1536, 4, "fp8_rows_multi"), (1024, 4096, 5, "fp8_rows_multi"), (768, 4096, 4, "fp8_rows_small")] {
             assert_eq!(pick(&[], &fp8(rows, cols, &[tokens]), false, true, 1, true), Some(want), "{rows}x{cols} {tokens} tokens");
         }
         assert_eq!(pick(&[], &fp8(1024, 4096, &[4, 1, 3, 2]), false, true, 1, true), Some("fp8_rows_multi"), "several parts keep multi: few is admitted for one part only");
         // One part of 3 or 4 tokens over at most 768 rows: the small kernel (q_a, kv_a); 5 tokens or several parts of 768 rows keep multi (1024 rows: few, below).
-        // SHARE-B: q_a (768 x 4,096) takes `fp8_rows_share` at 3 to 8 tokens and kv_a (256 x 4,096) at 5 to 8; below that they keep the small kernel.
-        for (rows, tokens, want) in [(768, 2, "fp8_rows_small"), (768, 3, "fp8_rows_share"), (768, 4, "fp8_rows_share"), (288, 3, "fp8_rows_small"), (288, 4, "fp8_rows_small"), (768, 5, "fp8_rows_share"), (768, 8, "fp8_rows_share"),
-            (768, 9, "fp8_rows_multi"), (288, 5, "fp8_rows_multi"), (1024, 3, "fp8_rows_few"), (1024, 4, "fp8_rows_few"),
-            (256, 1, "fp8_rows_small"), (256, 2, "fp8_rows_small"), (256, 3, "fp8_rows_small"), (256, 4, "fp8_rows_small"), (256, 5, "fp8_rows_share"), (256, 8, "fp8_rows_share"), (256, 9, "fp8_rows_multi"), (256, 16, "fp8_rows_multi")] {
+        for (rows, tokens, want) in [(768, 3, "fp8_rows_small"), (768, 4, "fp8_rows_small"), (288, 3, "fp8_rows_small"), (288, 4, "fp8_rows_small"), (768, 5, "fp8_rows_multi"), (1024, 3, "fp8_rows_few"), (1024, 4, "fp8_rows_few"),
+            (256, 1, "fp8_rows_small"), (256, 2, "fp8_rows_small"), (256, 3, "fp8_rows_small"), (256, 4, "fp8_rows_small"), (256, 5, "fp8_rows_multi"), (256, 8, "fp8_rows_multi"), (256, 16, "fp8_rows_multi")] {
             assert_eq!(pick(&[], &fp8(rows, 4096, &[tokens]), false, true, 1, true), Some(want), "{rows} rows {tokens} tokens");
         }
         assert_eq!(pick(&[], &[fp8(768, 4096, &[3])[0], fp8(768, 4096, &[3])[0]], false, true, 1, true), Some("fp8_rows_multi"), "two parts keep multi");
@@ -195,13 +184,9 @@ mod tests {
         // SHARED ROWS: 2 to 4 FP8 parts of one shape, block shape and count on the SAME rows (not cumulative) take ONE fp8_rows_multi launch with a block
         // for each 32 rows of each part, for every count of 1 to 16; any other table that is not cumulative keeps the old kernels.
         let shared = |fp8: &[fp8_rows::Part], all_fp8: bool, words: u32, shared_rows: bool| group(&Group { nv: &[], fp8, all_nv: false, all_fp8, words, cumulative: false, shared_rows, input: 256 });
-        // SHARE-B: the timed table (TWO parts of 1,024 x 4,096, the shared expert's gate and up) at 2 to 6 tokens takes ONE `fp8_rows_share` launch
-        // with a block for each 16 rows of each part.
         for tokens in 1..=16usize { for parts in 2..=4usize {
-            let want = if parts == 2 && (2..=6).contains(&tokens) { ("fp8_rows_share", 128, [160, 192, 192, 224, 224][tokens - 2], if tokens == 2 { 27744 } else { 30912 }) } else { ("fp8_rows_multi", (32 * parts) as u32, 128, 0) };
-            assert_eq!(shared(&fp8(1024, 4096, &vec![tokens; parts]), true, 1, true), Some(want), "{parts} parts of {tokens} tokens");
+            assert_eq!(shared(&fp8(1024, 4096, &vec![tokens; parts]), true, 1, true), Some(("fp8_rows_multi", (64 * parts * tokens.div_ceil(8)) as u32, 256, crate::expert_ops::fp8_row_shared(8, 32, tokens.min(8) as u32, false))), "{parts} parts of {tokens} tokens");
         } }
-        assert_eq!(shared(&fp8(2048, 4096, &[3, 3]), true, 1, true), Some(("fp8_rows_multi", 128, 128, 0)), "two parts of a table that was not timed keep multi");
         assert_eq!(shared(&fp8(1024, 4096, &[4, 4]), true, 1, false), None, "the caller did not say the rows are the same");
         assert_eq!(shared(&fp8(1024, 4096, &[4; 5]), true, 1, true), None, "5 parts");
         assert_eq!(shared(&fp8(1024, 4096, &[4, 3]), true, 1, true), None, "counts differ");

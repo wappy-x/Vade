@@ -214,6 +214,10 @@ impl Planes {
 /// Sweep of the admitted family: the K2 project (`mhc_boundary_project`) against the split pair, each followed by the
 /// unchanged finish launch, over rows 1..8, streams 1..32, many hidden widths, first and after sites, both norm
 /// precisions, and value patterns that expose any change of add order. All six written planes are compared.
+/// The finish launch of arm A is the baseline image's and of arm B the candidate image's, so the sweep is also the
+/// old-against-new byte check of `mhc_boundary_finish`. Its control: at the largest row count of every plain or
+/// alternating case the candidate's finish gets a wrong norm weight plane; the output plane must change and no other
+/// plane may, and the right plane must restore equal bytes.
 pub(crate) fn sweep(base_path: &str, candidate_path: &str, oracle:bool) -> Result<()> {
     let (a, b) = (std::fs::read(base_path).map_err(|e| e.to_string())?, std::fs::read(candidate_path).map_err(|e| e.to_string())?);
     println!("MHCSWEEP baseline_sha256={} candidate_sha256={} host_strip_fold_oracle={oracle}", sha256::digest(&a), sha256::digest(&b));
@@ -221,6 +225,7 @@ pub(crate) fn sweep(base_path: &str, candidate_path: &str, oracle:bool) -> Resul
     let (project, finish) = (g.function(ma, "mhc_boundary_project")?, g.function(ma, "mhc_boundary_finish")?);
     let (rms, dots, finish_b) = (g.function(mb, "mhc_boundary_rms")?, g.function(mb, "mhc_boundary_dots")?, g.function(mb, "mhc_boundary_finish")?);
     let started = Instant::now(); let (mut comparisons, mut bytes, mut digest) = (0u64, 0u64, String::new());
+    let (mut controls, mut dead) = (0u64, 0u64);
     // The swept cases are mhc_params::split_cases, the list a host test compares with the predicate; the weight kinds follow the stream count.
     let mut cases: Vec<(u32, u32, Vec<usize>, Vec<(u32, u32)>)> = vec![];
     for (n, h, rows) in crate::mhc_params::split_cases() {
@@ -235,6 +240,8 @@ pub(crate) fn sweep(base_path: &str, candidate_path: &str, oracle:bool) -> Resul
         let s = Shape { rows: top as u32, streams: n, hidden: h, iterations: 20, rms_eps: 1e-5, eps: 1e-6 }; s.validate()?;
         let (w, c, hh) = (s.wide(), s.coefficients(), h as usize);
         let norm = Buffer::new(&mut g, &pattern(0, hh, 5).iter().map(|v| v.abs() + 0.5).collect::<Vec<_>>())?;
+        // The control's wrong plane: every weight more than twice the right one, so every finite non-zero output word moves.
+        let norm_wrong = Buffer::new(&mut g, &pattern(0, hh, 5).iter().map(|v| v.abs() * 2.0 + 1.75).collect::<Vec<_>>())?;
         let (arm_a, arm_b) = (Planes::new(&mut g, top, s)?, Planes::new(&mut g, top, s)?);
         for (ik, wk) in weight_kinds {
             let weights = Buffer::new(&mut g, &pattern(wk, c * w, 3000 + n as u64 * 131 + h as u64 + wk as u64).into_iter().map(|v| if wk == 0 { v / 64.0 } else { v }).collect::<Vec<_>>())?;
@@ -275,6 +282,28 @@ pub(crate) fn sweep(base_path: &str, candidate_path: &str, oracle:bool) -> Resul
                             if x[..16] != GUARD || x[x.len() - 16..] != GUARD { return Err(format!("MHCSWEEP guard changed streams={n} hidden={h} rows={rows} plane={name}")); }
                             bytes += x.len() as u64;
                         }
+                        if (ik == 0 || ik == 5) && rows == top {
+                            let reference = arm_a.all().into_iter().map(|p| p.read(&g)).collect::<Result<Vec<_>>>()?;
+                            let body = &reference[5][16..reference[5].len() - 16];
+                            // An output plane of zeros or non-finite words cannot show a changed weight: counted, not used.
+                            if body.chunks_exact(4).any(|w| { let v = f32::from_le_bytes([w[0], w[1], w[2], w[3]]); v.is_finite() && v != 0.0 }) {
+                                for wrong in [true, false] {
+                                    for p in arm_b.all() { p.poison(&g)?; }
+                                    let mut xf = args(&arm_b); if wrong { xf.norm_weight = norm_wrong.address; }
+                                    g.launch(rms, [rows as u32, 1, 1], 256, 0, &mut [ptr(&mut xb)])?;
+                                    g.launch(dots, [rows as u32 * c as u32, 1, 1], 256, 0, &mut [ptr(&mut xb)])?;
+                                    g.launch(finish_b, [rows as u32, 1, 1], shape.prepare_threads(), 0, &mut [ptr(&mut xf)])?;
+                                    g.sync()?;
+                                    for (plane, (want, pb)) in reference.iter().zip(arm_b.all()).enumerate() {
+                                        let changed = pb.read(&g)? != *want;
+                                        if changed != (wrong && plane == 5) {
+                                            return Err(format!("MHCSWEEP FINISH CONTROL FAIL streams={n} hidden={h} rows={rows} after={after} norm_bf16={bf16} input_pattern={ik} wrong_norm={wrong} plane={plane} changed={changed}"));
+                                        }
+                                    }
+                                }
+                                controls += 1;
+                            } else { dead += 1; }
+                        }
                         comparisons += 1;
                         if comparisons % 997 == 0 { digest = sha256::digest(format!("{digest}{comparisons}{n}{h}{rows}").as_bytes()); }
                     }
@@ -284,6 +313,8 @@ pub(crate) fn sweep(base_path: &str, candidate_path: &str, oracle:bool) -> Resul
         if n != last_n { last_n = n; println!("MHCSWEEP streams={n} ok comparisons_so_far={comparisons} elapsed_s={:.1}", started.elapsed().as_secs_f64()); }
         g.clear()?;
     }
+    if controls == 0 { return Err("MHCSWEEP FINISH CONTROL FAIL no case with a live output plane".into()); }
+    println!("MHCSWEEP FINISH CONTROL PASS controls={controls} wrong_norm_plane=output_changed_alone restored=equal dead_output_cases_not_used={dead}");
     println!("MHCSWEEP PASS comparisons={comparisons} planes_per_comparison=6 compared_bytes={bytes} elapsed_s={:.1}", started.elapsed().as_secs_f64());
     Ok(())
 }

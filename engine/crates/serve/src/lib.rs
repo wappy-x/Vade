@@ -245,6 +245,12 @@ pub trait Engine {
     /// Discard optional history when requests overlap; that turn then remains
     /// plain because omitted target residuals cannot be recovered from KV.
     fn discard_contended_draft(&self) -> bool { false }
+    /// With `discard_contended_draft`: the most overlapping requests that keep their draft state
+    /// and its reservation. One: a second request discards it, as before.
+    fn contended_draft_chats(&self) -> usize { 1 }
+    /// Whether `request` is one that keeps its draft state beside other requests, up to
+    /// `contended_draft_chats` of them, all of this kind. Any other overlap discards it.
+    fn drafts_contended(&self, _request: &protocol::Request) -> bool { false }
     fn automatic_draft_allowed(&self, _chats: usize) -> bool { true }
     fn shared_draft_costs(&self, _chats: usize) -> Option<spark_engine::draft::CostCurve> { None }
     fn propose_batch<'s>(&'s self, _rows: &mut [DraftRows<'_, Self::Session<'s>>])

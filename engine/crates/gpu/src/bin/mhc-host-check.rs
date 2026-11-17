@@ -38,7 +38,7 @@ mod check {
     /// The device planes of one pass, in the order of `NAMES`. A hosted pass must be delivered first.
     fn planes(b: &Backend<'_>, pass: &MhcBoundaryPass<'_, '_>, all: bool) -> Result<Vec<Vec<u32>>, String> {
         let mut out = vec![bits(b, pass.residual())?, bits(b, pass.coefficients())?, bits(b, &pass.normalized())?];
-        if all { out.push(bits(b, pass.mixing_normalized())?); out.push(bits(b, pass.collapsed())?); }
+        if all { out.push(bits(b, pass.mixing_normalized()?)?); out.push(bits(b, pass.collapsed())?); }
         Ok(out)
     }
     const NAMES: [&str; 5] = ["residual", "coefficients", "output", "mixing", "collapsed"];

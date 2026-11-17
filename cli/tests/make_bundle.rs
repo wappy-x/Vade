@@ -96,7 +96,7 @@ fn fixture(stamp: &str) -> Fixture {
     let engine = payload.join("artifacts/engine/target/release/flash-serve");
     let ptx = payload.join("artifacts/engine/target/nvptx64-nvidia-cuda/release/spark_layer_kernels.ptx");
     write(&engine, &elf(&format!("libcuda.so.1\0GLIBC_2.17\0GLIBC_2.39\0{stamp}\0")), 0o755);
-    write(&ptx, b"//\n.version 8.8\n.target sm_121\n.address_size 64\n", 0o644);
+    write(&ptx, b"//\n.version 8.8\n.target sm_121a\n.address_size 64\n", 0o644);
     write(&payload.join("build.json"), format!("{{\n  \"sha\": \"{revision}\",\n  \"binary_sha256\": \"{}\",\n  \"ptx_sha256\": \"{}\"\n}}\n",
         sha256(&engine), sha256(&ptx)).as_bytes(), 0o644);
     write(&cli.join("vade"), &elf("GLIBC_2.34\0"), 0o755);
@@ -150,14 +150,14 @@ fn from_payload_gives_the_same_bytes_twice_and_one_checked_folder() {
     assert!(!refused.status.success() && String::from_utf8_lossy(&refused.stderr).contains("output already exists"));
 }
 
-const PTXAS: &str = "ptxas_version=13.0.88\nptxas_sha256=a1941a04ca4fd233b2fbe50c625b1e72b3d5f79ebe80209a272c85482dfbb487\nptxas_args=--gpu-name=sm_121 -m64 -O3\n";
+const PTXAS: &str = "ptxas_version=13.0.88\nptxas_sha256=a1941a04ca4fd233b2fbe50c625b1e72b3d5f79ebe80209a272c85482dfbb487\nptxas_args=--gpu-name=sm_121a -m64 -O3\n";
 // The three files make-cubin.sh writes, for the PTX at `ptx`.
 fn cubin(folder: &Path, ptx: &Path, image: &[u8]) -> String {
     write(&folder.join("flash.cubin"), image, 0o644);
     fs::create_dir_all(folder).unwrap();
     fs::copy(ptx, folder.join("flash.ptx")).unwrap();
     let digest = sha256(&folder.join("flash.cubin"));
-    write(&folder.join("flash.cubin.conf"), format!("format=vade-cubin-v1\ntarget=sm_121\nptx_sha256={}\ncubin_sha256={digest}\nmin_driver_api=13000\n{PTXAS}",
+    write(&folder.join("flash.cubin.conf"), format!("format=vade-cubin-v1\ntarget=sm_121a\nptx_sha256={}\ncubin_sha256={digest}\nmin_driver_api=13000\n{PTXAS}",
         sha256(ptx)).as_bytes(), 0o644);
     digest
 }
@@ -236,7 +236,7 @@ fn compiler(version: &str) -> Compiler {
         .replace("a1941a04ca4fd233b2fbe50c625b1e72b3d5f79ebe80209a272c85482dfbb487", &sha256(&ptxas));
     write(&script, source.as_bytes(), 0o755);
     let ptx = temp.0.join("in/spark_layer_kernels.ptx");
-    write(&ptx, b"//\n.version 8.8\n.target sm_121\n.address_size 64\n", 0o644);
+    write(&ptx, b"//\n.version 8.8\n.target sm_121a\n.address_size 64\n", 0o644);
     Compiler { temp, archive, script, ptx }
 }
 
@@ -246,10 +246,10 @@ fn make_cubin_runs_the_pinned_command_on_exact_bytes_and_writes_the_manifest() {
     let out = c.temp.0.join("out");
     let printed = run(Command::new("/bin/sh").arg(&c.script).arg(&c.ptx).arg(&out).arg(&c.archive));
     assert!(printed.contains("ptxas: 13.0.88"), "{printed}");
-    assert_eq!(fs::read_to_string(out.join("flash.cubin")).unwrap(), "--gpu-name=sm_121 -m64 -O3 flash.ptx -o flash.cubin\n");
+    assert_eq!(fs::read_to_string(out.join("flash.cubin")).unwrap(), "--gpu-name=sm_121a -m64 -O3 flash.ptx -o flash.cubin\n");
     assert_eq!(fs::read(out.join("flash.ptx")).unwrap(), fs::read(&c.ptx).unwrap());
     assert_eq!(fs::read_to_string(out.join("flash.cubin.conf")).unwrap(), format!(
-        "format=vade-cubin-v1\ntarget=sm_121\nptx_sha256={}\ncubin_sha256={}\nmin_driver_api=13000\nptxas_version=13.0.88\nptxas_sha256={}\nptxas_args=--gpu-name=sm_121 -m64 -O3\n",
+        "format=vade-cubin-v1\ntarget=sm_121a\nptx_sha256={}\ncubin_sha256={}\nmin_driver_api=13000\nptxas_version=13.0.88\nptxas_sha256={}\nptxas_args=--gpu-name=sm_121a -m64 -O3\n",
         sha256(&c.ptx), sha256(&out.join("flash.cubin")), sha256(&c.temp.0.join("toolkit/cuda_nvcc-linux-sbsa-13.0.88-archive/bin/ptxas"))));
     let names: Vec<_> = fs::read_dir(&c.temp.0).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
     assert!(!names.iter().any(|name| name.starts_with("out.")), "{names:?}");
@@ -270,7 +270,7 @@ fn make_cubin_refuses_another_compiler_or_target() {
     let wrong = c.temp.0.join("other.tar");
     fs::write(&wrong, b"not the pinned archive").unwrap();
     refused(&c, &wrong, "pinned SHA-256");
-    write(&c.ptx, b"//\n.version 8.8\n.target sm_121a\n.address_size 64\n", 0o644);
+    write(&c.ptx, b"//\n.version 8.8\n.target sm_121\n.address_size 64\n", 0o644);
     refused(&c, &c.archive, "does not target the GB10");
     let c = compiler("13.0.48");
     refused(&c, &c.archive, "does not report version 13.0.88");

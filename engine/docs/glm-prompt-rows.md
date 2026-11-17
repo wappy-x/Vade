@@ -108,7 +108,37 @@ and `mtp_depth`. With `"draft":"plain"` the same server decodes one token per st
   the loaded depth. A request of depth 3 or less, and a server started with
   `--mtp 3` or less, propose as before.
 
-A pass serves one chat. With more chats, each decodes plain rows.
+A pass serves one chat, or two to three chats that draft together. Two to three strict
+requests of depth 2 or more that are alone on the server each keep their own proposer. Their check rows run
+in ONE shared pass in a scheduler tick
+([`rows/shared.rs`](../crates/tp/src/bounded_decoder/rows/shared.rs), command 32 in
+[`row_split/shared.rs`](../crates/tp/src/row_split/shared.rs)). The steps of a layer
+that read weights only run once on the rows of all the chats. The steps that read a
+chat's history run once for each chat, on that chat's rows, with its own positions
+and caches. Each chat has its own verdict and its own rollback: one chat may keep
+four tokens while the other keeps one. A row in a shared pass has the bits of the
+same row in that chat's own pass. A pass holds 16 rows at most, kept rows included.
+The pair decides for both chats
+([`pair.rs`](../crates/tp/src/row_split/pair.rs)): both propose their whole depth in
+a tick, or both ride the step of two chats. A pair starts with shared plain steps.
+Each chat runs the pair trial: lookback probes that start eight steps into its
+answer, five steps apart. It does not wait for the think block to end. Seven matched
+tokens within four probes start a chat. The steps retain owned predictor inputs for
+each chat. Both trials must pass before shared passes start. A failed trial keeps
+both chats on shared plain steps, and each chat turns its predictor off when it
+hands back to plain steps (command 31, word 2: it keeps the rows its prompt expanded,
+because its drafting invoice stays). An output cap under 32 tokens cannot pay the probes back
+and uses ordinary shared decoding without pair trial state. This cap guard does not
+change a lone strict chat.
+
+Once shared passes start, the pair compares each chat's kept tokens with the measured cost
+of shared plain steps. If either chat stops paying, both leave the shared passes for the
+rest of the pair. The served log records probe time with `SERVED PAIR PROBE`, trial
+verdicts with `SERVED PAIR TRIAL`, each shared pass with `SERVED SHARED`, and one `SERVED PAIR` account for each pair. Three strict chats follow the same rule
+as two: every chat's trial must pass, all propose in a tick or none does, and the chat that keeps the fewest rows
+must still gain against the step of all of them. A chat that arrives starts a new trial for all. When a chat ends,
+the chats that are left go on. With four or more chats, and for a request that
+names no draft mode beside another chat, each chat decodes plain rows.
 
 ## Memory
 

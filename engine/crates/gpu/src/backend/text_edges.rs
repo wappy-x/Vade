@@ -79,7 +79,7 @@ impl<'a> ResidentTextEdges<'_,'a> {
         let mut args = crate::next_params::MxLayer::default();
         args.push(crate::next_params::MxProjection {weights:self.head.address,scales:self.scales.address,
             input:normalized.device_address(),output:output.device_address(),rows:s.vocab() as u32,
-            cols:s.hidden() as u32,tokens:1,input_bf16:0,round:0})?;
+            cols:s.hidden() as u32,tokens:1,input_bf16:0,round:0,mode:crate::next_params::MX_SCALAR})?;
         // SAFETY: Layout checked complete E4M3/UE8M0 spans and weight alignment.
         // The private views retain their arena. Shape and check_vector bound the
         // input; MxLayer checks the ABI and alignment. The new output is disjoint.

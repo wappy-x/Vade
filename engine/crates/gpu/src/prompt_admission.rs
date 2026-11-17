@@ -41,10 +41,11 @@ pub fn permute_blocks(s:Shape)->u32 {if s.op==Op::RankRows {s.rows*s.tokens} els
 /// `ExpertPlaceTile` of the expert results on two ranks: `tokens * ROUTED` rows, local rows 1024 or 2048 (output rows of 2048 or
 /// 4096 words), `slots = rows * dim`. Tiles are 32 channels wide. The table must come from `prompt_ops::place_table`.
 /// GROUP FOLD: and of ONE rank's own down rows (`FOLD_LOCAL` words a row, one part), placed before their fold and its exchange.
+/// PACKED MIDDLE: and of ONE rank's own middle rows (`MIDDLE_LOCAL` words a row, one part), placed before their quantizer and its exchange.
 /// The kernel takes any part count (a source word is `part * slots + ...`); each form here is device-swept (`swept::place_cases`).
 pub fn place_admitted(s:Shape)->bool {
     let rows=s.rows as usize;
-    s.op==Op::ExpertPlaceTile && matches!((s.dim,s.taps),(1024,2)|(2048,2)|(FOLD_LOCAL,1)) && rows%ROUTED==0 && (1..=MOVE_MAX).contains(&(rows/ROUTED))
+    s.op==Op::ExpertPlaceTile && matches!((s.dim,s.taps),(1024,2)|(2048,2)|(FOLD_LOCAL,1)|(MIDDLE_LOCAL,1)) && rows%ROUTED==0 && (1..=MOVE_MAX).contains(&(rows/ROUTED))
         && s.cols==s.dim*s.taps && s.slots as usize==rows*s.dim as usize && s.lengths().is_some()
 }
 /// Grid of the place tile: slot tiles on x, channel tiles on y.
@@ -90,6 +91,9 @@ pub const MHC_MIN_ROWS:u32=128;
 pub fn mhc_tile_admitted(s:crate::mhc_params::Shape)->bool {
     s.validate().is_ok() && !s.split_project() && ((MHC_MIN_ROWS..=GROUP_MAX as u32).contains(&s.rows) || GROUP_BIG.contains(&(s.rows as usize))) && s.streams==4 && s.hidden==4096
 }
+/// The fused boundary wins at 1,024 rows and loses at 256 (MEASURED f8row-mhc-warps-1). Keep the narrower admission:
+/// its feature tree and every plane match the three-launch path in the six-plane device sweep.
+pub fn mhc_block_admitted(s:crate::mhc_params::Shape)->bool {s.rows==1024 && mhc_tile_admitted(s)}
 /// Blocks of the token-tiled project.
 pub fn mhc_tile_blocks(rows:u32)->u32 {rows.div_ceil(MHC_TOKENS as u32)}
 /// Tokens one thread of `prompt_conv` walks.
@@ -102,6 +106,8 @@ fn route_admitted(i:CausalShape)->bool {
 }
 /// The rows one rank of a pair owns of the model's 4096: the width of a fold made before its exchange (ROWS FOLD).
 pub const FOLD_LOCAL:u32=2048;
+/// The middle rows one rank of a pair owns of a routed expert's 2048: the packed middle places them alone (`place_admitted`).
+pub const MIDDLE_LOCAL:u32=1024;
 /// Most tokens of a fold of `FOLD_LOCAL` rows: the chats of one batch step (`bounded_decoder::BATCH_ROWS`, pinned there).
 pub const FOLD_LOCAL_TOKENS:usize=8;
 /// Wrapped `ExpertFold` of the model: 8 routed rows of 4096 plus the shared expert. And the same fold of the `FOLD_LOCAL`
@@ -118,6 +124,7 @@ pub const fn recurrent_heads(heads:u32)->bool {matches!(heads,32|64)}
 /// of 32 or 64 heads x 128 channels, for 1 to GROUP_MAX tokens. Float parameters (gate bound, epsilon, scale) are values of the same
 /// expressions and are swept at three values each.
 pub fn fast_kernel(s:Shape)->Option<&'static str> {
+    if matches!(s.op,Op::WirePackBf16|Op::WireUnpackBf16) && s.lengths().is_some() {return Some("prompt_wire_bf16");}
     s.lengths()?;
     if !group_admitted(s.tokens as usize) {return None;}
     match s.op {
@@ -128,11 +135,22 @@ pub fn fast_kernel(s:Shape)->Option<&'static str> {
             Causal::ExpertFold if fold_admitted(i)=>Some("prompt_fold"),
             _=>None}},
         Op::ConvRows if recurrent_heads(s.heads) && s.dim==128 && s.taps==4=>Some("prompt_conv"),
+        // The prepare entry also computes the unchanged exponentials of an already prepared row.
+        Op::StepDecay if recurrent_heads(s.heads) && s.dim==128=>Some("prompt_prepare"),
         _=>None,
     }
 }
+/// True when the convolution rows of a run of a swept big size (512, 768 or 1,024 tokens) take `prompt_conv` in ONE launch.
+/// The decoder then makes no runs of `GROUP_MAX` tokens for it and no join of their outputs (`conv_rows`): the join copied
+/// the whole convolved plane once more (three planes of the run, about 50 MB at 1,024 tokens of 32 heads). The tuple is one
+/// `swept::conv_cases` lists, so the device sweep byte-compares it with the generic kernel.
+pub fn conv_whole(s:Shape)->bool {s.op==Op::ConvRows && big_group(s.tokens as usize) && fast_kernel(s)==Some("prompt_conv")}
 /// Blocks of `FAST_THREADS` threads for the kernel `fast_kernel` named.
 pub fn fast_blocks(s:Shape)->u32 {
+    if matches!(s.op,Op::WirePackBf16|Op::WireUnpackBf16) {
+        if s.op==Op::WireUnpackBf16 && s.first!=0 {return s.rows.div_ceil(32)*s.cols.div_ceil(32);}
+        return s.lengths().map_or(1,|(_,_,units,_)|units.div_ceil(FAST_THREADS as usize) as u32);
+    }
     let (m,i)=(s.tokens as usize,s.inner);
     let blocks=match s.op {
         Op::Wrapped=>match i.op {
@@ -140,6 +158,7 @@ pub fn fast_blocks(s:Shape)->u32 {
             Causal::Route=>m.div_ceil(4),
             _=>(m*i.cols as usize).div_ceil(FAST_THREADS as usize),
         },
+        Op::StepDecay=>(m*s.heads as usize*s.dim as usize).div_ceil(4*FAST_THREADS as usize),
         _=>(3*s.heads as usize*s.dim as usize*m.div_ceil(CONV_RUN)).div_ceil(FAST_THREADS as usize),
     };
     blocks.max(1) as u32
@@ -149,6 +168,15 @@ pub fn fast_blocks(s:Shape)->u32 {
 mod tests {
     use super::*;
     use crate::swept;
+    #[test]
+    fn decay_uses_the_prepare_entry_only_on_the_swept_shapes() {
+        for m in 0..=1100 {for h in [1,31,32,33,64,65] {for d in [127,128,129] {
+            let mut s=Shape::new(Op::StepDecay,m).unwrap();s.heads=h;s.dim=d;
+            assert_eq!(fast_kernel(s),if group_admitted(m) && recurrent_heads(h) && d==128 {Some("prompt_prepare")} else {None});
+        }}}
+        let mut s=Shape::new(Op::StepDecay,1024).unwrap();s.heads=32;s.dim=128;
+        assert_eq!(fast_blocks(s),8192);
+    }
     fn transpose(rows:u32,cols:u32)->Shape {let mut s=Shape::new(Op::Transpose,1).unwrap();s.rows=rows;s.cols=cols;s}
     /// The standing rule for `transpose_smem`, tuple by tuple (review): the admitted set IS the list of pairs the device sweep walks. Neither
     /// direction is axis sampling: every admitted pair is on the list and every listed pair is admitted.
@@ -251,7 +279,7 @@ mod tests {
                     if permute_admitted(s,0,0) {seen[0]+=1;assert!(permute_list.contains(&(rows,cols,tokens)),"permute {rows} {cols} {tokens}");}
                 }
             }
-            for (d,t) in [(1024usize,2usize),(2048,2),(32,1),(32,2),(512,4),(1024,1),(2048,1),(4096,1),(1024,4)] {
+            for (d,t) in [(1024usize,2usize),(2048,2),(32,1),(32,2),(512,4),(512,1),(1024,1),(2048,1),(4096,1),(1024,4)] {
                 for rows in [tokens*ROUTED,tokens*ROUTED+4] {
                     let mut s=Shape::new(Op::ExpertPlaceTile,1).unwrap();s.rows=rows as u32;s.dim=d as u32;s.taps=t as u32;s.cols=(d*t) as u32;s.slots=(rows*d) as u32;
                     if place_admitted(s) {seen[1]+=1;assert!(place_list.contains(&(rows/ROUTED,d,t)),"place {rows} {d} {t}");}
@@ -287,12 +315,37 @@ mod tests {
         for tokens in swept::group_tokens() {let local=wrapped(Causal::ExpertFold,0,0,1,8,FOLD_LOCAL,0.0,0.0,tokens);
             assert_eq!(fast_kernel(local),Some("prompt_fold"),"{tokens}");assert_eq!(fast_blocks(local),16*tokens as u32);}
         for tokens in [257usize,300,1023,1025] {assert_eq!(fast_kernel(wrapped(Causal::ExpertFold,0,0,1,8,FOLD_LOCAL,0.0,0.0,tokens)),None,"{tokens}");}
-        // GROUP FOLD: one rank's own down rows are placed by the tile kernel at every group size; no other one-part form is.
+        // GROUP FOLD: one rank's own down rows are placed by the tile kernel at every group size. PACKED MIDDLE: and one
+        // rank's own middle rows. No other one-part form is.
         for tokens in [1usize,16,64,256,512,1024] {let mut s=Shape::new(Op::ExpertPlaceTile,1).unwrap();s.rows=(tokens*ROUTED) as u32;s.dim=FOLD_LOCAL;s.taps=1;s.cols=FOLD_LOCAL;s.slots=s.rows*FOLD_LOCAL;
             assert!(place_admitted(s),"{tokens}");assert_eq!(place_grid(s),(s.rows.div_ceil(TILE),FOLD_LOCAL/TILE));
-            s.dim=1024;s.cols=1024;s.slots=s.rows*1024;assert!(!place_admitted(s),"{tokens}");}
-        assert_eq!(permute_list.len(),2*MOVE_MAX);assert_eq!(place_list.len(),3*MOVE_MAX);assert_eq!(prepare_list.len(),2*swept::RECURRENT_HEADS.len()*sizes);assert_eq!(conv_list.len(),swept::RECURRENT_HEADS.len()*sizes);assert_eq!(mhc_list.len(),sizes-127);
+            s.dim=MIDDLE_LOCAL;s.cols=MIDDLE_LOCAL;s.slots=s.rows*MIDDLE_LOCAL;assert!(place_admitted(s),"{tokens}");assert_eq!(place_grid(s),(s.rows.div_ceil(TILE),MIDDLE_LOCAL/TILE));
+            s.dim=4096;s.cols=4096;s.slots=s.rows*4096;assert!(!place_admitted(s),"{tokens}");
+            s.dim=512;s.cols=512;s.slots=s.rows*512;assert!(!place_admitted(s),"{tokens}");}
+        assert_eq!(permute_list.len(),2*MOVE_MAX);assert_eq!(place_list.len(),4*MOVE_MAX);assert_eq!(swept::MIDDLE_LOCAL,MIDDLE_LOCAL as usize);assert_eq!(prepare_list.len(),2*swept::RECURRENT_HEADS.len()*sizes);assert_eq!(conv_list.len(),swept::RECURRENT_HEADS.len()*sizes);assert_eq!(mhc_list.len(),sizes-127);
         for tokens in [257usize,511,513,1023,1025,2048] {assert!(!group_admitted(tokens),"{tokens}");}
         for tokens in GROUP_BIG {assert!(group_admitted(tokens));assert_eq!(fast_kernel(conv(tokens,64,128,4)),Some("prompt_conv"));assert!(mhc_tile_admitted(mhc(tokens as u32,4,4096)));}
     }
+    /// ONE LAUNCH: the convolution of a run takes one launch exactly at the swept big sizes of the model's shapes; every such
+    /// tuple is in the device sweep list. Any other count keeps the runs of `GROUP_MAX` tokens (or the one launch of a small group).
+    #[test] fn a_convolution_run_takes_one_launch_only_at_the_swept_big_sizes() {
+        let list=crate::swept::conv_cases();let mut seen=0;
+        for tokens in [1usize,17,255,256,257,300,511,512,513,767,768,769,1023,1024,1025,2048] {for h in [16u32,32,33,64] {for d in [127u32,128] {for t in [3u32,4,5] {
+            let got=conv_whole(conv(tokens,h,d,t));
+            assert_eq!(got,matches!(tokens,512|768|1024) && matches!(h,32|64) && d==128 && t==4,"{tokens} {h} {d} {t}");
+            if got {seen+=1;assert!(list.contains(&(tokens,h as usize,d as usize,t as usize)));assert_eq!(fast_blocks(conv(tokens,h,d,t)),3*h*d*(tokens as u32).div_ceil(CONV_RUN as u32)/FAST_THREADS);}
+        }}}}
+        assert_eq!(seen,6);
+        // Only the convolution rows: no other operation of the same shape answers.
+        let mut other=conv(1024,32,128,4);other.op=Op::HistoryRows;assert!(!conv_whole(other));
+    }    #[test] fn the_fused_mhc_boundary_admits_only_its_proven_large_group() {
+        let proof=crate::swept::mhc_cases();let mut admitted=0;
+        for rows in [0,1,8,64,127,128,256,512,768,1023,1024,1025] {for streams in [0,1,3,4,5] {for hidden in [1,2048,4095,4096,4097] {
+            let s=mhc(rows,streams,hidden);let got=mhc_block_admitted(s);
+            assert_eq!(got,(rows,streams,hidden)==(1024,4,4096));
+            if got {admitted+=1;assert!(proof.contains(&(rows as usize,streams as usize,hidden as usize)));}
+        }}}
+        assert_eq!(admitted,1);
+    }
+
 }

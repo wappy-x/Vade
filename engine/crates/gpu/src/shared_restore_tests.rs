@@ -1,5 +1,4 @@
-//! The rejected broad variant must fail these restored three/four-row contracts. The block-FP8 rows of the contract were moved once since, by
-//! SHARE-B, to a NEW entry with its own byte proof and launch timing (see the note in the test).
+//! The rejected broad variant must fail these restored three/four-row contracts.
 use super::*;
 #[test]
 fn three_and_four_rows_keep_the_base_entries_grids_and_byte_order() {
@@ -7,18 +6,13 @@ fn three_and_four_rows_keep_the_base_entries_grids_and_byte_order() {
         for (rows,cols) in [(2048,8192),(2048,12288),(4096,4096),(6144,4096)] {
             assert_eq!(mx(rows,cols,m,256,512,768),Mx::Small("mx_rows_small4",4));
         }
-        // SHARE-B (2026-11-16): the timed single block-FP8 tables take the new entry `fp8_rows_share` at 3 and 4 rows (one copy and one decode
-        // of a weight for all rows; launch times in `fp8_small::share_wins`, same bytes in `kernel-bench --fp8-small {OLD} {X} share`). The tables
-        // that were not timed (ONE part of 1,024 x 4,096) or where it loses (256 x 4,096) keep the base entries and grids.
-        for (rows,cols,want) in [(1024,4096,"fp8_rows_few"),(2048,2048,"fp8_rows_share"),
-            (2048,16384,"fp8_rows_share"),(8192,1536,"fp8_rows_share"),(768,4096,"fp8_rows_share"),(256,4096,"fp8_rows_small")] {
+        for (rows,cols,want) in [(1024,4096,"fp8_rows_few"),(2048,2048,"fp8_rows_few"),
+            (2048,16384,"fp8_rows_multi"),(8192,1536,"fp8_rows_multi"),(768,4096,"fp8_rows_small"),(256,4096,"fp8_rows_small")] {
             let parts=[fp8_rows::Part {rows,cols,tokens:m,block_rows:128,block_cols:128,weight:256,scales:512}];
             let got=group(&Group {nv:&[],fp8:&parts,all_nv:false,all_fp8:true,words:1,cumulative:true,shared_rows:false,input:768});
-            let expected=match want {
-                "fp8_rows_few"=>(want,rows.div_ceil(16) as u32,128,0),
-                "fp8_rows_share"=>(want,rows.div_ceil(16) as u32,192,30912),
-                _=>(want,(rows.div_ceil(16)*m) as u32,160,30720),
-            };
+            // TENSOR-CORE REBASE (block FP8): the three entries keep their names (each is a recorded launch kind) and run
+            // the one row body with one geometry: a block a tile of 16 rows and up to 8 token rows (`fp8_small`).
+            let expected=(want,rows.div_ceil(16) as u32,fp8_small::threads(&parts),fp8_small::shared(&parts));
             assert_eq!(got,Some(expected),"{rows}x{cols} m={m}");
         }
         // The same entry/geometry means the same device body. Also retain the host

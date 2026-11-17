@@ -17,9 +17,12 @@ pub const BATCH_MIN_ROWS:usize=3;
 /// while a third chat read its prompt left every later step of 3 to 7 chats 4 to 6 ms slower (loads A1,
 /// A2, B1; the same with the routed path off; cause not found). Bits do not depend on this number.
 pub const BATCH_PAIR_ROWS:usize=2;
-/// The latent-absorb chats sweep on GB10 (2026-11-12, ASTRA-ROWS sweep.log) first wins beyond both ranges at five rows.
+/// Fewest chats whose latent layers run as one row group. With the tile's own body the group first won at five rows
+/// (latent-absorb chats sweep on GB10, 2026-11-12, ASTRA-ROWS sweep.log). With the small form of query and project
+/// (1 to 8 tokens, `kernels/src/latent_absorption_tile.rs`), served on two Sparks (bracket chats4-br1, 2026-11-16): the
+/// group made a step of 4 chats 1.15 ms faster and one of 8 chats 1.25 ms faster, and one of 2 chats 0.19 ms slower.
 /// Smaller groups keep the per-chat launches. This floor does not change the arithmetic of a row.
-pub const CHAT_ROWS_MIN:usize=5;
+pub const CHAT_ROWS_MIN:usize=4;
 fn chat_rows_admitted(rows:usize)->bool {(CHAT_ROWS_MIN..=BATCH_ROWS).contains(&rows)}
 static CHAT_ATTENTION_LAYERS:AtomicU64=AtomicU64::new(0);
 /// Completed grouped attention layers, for the served path check.
@@ -55,19 +58,24 @@ pub fn expert_union_counts()->Vec<[u64;2]> {EXPERT_PICKS.iter().map(|counts|[cou
 /// recorded in `engine/docs/pair-row-study.md`.
 pub const ROUTED_CHATS:usize=1;
 /// Steps that read one chat's history. Every other step of a layer depends on its row alone.
-fn reads_history(kind:Kind)->bool {
+pub(super) fn reads_history(kind:Kind)->bool {
     matches!(kind,Kind::Conv|Kind::KdaStep|Kind::CacheAppend|Kind::Pool|Kind::ScorePools|Kind::Select|Kind::Gather|Kind::ExpandKv|Kind::Scores|Kind::Softmax|Kind::Values)
 }
 impl<'f,C:Compute> Decoder<'f,C> {
     /// One token for each chat: `rows[i]` is a chat's input token and its state. Result `i` is
     /// that chat's logits, its greedy ID and its next state, with the bits of `step` on that
     /// chat alone. The chats may stand at different positions. No given state changes.
-    pub fn step_batch(&self,rows:&[(u32,&State<C::Value>)])->Result<Vec<(Vec<f32>,u32,State<C::Value>)>> {self.step_batch_head(rows,false)}
+    pub fn step_batch(&self,rows:&[(u32,&State<C::Value>)])->Result<Vec<(Vec<f32>,u32,State<C::Value>)>> {self.step_batch_head(rows,false,None)}
     /// The same step when no chat needs its logits (every chat is greedy): each chat's ID is picked on the backend that holds
     /// the logits (`Compute::rows_greedy`), as the plain greedy step picks it, and no logits cross to the host. The logits of
     /// a result are then empty. The same ID and the same next state as `step_batch`.
-    pub fn step_batch_greedy(&self,rows:&[(u32,&State<C::Value>)])->Result<Vec<(Vec<f32>,u32,State<C::Value>)>> {self.step_batch_head(rows,true)}
-    fn step_batch_head(&self,rows:&[(u32,&State<C::Value>)],greedy:bool)->Result<Vec<(Vec<f32>,u32,State<C::Value>)>> {
+    pub fn step_batch_greedy(&self,rows:&[(u32,&State<C::Value>)])->Result<Vec<(Vec<f32>,u32,State<C::Value>)>> {self.step_batch_head(rows,true,None)}
+    /// A shared step retaining each chat's predictor input, with the same arithmetic as the ordinary batch.
+    /// Hidden rows are owned copies so a trail does not retain a shared workspace plane.
+    pub fn step_batch_tracked(&self,rows:&[(u32,&State<C::Value>)],greedy:bool)->Result<(Vec<(Vec<f32>,u32,State<C::Value>)>,Vec<C::Value>)> {
+        let mut hidden=Vec::new();let results=self.step_batch_head(rows,greedy,Some(&mut hidden))?;Ok((results,hidden))
+    }
+    fn step_batch_head(&self,rows:&[(u32,&State<C::Value>)],greedy:bool,tracked:Option<&mut Vec<C::Value>>)->Result<Vec<(Vec<f32>,u32,State<C::Value>)>> {
         let c=self.checkpoint;let d=c.description();let n=rows.len();
         need(n>0 && n<=BATCH_ROWS,"batch step row count differs")?;
         for (token,state) in rows {
@@ -102,6 +110,11 @@ impl<'f,C:Compute> Decoder<'f,C> {
         let mean=self.compute.prompt(RowShape::wrapped(s,n).ok_or("batch row count exceeds ABI")?,[Some(&residual),None,None,None,None],&[])?;
         let name="model.language_model.norm.weight";
         let normalized=self.compute.rows_norm(name,norm_shape(c,name,hidden)?,&mean,n,&self.parameters[name])?;
+        if let Some(tracked)=tracked {
+            let plane=if super::PROPOSER_HIDDEN==0 {&mean} else {&normalized};
+            for chat in 0..n {let row=self.compute.range(plane,chat*hidden,hidden)?;
+                tracked.push(self.compute.rows_append(None,0,&row,hidden)?);}
+        }
         let vocab=d.vocab as usize;let projected=self.project_group("lm_head.weight",&normalized,n,true)?;
         if greedy && let Some(best)=self.compute.rows_greedy(&projected,n)? {
             need(best.len()==n && best.iter().all(|&id|u64::from(id)<d.vocab),"batch step greedy IDs differ")?;
@@ -256,8 +269,8 @@ mod tests {
     use super::*;
     #[test]
     fn chat_attention_floor_keeps_small_groups_on_the_per_chat_path() {
-        for rows in 0..=4 {assert!(!chat_rows_admitted(rows));}
-        for rows in 5..=8 {assert!(chat_rows_admitted(rows));}
+        for rows in 0..=3 {assert!(!chat_rows_admitted(rows));}
+        for rows in 4..=8 {assert!(chat_rows_admitted(rows));}
         assert!(!chat_rows_admitted(9));
     }
     #[test]

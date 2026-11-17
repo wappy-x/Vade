@@ -44,6 +44,9 @@ pub(crate) fn rows<const T:usize,const DEPTH:usize,const R:usize>(p:MxProjection
         if core::arch::nvptx::_block_dim_x()!=128 {core::arch::asm!("trap;");}
         (core::arch::nvptx::_block_idx_x() as usize*(4*R)+core::arch::nvptx::_thread_idx_x() as usize/32*R,core::arch::nvptx::_block_idx_y() as usize*T)
     };
+    // The tensor-core word: the host gives such a descriptor the grid (ceil(rows / 16), ceil(tokens / 8)) under any of these
+    // entry names, and the block runs the one row body of `mx_tc` at its own place in that grid (1 to 8 tokens a block).
+    if p.mode==crate::next_params::MX_TC {crate::mx_tc::block::<{crate::mx_tc::AHEAD},{crate::mx_tc::EVERY}>(p,None,false);return;}
     if first>=p.rows as usize || token>=p.tokens as usize {return;}
     wave::<T,DEPTH,R>(p,first,token);
 }
@@ -198,6 +201,8 @@ pub(crate) fn decode<const DEPTH:usize,const MIXED:bool>(layer:*const crate::nex
             (index,block-start)
         };
         let projection=(*layer).projections[index];
+        // The tensor-core word: the descriptor's own grid and body; a merged launch rounds every MXFP8 word.
+        if projection.mode==crate::next_params::MX_TC {crate::mx_tc::layer_block(projection,local,MIXED);return;}
         let quads=projection.rows.div_ceil(4);
         let row=(local%quads) as usize*4+_thread_idx_x() as usize/32;
         if row>=projection.rows as usize {return;}

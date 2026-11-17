@@ -542,6 +542,76 @@ pub unsafe extern "ptx-kernel" fn logits_argmax_finish(partials: *const f32, res
     if lane == 0 { *result = best; *result.add(1) = id as f32; *result.add(2) = valid as f32; }
 }
 
+/// DRAFT CONFIDENCE: `logits_argmax` with a fourth word a tile, the softmax mass of the tile against its best
+/// logit (the sum of exp(logit - best) over its finite logits). The pick (best, lowest ID on a tie, valid) is the
+/// pick of `logits_argmax` for every valid row; the mass is a score only. A lane moves its mass to the warp's best
+/// after `reduce_best` (a butterfly: every lane holds the warp's best) and `sum` adds the lanes.
+// SAFETY: as logits_argmax: the host checks that `logits` holds `width` values a row and `partials` four words for
+// each tile of 1024 values a row, for every row of the grid's y; each warp writes only its own tile's four words.
+#[no_mangle]
+pub unsafe extern "ptx-kernel" fn logits_argmax_mass(logits: *const f32, partials: *mut f32, width: u32) {
+    let row = _block_idx_y() as usize;
+    let logits = logits.add(row * width as usize);
+    let partials = partials.add(row * ((width as usize + 1023)/1024) * 4);
+    let thread = index();
+    let warp = thread / 32;
+    let lane = thread % 32;
+    let begin = warp * 1024;
+    if begin >= width as usize { return; }
+    let end = (begin + 1024).min(width as usize);
+    // An empty mass stays empty: a lane that saw no finite logit (best still minus infinity) adds nothing.
+    let moved = |mass: f32, from: f32, to: f32| if mass == 0.0 { 0.0 } else { mass * exp(from - to) };
+    let (mut best, mut id, mut valid, mut mass) = (f32::NEG_INFINITY, u32::MAX, 1u32, 0f32);
+    let mut i = begin + lane;
+    while i < end {
+        let value = *logits.add(i);
+        let finite = value.is_finite();
+        valid &= finite as u32;
+        if finite {
+            if value > best { mass = moved(mass, best, value) + 1.0; best = value; id = i as u32; }
+            else { mass += exp(value - best); }
+        }
+        i += 32;
+    }
+    let (top, id, valid) = reduce_best(best, id, valid);
+    let mass = sum(moved(mass, best, top));
+    if lane == 0 {
+        *partials.add(warp * 4) = top;
+        *partials.add(warp * 4 + 1) = id as f32;
+        *partials.add(warp * 4 + 2) = valid as f32;
+        *partials.add(warp * 4 + 3) = mass;
+    }
+}
+
+/// DRAFT CONFIDENCE: `logits_argmax_finish` over the four-word tiles of `logits_argmax_mass`. The result row is
+/// best, ID, valid, and the softmax mass of the whole row against its best logit.
+// SAFETY: as logits_argmax_finish: the host checks that `partials` holds `count` four-word tiles a row and `result`
+// four words a row, for every row of the grid's y; lane 0 of the row's one warp writes its four words.
+#[no_mangle]
+pub unsafe extern "ptx-kernel" fn logits_argmax_mass_finish(partials: *const f32, result: *mut f32, count: u32) {
+    let row = _block_idx_y() as usize;
+    let partials = partials.add(row * count as usize * 4);
+    let result = result.add(row * 4);
+    let lane = index();
+    if lane >= 32 { return; }
+    let moved = |mass: f32, from: f32, to: f32| if mass == 0.0 { 0.0 } else { mass * exp(from - to) };
+    let (mut best, mut id, mut valid, mut mass) = (f32::NEG_INFINITY, u32::MAX, 1u32, 0f32);
+    let mut i = lane;
+    while i < count as usize {
+        let value = *partials.add(i * 4);
+        let index = *partials.add(i * 4 + 1) as u32;
+        valid &= *partials.add(i * 4 + 2) as u32;
+        let their = *partials.add(i * 4 + 3);
+        let top = if value > best { value } else { best };
+        mass = moved(mass, best, top) + moved(their, value, top);
+        if value > best || (value == best && index < id) { best = value; id = index; }
+        i += 32;
+    }
+    let (top, id, valid) = reduce_best(best, id, valid);
+    let mass = sum(moved(mass, best, top));
+    if lane == 0 { *result = top; *result.add(1) = id as f32; *result.add(2) = valid as f32; *result.add(3) = mass; }
+}
+
 /// Each warp selects one disjoint vocabulary tile. Ordering matches the host:
 /// descending finite logit, then ascending ID, including ties at signed zero.
 #[no_mangle]

@@ -8,6 +8,7 @@ use core::arch::asm;
 use crate::prompt_ops::{Arguments,Op};
 use crate::causal_ops::{Op as Causal,round,sigmoid,root};
 use crate::next_math::exp;
+use crate::strip_warp::unroll;
 
 const THREADS:usize=crate::prompt_admission::FAST_THREADS as usize;
 macro_rules! lane_square_sum {($x:expr,$d:expr,$lane:expr)=>{{
@@ -33,8 +34,25 @@ pub(crate) fn prompt_prepare(p:Arguments) {
     // (shared by all tokens), and each (token, head) unit owns the disjoint 4*dim+1 output words at unit*(4*dim+1);
     // owners live and disjoint through completion. Indexes stay inside (token < tokens, head < heads, j < dim). All 32
     // lanes of a warp take the same trip counts, so the shuffles are converged. A block of other than THREADS threads traps.
+    // StepDecay uses the same checked prepared input rows, no weight and a private tokens*heads*dim output.
+    // Each thread owns its grid-strided output words. The input address follows the same token/head/key map
+    // as prompt_ops::unit. Four independent reads precede their unchanged exponentials; each tail is guarded.
     unsafe {
         let s=p.shape;let inner=s.inner;
+        if s.op==Op::StepDecay {
+            if core::arch::nvptx::_block_dim_x() as usize!=THREADS {core::arch::nvptx::trap();}
+            let d=s.dim as usize;let units=s.tokens as usize*s.heads as usize*d;
+            let input=p.input[0] as *const f32;let output=p.output as *mut f32;
+            let mut first=core::arch::nvptx::_block_idx_x() as usize*THREADS+core::arch::nvptx::_thread_idx_x() as usize;
+            let stride=core::arch::nvptx::_grid_dim_x() as usize*THREADS;
+            while first<units {
+                let mut raw=[0.0f32;4];
+                unroll!(4,i,{let at=first+i*stride;if at<units {raw[i]=*input.add((at/d)*(4*d+1)+3*d+at%d);}});
+                unroll!(4,i,{let at=first+i*stride;if at<units {*output.add(at)=exp(raw[i]);}});
+                first+=4*stride;
+            }
+            return;
+        }
         if s.op!=Op::Wrapped || inner.op!=Causal::Prepare || core::arch::nvptx::_block_dim_x() as usize!=THREADS {core::arch::nvptx::trap();}
         let (heads,d,tokens)=(inner.heads as usize,inner.dim as usize,s.tokens as usize);let width=heads*d;
         let tid=core::arch::nvptx::_thread_idx_x() as usize;let lane=tid&31;

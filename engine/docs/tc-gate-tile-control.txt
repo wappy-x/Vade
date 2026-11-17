@@ -1,0 +1,25 @@
+RUN a-gate-main-a1-1+a-gate-main-a3-3: commit 1508efce96fd732edf93704c95c34b813afcebaf, control none, lists 56, servers ['K32', 'PL']
+RUN a-gate-control-tile-1: commit 771797e921d8585e5d8a121b26ea50690e5dbaef, control tile, lists 12, servers ['K32', 'PL']
+GATE PART 1 TWICE THE SAME: FAIL (12 findings)
+   lists equal 0 of 12, tokens compared 1254, servers compared ['K32', 'PL'], commit 1508efce96fd732edf93704c95c34b813afcebaf
+   FAIL K32/out-K32/K32-long-cont-32.json: first difference at token 0 of 32: 11 against 25
+   FAIL K32/out-K32/K32-short-base-again.json: first difference at token 9 of 64: 702 against 374
+   FAIL K32/out-K32/K32-short-base.json: first difference at token 9 of 64: 702 against 374
+   FAIL K32/out-K32/K32-short-cont-1.json: first difference at token 1 of 63: 15504 against 975
+   FAIL K32/out-K32/K32-short-cont-17.json: first difference at token 0 of 47: 3015 against 264
+   FAIL K32/out-K32/K32-short-cont-40.json: first difference at token 0 of 24: 20 against 320
+   FAIL K32/out-K32/K32-turn1.json: first difference at token 25 of 64: 17045 against 279
+   FAIL K32/out-K32/K32-turn2-cold.json: first difference at token 0 of 64: 785 against 10056
+   FAIL K32/out-K32/K32-turn2.json: first difference at token 0 of 64: 785 against 10056
+   FAIL PL/out-PL/PL-one-code-s1-P.json: first difference at token 0 of 256: 7984 against 154842
+   FAIL PL/out-PL/PL-one-prose-s1-P.json: first difference at token 1 of 256: 3968 against 264
+   FAIL PL/out-PL/PL-one-structured-s1-P.json: first difference at token 1 of 256: 4718 against 220
+GATE PART 3 PROMPT PATH EQUALS DECODE PATH: FAIL (3 findings)
+   checks run 6; kept turn cached_tokens=8192 of 8759 prompt tokens; resume lines in the server log 1
+   checks run 6; kept turn cached_tokens=8192 of 8759 prompt tokens; resume lines in the server log 1
+   FAIL run a-gate-control-tile-1: short-continuation-k1: DIFFER (first difference at token 1)
+   FAIL run a-gate-control-tile-1: short-continuation-k17: DIFFER (first difference at token 23)
+   FAIL run a-gate-control-tile-1: short-continuation-k40: DIFFER (first difference at token 11)
+CONTROL CAUGHT by part 1 TWICE THE SAME (state FAIL, findings that are token differences: 12)
+CONTROL CAUGHT by part 3 PROMPT PATH EQUALS DECODE PATH (state FAIL, findings that are token differences: 3)
+CONTROL VERDICT: EVERY NAMED PART CAUGHT THE WRONG BUILD

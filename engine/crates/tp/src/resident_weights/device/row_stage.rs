@@ -47,15 +47,22 @@ impl<'b,'d> Weights<'b,'d> {
     /// `matrix_rows` for an MXFP8 matrix (`project_rows` = quantize, projection, round), with the one
     /// quantize in front. The quantized rows depend on the rows and the width only, and the jobs of a group have one
     /// width (equal input lengths at one `m`), so each matrix reads the words its own quantize would have made.
+    /// Matrices whose rows pack share the packed rows (one launch from the raw rows); the others the decoded rows.
     pub(super) fn mx_rows_shared(&mut self,b:&Backend<'d>,jobs:&[(&str,&DeviceVector<'_>,bool)],group:&[usize],m:usize,made:&mut [Option<(DeviceVector<'d>,bool)>])->Result<()> {
-        let mut decoded=None;
+        let (mut decoded,mut packed)=(None,None);
         for &job in group {
             let stamp=self.cost.start(b);let (name,input,_)=jobs[job];
             let matrix=self.matrices.get(name).ok_or("quantize share matrix is absent")?;
             let Storage::Mx(projection)=&matrix.storage else {return Err("quantize share MXFP8 storage differs".into());};
             if input.len()!=m.checked_mul(matrix.cols).ok_or("quantize share extent overflow")? {return Err("quantize share feature extent differs".into());}
-            let rows=match &decoded {Some(rows)=>rows,None=>decoded.insert(projection.quantize_rows(input,m)?)};
-            let local=matrix.rows.count;let output=projection.project_quantized_rows(rows,m)?.into_vector();
+            let local=matrix.rows.count;
+            let output=if projection.packs_rows(input,m) {
+                let rows=match &packed {Some(rows)=>rows,None=>packed.insert(projection.pack_rows(input,m)?)};
+                projection.project_packed_rows(rows)?
+            } else {
+                let rows=match &decoded {Some(rows)=>rows,None=>decoded.insert(projection.quantize_rows(input,m)?)};
+                projection.project_quantized_rows(rows,m)?.into_vector()
+            };
             if output.len()!=m*local {return Err("quantize share rows extent differs".into());}made[job]=Some((output,false));
             let bytes=local*(matrix.cols+matrix.cols/32);
             self.cost.settle(b)?;self.cost.record(||"projection_0".into(),stamp,b,bytes);

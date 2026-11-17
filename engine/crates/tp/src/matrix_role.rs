@@ -1,4 +1,4 @@
-//! The role of a matrix in its pair, and the NVFP4 product of the host fallback.
+//! The role of a matrix in its pair, and the NVFP4 and block-FP8 products of the host fallback.
 //!
 //! A pair of matrices maps the model width to an inner width and back. The FIRST matrix reads the model width
 //! (expert gate and up, q, k, v, routers). The SECOND matrix writes it back (expert down, shared down, dense down,
@@ -30,10 +30,68 @@ pub fn nv_host_product(rows:usize,cols:usize,weight:&[u8],scales:&[u8],global_sc
         block_rows:1,block_cols:16,tokens:1,global:global_scale,activation:activation.global(),bound:0.0,role};
     expert_ops::reference(shape,[&quantized,&[],&[],&[]],weight,scales)
 }
+/// One block-FP8 matrix times one activation row on the host, from the checkpoint's bytes: the contract word of the
+/// format (`docs/tc-dense-contract.md`, section Block FP8; `expert_ops::fp8_word`), the word the resident kernels give
+/// on every path (the one-row decode step, the small row groups, the prompt tile). `weight` holds one E4M3 code a
+/// column, row-major; `scales` one little-endian FP32 scale a block of `block_rows` by `block_cols`. The word is
+/// rounded to BF16, as on the device. Block FP8 has one word for first and second matrices (ruling A of the wave:
+/// four ranges of whole scale blocks, cut by the block count only), so there is no role here.
+pub fn fp8_host_product(rows:usize,cols:usize,weight:&[u8],scales:&[u8],block_rows:usize,block_cols:usize,input:&[f32])->Result<Vec<f32>> {
+    if input.len()!=cols {return Err("block FP8 host product input width differs".into());}
+    let abi=|value:usize,what:&'static str|u32::try_from(value).map_err(|_|what);
+    let shape=Shape {op:Op::Fp8Project,rows:abi(rows,"block FP8 host product rows exceed ABI")?,cols:abi(cols,"block FP8 host product columns exceed ABI")?,
+        block_rows:abi(block_rows,"block FP8 scale row block exceeds ABI")?,block_cols:abi(block_cols,"block FP8 scale column block exceeds ABI")?,
+        tokens:1,global:1.0,activation:1.0,bound:0.0,role:0};
+    expert_ops::reference(shape,[input,&[],&[],&[]],weight,scales)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
     use spark_gpu_probe::tc_twin;
+    /// The host fallback of a block-FP8 matrix gives the contract word of the independent twin (`tc_twin_f8`) on every
+    /// class of hard input, for one and for several scale-row bands, and NOT the one chain of scaled weights it gave
+    /// before the rebase. The last BF16 rounding hides most order differences (about one word in five thousand moves
+    /// on general inputs), so the test searches seeded rows for words that tell the two functions apart and checks
+    /// the fallback on exactly those rows.
+    #[test]
+    fn the_block_fp8_host_fallback_gives_the_contract_word() {
+        use spark_gpu_probe::tc_twin_f8 as twin;
+        let mut compared=0usize;
+        for (rows,cols,br,bc) in [(3usize,2048usize,2usize,128usize),(2,1024,1,128),(4,512,128,128),(2,6144,128,128),(1,80,1,16),(5,200,2,64)] {
+            for salt in 0..14usize {
+                let grid=cols.div_ceil(bc);let bands=rows.div_ceil(br);
+                let weight:Vec<u8>=(0..rows*cols).map(|i|twin::weight(i,salt,salt)).collect();
+                let scale:Vec<f32>=(0..bands*grid).map(|i|twin::scale(i,salt)).collect();
+                let bytes:Vec<u8>=scale.iter().flat_map(|v|v.to_le_bytes()).collect();
+                let input:Vec<f32>=(0..cols).map(|i|twin::activation(i,salt+3,salt)).collect();
+                let got=fp8_host_product(rows,cols,&weight,&bytes,br,bc,&input).unwrap();
+                assert_eq!(got.len(),rows);
+                for (row,value) in got.iter().enumerate() {
+                    let (codes,own)=(&weight[row*cols..(row+1)*cols],&scale[(row/br)*grid..(row/br+1)*grid]);
+                    assert_eq!(value.to_bits(),twin::word(twin::accumulator(codes,own,bc,&input)),"{rows}x{cols} block {br}x{bc} salt {salt} row {row}");
+                    compared+=1;
+                }
+            }
+        }
+        assert_eq!(compared,14*17);
+        // Rows whose finished word differs from the old fallback: one ascending chain of (code * scale) * round(x), then the BF16 round.
+        let (cols,bc)=(512usize,128usize);let mut moved=0usize;
+        for seed in 0..200_000usize {
+            let codes:Vec<u8>=(0..cols).map(|c|twin::weight(c+seed*2053,3,0)).collect();
+            let scale:Vec<f32>=(0..cols/bc).map(|b|twin::scale(b,seed)).collect();
+            let input:Vec<f32>=(0..cols).map(|c|twin::activation(c,seed,6)).collect();
+            let new=twin::word(twin::accumulator(&codes,&scale,bc,&input));
+            let mut sum=0.0f32;
+            for column in 0..cols {sum+=(nvfp4::e4m3(codes[column])*scale[column/bc])*expert_ops::round(input[column]);}
+            if expert_ops::round(sum).to_bits()==new {continue;}
+            let bytes:Vec<u8>=scale.iter().flat_map(|v|v.to_le_bytes()).collect();
+            assert_eq!(fp8_host_product(1,cols,&codes,&bytes,128,bc,&input).unwrap()[0].to_bits(),new,"seed {seed}");
+            moved+=1;if moved==3 {break;}
+        }
+        assert_eq!(moved,3,"rows that tell the contract word from the old chain");
+        assert!(fp8_host_product(1,128,&[0;128],&1f32.to_le_bytes(),128,128,&[0.0;127]).is_err(),"a short input is refused");
+        assert!(fp8_host_product(1,128,&[0x7f;128],&1f32.to_le_bytes(),128,128,&[0.0;128]).is_err(),"a NaN weight code is refused");
+    }
     #[test]
     fn the_role_follows_the_last_name_part_of_the_weight() {
         for name in ["model.layers.3.mlp.experts.7.down_proj.weight","model.layers.3.mlp.shared_experts.down_proj.weight","model.layers.0.mlp.down_proj.weight",

@@ -414,7 +414,11 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
                 && engine.shared_prefill_batch() && (engine.shared_batch() || !prompt_cohorts.decoding(active.iter().filter(|j| !j.done).map(|j| (j.id, j.generation.state.tokens.len() >= j.ready.prompt.len())))) {
                 break;
             }
-            super::draft_admission::retire(engine, &mut active, reservation_for)?;
+            // Requests that all draft beside each other (`Engine::contended_draft_chats`) keep their draft state
+            // when their draft reservations fit under the owner headroom. Any other overlap retires it, as before.
+            let kept = super::draft_admission::keeps(engine, &active, &oldest.request) && reservation_for(oldest,oldest.reservation_tokens(output_window, engine.reserve_full_output()),false,None)
+                .and_then(|bytes| reservations(active.iter().map(|j| &j.generation.state)).0.checked_add(bytes)).is_some_and(|bytes| bytes <= config.active_bytes.saturating_sub(foreground_bytes));
+            if !kept { super::draft_admission::retire(engine, &mut active, reservation_for)?; }
             // The idle maintenance above may predate this request; the cache balance below
             // can poll memory pressure and the forks can allocate.
             engine.admission_started();
@@ -451,7 +455,7 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
             };
             let incremental = |j: &Ready| {
                 let tokens = j.reservation_tokens(output_window, engine.reserve_full_output());
-                let full = reservation_for(j,tokens,engine.discard_contended_draft() && active.iter().any(|job| !job.done) || shared_plain(j, config, active.iter().map(|a| &a.ready).chain(queued.iter())),Some(cached_prefix(j)))?;
+                let full = reservation_for(j,tokens,super::draft_admission::contended(engine, &active, &j.request) || shared_plain(j, config, active.iter().map(|a| &a.ready).chain(queued.iter())),Some(cached_prefix(j)))?;
                 let shared = if let Some((state, retain)) = checkpoint(j) {
                     shared_charge(state.session.prefix_allocations(retain).unwrap_or_default())
                 } else if config.prefix_cache && j.request.prefix_cache {
@@ -480,7 +484,7 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
                 }
                 continue;
             }
-            let waiting_bytes = reservation_for(oldest,oldest.reservation_tokens(output_window, engine.reserve_full_output()),engine.discard_contended_draft() && active.iter().any(|job| !job.done) || shared_plain(oldest, config, active.iter().map(|a| &a.ready).chain(queued.iter())),None)
+            let waiting_bytes = reservation_for(oldest,oldest.reservation_tokens(output_window, engine.reserve_full_output()),super::draft_admission::contended(engine, &active, &oldest.request) || shared_plain(oldest, config, active.iter().map(|a| &a.ready).chain(queued.iter())),None)
                 .or_else(|| retain_prefix(oldest).then_some(usize::MAX))
                 .ok_or("missing request reservation")?;
             let (younger_count, younger_bytes, younger_backgrounds, younger_foreground) = active.iter()
@@ -517,7 +521,7 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
                 .filter(|(i, j)| *i == 0 || (younger_count + 2 <= config.active
                     && younger_backgrounds + usize::from(j.request.priority != 255)
                         + usize::from(oldest.request.priority != 255) <= public_slots
-                    && reservation_for(j,j.reservation_tokens(output_window, engine.reserve_full_output()),engine.discard_contended_draft() && active.iter().any(|job| !job.done),None)
+                    && reservation_for(j,j.reservation_tokens(output_window, engine.reserve_full_output()),super::draft_admission::contended(engine, &active, &j.request),None)
                         .and_then(|bytes| younger_bytes.checked_add(bytes))
                         .and_then(|bytes| bytes.checked_add(waiting_bytes))
                         .is_some_and(|bytes| bytes <= if j.request.priority == 255 { config.active_bytes } else { backfill_limit })))
@@ -545,6 +549,8 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
                     (0, true)
                 } else { break; }
             };
+            let selected_plain = pressure_plain || shared_plain(&queued[index], config, active.iter().map(|a| &a.ready).chain(queued.iter()));
+            if kept && super::draft_admission::retires_selected(engine, &active, &queued[index].request, selected_plain) { super::draft_admission::retire(engine, &mut active, reservation_for)?; continue; }
             // Reserve before forking: compact tails may allocate during
             // truncate, so LRU reclamation must precede any backend allocation.
             // An adapter may explicitly fund retained snapshots inside the
@@ -568,7 +574,7 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
                 .ok_or_else(|| crate::budget::session_refusal(next_reserved as u128, config.session_budget_bytes, "live reservations; CONTEXT not supplied to cache balancing", "the scheduler session pool"))?
                 .saturating_sub(hold), engine.cache_free_physical_bytes(next_reserved)?, funded, clock_now());
             let plain = pressure_plain
-                || engine.discard_contended_draft() && active.iter().any(|job| !job.done)
+                || super::draft_admission::contended(engine, &active, &queued[index].request)
                 || shared_plain(&queued[index], config, active.iter().map(|a| &a.ready).chain(queued.iter()));
             let mut ready = queued.remove(index);
             let tokens = ready.reservation_tokens(output_window, engine.reserve_full_output());
@@ -825,7 +831,9 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
                 }
             active.push(job);
         }
-        let concurrent_jobs = active.iter().filter(|j| !j.done).count(); if engine.shared_prefill_batch() && !engine.shared_batch() { prompt_cohorts.refresh(active.iter().filter(|j| !j.done).map(|j| (j.id, j.generation.state.tokens.len() >= j.ready.prompt.len()))); }
+        // Overlapping requests that all draft beside each other keep their draft state (`Engine::contended_draft_chats`).
+        let concurrent_jobs = active.iter().filter(|j| !j.done).count(); let drafts_kept = concurrent_jobs <= engine.contended_draft_chats() && active.iter().filter(|j| !j.done).all(|j| !j.reservation_plain && engine.drafts_contended(&j.ready.request));
+        if engine.shared_prefill_batch() && !engine.shared_batch() { prompt_cohorts.refresh(active.iter().filter(|j| !j.done).map(|j| (j.id, j.generation.state.tokens.len() >= j.ready.prompt.len()))); }
         #[cfg(test)] super::model_tests::age_prompts(&mut active); engine.active_cohort(concurrent_jobs);
         draft_policy.update(active.iter().filter(|j| !j.done).count(), clock_now(),
             config.draft == protocol::DraftMode::Auto || active.iter().any(|j| j.ready.request.draft == Some(protocol::DraftMode::Auto)), engine.automatic_draft_limit());
@@ -989,7 +997,7 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
                     // Omitting draft-history kernels makes this request plain
                     // through completion: resuming would require target replay.
                     // Keep the speculator alive to consume its pending token.
-                    if concurrent_jobs > 1 && !job.reservation_plain {
+                    if concurrent_jobs > 1 && !drafts_kept && !job.reservation_plain {
                         job.generation.state.session.disable_model_draft();
                         job.generation.state.reserved_session_bytes = reservation_for(&job.ready,job.reserved_tokens,true,None).ok_or("missing plain reservation")?;
                         job.reservation_plain = true;

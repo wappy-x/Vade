@@ -197,17 +197,27 @@ impl<'a> Backend<'a> {
         self.enqueue_argmax_device(logits, partials, result, 0)?;
         self.read_argmax(result, 1, |values| Ok((values[1] as u32, values[0])))
     }
+    /// `row` names the result row. With `ARGMAX_MASS` set in it, the row has four words: best, ID, valid and the
+    /// softmax mass of the logits against their best (`logits_argmax_mass`); the pick is the same. A draft score only.
     pub fn enqueue_argmax_device(&self, logits: &DeviceVector<'_>, partials: &mut DeviceVector<'_>,
         result: &mut DeviceVector<'_>, row: usize) -> Result<(), String> {
+        let mass = row & ARGMAX_MASS != 0; let row = row & !ARGMAX_MASS; let words = if mass { 4 } else { 3 };
         let count = logits.len.div_ceil(1024);
-        self.check_vector(logits, logits.len)?; self.check_vector(partials, count * 3)?; self.check_vector(result, result.len)?;
-        if (row + 1) * 3 > result.len { return Err("argmax result row outside buffer".into()); }
+        self.check_vector(logits, logits.len)?; self.check_vector(partials, count.checked_mul(words).ok_or("argmax partials extent overflows")?)?; self.check_vector(result, result.len)?;
+        // Checked: a row near the top of usize must not wrap to an end inside the buffer or an address before it.
+        let start = row.checked_mul(words).filter(|start| start.checked_add(words).is_some_and(|end| end <= result.len))
+            .ok_or("argmax result row outside buffer")?;
+        let row_address = start.checked_mul(4).and_then(|bytes| u64::try_from(bytes).ok()).and_then(|bytes| result.buffer.address.checked_add(bytes))
+            .ok_or("argmax result row outside buffer")?;
         if logits.len > 1 << 24 { return Err("argmax ID exceeds exact FP32 integer range".into()); }
-        let (mut x, mut p, mut y, mut width, mut count) = (logits.buffer.address, partials.buffer.address, result.buffer.address + (row * 12) as u64, logits.len as u32, count as u32);
+        let (mut x, mut p, mut y, mut width, mut count) = (logits.buffer.address, partials.buffer.address, row_address, logits.len as u32, count as u32);
         let kernels = self.layer_kernels()?;
+        let (first, finish) = if mass { (kernels.argmax_mass, kernels.argmax_mass_finish) } else { (kernels.argmax, kernels.argmax_finish) };
+        // SAFETY: the checked device vectors belong to this context; partials hold count * words and the checked
+        // result-row address holds words. The selected ABI uses that width; both launches are ordered on this stream.
         unsafe {
-            self.enqueue(kernels.argmax, count as usize * 32, &mut [parameter(&mut x), parameter(&mut p), parameter(&mut width)])?;
-            self.enqueue(kernels.argmax_finish, 32, &mut [parameter(&mut p), parameter(&mut y), parameter(&mut count)])?;
+            self.enqueue(first, count as usize * 32, &mut [parameter(&mut x), parameter(&mut p), parameter(&mut width)])?;
+            self.enqueue(finish, 32, &mut [parameter(&mut p), parameter(&mut y), parameter(&mut count)])?;
         }
         Ok(())
     }

@@ -14,3 +14,9 @@ Both have ELF OSABI `0x41`, ABI version `8`, executable type `2`, machine
 `sm_121` is `0x06007902`; `sm_121a` is `0x0a007902`. The producer validator
 accepts only the first complete encoding, including all target-feature bits.
 New CUDA ELF ABI or flag encodings require explicit review and new fixtures.
+
+Note of 2026-11-16 (rebase R3, the image target is now `sm_121a`): the pinned
+compiler (13.0.88) writes `0x06007902` for the main image under
+`--gpu-name=sm_121a -m64 -O3` too (measured on a GB10, lab runs `r3-code-1` to
+`r3-code-4`). So the accepted header is unchanged, and the `0x0a007902` header
+of the second fixture stays a refused encoding whatever produced it.

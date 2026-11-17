@@ -147,3 +147,9 @@ pub(crate) fn run(base_path: &str, candidate_path: &str, mode: &str) -> Result<(
     println!("STEPTILE DONE elapsed_s={:.1}", started.elapsed().as_secs_f64());
     Ok(())
 }
+
+pub(in crate::cuda) fn diag_replay(g:&mut Gpu,module:H)->Result<()> {
+ let c=Case{tokens:1024,heads:32,dim:128};let x=inputs(g,&c,0,91)?;let out=Buffer::new(g,&vec![f32::NAN;c.words()])?;let a=args(&c,&x,&out);let f=g.function(module,"step_rows_tile")?;
+ let launch=|g:&Gpu|{let mut a=a;launch_block(g,f,&c,&mut a)};
+ super::diag_limits::replay(g,"step_rows_tile","M=1024 heads=32 dim=128",out.address,c.words(),None,&launch)?;g.clear()
+}

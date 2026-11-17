@@ -168,13 +168,13 @@ pub(crate) fn run(base_path: &str, candidate_path: &str, mode: &str) -> Result<(
         println!("LATENTTILE ORDER CONTROL PASS same products in another strip order: different_words={moved} of {}", c.tile(22).3);
         g.clear()?;
         let (mut comparisons, mut bytes) = (0u64, 0u64); let mut seed = 100u64;
-        // The model's shape (32 local heads, key and value 256, latent 512, 2,051 slots) at 16, 64, 256, 512 and 1,024
+        // The model's shape (32 local heads, key and value 256, latent 512, 2,051 slots) at 16, 64, 256, 512, 1,024 and 2,048
         // tokens: the first group of a prompt (cache = the group), a group after 2,048 rows, and the last group of
         // an 8,192-token read; every activation class; the served selection and the every-count selection.
         for kind in [0u32, 2, 4, 5, 6] {
-            for tokens in [16usize, 64, 256, 512, 1024] {
+            for tokens in [16usize, 64, 256, 512, 1024, 2048] {
                 let mut shapes = vec![(tokens, true), (2048 + tokens, true), (tokens + 3, false)];
-                if tokens == 1024 { shapes.push((8192, true)); }
+                if tokens >= 1024 { shapes.push((8192, true)); }
                 for (rows, served) in shapes {
                     seed += 1; let c = Case::model(tokens, rows); let fx = fixture(&mut g, &c, kind, served, seed)?;
                     bytes += compare(&mut g, fns, &c, &fx, &format!("tokens={tokens} rows={rows} kind={kind} served={served}"))?; comparisons += 4; g.clear()?;
@@ -190,18 +190,20 @@ pub(crate) fn run(base_path: &str, candidate_path: &str, mode: &str) -> Result<(
                 bytes += compare(&mut g, fns, &c, &fx, &format!("edge tokens={tokens} heads={heads} dim={dim} taps={taps} cols={cols} rows={rows} slots={slots} kind={kind}"))?; comparisons += 4; g.clear()?;
             }
         }
-        println!("LATENTTILE BYTES PASS comparisons={comparisons} output_bytes={bytes} tokens=16,64,256,512,1024 elapsed_s={:.1}", started.elapsed().as_secs_f64());
+        println!("LATENTTILE BYTES PASS comparisons={comparisons} output_bytes={bytes} tokens=16,64,256,512,1024,2048 elapsed_s={:.1}", started.elapsed().as_secs_f64());
     }
-    // Timing: the eight groups of an 8,192-token read (1,024 tokens, cache 1,024 to 8,192 rows), served selection.
+    // Timing: an 8,192-token read with eight 1,024-row groups or four 2,048-row leased groups, served selection.
     let probes: Vec<(String, H)> = match mode.strip_prefix("probe=") {
         Some(names) => names.split(',').map(|n| Ok((n.to_string(), g.function(mb, n)?))).collect::<Result<_>>()?,
         None => vec![],
     };
     if mode == "time" || mode == "all" || !probes.is_empty() {
+        let group_sizes=if probes.is_empty() {vec![1024usize,2048]} else {vec![1024]};
+        for tokens in group_sizes {
         let mut saved = [0.0f64; 4]; let mut base_total = [0.0f64; 4];
-        let groups: Vec<usize> = if probes.is_empty() { (1..=8).map(|i| i * 1024).collect() } else { vec![1024, 4096, 8192] };
+        let groups: Vec<usize> = if probes.is_empty() { (1..=8192/tokens).map(|i| i * tokens).collect() } else { vec![1024, 4096, 8192] };
         for rows in groups {
-            let c = Case::model(1024, rows); let fx = fixture(&mut g, &c, 0, true, 31)?;
+            let c = Case::model(tokens, rows); let fx = fixture(&mut g, &c, 0, true, 31)?;
             for (i, (op, name)) in OPS.iter().enumerate() {
                 let out = Buffer::new(&mut g, &vec![0.0; c.tile(*op).3])?; let mut a = arguments(&c, *op, &fx, out.address);
                 let mut arms: Vec<(String, H)> = vec![("base".into(), fns.0), ("candidate".into(), fns.1)]; arms.extend(probes.iter().cloned());
@@ -227,14 +229,15 @@ pub(crate) fn run(base_path: &str, candidate_path: &str, mode: &str) -> Result<(
                 let medians: Vec<f64> = times.into_iter().map(median).collect();
                 saved[i] += medians[0] - medians[1]; base_total[i] += medians[0];
                 let extra: String = arms.iter().zip(&medians).skip(2).map(|(a, m)| format!(" {}_us={m:.1}", a.0)).collect();
-                println!("LATENTTILE TIME op={name} tokens=1024 rows={rows} first={} blocks={} base_us={:.1} candidate_us={:.1} ratio={:.4}{extra}{verdicts}", c.first(), c.blocks(*op)?, medians[0], medians[1], medians[0] / medians[1]);
+                println!("LATENTTILE TIME op={name} tokens={tokens} rows={rows} first={} blocks={} base_us={:.1} candidate_us={:.1} ratio={:.4}{extra}{verdicts}", c.first(), c.blocks(*op)?, medians[0], medians[1], medians[0] / medians[1]);
             }
             g.clear()?;
         }
         if probes.is_empty() {
             // One absorbed layer runs each operation once a group; the model has 11 absorbed layers.
-            for (i, (_, name)) in OPS.iter().enumerate() { println!("LATENTTILE FORECAST op={name} base_ms_a_read={:.1} saved_ms_a_read={:.1}", base_total[i] * 11.0 / 1e3, saved[i] * 11.0 / 1e3); }
-            println!("LATENTTILE FORECAST 8192-token read, 11 layers, one rank: base_ms={:.1} saved_ms={:.1} (bench medians, not a served run)", base_total.iter().sum::<f64>() * 11.0 / 1e3, saved.iter().sum::<f64>() * 11.0 / 1e3);
+            for (i, (_, name)) in OPS.iter().enumerate() { println!("LATENTTILE FORECAST op={name} tokens={tokens} base_ms_a_read={:.1} saved_ms_a_read={:.1}", base_total[i] * 11.0 / 1e3, saved[i] * 11.0 / 1e3); }
+            println!("LATENTTILE FORECAST 8192-token read, tokens={tokens}, 11 layers, one rank: base_ms={:.1} saved_ms={:.1} (bench medians, not a served run)", base_total.iter().sum::<f64>() * 11.0 / 1e3, saved.iter().sum::<f64>() * 11.0 / 1e3);
+        }
         }
     }
     println!("LATENTTILE PASS elapsed_s={:.1}", started.elapsed().as_secs_f64());

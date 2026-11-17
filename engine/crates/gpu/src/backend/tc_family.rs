@@ -20,6 +20,10 @@ pub(super) enum NvOperands<'v,'d> {
     Gathered(&'v DeviceVector<'d>,&'v DeviceVector<'d>,&'v [f32]),
     /// The kept scratch already holds this group's operands: an earlier list of the same call wrote them.
     Kept,
+    /// PACKED MIDDLE: the set's packed operands in one vector, made before this call (`Backend::nv_quantize_pack_planes`
+    /// of each rank's columns, set side by side): rows_in rows of cols / 8 code words, then rows_in rows of cols / 64
+    /// scale words. They are copied to the set's rows of the kept scratch; no operand launch runs for the set.
+    Packed(&'v DeviceVector<'d>),
 }
 
 /// WIDE COHORT: one row set of a product launch (`Backend::nv_rows_tc`): what one call of `nv_rows_tc_one` takes.
@@ -71,9 +75,12 @@ pub(super) struct TcState<'a> {
     /// WIDE COHORT: true = the kept scratch was grown for a launch of several row sets (a wide prompt group, which runs
     /// only under a prompt lease). `nv_tc_scratch_return` drops that scratch when the lease is returned.
     wide:Cell<bool>,
+    /// Check tools only: true = a native prompt cohort of several sets keeps one work interval a (expert, set) and
+    /// copies an expert's weight tile once a set (the same words). false = the serving choice (PAIRED PARTS).
+    paired_off:Cell<bool>,
 }
 impl TcState<'_> {
-    pub(super) fn new()->Self {Self {module:std::cell::OnceCell::new(),off:Cell::new(false),scratch:RefCell::new(None),fused_off:Cell::new(false),gather_off:Cell::new(false),wide:Cell::new(false)}}
+    pub(super) fn new()->Self {Self {module:std::cell::OnceCell::new(),off:Cell::new(false),scratch:RefCell::new(None),fused_off:Cell::new(false),gather_off:Cell::new(false),wide:Cell::new(false),paired_off:Cell::new(false)}}
 }
 impl<'a> Backend<'a> {
     pub(super) fn tc_module(&self)->Result<&Module<'a>,String> {
@@ -105,6 +112,10 @@ impl<'a> Backend<'a> {
     /// copy (the same operand bytes), so a tool can time `nv_quantize_gather` against it and compare the words.
     pub fn set_nv_quantize_gather(&self,on:bool) {self.tc.gather_off.set(!on);}
     pub(super) fn nv_quantize_gather_off(&self)->bool {self.tc.gather_off.get()}
+    /// Check tools only: false = a native prompt cohort of several sets runs one work interval a (expert, set), so a
+    /// tool can time PAIRED PARTS against it and compare the words.
+    pub fn set_prompt_paired(&self,on:bool) {self.tc.paired_off.set(!on);}
+    pub(super) fn prompt_paired_off(&self)->bool {self.tc.paired_off.get()}
     /// Check tools only: fills the kept operand scratch (codes and scale codes) with the byte 0xA5, so a byte that a
     /// later operand launch does not store shows in the product words. No effect when there is no scratch yet.
     pub fn nv_tc_scratch_poison(&self)->Result<(),String> {
@@ -132,6 +143,29 @@ impl<'a> Backend<'a> {
         self.synchronize()?;
         let bytes=|v:&DeviceVector<'_>,n:usize|->Result<Vec<u8>,String> {Ok(self.read_vector_values(v)?.iter().flat_map(|w|w.to_bits().to_le_bytes()).take(n).collect())};
         Ok((bytes(&codes,rows*cols/2)?,bytes(&scales,rows*cols/16)?))
+    }
+    /// PACKED MIDDLE: the packed operands `nv_quantize_pack` writes for FP32 rows of `cols` words, row r at the input scale
+    /// `activations[r]` (one word a row, on the device), as two fresh vectors: rows * cols / 8 words of codes and
+    /// rows * cols / 64 words of scale codes. `cols` is a multiple of 64, so both are whole words and the launch stores
+    /// every byte of both (one thread a 16-column block; no fill before it). A block's bytes depend on its own 16 words and
+    /// its row's scale only (`expert_ops::quantize_packed_with`), so the rows of ONE rank's columns of a matrix input pack
+    /// to that rank's bytes of the whole rows' operands. `input`, `activations` and both results must stay alive until the
+    /// stream has run the launch (a Buffer drop waits for it).
+    pub fn nv_quantize_pack_planes(&self,input:&DeviceVector<'_>,cols:usize,activations:&DeviceVector<'_>)->Result<(DeviceVector<'a>,DeviceVector<'a>),String> {
+        self.require_resident_stream()?;let rows=activations.len();
+        if rows==0 || cols==0 || !cols.is_multiple_of(64) || input.is_segmented() || activations.is_segmented() || input.len()!=rows.checked_mul(cols).ok_or("quantize-pack input overflow")?
+            || (input.device_address()|activations.device_address())&3!=0 {return Err("quantize-pack planes extent differs".into());}
+        self.check_vector(input,input.len())?;self.check_vector(activations,rows)?;
+        let (mut codes,mut scales)=(self.vector(rows*(cols/8))?,self.vector(rows*(cols/64))?);
+        self.skip_fill(&mut codes)?;self.skip_fill(&mut scales)?;
+        let mut args=NvQuantizePack {input:input.device_address(),codes:codes.device_address(),scales:scales.device_address(),activations:activations.device_address(),
+            rows:u32::try_from(rows).map_err(|_|"quantize-pack rows exceed ABI")?,cols:u32::try_from(cols).map_err(|_|"quantize-pack columns exceed ABI")?};
+        let blocks=crate::tc_abi::nv_quantize_pack_blocks(rows,cols).ok_or("quantize-pack grid overflow")?;
+        self.require_arm_kernels(&["nv_quantize_pack"])?;crate::prompt_launches::record("nv_quantize_pack");crate::prompt_launches::record("packed_middle");
+        // The checks above give the kernel its contract: rows * cols input words, rows scale words, private outputs of
+        // rows * cols / 2 and rows * cols / 16 bytes (whole words), 4-byte aligned; the caller keeps all four alive.
+        self.unrecorded(||self.launch_checked_expert_payload("nv_quantize_pack",blocks,1,NV_QUANTIZE_PACK_THREADS,0,&mut args))?;
+        Ok((codes,scales))
     }
     /// WIDE COHORT: a prompt lease is returned. Drops the kept scratch when a launch of several row sets grew it (the
     /// operands of every run of a wide group: about 19 MB a run of 1,024 rows on the model), so bytes that a wide
@@ -221,6 +255,14 @@ impl<'a> Backend<'a> {
                     self.require_arm_kernels(&["nv_quantize_gather"])?;crate::prompt_launches::record("nv_quantize_gather");
                 },
                 NvOperands::Kept=>{},
+                NvOperands::Packed(packed)=>{
+                    // Whole words a row in both arrays (cols a multiple of 64), and exactly the set's rows.
+                    let (code_words,scale_words)=(rows_in*(cols/8),rows_in*(cols/64));
+                    if !cols.is_multiple_of(64) || packed.is_segmented() || packed.len()!=code_words+scale_words {return Err("tensor-core packed operand extent differs".into());}
+                    // Two device copies on the one ordered stream, before the product launch: the set's rows of both
+                    // operand arrays, every byte of them (safe calls: `copy_range` checks both spans).
+                    self.unrecorded(||{self.copy_range(packed,codes,0,start*(cols/8),code_words)?;self.copy_range(packed,scales,code_words,start*(cols/64),scale_words)})?;
+                },
             }
         }
         // The input scale of every row of every set, in one write before the operand launches that read them.
@@ -243,7 +285,7 @@ impl<'a> Backend<'a> {
         }
         if bytes.len()!=parts*std::mem::size_of::<NvPart>() {return Err("tensor-core part table layout differs".into());}
         self.write_vector_bytes(owner,&bytes)?;
-        let mut args=NvRows {table:owner.device_address(),codes:codes.device_address(),scales:scales.device_address(),count,rows:rows as u32,cols:cols as u32,layout:1,skip:1,raw:0,chains};
+        let mut args=NvRows {table:owner.device_address(),codes:codes.device_address(),scales:scales.device_address(),count,rows:rows as u32,cols:cols as u32,layout:1,skip:1,raw:0,chains,work:0,work_count:0,merge:0,rowmap:0};
         let (entry,block_tokens)=nv_rows_entry(chains);
         self.require_arm_kernels_tc(&[entry])?;if !packs.is_empty() {self.require_arm_kernels_tc(&["tc_nv_pack"])?;}
         crate::prompt_launches::record("fp4_cohort");
@@ -287,7 +329,7 @@ impl<'a> Backend<'a> {
         })?;
         Ok(())
     }
-    fn require_arm_kernels_tc(&self,names:&[&str])->Result<(),String> {
+    pub(super) fn require_arm_kernels_tc(&self,names:&[&str])->Result<(),String> {
         let module=self.tc_module()?;for name in names {module.function(name)?;}Ok(())
     }
 }

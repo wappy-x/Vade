@@ -76,6 +76,8 @@ pub fn project(
                 tokens: tokens as u32,
                 input_bf16: u32::from(input_bf16),
                 round: u32::from(round),
+                // This path keeps the scalar word (0 = `next_params::MX_SCALAR`).
+                mode: 0,
             })
             .map_err(str::to_string)?;
     }

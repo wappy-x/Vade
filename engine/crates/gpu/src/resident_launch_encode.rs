@@ -19,6 +19,8 @@ pub(super) fn expert(p:crate::expert_ops::LaunchArguments)->Command {let mut c=e
 pub(crate) fn causal_fast(p:crate::causal_ops::Arguments)->Command {let mut c=causal(p);c.kind=Kind::CausalFast as u32;c}
 pub(super) fn nv_stream(p:crate::expert_ops::LaunchArguments)->Command {let mut c=expert(p);c.kind=Kind::NvStream as u32;c}
 pub(super) fn nv_tile(p:crate::expert_ops::LaunchArguments)->Command {let mut c=expert(p);c.kind=Kind::NvTile as u32;c}
+/// The block FP8 decode tile (`fp8_tile`): the expert payload under its own kind.
+pub(super) fn fp8_tile(p:crate::expert_ops::LaunchArguments)->Command {let mut c=expert(p);c.kind=Kind::Fp8Tile as u32;c}
 /// The pair split's raw quarter launch: the expert payload, and the quarters a row gets in the word after it.
 pub(super) fn nv_quarters(p:crate::expert_ops::LaunchArguments,quarters:u64)->Command {
     let mut c=expert(p);c.kind=Kind::NvQuarters as u32;c.word(crate::resident_launch::NV_QUARTERS_WORD,quarters);c
@@ -31,7 +33,7 @@ pub(super) fn device_route(p:crate::device_route::Build)->Command {
 }
 pub(super) fn mx(p:crate::next_params::MxLayer)->Command {
     use crate::next_params::{MxLayer,MxProjection};let mut c=Command::new(Kind::Mx);
-    for (i,p) in p.projections.into_iter().enumerate(){let mut s=Command::new(Kind::Mx);fields!(s,MxProjection,p,weights,scales,input,output,rows,cols,tokens,input_bf16,round);c.put(i*core::mem::size_of::<MxProjection>(),&s.payload[..core::mem::size_of::<MxProjection>()]);}
+    for (i,p) in p.projections.into_iter().enumerate(){let mut s=Command::new(Kind::Mx);fields!(s,MxProjection,p,weights,scales,input,output,rows,cols,tokens,input_bf16,round,mode);c.put(i*core::mem::size_of::<MxProjection>(),&s.payload[..core::mem::size_of::<MxProjection>()]);}
     for (i,v) in p.ends.into_iter().enumerate(){c.put(core::mem::offset_of!(MxLayer,ends)+i*4,&v.to_ne_bytes());}
     fields!(c,MxLayer,p,count);c
 }
@@ -39,7 +41,7 @@ pub(super) fn mixed(p:crate::next_params::ResidentProjectionBatch,kind:Kind)->Co
     let mut c=mx(p.layer);c.kind=kind as u32;fields!(c,crate::next_params::ResidentProjectionBatch,p,plain,round);c
 }
 pub(super) fn mx_rows(p:crate::next_params::MxProjection,kind:Kind)->Command {
-    let mut c=Command::new(kind);fields!(c,crate::next_params::MxProjection,p,weights,scales,input,output,rows,cols,tokens,input_bf16,round);c
+    let mut c=Command::new(kind);fields!(c,crate::next_params::MxProjection,p,weights,scales,input,output,rows,cols,tokens,input_bf16,round,mode);c
 }
 pub(super) fn group_rows(p:crate::expert_ops::GroupArguments,kind:Kind)->Command {
     let mut c=Command::new(kind);fields!(c,crate::expert_ops::GroupArguments,p,table,input,output,lut,count,units,words,stride);c
@@ -100,10 +102,11 @@ pub(super) fn copy(p:crate::kernel_params::HybridCopy)->Command {let mut c=Comma
         let c=group_rows(p,Kind::Fp8RowsMulti);for (i,v) in [16,32,48,64].into_iter().enumerate(){assert_eq!(u64_at(&c,i*8),v);}
         for (i,v) in [7,11,13,17].into_iter().enumerate(){assert_eq!(u32_at(&c,32+i*4),v);}
         assert!(c.payload[size_of::<crate::expert_ops::GroupArguments>()..].iter().all(|&v|v==0));
-        let p=crate::next_params::MxProjection {weights:16,scales:32,input:48,output:64,rows:123,cols:256,tokens:8,input_bf16:0,round:0};
+        let p=crate::next_params::MxProjection {weights:16,scales:32,input:48,output:64,rows:123,cols:256,tokens:8,input_bf16:0,round:0,mode:1};
         let c=mx_rows(p,Kind::MxRows8);for (i,v) in [16,32,48,64].into_iter().enumerate(){assert_eq!(u64_at(&c,i*8),v);}
-        for (i,v) in [123,256,8,0,0].into_iter().enumerate(){assert_eq!(u32_at(&c,32+i*4),v);}
-        assert!(c.payload[52..].iter().all(|&v|v==0));
+        // The word function (`mode`, offset 52) rides in the record: a replay of a tensor-core matrix must not fall to the scalar word.
+        for (i,v) in [123,256,8,0,0,1].into_iter().enumerate(){assert_eq!(u32_at(&c,32+i*4),v);}
+        assert!(c.payload[56..].iter().all(|&v|v==0));
         let build=crate::device_route::Build {table:16,ids:32,input:48,quantized:64,quantizers:80,projects:96,output:112,experts:1024,picks:8,phases:2,down:0,shared:1,raw:0};
         let c=route_rows(crate::device_route::BuildRows {build,tokens:8,stride:17});
         assert_eq!(c.payload[..size_of::<crate::device_route::Build>()],device_route(build).payload[..size_of::<crate::device_route::Build>()]);
@@ -203,12 +206,33 @@ pub(super) fn copy(p:crate::kernel_params::HybridCopy)->Command {let mut c=Comma
         assert_eq!(new.kind,Kind::NvTile as u32);assert_eq!(new.payload,old.payload);assert_eq!(new.reserved,[0;3]);
         assert_eq!(Kind::NvTile.kernel(),"resident_launch_nv_tile");
     }
+    #[test] fn fp8_tile_replay_keeps_the_original_expert_payload() {
+        use crate::expert_ops::{Arguments,LaunchArguments,Shape,Op};
+        let shape=Shape {op:Op::Fp8Serial,rows:2048,cols:2048,block_rows:128,block_cols:128,tokens:1,global:1.0,activation:1.0,bound:0.0,role:0};
+        let p=LaunchArguments {single:Arguments {input:[16,4,4,4],weight:80,scales:96,output:112,shape},batch:0,count:1};
+        let old=expert(p);let new=fp8_tile(p);
+        assert_eq!(Kind::Fp8Tile as u32,72);
+        assert_eq!(new.kind,Kind::Fp8Tile as u32);assert_eq!(new.payload,old.payload);assert_eq!(new.reserved,[0;3]);
+        assert_eq!(Kind::Fp8Tile.kernel(),"resident_launch_fp8_tile");
+        // The side prefetch of a one-job launch reads the same window from either kind.
+        let (a,b)=(crate::bus_shadow::more(&old).unwrap(),crate::bus_shadow::more(&new).unwrap());
+        assert_eq!((a.weight,a.bytes),(b.weight,b.bytes));assert_eq!((b.weight,b.bytes),(80,2048*2048));
+    }
+    /// A merge dropped this arm once (2026-11-16): every one-job decode launch of block FP8 then left the recorded part
+    /// and ended it (86 more flushes a step, MEASURED run f8tc-r2-2: the one-row step 41.3 to 43.2 ms). The recorder
+    /// needs a device, so the host reads its text.
+    #[test] fn the_recorder_knows_the_fp8_tile_entry_by_name() {
+        let recorder=include_str!("backend/resident_launch.rs");
+        assert!(recorder.contains(r#""fp8_tile"=>Some((Kind::Fp8Tile,encode::fp8_tile("#));
+        // The host launches a one-job tile under that name.
+        assert!(include_str!("backend/expert_ops.rs").contains(r#"{"fp8_tile"} else {"expert_operation"}"#));
+    }
     fn u64_at(c:&Command,at:usize)->u64 {u64::from_ne_bytes(c.payload[at..at+8].try_into().unwrap())}
     fn u32_at(c:&Command,at:usize)->u32 {u32::from_ne_bytes(c.payload[at..at+4].try_into().unwrap())}
     #[test] fn mixed_projection_abi_keeps_all_descriptors_and_flags() {
         use crate::next_params::{MxProjection,MxLayer,ResidentProjectionBatch};use core::mem::{offset_of,size_of};
         let mut p=ResidentProjectionBatch {round:1,..Default::default()};
-        for i in 0..9 {p.push(MxProjection {weights:16*(i+1),scales:32,input:48,output:64,rows:(i+1) as u32,cols:32,tokens:1,input_bf16:0,round:0},i%2==0).unwrap();}
+        for i in 0..9 {p.push(MxProjection {weights:16*(i+1),scales:32,input:48,output:64,rows:(i+1) as u32,cols:32,tokens:1,input_bf16:0,round:0,mode:0},i%2==0).unwrap();}
         for kind in [Kind::Mixed,Kind::MixedBf16,Kind::PlainBatch] {
         let c=mixed(p,kind);assert_eq!(c.kind,kind as u32);assert_eq!(c.reserved,[0;3]);assert_eq!(offset_of!(ResidentProjectionBatch,layer),0);
         for (i,v) in p.layer.projections.iter().enumerate() {let at=i*size_of::<MxProjection>();assert_eq!(u64_at(&c,at),v.weights);assert_eq!(u64_at(&c,at+24),v.output);assert_eq!(u32_at(&c,at+40),v.tokens);assert_eq!(u32_at(&c,at+52),0);}
@@ -227,8 +251,8 @@ pub(super) fn copy(p:crate::kernel_params::HybridCopy)->Command {let mut c=Comma
         let c=expert(crate::expert_ops::LaunchArguments {single:p,batch:128,count:3});assert_eq!(u64_at(&c,offset_of!(crate::expert_ops::Arguments,output)),112);assert_eq!(u32_at(&c,offset_of!(crate::expert_ops::Arguments,shape)+32),(-0.0f32).to_bits());
         assert_eq!(u64_at(&c,offset_of!(crate::expert_ops::LaunchArguments,batch)),128);assert_eq!(u32_at(&c,offset_of!(crate::expert_ops::LaunchArguments,count)),3);
         assert_eq!(u32_at(&c,offset_of!(crate::expert_ops::Arguments,shape)+offset_of!(crate::expert_ops::Shape,tokens)),1);
-        let mut p=crate::next_params::MxLayer::default();p.push(crate::next_params::MxProjection {weights:16,scales:32,input:48,output:64,rows:3,cols:32,tokens:1,input_bf16:0,round:0}).unwrap();let c=mx(p);
-        assert_eq!(u64_at(&c,24),64);assert_eq!(u32_at(&c,offset_of!(crate::next_params::MxLayer,count)),1);
+        let mut p=crate::next_params::MxLayer::default();p.push(crate::next_params::MxProjection {weights:16,scales:32,input:48,output:64,rows:3,cols:32,tokens:1,input_bf16:0,round:0,mode:1}).unwrap();let c=mx(p);
+        assert_eq!(u64_at(&c,24),64);assert_eq!(u32_at(&c,offset_of!(crate::next_params::MxProjection,mode)),1);assert_eq!(u32_at(&c,offset_of!(crate::next_params::MxLayer,count)),1);
         for (i,v) in p.ends.iter().enumerate(){assert_eq!(u32_at(&c,offset_of!(crate::next_params::MxLayer,ends)+i*4),*v);}
         let p=crate::mhc_params::Prepare {input:16,weights:32,base:48,scale:64,normalized:80,coefficients:96,collapsed:112,shape:crate::mhc_params::Shape {rows:1,streams:2,hidden:3,iterations:4,rms_eps:1e-6,eps:1e-5}};let c=prepare(p);
         assert_eq!(u64_at(&c,40),96);assert_eq!(u64_at(&c,offset_of!(crate::mhc_params::Prepare,collapsed)),112);

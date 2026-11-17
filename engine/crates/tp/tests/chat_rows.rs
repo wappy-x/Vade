@@ -1,4 +1,4 @@
-//! CHAT ROWS on the host: for five or more chats a latent layer's absorbed attention runs as ONE row group
+//! CHAT ROWS on the host: for four or more chats a latent layer's absorbed attention runs as ONE row group
 //! (`Compute::latent_absorption_chats`), each chat on its own rows of one latent value. The host compute has no absorbed
 //! weights, so no host test reached that path. This compute answers the three absorbed calls with ONE stand-in function of
 //! a row's own query and its own selected latent rows, laid out as the device lays them out (chat i's Gather at row
@@ -141,7 +141,7 @@ fn absorbed_prompt_refuses_bad_counts_fractional_ids_and_future_rows_before_atte
 }
 /// A run of batch steps whose cohort changes: 1 to 8 chats, down again and up again, the chats rotating so that a chat
 /// leaves, returns, and stands in another slot at another position. Every chat keeps the logit bits, the ID and the next
-/// state of its own plain step. The attention launches of each step are counted: five or more chats take ONE row group
+/// state of its own plain step. The attention launches of each step are counted: four or more chats take ONE row group
 /// a latent layer (one exchange); fewer chats keep one attention a chat.
 #[test]
 fn a_changing_cohort_shares_one_attention_group_a_layer_and_each_chat_keeps_its_own_bits() {
@@ -158,11 +158,11 @@ fn a_changing_cohort_shares_one_attention_group_a_layer_and_each_chat_keeps_its_
         let rows=chats.iter().map(|&chat|(tokens[chat],&actual[chat])).collect::<Vec<_>>();
         for count in [&grouping.alone,&grouping.groups,&grouping.grouped_chats] {count.set(0);}
         let outputs=batch.step_batch(&rows).unwrap();
-        // The launch plan of the step: one row group a latent layer from five chats on (five kernels and one exchange a
+        // The launch plan of the step: one row group a latent layer from four chats on (five kernels and one exchange a
         // layer, whatever the chat count), else one attention a chat (five kernels and one exchange a chat).
         let plan=(grouping.groups.get(),grouping.grouped_chats.get(),grouping.alone.get());
-        assert_eq!(plan,if width>=5 {(latent,width*latent,0)} else {(0,0,width*latent)},"step={step} width={width}");
-        if width>=5 {grouped_steps+=1;}widths.insert(width);
+        assert_eq!(plan,if width>=4 {(latent,width*latent,0)} else {(0,0,width*latent)},"step={step} width={width}");
+        if width>=4 {grouped_steps+=1;}widths.insert(width);
         for (&chat,(logits,id,next)) in chats.iter().zip(outputs) {
             let (want,want_id,want_next)=scalar.step(tokens[chat],&expected[chat],|_,_|Ok(())).unwrap();
             assert_eq!(id,want_id,"step={step} width={width} chat={chat}");assert_eq!(bits(&logits),bits(&want),"step={step} width={width} chat={chat}");

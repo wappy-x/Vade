@@ -1,12 +1,13 @@
 //! One synchronous prompt call borrows spare pool bytes. Admission charges stay fixed.
 use super::*;
 use crate::bounded_decoder::{PROMPT_GROUP,PROMPT_GROUP_MAX,PROMPT_GROUP_LEASE};
-/// The groups a prompt call can borrow for, largest first: the two lease-only sizes, then the startup sizes above
+/// The groups a prompt call can borrow for, largest first: the three lease-only sizes, then the startup sizes above
 /// `PROMPT_GROUP`. A service borrows only for a size above its startup group.
-pub(super) const SIZES:[usize;4]=[PROMPT_GROUP_LEASE[0],PROMPT_GROUP_LEASE[1],PROMPT_GROUP_MAX,PROMPT_GROUP_MAX/2];
+pub(super) const SIZES:[usize;5]=[PROMPT_GROUP_LEASE[0],PROMPT_GROUP_LEASE[1],PROMPT_GROUP_LEASE[2],PROMPT_GROUP_MAX,PROMPT_GROUP_MAX/2];
 /// The largest group a service offers to borrow for: the largest lease size whose peak and whose words a pair has
-/// measured (2,048 rows: two runs of 1,024 rows that share the routed expert product launches). The larger lease size
-/// stays in the cut (`lease_groups`), in the plan and in the host bit checks, and no service offers it.
+/// measured (3,072 rows: three runs of 1,024 rows that share the routed expert product launches; 2,048 rows when the
+/// spare pool does not cover three runs). The largest lease size stays in the cut (`lease_groups`), in the plan and
+/// in the host bit checks, and no service offers it.
 pub(super) const SERVED:usize=PROMPT_GROUP_LEASE[1];
 /// A group size the ranks may agree on: the startup sizes and the lease sizes.
 fn agreed(rows:usize)->bool {rows==PROMPT_GROUP || SIZES.contains(&rows)}

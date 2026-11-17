@@ -190,13 +190,18 @@ pub fn attention_table_blocks(s:Shape)->u32 {
 }
 /// Context rows in one grid bucket: a launch whose extent follows the context takes the grid of the next 256 rows.
 pub const BUCKET_ROWS:u32=256;
-/// Blocks of 128 threads for the absorbed scores of a decode step (`latent_absorption_scores`): one warp a unit, where a
-/// unit is one latent row for four heads. The rows follow the context, so the grid is that of the next 256 rows: a
+/// Blocks of `absorb_tc::THREADS` threads for an absorbed operation of a decode step (`latent_absorption`,
+/// `latent_absorption_scores`, `latent_absorption_values`): one outer index, 128 M rows and 32 N columns a block
+/// (`absorb_tc::Form`). The rows of the scores follow the context, so their grid is that of the next 256 rows: a
 /// recorded graph piece is keyed by its grids, and this grid then changes as Gather's does, not at every token.
-/// Exact: the kernel takes its rows from the shape, and a unit at or past `ceil(heads/4)*rows` names a head past the
-/// last one and leaves before it reads or writes.
-pub fn absorb_scores_blocks(s:Shape)->u32 {
-    let rows=if s.rows==0 {1} else {s.rows};(s.heads.div_ceil(4)*rows.next_multiple_of(BUCKET_ROWS)).div_ceil(4)
+/// Exact: the kernel takes its rows from the shape, and a block past `Form::blocks` names an outer index past the last
+/// one and leaves before it reads or writes.
+pub fn absorb_blocks(s:Shape)->Option<u32> {
+    let grid=if s.op==Op::AbsorbScores {Shape {rows:(if s.rows==0 {1} else {s.rows}).checked_next_multiple_of(BUCKET_ROWS)?,..s}} else {s};
+    let (f,exact)=(crate::absorb_tc::Form::step(grid)?,crate::absorb_tc::Form::step(s)?);
+    // A selected row is addressed by a 32-bit word offset in the kernel's staged chunk.
+    if exact.rows.checked_mul(exact.k)?>=crate::absorb_tc::NO_ROW as usize {return None;}
+    u32::try_from(f.step_blocks()).ok()
 }
 /// Fixed 32-lane feature tree, independent of token count and topology.
 fn square_sum(x:&[f32])->f32 {
@@ -296,7 +301,7 @@ pub fn unit(s:Shape,index:usize,x:[&[f32];4],w:&[f32],out:&mut[f32]) {
                 for token in 0..4 {if token<heads {sum[token]+=x[0][token*cols+j]*weight;}}}
             out[..heads].copy_from_slice(&sum[..heads]);},
         #[cfg(not(target_arch="nvptx64"))]
-        _ if crate::latent_absorb::is_absorb(s.op)=>crate::latent_absorb::unit(s,index,x,w,out,|a,b|a*b,|a,b|a+b),
+        _ if crate::latent_absorb::is_absorb(s.op)=>crate::latent_absorb::unit(s,index,x,w,out),
         _=>crate::latent_ops::unit(s,index,x,w,out),
     }
 }
@@ -675,19 +680,25 @@ mod tests {
         assert_eq!(checked,16);
         for op in [Op::Route,Op::Pool,Op::Select,Op::Scores,Op::Values] {assert!(!writes_every_word(op));}
     }
-    #[test] fn absorbed_scores_take_the_grid_of_their_bucket_and_spare_units_name_no_head() {
-        for heads in [1u32,4,5,16,32] {for rows in [1u32,3,4,255,256,257,2051,4096] {
+    #[test] fn absorbed_scores_take_the_grid_of_their_bucket_and_spare_blocks_name_no_token() {
+        use crate::absorb_tc::Form;
+        for heads in [1u32,4,5,16,32,33] {for rows in [1u32,3,4,127,128,129,255,256,257,2051,4096] {
             let s=Shape {op:Op::AbsorbScores,heads,dim:64,taps:64,rows,cols:128,epsilon:0.0,bound:0.0};
-            let (blocks,exact)=(absorb_scores_blocks(s),(heads.div_ceil(4)*rows).div_ceil(4));
-            assert!(blocks>=exact,"{heads} {rows}");assert_eq!(blocks,absorb_scores_blocks(Shape {rows:rows.next_multiple_of(BUCKET_ROWS),..s}));
-            // The kernel's own index rule: unit = block*4 + warp, head0 = unit/rows*4. Every unit of a spare block, and every
-            // spare unit of the last exact block, names a head at or past `heads`, where the kernel returns.
-            for unit in heads.div_ceil(4)*rows..blocks*4 {assert!(unit/rows*4>=heads,"{heads} {rows} {unit}");}
-            // Every real unit is launched.
-            assert!(blocks*4>=heads.div_ceil(4)*rows);
+            let (blocks,f)=(absorb_blocks(s).unwrap(),Form::step(s).unwrap());
+            assert!(blocks as usize>=f.step_blocks(),"{heads} {rows}");assert_eq!(blocks,absorb_blocks(Shape {rows:rows.next_multiple_of(BUCKET_ROWS),..s}).unwrap());
+            // The kernel's own index rule: every spare block names an outer index at or past the one token, where the kernel returns.
+            for block in f.step_blocks()..blocks as usize {assert!(f.step_block(block).0>=f.outer(),"{heads} {rows} {block}");}
+            for block in 0..f.step_blocks() {assert_eq!(f.step_block(block).0,0);}
         }}
         // One bucket for a whole 256 rows, as Gather.
         let s=Shape {op:Op::AbsorbScores,heads:32,dim:64,taps:64,rows:1,cols:128,epsilon:0.0,bound:0.0};
-        assert_eq!(absorb_scores_blocks(s),absorb_scores_blocks(Shape {rows:256,..s}));assert!(absorb_scores_blocks(Shape {rows:257,..s})>absorb_scores_blocks(s));
+        assert_eq!(absorb_blocks(s),absorb_blocks(Shape {rows:256,..s}));assert!(absorb_blocks(Shape {rows:257,..s})>absorb_blocks(s));
+        // The other three operations take their exact grid: it does not follow the context.
+        for op in [Op::AbsorbQuery,Op::AbsorbValues,Op::AbsorbProject] {
+            let s=Shape {op,heads:32,dim:256,taps:256,rows:1,cols:512,epsilon:0.0,bound:0.0};
+            assert_eq!(absorb_blocks(s),absorb_blocks(Shape {rows:2051,..s}),"{op:?}");
+        }
+        assert_eq!(absorb_blocks(Shape {op:Op::AbsorbValues,heads:32,dim:256,taps:256,rows:2051,cols:512,epsilon:0.0,bound:0.0}),Some(16));
+        assert_eq!(absorb_blocks(Shape {op:Op::AbsorbQuery,heads:32,dim:256,taps:256,rows:2051,cols:512,epsilon:0.0,bound:0.0}),Some(128));
     }
 }

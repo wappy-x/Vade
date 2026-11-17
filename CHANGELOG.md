@@ -7,6 +7,180 @@ A short revision such as `380d8e5` or a number such as PR 142 names a revision
 or pull request of the private development history. This repository does not
 hold them ([glossary](docs/GLOSSARY.md#ho), "Main `abc1234`").
 
+## v0.2.0-rc.22 - 2026-11-17
+
+The GLM prompt read is much shorter, and **the GLM token IDs changed**. Read
+the next part first if you compare answers with an older release. GLM
+remains a diagnostic text service.
+
+**GLM token IDs changed on purpose (rebases R1, R2 and R3).**
+
+- **What changed.** The dense shared layers of GLM now run on the tensor
+  cores of the GPU, in the prompt read and in decode. Rebase R1 moved the
+  MXFP8 layer matrices and the BF16 latent attention group. Rebase R2 moved
+  the block FP8 matrices. Rebase R3 (train 16) put the MXFP8 matrices on a
+  new word: the block scales now go inside the tensor-core step. Before
+  R1, these layers used scalar row math.
+- **Why the token IDs change.** A tensor-core product adds its terms in
+  another order and rounds at another place than the scalar form. Both are
+  rounded forms of the same sum. Where two tokens were almost tied, the
+  choice can now fall the other way. So some requests get other tokens than
+  under v0.2.0-rc.21.
+- **What did not change.** The exactness rules hold on the new token IDs.
+  The same request gives the same token IDs on every run: alone or among
+  several chats, drafted or plain, read as a prompt or made by a decode step,
+  resumed or read cold. The rules and their gate are in
+  [the tensor-core contract](engine/docs/tc-dense-contract.md).
+- **What you must do.** GLM token IDs that you saved with v0.2.0-rc.21 or an
+  older release do not match this release. Save new ones with this release.
+  Qwen token IDs did not change: all 72 saved lists match on one Spark and on
+  two Sparks.
+- **The references.** The GLM golden file is epoch 6 (v0.2.0-rc.21 had
+  epoch 3). The file before each rebase is kept under
+  [tools/goldens/archive](tools/goldens/archive). No old reference was
+  overwritten.
+- **The quality check of R1 and R2.** A rebase is measured two ways before
+  it lands. Neither is a comparison with the old token IDs. First, word
+  accuracy. On real captured inputs, the new word's count of misrounded
+  words must stay inside a written allowance over the old word's count
+  (three times the square root of the sum of both counts). This bar guards
+  against a word that is clearly worse. It is not a rule that no error
+  measure may rise. Each number is given three times: on the inputs
+  captured from the old build, from the new build, and from a chain that
+  uses exact arithmetic. Each of the three sets pools decode steps 1, 5
+  and 9 and holds 3,182,592 words. For R1 the counts were 155 / 168 / 176
+  against 144 / 146 / 159 (11 / 22 / 17 more; the allowance was about 52 /
+  53 / 55). Its error in BF16 steps, as a root mean square over all words of a
+  set, was 0.2915 / 0.2901 / 0.2981 for the old word and 0.2992 / 0.2899 /
+  0.2981 for the new word; the ideal word gives 0.2887. Second, agreement
+  with the model maker's own engine, under three written bars (the last
+  two got this form during the gate of R2). (a) On the positions where the
+  maker's own choice is clear, the count is not lower than for the build
+  just before. (b) On the long prompts, the count of agreeing positions is
+  not under 49,699 of 67,518, the count of the last release. This
+  reference is fixed. (c) Against the build just before, the long-prompt
+  count may fall only inside a written chance allowance (three times the
+  square root of the number of positions that changed sides), in the whole
+  count and in each of its two bands. For R1 the clear positions were 172
+  of 173 for both builds, and the long-prompt count went from 49,699 to
+  49,752. For R2 the clear positions were 173 of 173. Its long-prompt
+  count was 49,704: 48 under R1, inside the allowance of 301.6, and 5 over
+  the fixed reference.
+- **The quality check of R3: two bars were not met.** Read this before you
+  rely on GLM answers. Word accuracy against exact arithmetic passed its
+  written bar: 139 / 167 / 183 misrounded words of 3,182,592 with R3 on
+  the three input sets, against 144 / 146 / 159 for the scalar word before
+  R1. The agreement with
+  the model maker's engine went down a little. The long-prompt count is
+  49,619 of 67,518 against 49,699 for the last release (80 fewer: 0.12
+  percentage points of the 67,518). On the 173 positions where the maker's
+  own choice is clear, R3 agrees on 172 and the build before it agreed on
+  173. So bars (a) and (b) failed as written. Bar (c), the recorded
+  chance test, passed: on the long prompts,
+  counted as one pool and in each of its two bands, the difference from
+  the build just before R3 is inside what chance gives between two builds.
+  That test does not cover the 173 clear positions. It does not turn
+  either failed bar into a pass, and a count inside the chance spread is
+  not proof that nothing was lost. The project owner decided to land R3
+  with these numbers. From now on a running total against the last release
+  is kept. A later rebase is stopped for a new decision when the
+  long-prompt count falls under 49,496 of 67,518 (203 fewer than 49,699:
+  0.30 percentage points of the 67,518) or the clear positions fall under
+  172 of 173.
+
+Every performance number below was measured with GLM FP4-Local on two DGX
+Sparks. Unless a line says otherwise, each read number compares one train
+with the main just before it, in the run order main, change, change, main.
+Two lines differ: the train 14 numbers come from the bracket of its tile
+component alone, and the train 12 number is a single run. These numbers do
+not compare
+this release as a whole with v0.2.0-rc.21. The RigMark card of the released
+source (cold 8,192-token read, one chat with drafting off and on, 2, 4 and 8
+chats, first token) is measured after the release and published at
+https://vade.lol/results/ with its exact source and settings.
+
+New and changed:
+
+- **A shorter GLM prompt read, with new token IDs (rebase R1).** The engine's
+  8,192-token read measured 21.104371 / 17.237977 / 17.265047 / 21.221449
+  seconds in the order main, change, change, main (`r1-speed-1`): 3.91
+  seconds less on average (18.5 percent). The one-row decode step was at
+  most 0.44 percent slower in the paired check. The train kept all 66 new
+  saved ID lists in its four loads and context-32,768 cache checks.
+- **A shorter GLM prompt read again, with new token IDs (rebase R2).** The
+  same read measured 17.111914 / 16.333568 / 16.223850 / 17.158979 seconds
+  (`f8tc-r2-3`): 0.86 seconds less on average (5.0 percent). The one-row
+  decode step was at most 0.53 percent slower in the paired check.
+- **A shorter GLM prompt read a third time, with new token IDs (rebase R3,
+  train 16).** The read measured 13.581568 / 12.289007 / 12.309838 /
+  13.503298 seconds (`d2-t16-read-m1`, `-c1`, `-c2`, `-m2`): 1.24 seconds
+  less on average (9.2 percent). Its quality numbers are in the part on
+  token IDs above.
+- **Shorter attention work in the GLM prompt read (train 13).** The read
+  measured 23.198943 / 21.635487 / 21.768195 / 23.319166 seconds
+  (`d2-t13-read-m1`, `-c1`, `-c2`, `-m2`): 6.7 percent less on average. All
+  130 saved ID lists matched the main.
+- **Two or three strict GLM chats draft together (trains 12 and 13).** Two
+  or three requests that ask for strict drafting (`"draft":"strict"`, depth
+  2 or more) and are alone on the server now share one check pass. With four
+  or more chats, the chats decode plainly. Token IDs are the same with
+  drafting on and off.
+- **A third block FP8 tile form (train 14).** The bracket of the tile
+  component alone, before the train was put together, measured 16.239973 /
+  15.453670 / 15.422949 / 16.219116 seconds in the order base, change,
+  change, base (`f8tc-t3-b-b1`, `-c1`, `-c2`, `-b2`): 0.79 seconds less on
+  average. The assembled train made no speed claim of its own; one run of
+  it read in 16.000629 seconds (`d2-t14-four-1`). All saved ID lists
+  matched the main. This train also restored the offline
+  kernel compile and the kernel source census, which rebases R1 and R2 had
+  left failing.
+- **Shorter latent attention, mHC and exchange work (train 15).** The read
+  measured 15.795561 / 13.561186 / 13.588822 / 15.593297 seconds
+  (`d2-t15-read-m1`, `-c1`, `-c2`, `-m2`): 2.12 seconds less on average
+  (13.5 percent). All 188 saved ID lists (23,968 token IDs) matched the
+  main. The pooled one-row decode check was at most 0.59 percent slower.
+- **One convolution launch and shorter expert work in the prompt read
+  (train 17, same token IDs).** A prompt run now takes one convolution
+  launch. The experts work in paired parts and place their result
+  directly. The read measured 12.412891 / 11.435229 / 11.319606 / 12.394422
+  seconds (`d2-t17-read-m1`, `-c1`, `-c2`, `-m2`): 1.03 seconds less on
+  average (8.3 percent). All 90 saved ID lists (12,592 token IDs) matched
+  the main.
+- **Packed prompt groups, and less work a step for several chats (train 18,
+  same token IDs).** One launch quantizes and packs the rows of an MXFP8
+  prompt group, and the latent products share a packed cache. The read
+  measured 11.413975 / 10.845326 / 10.362826 / 11.297922 seconds
+  (`d2-t18-read-m1`, `-c1`, `-c2`, `-m2`): 0.75 seconds less on average
+  (6.6 percent). All 90 saved ID lists (12,592 token IDs) matched the main.
+  Drafting now checks only the drafted tokens that pay. One run of the four
+  loads on this train (`d2-t18-four-1`) against one run on the train before
+  it (`d2-t17-four-1`): drafting on, prose 25.33 against 24.49, code 31.29
+  against 30.72, structured 41.13 against 40.68 tokens per second; 2, 4 and
+  8 chats 31.51 / 49.36 / 62.85 against 31.28 / 48.04 / 61.66; one plain
+  chat 24.37 against 24.38. These are single runs, not a balanced
+  comparison.
+- **A wider prompt lease in the prompt read (train 19, same token IDs).** A
+  wide prompt group may now hold 3,072 rows where the memory allows. Before,
+  the lease stopped at 2,048 rows. An 8,192-token read is then cut into
+  3,072 + 3,072 + 2,048 rows: three product launches a matrix where four
+  stood. The read measured 10.409166 / 10.141929 / 10.068639 / 10.503624
+  seconds (`d2-t19-read-m1`, `-c1`, `-c2`, `-m2`): 0.35 seconds less on
+  average (3.4 percent). All 90 saved ID lists (12,592 token IDs)
+  matched the main.
+- **Packed expert exchange and fused mHC boundaries (train 12).** The train
+  kept all 88 saved ID lists of the main. One read of it, a single run
+  with no bracket, measured 22.786523 seconds (`n3-t12-read-1`).
+
+Known limits:
+
+- GLM is still a diagnostic text service. It is not qualified.
+- Rebase R3 did not meet two of its written quality bars. The numbers are
+  in the part on token IDs above.
+- The prompt read is still slower than the model maker's own engine on the
+  same two Sparks.
+- The build still prints version `0.1.0` in `vade --version` and in the
+  bundle file name. The release tag is the version of record.
+
 ## v0.2.0-rc.21 - 2026-11-16
 
 Drafting is on by default for the GLM text service. This release includes all
@@ -209,7 +383,7 @@ Checks:
   lists and 9,248 token IDs across the four loads, short-prompt/read and
   context-32,768 cache checks (`n3-t11-fourloads-1`, `n3-t11-read-1`,
   `n3-t11-k32-1`). These checks include overlapping prompts. The touched
-  host suites passed 1,116 tests with no failures and 13 device-only tests
+  host suites passed 1,116 tests with no failures and 13 tests
   ignored. The source checks and Qwen/GLM golden checks also passed.
 - **The default start at the landing of PR 232.** A plain `vade up` of the
   GLM text service ran on the exact merged code. It printed the fall of the

@@ -98,6 +98,7 @@ impl<'a> Backend<'a> {
             #[cfg(feature="kernel-bench")]
             "chain_add_latency"=>(1,32),
             "mhc_residual_rows"=>((shape.rows as usize*shape.wide()).div_ceil(256) as u32,256),
+            "mhc_boundary_block"=>(shape.rows,256),
             "mhc_project_tile"=>(shape.rows.div_ceil(crate::prompt_admission::MHC_TOKENS as u32),256),
             "mhc_boundary_fused"=>(crate::mhc_params::FUSED_BLOCKS as u32,crate::mhc_params::FUSED_THREADS as u32),
             "mhc_boundary_phase_rms"|"mhc_boundary_phase_dots"=>(shape.rows*crate::mhc_params::FUSED_BLOCKS as u32,crate::mhc_params::FUSED_THREADS as u32),

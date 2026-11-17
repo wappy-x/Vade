@@ -6,6 +6,12 @@ impl<'a> Backend<'a> {
     /// Dropping an owner drains the stream first, so borrowed inputs stay live.
     #[allow(clippy::if_same_then_else)] // the branches are separate test cases.
     pub fn prompt_operation(&self,shape:Shape,input:[Option<&DeviceVector<'_>>;5],weight:Option<&DeviceVector<'_>>)->Result<DeviceVector<'a>,String> {
+        self.prompt_operation_output(shape,input,weight,None)
+    }
+    /// An optional private destination view. It must not overlap any input. The
+    /// ordered stream owns its writes until completion, including mapped storage.
+    #[allow(clippy::if_same_then_else)] // The launch branches are separate device cases.
+    pub fn prompt_operation_output(&self,shape:Shape,input:[Option<&DeviceVector<'_>>;5],weight:Option<&DeviceVector<'_>>,destination:Option<DeviceVector<'a>>)->Result<DeviceVector<'a>,String> {
         self.require_resident_stream()?;
         let (lengths,weights,units,words)=shape.lengths().ok_or("invalid prompt row shape")?;
         // No prompt kernel reads the round mark of a fold (`causal_ops::FOLD_ROUNDS`): a wrapped fold is the fold alone.
@@ -20,7 +26,14 @@ impl<'a> Backend<'a> {
             if w.is_segmented() {return Err("prompt row weight must be contiguous".into());}w.device_address()},
             _ if weights==0=>4,_=>return Err("prompt row weight count differs".into())};
         let total=units.checked_mul(words).ok_or("prompt row output overflow")?;
-        let mut output=self.vector(total.max(1))?;let mut filled=false;
+        let mut output=match destination {Some(out)=>{
+            self.check_vector(&out,total.max(1))?;if out.is_segmented() {return Err("prompt destination must be contiguous".into());}
+            let end=out.device_address().checked_add((total*4) as u64).ok_or("prompt destination overflow")?;
+            if addresses.into_iter().zip(lengths).any(|(start,n)|n>0 && start<end && start+(n*4) as u64>out.device_address()) {
+                return Err("prompt destination overlaps an input".into());
+            }
+            if weights>0 && address<end && address+(weights*4) as u64>out.device_address() {return Err("prompt destination overlaps its weight".into());}
+            out},None=>self.vector(total.max(1))?};let mut filled=false;
         // A group past the swept token range of a reading kernel runs that kernel over runs of tokens (prompt_chunks): each run
         // reads its own tokens' words and writes its own tokens' output words, so the bits are those of the one launch.
         // An entry: shape, input addresses and lengths, units, words a unit, and the address of its output words inside `output`.
@@ -44,7 +57,10 @@ impl<'a> Backend<'a> {
             let (rows,tokens,heads)=(shape.rows as usize,shape.tokens as usize,shape.heads as usize);
             // A draft verify pass has 1 to 16 tokens. The small-count kernels run a warp for each unit instead of one thread and go first
             // (small_choice.rs: their order is tested on the host); then lane K's and lane R's tiles; then prompt_rows.
-            let small=crate::latent_absorb_rows::launch(shape).or_else(||crate::small_choice::prompt(&shape,addresses[0],address));
+            // The latent tile: its third form where the kernels take the launch (latent_absorb_rows::third: the same bits), else the first.
+            let third=crate::latent_absorb_rows::third(shape,addresses,address,out);
+            if crate::latent_absorb_rows::packed(shape.op) && third.is_none() {return Err("packed latent cache shape or alignment is not admitted".into());}
+            let small=third.or_else(||crate::latent_absorb_rows::launch(shape)).or_else(||crate::small_choice::prompt(&shape,addresses[0],address));
             let tile=if small.is_some() {small} else {match shape.op {
                 Op::ProjectRows if crate::plain_tile::narrow_admitted(rows,tokens,shape.cols as usize,addresses[0],address)=>Some(("plain_rows_narrow",crate::plain_tile::narrow_blocks(rows,tokens).ok_or("plain narrow grid overflow")?,crate::plain_tile::NARROW_THREADS)),
                 Op::ProjectRows if crate::plain_tile::admitted(rows,tokens,shape.cols as usize,addresses[0],address)=>Some(("plain_rows_tile",crate::plain_tile::blocks(rows,tokens).ok_or("plain tile grid overflow")?,crate::plain_tile::THREADS)),
@@ -94,7 +110,8 @@ impl<'a> Backend<'a> {
                 else if let Some(name)=fast {(name,if name=="prompt_softmax_rows" {shape.tokens*shape.heads} else {crate::prompt_admission::fast_blocks(shape)},1,crate::prompt_admission::FAST_THREADS)}
                 else if selecting {("prompt_select_rows",shape.tokens,1,crate::select_admission::THREADS)}
                 else {match tile {Some(t)=>(t.0,t.1,1,t.2),None if tiles=>("transpose_tiles",u32::try_from((threads/16).div_ceil(128)).map_err(|_|"prompt row grid overflow")?,1,128),None=>("prompt_rows",u32::try_from(threads.div_ceil(128)).map_err(|_|"prompt row grid overflow")?,1,128)}};
-            crate::prompt_launches::record(kernel);
+            // A third-form launch counts as the latent tile it replaces (the gate reads that count) and under its own name.
+            if third.is_some() {crate::prompt_launches::record("latent_absorption_tile");crate::prompt_launches::record("latent_tile3");} else {crate::prompt_launches::record(kernel);}
             let big=crate::prompt_admission::big_group;
             if (permuting || placing) && big(shape.rows as usize/crate::prompt_admission::ROUTED) || transposing && big(shape.cols as usize) || fast.is_some() && big(tokens) {crate::prompt_launches::record("prompt_big_group");}
             // SAFETY: Shape bounds every output unit and every read indexed by shape, and
@@ -131,6 +148,10 @@ impl<'a> Backend<'a> {
     /// as each decode token does, instead of releasing every spare. The next group (or the
     /// next session's first group) takes its own buffer sizes back from the pool.
     pub fn keep_group_spares(&self,room:usize)->Result<(),String> {self.synchronize()?;self.context.trim_vector_pool(room);Ok(())}
+    /// LEASE SPARES: after a prompt group whose prompt goes on, when its lease goes back: drain, then end the group's pool
+    /// cap and ceiling (`group_vector_spares`) without freeing a spare. The next group takes the same buffer sizes back
+    /// from the pool. Free storage only: the device budget and the host pressure rule still release spares.
+    pub fn end_group_spares(&self)->Result<(),String> {self.synchronize()?;self.context.end_group_vector_pool();Ok(())}
     /// A decode token starts: release the spare vectors kept longest until `room` bytes fit
     /// under the pool's cap. Buffers whose size follows the context are never asked for
     /// again; without this they fill the pool and every later buffer is allocated anew.

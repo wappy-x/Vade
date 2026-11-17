@@ -45,7 +45,7 @@ sha=<full-source-sha40>
 date=<commit date, UTC>
 target=gb10
 arch=aarch64-unknown-linux-gnu
-gpu=sm_121
+gpu=sm_121a
 ptx_isa=8.8
 ptx_cuda=12.9
 ptx_min_driver=575.51.03
@@ -72,7 +72,7 @@ Linux or macOS.
 Before it packs anything, it checks that `source.tar`, `build.json` and
 `REVISION` name the same commit, that the engine and PTX match the hashes in
 `build.json`, that the three programs are Linux aarch64 ELF files without
-build-machine paths, and that the PTX targets `sm_121` with a PTX ISA it knows
+build-machine paths, and that the PTX targets `sm_121a` with a PTX ISA it knows
 the oldest driver for. With `--cubin-dir`, the folder that `scripts/make-cubin.sh`
 wrote, it also checks that the compiled PTX is byte for byte the bundled PTX and
 that `flash-serve` holds that image, then adds `flash.cubin.conf` and three

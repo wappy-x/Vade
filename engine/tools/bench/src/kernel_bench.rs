@@ -3,6 +3,16 @@
 #[allow(unsafe_code)]
 #[path = "kernel_cuda.rs"]
 mod cuda;
+/// The CPU twins of the tensor-core words, the files the gpu crate's host tests run.
+#[allow(dead_code)]
+#[path = "../../../crates/gpu/src/tc_twin_bf16.rs"]
+mod tc_twin_bf16;
+#[allow(dead_code)]
+#[path = "../../../crates/gpu/src/tc_twin_f8.rs"]
+mod tc_twin_f8;
+#[allow(dead_code)]
+#[path = "../../../crates/gpu/src/tc_f8.rs"]
+mod tc_f8;
 #[cfg(target_os = "linux")] use cuda::fp8group;
 #[cfg(target_os = "linux")] use cuda::rows;
 #[cfg(not(target_os = "linux"))]
@@ -11,6 +21,10 @@ mod cuda;
 #[cfg(not(target_os = "linux"))]
 #[allow(dead_code)]
 #[path = "kernel_fp8.rs"] mod fp8group;
+// The code-list tool runs on a box only; its verdict rules have tests, and they run on a development host too.
+#[cfg(all(test, not(target_os = "linux")))]
+#[allow(dead_code)]
+#[path = "kernel_codepair.rs"] mod codepair;
 #[allow(dead_code)]
 #[path = "../../export/src/sha256.rs"]
 mod sha256;
@@ -919,6 +933,15 @@ fn run() -> Result<()> {
         }
         if flag == "--boundary-receipts" {return boundary_receipts::run(&args.collect::<Vec<_>>());}
         if flag == "--checker-self-test" {return byte_check::self_test();}
+        if flag == "--diag-limits" {
+            let image=args.next().ok_or("--diag-limits needs primary and tensor images")?;
+            let tensor=args.next().ok_or("--diag-limits needs tensor image")?;
+            let mode=args.next().unwrap_or_else(||"limits".into());
+            #[cfg(target_os="linux")]
+            return cuda::diag_limits::run(&image,&tensor,&mode);
+            #[cfg(not(target_os="linux"))]
+            return Err(format!("diagnostic limits need Linux and CUDA: {image} {tensor} {mode}"));
+        }
         if flag == "--mhc-phased" {
             let base=args.next().ok_or("--mhc-phased needs base and candidate PTX paths")?;
             let path=args.next().ok_or("--mhc-phased needs a candidate PTX path")?;
@@ -1003,6 +1026,32 @@ fn run() -> Result<()> {
             #[cfg(not(target_os = "linux"))]
             return Err(format!("plain probe needs Linux with CUDA: {base} {candidate} {names} {mode}"));
         }
+        if flag == "--absorb-tc-time" {
+            let base=args.next().ok_or("--absorb-tc-time needs base image")?;
+            let candidate=args.next().ok_or("--absorb-tc-time needs candidate image")?;
+            #[cfg(target_os = "linux")]
+            return cuda::absorbtc::run(&base,&candidate);
+            #[cfg(not(target_os = "linux"))]
+            { let _=(base,candidate);return Err("--absorb-tc-time requires Linux and CUDA".into()); }
+        }
+        if flag == "--latent3" {
+            let image=args.next().ok_or("--latent3 needs an image")?;
+            let mode=args.next().unwrap_or_else(|| "all".to_string());
+            let only=args.next().unwrap_or_else(|| "all".to_string());
+            #[cfg(target_os = "linux")]
+            return cuda::absorbtc::latent3::run(&image,&mode,&only);
+            #[cfg(not(target_os = "linux"))]
+            { let _=(image,mode,only);return Err("--latent3 requires Linux and CUDA".into()); }
+        }
+        if flag == "--latent-small" {
+            let old=args.next().ok_or("--latent-small needs the old image")?;
+            let new=args.next().ok_or("--latent-small needs the new image")?;
+            let mode=args.next().unwrap_or_else(|| "all".to_string());
+            #[cfg(target_os = "linux")]
+            return cuda::absorbtc::latentsmall::run(&old,&new,&mode);
+            #[cfg(not(target_os = "linux"))]
+            { let _=(old,new,mode);return Err("--latent-small requires Linux and CUDA".into()); }
+        }
         if flag == "--shared-forms" {
             let path = args.next().ok_or("--shared-forms needs an image")?;
             #[cfg(target_os = "linux")]
@@ -1020,6 +1069,7 @@ fn run() -> Result<()> {
             return Err(format!("fold rows check needs Linux with CUDA: {base} {candidate} {mode}"));
         }
         if flag == "--rows-p1" {
+
             let base = args.next().ok_or("--rows-p1 needs a baseline and a candidate image")?;
             let candidate = args.next().ok_or("--rows-p1 needs a candidate image")?;
             let mode = args.next().unwrap_or_else(|| "both".to_string());
@@ -1120,6 +1170,15 @@ fn run() -> Result<()> {
             #[cfg(not(target_os = "linux"))]
             return Err(format!("pool scores check needs Linux with CUDA: {base} {candidate} {mode}"));
         }
+        if flag == "--mx-tc" {
+            let base = args.next().ok_or("--mx-tc needs a baseline and a candidate image")?;
+            let candidate = args.next().ok_or("--mx-tc needs a candidate image")?;
+            let mode = args.next().unwrap_or_else(|| "all".into());
+            #[cfg(target_os = "linux")]
+            return cuda::mx_tc(&base, &candidate, &mode);
+            #[cfg(not(target_os = "linux"))]
+            return Err(format!("MX-TC needs Linux with CUDA: {base} {candidate} {mode}"));
+        }
         if flag == "--mx-rows" {
             let base = args.next().ok_or("--mx-rows needs a baseline and a candidate image")?;
             let candidate = args.next().ok_or("--mx-rows needs a candidate image")?;
@@ -1127,6 +1186,14 @@ fn run() -> Result<()> {
             return cuda::mx_rows(&base, &candidate, args.next().as_deref() == Some("wide"));
             #[cfg(not(target_os = "linux"))]
             return Err(format!("mx rows check needs Linux with CUDA: {base} {candidate}"));
+        }
+        if flag == "--fp8-tc" {
+            let base = args.next().ok_or("--fp8-tc needs a baseline and a candidate image")?;
+            let candidate = args.next().ok_or("--fp8-tc needs a candidate image")?;
+            #[cfg(target_os = "linux")]
+            return cuda::fp8_tc(&base, &candidate, args.next().as_deref().unwrap_or(""));
+            #[cfg(not(target_os = "linux"))]
+            return Err(format!("fp8 tensor-core check needs Linux with CUDA: {base} {candidate}"));
         }
         if flag == "--fp8-rows" {
             let base = args.next().ok_or("--fp8-rows needs a baseline and a candidate image")?;
@@ -1161,6 +1228,22 @@ fn run() -> Result<()> {
             return cuda::fp4_cohort(&production, &fp4, &mode);
             #[cfg(not(target_os = "linux"))]
             return Err(format!("FP4-COHORT needs Linux with CUDA: {production} {fp4} {mode}"));
+        }
+        if flag == "--prompt-route" {
+            let image = args.next().ok_or("--prompt-route needs a kernel image")?;
+            let mode = args.next().unwrap_or_else(|| "all".into());
+            #[cfg(target_os = "linux")]
+            return cuda::prompt_route(&image, &mode);
+            #[cfg(not(target_os = "linux"))]
+            return Err(format!("prompt route needs Linux with CUDA: {image} {mode}"));
+        }
+        if flag == "--prompt-route-native" {
+            let image = args.next().ok_or("--prompt-route-native needs the primary and tensor-core images")?;
+            let second = args.next().ok_or("--prompt-route-native needs the tensor-core image")?;
+            #[cfg(target_os = "linux")]
+            return cuda::prompt_route_native(&image, &second);
+            #[cfg(not(target_os = "linux"))]
+            return Err(format!("prompt native route needs Linux with CUDA: {image} {second}"));
         }
         if flag == "--route-rows" {
             let image = args.next().ok_or("--route-rows needs a kernel image")?;

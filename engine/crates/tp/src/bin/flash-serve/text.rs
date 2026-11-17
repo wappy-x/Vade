@@ -50,10 +50,12 @@ pub fn run(args:&[String],checkpoint:CheckpointAdmission,root:&Path,output_setti
     // different options, or one build of before the default (off without an option) and one of after it (on).
     // Bit 62 goes with it since a resume starts with the readiness word (`Factory::kept_ready`): a build of before
     // that word keeps prompts with bit 62 clear, so it and this build refuse each other here, not at a first resume.
-    local[..64].copy_from_slice(identity.fingerprint().as_bytes());local[64..72].copy_from_slice(&(context as u64|u64::from(keep)<<63|u64::from(keep)<<62).to_le_bytes());local[72..].copy_from_slice(&(budget as u64).to_le_bytes());
+    // Bit 61 identifies the lossless BF16 prompt packet format. A mixed build
+    // must fail here, before either rank posts a differently sized collective.
+    local[..64].copy_from_slice(identity.fingerprint().as_bytes());local[64..72].copy_from_slice(&(context as u64|u64::from(keep)<<63|u64::from(keep)<<62|1<<61).to_le_bytes());local[72..].copy_from_slice(&(budget as u64).to_le_bytes());
     ring.all_gather(&mut records,80)?;
     for record in records.as_chunks::<80>().0 {
-        if record[..72]!=records[..72] {return Err("text service rank metadata, context or prompt keep choice differs: start every rank from one build with the same options (prompts are kept unless --no-prompt-keep is given)".into());}
+        if record[..72]!=records[..72] {return Err("text service rank metadata, wire format, context or prompt keep choice differs: start every rank from one build with the same options (prompts are kept unless --no-prompt-keep is given)".into());}
         budget=budget.min(u64::from_le_bytes(record[72..].try_into().unwrap()).try_into().map_err(|_|"rank budget exceeds address space")?);
     }
     // The driver compiles a kernel image that is new to this box, one time, for about 40 s. A warm load takes 0.35 s. The log names the wait after 3 s, so nobody stops the rank in the middle of a compile.

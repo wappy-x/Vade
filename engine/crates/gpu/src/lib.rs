@@ -42,6 +42,7 @@ pub mod softmax_rows;
 pub mod wide_weights;
 pub mod swept;
 pub mod routing;
+pub mod prompt_route;
 pub mod frontend_math;
 #[allow(clippy::manual_is_multiple_of)] // Shared with the NVPTX crate; fix it with the kernels.
 pub mod router_abi;
@@ -83,6 +84,7 @@ pub mod causal_ops;
 #[allow(clippy::needless_range_loop)] // Shared with the NVPTX crate; fix it with the kernels.
 pub mod latent_ops;
 pub mod latent_absorb;
+pub mod absorb_tc;
 pub mod latent_absorb_rows;
 #[allow(clippy::chunks_exact_to_as_chunks, clippy::eq_op, clippy::manual_is_multiple_of, clippy::manual_range_contains, clippy::manual_swap, clippy::mut_range_bound, clippy::needless_range_loop, clippy::suspicious_assignment_formatting)] // Shared with the NVPTX crate; fix it with the kernels.
 pub mod prompt_ops;
@@ -94,6 +96,11 @@ pub mod tc_contract;
 pub mod tc_abi;
 pub mod tc_twin;
 pub mod tc_twin_bf16;
+pub mod tc_twin_mx;
+pub mod tc_twin_mx_pack;
+#[cfg(test)] mod tc_twin_mx_checks;
+pub mod tc_f8;
+pub mod tc_twin_f8;
 pub mod tc_twin_fold;
 pub mod tc_twin_quarter;
 pub mod device_route;

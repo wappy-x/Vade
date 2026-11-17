@@ -127,7 +127,7 @@ fn part_bytes(weight: u64, scales: u64, output: u64, first: u32, tokens: u32, gl
     v
 }
 #[repr(C)] #[derive(Clone, Copy)]
-struct Args { table: u64, codes: u64, scales: u64, count: u32, rows: u32, cols: u32, layout: u32, skip: u32, raw: u32, chains: u32 }
+struct Args { table: u64, codes: u64, scales: u64, count: u32, rows: u32, cols: u32, layout: u32, skip: u32, raw: u32, chains: u32, work:u64, work_count:u32, pad:u32, rowmap:u64 }
 struct Device { args: Args, max_tokens: usize, outputs: Vec<(u64, usize)> }
 /// Uploads a fixture: weights in `layout` (0 row-major, 1 column tiles), the gathered activations, one output a part.
 fn upload(g: &mut Gpu, fx: &Fixture, layout: u32, shared: Option<&[(u64, u64)]>) -> Result<Device> {
@@ -145,7 +145,7 @@ fn upload(g: &mut Gpu, fx: &Fixture, layout: u32, shared: Option<&[(u64, u64)]>)
         first += p.tokens.len() as u32;
     }
     codes.extend([0u8; 64]); scales.extend([0u8; 64]);
-    let args = Args { table: g.upload(&table)?, codes: g.upload(&codes)?, scales: g.upload(&scales)?, count: fx.parts.len() as u32, rows: fx.rows as u32, cols: fx.cols as u32, layout, skip: 0, raw: 0, chains: chains() };
+    let args = Args { table: g.upload(&table)?, codes: g.upload(&codes)?, scales: g.upload(&scales)?, count: fx.parts.len() as u32, rows: fx.rows as u32, cols: fx.cols as u32, layout, skip: 0, raw: 0, chains: chains(),work:0,work_count:0,pad:0,rowmap:0 };
     Ok(Device { args, max_tokens: fx.parts.iter().map(|p| p.tokens.len()).max().unwrap_or(0), outputs })
 }
 fn launch(g: &Gpu, f: F, d: &Device, skip: u32, raw: u32) -> Result<()> {
@@ -706,9 +706,9 @@ fn decode_time(g: &mut Gpu, cols_fn: H, f: F, third: Third, skip: u32) -> Result
                     parts.extend(part_bytes(w, s, out + (i * rows * 4) as u64, i as u32, 1, 0.75, 0.125));
                     parts_rows.extend(part_bytes(wr, sr, out + (i * rows * 4) as u64, i as u32, 1, 0.75, 0.125));
                 }
-                fp4_rows.push(Args { table: g.upload(&parts_rows)?, codes, scales, count: count as u32, rows: rows as u32, cols: cols as u32, layout: 0, skip: 0, raw: 0, chains: chains() });
+                fp4_rows.push(Args { table: g.upload(&parts_rows)?, codes, scales, count: count as u32, rows: rows as u32, cols: cols as u32, layout: 0, skip: 0, raw: 0, chains: chains(),work:0,work_count:0,pad:0,rowmap:0 });
                 nv_tables.push(g.upload(&t)?);
-                fp4.push(Args { table: g.upload(&parts)?, codes, scales, count: count as u32, rows: rows as u32, cols: cols as u32, layout: 1, skip, raw: 0, chains: chains() });
+                fp4.push(Args { table: g.upload(&parts)?, codes, scales, count: count as u32, rows: rows as u32, cols: cols as u32, layout: 1, skip, raw: 0, chains: chains(),work:0,work_count:0,pad:0,rowmap:0 });
             }
             // nv_cols gets its production size; the contract-b body gets its own (smaller from 1,984 columns up).
             let shared_bytes = nv_shared(cols);
@@ -848,4 +848,27 @@ pub(crate) fn run(production: &str, fp4: &str, mode: &str) -> Result<()> {
     }
     println!("FP4COHORT DONE");
     Ok(())
+}
+
+/// Replay valid production-sized cohort descriptors. These are explicit synthetic
+/// distributions constrained by the held grid, not recovered original routes.
+pub(in crate::cuda) fn diag_replay(g:&mut Gpu,module:H)->Result<()> {
+ for (name,n,k,tile,chains,sets) in [("fp4_cohort",1024usize,4096usize,128usize,1u32,2usize),("fp4_cohort_t64",2048,2048,64,4,2)] {
+  let f=g.function(module,name)?;
+  for max_tokens in [128usize,256,384,512,960] {
+   let parts=574usize;let total=16384usize;let mut counts=vec![1usize;parts];counts[0]=max_tokens;
+   let rest=total-max_tokens;for (i,v) in counts.iter_mut().enumerate().skip(1){*v=rest/(parts-1)+usize::from(i-1<rest%(parts-1));}
+   let weight_parts=if sets==2{parts/2}else{parts};let wb=n*k/2;let sb=n*k/16;
+   let weights=g.alloc(weight_parts*wb)?;let scales=g.alloc(weight_parts*sb)?;
+   let chunk=vec![0x22;wb];let schunk=vec![0x38;sb];for i in 0..weight_parts{g.upload_at(weights+(i*wb) as u64,&chunk)?;g.upload_at(scales+(i*sb) as u64,&schunk)?;}
+   let codes=g.upload(&vec![0x22;total*k/2])?;let xs=g.upload(&vec![0x38;total*k/16])?;let out=g.upload(&vec![0xa5;total*n*4])?;
+   let mut table=vec![];let mut first=0usize;
+   for (i,&m) in counts.iter().enumerate(){let wi=if sets==2{i/2}else{i};table.extend(part_bytes(weights+(wi*wb) as u64,scales+(wi*sb) as u64,out+(first*n*4) as u64,first as u32,m as u32,1.0,1.0));first+=m;}
+   let a=Args{table:g.upload(&table)?,codes,scales:xs,count:parts as u32,rows:n as u32,cols:k as u32,layout:1,skip:1,raw:0,chains,work:0,work_count:0,pad:0,rowmap:0};
+   let padded=counts.iter().map(|m|m.div_ceil(tile)*tile).sum::<usize>();
+   println!("DIAG COHORT name={name} M_total={total} N={n} K={k} parts={parts} max_tokens={max_tokens} padded_tokens={padded} weight_parts={weight_parts} counts={counts:?} source=SYNTHETIC_GRID_CONSTRAINED");
+   let launch=|g:&Gpu|{let mut a=a;g.launch(f,[max_tokens.div_ceil(tile) as u32,n as u32/128,parts as u32],256,0,&mut [ptr(&mut a)])};
+   super::diag_limits::replay(g,name,&format!("M_total={total} N={n} K={k} parts={parts} max_tokens={max_tokens} padded_tokens={padded}"),out,total*n,Some((k as f32).to_bits()),&launch)?;g.clear()?;
+  }
+ }Ok(())
 }

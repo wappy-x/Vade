@@ -49,7 +49,7 @@ fn first_arithmetic(calls:&[Call])->Option<Kind> {calls.iter().map(|call|call.gr
 fn arithmetic(kind:Kind)->bool {
     matches!(kind,Kind::AbsorbDense|Kind::AbsorbAttention
         |Kind::Causal|Kind::Expert|Kind::Plain|Kind::PlainBf16|Kind::Mx|Kind::Mixed|Kind::MixedBf16|Kind::PlainBatch|Kind::NvStream|Kind::CausalFast|Kind::CausalChain|Kind::CausalGroup
-        |Kind::NvTile|Kind::DeviceRoute|Kind::NvQuarters|Kind::MxRows2|Kind::MxRows4|Kind::MxRows8|Kind::MxRows8w|Kind::MxRowsTile
+        |Kind::NvTile|Kind::Fp8Tile|Kind::DeviceRoute|Kind::NvQuarters|Kind::MxRows2|Kind::MxRows4|Kind::MxRows8|Kind::MxRows8w|Kind::MxRowsTile
         |Kind::MixedRows|Kind::FoldRows|Kind::FoldRowsF32|Kind::Fp8RowsSmall|Kind::Fp8RowsMulti|Kind::Fp8RowsFew|Kind::Fp8RowsShare|Kind::PlainRowsSmall|Kind::DeviceRouteRows)
 }
 fn zero_grid(zeros:&[(usize,u64,u32,bool)])->Option<Grid> {
@@ -361,13 +361,15 @@ impl<'a> Backend<'a> {
                 _=>encode::prompt_rows(args[0].cast::<crate::prompt_ops::Arguments>().read_unaligned(),kind),
             };Some((kind,command))},
             "latent_absorption"|"latent_absorption_scores"|"latent_absorption_values"=>{
-                let kind=if name=="latent_absorption" {Kind::AbsorbDense} else {Kind::AbsorbAttention};
+                let kind=if name=="latent_absorption" {Kind::AbsorbDense} else {Kind::AbsorbAttention};crate::prompt_launches::record("absorb_step_recorded");
                 let mut c=encode::causal(args[0].cast::<crate::causal_ops::Arguments>().read_unaligned());c.kind=kind as u32;Some((kind,c))},
             "causal_operation"=>Some((Kind::Causal,encode::causal(args[0].cast::<crate::causal_ops::Arguments>().read_unaligned()))),
             "expert_operation"=>Some((Kind::Expert,encode::expert(args[0].cast::<crate::expert_ops::LaunchArguments>().read_unaligned()))),
             "causal_fast"=>Some((Kind::CausalFast,encode::causal_fast(args[0].cast::<crate::causal_ops::Arguments>().read_unaligned()))),
             "nv_rows_stream"=>Some((Kind::NvStream,encode::nv_stream(args[0].cast::<crate::expert_ops::LaunchArguments>().read_unaligned()))),
             "nv_tile"|"nv_cols"=>Some((Kind::NvTile,encode::nv_tile(args[0].cast::<crate::expert_ops::LaunchArguments>().read_unaligned()))),
+            // The block FP8 decode tile of a single job (`launch_experts`): recorded, or every such launch ends the recorded part.
+            "fp8_tile"=>Some((Kind::Fp8Tile,encode::fp8_tile(args[0].cast::<crate::expert_ops::LaunchArguments>().read_unaligned()))),
             // The pair split: raw quarter accumulators, the fold inside each quarter, the take of the sum exchange.
             "nv_cols_q4"|"nv_cols_q2"|"nv_cols_q1"=>Some((Kind::NvQuarters,encode::nv_quarters(args[0].cast::<crate::expert_ops::LaunchArguments>().read_unaligned(),
                 match name {"nv_cols_q4"=>4,"nv_cols_q2"=>2,_=>1}))),

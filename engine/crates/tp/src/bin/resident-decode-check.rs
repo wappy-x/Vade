@@ -53,6 +53,8 @@ use spark_tp::Result;
 #[cfg(target_os="linux")]
 #[path="resident-decode-check/put_wide.rs"] mod put_wide;
 #[cfg(target_os="linux")]
+#[path="resident-decode-check/wire_bf16.rs"] mod wire_bf16;
+#[cfg(target_os="linux")]
 #[path="resident-decode-check/select_known.rs"] mod select_known;
 #[cfg(target_os="linux")]
 #[path="resident-decode-check/first_step.rs"] mod first_step;
@@ -66,6 +68,10 @@ use spark_tp::Result;
 #[path="resident-decode-check/nv_tc_groups.rs"] mod nv_tc_groups;
 #[cfg(target_os="linux")]
 #[path="resident-decode-check/dense_tc_rows.rs"] mod dense_tc_rows;
+#[cfg(target_os="linux")]
+#[path="resident-decode-check/absorb_time.rs"] mod absorb_time;
+#[cfg(target_os="linux")]
+#[path="resident-decode-check/absorb_tc_rows.rs"] mod absorb_tc_rows;
 #[cfg(target_os="linux")]
 #[path="resident-decode-check/nv_replay.rs"] mod nv_replay;
 #[cfg(target_os="linux")]
@@ -929,6 +935,10 @@ fn main() {
         #[cfg(target_os="linux")]
         [mode,out] if mode=="fill-free"=>fill_free::run(Path::new(out)),
         #[cfg(target_os="linux")]
+        [mode,out] if mode=="wire-bf16"=>wire_bf16::run(Path::new(out)),
+        #[cfg(target_os="linux")]
+        [mode,kind] if mode=="wire-bf16-reject"=>kind.parse::<usize>().map_err(|e|e.to_string()).and_then(wire_bf16::rejects),
+        #[cfg(target_os="linux")]
         [mode,out] if mode=="put-wide"=>put_wide::run(Path::new(out)),
         #[cfg(target_os="linux")]
         [mode,out] if mode=="select-known"=>select_known::run(Path::new(out)),
@@ -952,6 +962,10 @@ fn main() {
         [mode,out] if mode=="nv-prompt-split"=>nv_tc_groups::split(Path::new(out)),
         #[cfg(target_os="linux")]
         [mode,out] if mode=="dense-tc-rows"=>dense_tc_rows::run(Path::new(out)),
+        #[cfg(target_os="linux")]
+        [mode,out] if mode=="absorb-time"=>absorb_time::run(Path::new(out)),
+        #[cfg(target_os="linux")]
+        [mode,out] if mode=="absorb-tc-rows"=>absorb_tc_rows::run(Path::new(out)),
         #[cfg(target_os="linux")]
         [mode,captures,out] if mode=="nv-replay"=>nv_replay::run(Path::new(captures),Path::new(out),None),
         #[cfg(target_os="linux")]

@@ -411,7 +411,7 @@ engine/crates/gpu	src/backend/device.rs	impl:Backend::fn:bounded_attention_devic
 engine/crates/gpu	src/backend/device.rs	impl:Backend::fn:bounded_attention_device	block:3	frozen ruling 2026-11-02 11:54
 engine/crates/gpu	src/backend/device.rs	impl:Backend::fn:embedding_device	block:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu	src/backend/device.rs	impl:Backend::fn:embedding_selected_device	block:1	frozen ruling 2026-11-02 11:54
-engine/crates/gpu	src/backend/device.rs	impl:Backend::fn:enqueue_argmax_device	block:1	frozen ruling 2026-11-02 11:54
+engine/crates/gpu	src/backend/device.rs	impl:Backend::fn:enqueue_argmax_device	block:1	ruling 2026-11-17 01:00
 engine/crates/gpu	src/backend/device.rs	impl:Backend::fn:matvec_device	block:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu	src/backend/device.rs	impl:Backend::fn:matvec_device	block:2	frozen ruling 2026-11-02 11:54
 engine/crates/gpu	src/backend/device.rs	impl:Backend::fn:matvec_device	block:3	frozen ruling 2026-11-02 11:54
@@ -437,8 +437,8 @@ engine/crates/gpu	src/backend/mhc.rs	impl:Backend::fn:mhc_combine_owned	block:1	
 engine/crates/gpu	src/backend/mhc.rs	impl:Backend::fn:round_bf16_lanes	block:1	ruling 2026-11-05 07:35
 engine/crates/gpu	src/backend/mxfp8_projection.rs	impl:Backend::fn:resident_projection_batch	block:1	ruling 2026-11-05 07:35
 engine/crates/gpu	src/backend/mxfp8_projection.rs	impl:ResidentMxfp8Projection::fn:apply	block:1	ruling 2026-11-05 07:35
-engine/crates/gpu	src/backend/mxfp8_projection.rs	impl:ResidentMxfp8Projection::fn:apply_rows	block:1	ruling 2026-11-05 07:35
-engine/crates/gpu	src/backend/prompt_ops.rs	impl:Backend::fn:prompt_operation	block:1	ruling 2026-11-05 07:35
+engine/crates/gpu	src/backend/mxfp8_projection.rs	impl:ResidentMxfp8Projection::fn:apply_rows	block:1	ruling 2026-11-17 01:00
+engine/crates/gpu	src/backend/prompt_ops.rs	impl:Backend::fn:prompt_operation_output	block:1	ruling 2026-11-05 07:35
 engine/crates/gpu	src/backend/resident_launch.rs	impl:Backend::fn:flush_resident_launches	block:1	ruling 2026-11-05 07:35
 engine/crates/gpu	src/backend/resident_launch.rs	impl:Backend::fn:record_resident_launch	block:1	ruling 2026-11-05 07:35
 engine/crates/gpu	src/backend/resident_launch.rs	impl:Backend::fn:record_resident_launch	fn:1	ruling 2026-11-05 07:35
@@ -1505,6 +1505,8 @@ engine/crates/gpu/kernels	src/layer.rs	fn:layer_rms_fused	fn:1	frozen ruling 202
 engine/crates/gpu/kernels	src/layer.rs	fn:layer_swiglu	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/layer.rs	fn:logits_argmax	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/layer.rs	fn:logits_argmax_finish	fn:1	frozen ruling 2026-11-02 11:54
+engine/crates/gpu/kernels	src/layer.rs	fn:logits_argmax_mass	fn:1	ruling 2026-11-17 01:00
+engine/crates/gpu/kernels	src/layer.rs	fn:logits_argmax_mass_finish	fn:1	ruling 2026-11-17 01:00
 engine/crates/gpu/kernels	src/layer.rs	fn:logits_bf16	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/layer.rs	fn:logits_top_k	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/layer.rs	fn:logits_top_k_finish	fn:1	frozen ruling 2026-11-02 11:54
@@ -2330,6 +2332,7 @@ engine/crates/gpu/kernels	src/prompt_fast.rs	fn:prompt_prepare	block:1
 engine/crates/gpu/kernels	src/prompt_fast.rs	fn:prompt_route	block:1
 engine/crates/gpu/kernels	src/prompt_move.rs	fn:prompt_permute	block:1
 engine/crates/gpu/kernels	src/prompt_move.rs	fn:prompt_place	block:1
+engine/crates/gpu/kernels	src/prompt_wire_bf16.rs	fn:entry	block:1	ruling 2026-11-16 13:42
 engine/crates/gpu/kernels	src/mhc_project_tile.rs	fn:mhc_residual_rows	block:1
 engine/crates/gpu/kernels	src/plain_rows_few.rs	fn:plain_rows_few	block:1
 engine/crates/gpu/kernels	src/plain_rows_small.rs	fn:plain_rows_small	block:1
@@ -2382,10 +2385,10 @@ engine/crates/gpu/kernels	src/mhc_boundary_one.rs	fn:resident_mhc_boundary_fused
 engine/crates/gpu/kernels-tc	src/lib.rs	fn:panic	block:1	ruling 2026-11-11 05:36
 # engine runner 2026-11-11 (ruling 3 of the tensor-core rebase, after Carbon's per-site audit in the second review: ROW YES for each): the seven new kernel sites of the branch, each with a SAFETY contract read against its host checks: the tensor-core group launch (Backend::nv_rows_tc), the four kernel entries of fp4_cohort.rs, the decode body nv_cols_b project, and the pack kernel tc_nv_pack.
 engine/crates/gpu	src/backend/tc_family.rs	impl:Backend::fn:nv_rows_tc	block:1	ruling 2026-11-11 07:06
-engine/crates/gpu/kernels	src/fp4_cohort.rs	fn:fp4_cohort	fn:1	ruling 2026-11-11 07:06
-engine/crates/gpu/kernels	src/fp4_cohort.rs	fn:fp4_cohort_cc	fn:1	ruling 2026-11-11 07:06
+engine/crates/gpu/kernels	src/fp4_cohort.rs	fn:fp4_cohort	fn:1	ruling 2026-11-17 01:00
+engine/crates/gpu/kernels	src/fp4_cohort.rs	fn:fp4_cohort_cc	fn:1	ruling 2026-11-17 01:00
 engine/crates/gpu/kernels	src/fp4_cohort.rs	fn:fp4_peak	fn:1	ruling 2026-11-11 07:06
-engine/crates/gpu/kernels	src/fp4_cohort.rs	macro:cohort_entry::fn:$name	fn:1	ruling 2026-11-11 07:06
+engine/crates/gpu/kernels	src/fp4_cohort.rs	macro:cohort_entry::fn:$name	fn:1	ruling 2026-11-17 01:00
 engine/crates/gpu/kernels	src/nv_cols_b.rs	fn:project	block:1	ruling 2026-11-11 07:06
 engine/crates/gpu/kernels-tc	src/nv_pack.rs	fn:tc_nv_pack	fn:1	ruling 2026-11-11 07:06
 # HOUR-NEXT 2026-11-11 (epoch 3 bundle): ALLOW by the Carbon reviewer, one line a row, verdict MERGE (hour folder REVIEW-unsafe-bundle.md, written 11:05 Central, read at 9df5b6221; request UNSAFE-ROWS-bundle.md): the MXFP8 quarter launch, and the pair split's fold and REDUCE take (their bodies, renamed for the recorded form). The same read allowed the seven rows of ruling 3 above once more, with nv_cols_b::project as D2 changed it (the RAW form).
@@ -2411,3 +2414,37 @@ engine/crates/tp	src/resident_weights.rs	mod:device::impl:Weights::fn:receive_fi
 engine/crates/tp	src/transport.rs	impl:Ring::fn:post_rank_blocks_receive	block:1	ruling 2026-11-15 22:14
 engine/crates/tp	src/transport.rs	impl:Ring::fn:post_rank_blocks_receive	fn:1	ruling 2026-11-15 22:14
 engine/crates/tp	tests/prompt_exchange.rs	fn:a_ring_without_rdma_posts_no_early_receive_and_gathers_as_before	block:1	ruling 2026-11-15 22:14
+# F8ROW fused mHC boundary, PROPOSED under LEAD 2026-11-16 03:53; one kernel block, contract review owed before landing.
+engine/crates/gpu/kernels	src/mhc_boundary_fused.rs	fn:mhc_boundary_block	block:1
+engine/crates/gpu/kernels	src/mx_tc.rs	fn:block	block:1	ruling 2026-11-16 01:57
+engine/crates/gpu/kernels	src/mx_tc.rs	fn:tile	block:1	ruling 2026-11-16 01:57
+engine/crates/gpu/kernels	src/mx_tc.rs	fn:mx_tc_probe	block:1	ruling 2026-11-16 01:57
+engine/crates/gpu/kernels	src/mx_tc.rs	fn:mx_tc_probe_cvt	block:1	ruling 2026-11-16 01:57
+# EXPB prompt route metadata, one block per kernel; lead approved these exact rows after bounds and byte proofs.
+engine/crates/gpu/kernels	src/prompt_route.rs	fn:prompt_route_count	block:1	ruling 2026-11-16 14:58
+engine/crates/gpu/kernels	src/prompt_route.rs	fn:prompt_route_tables	block:1	ruling 2026-11-16 14:58
+engine/crates/gpu/kernels	src/prompt_route.rs	fn:prompt_route_native	block:1	ruling 2026-11-17 01:00
+engine/crates/gpu/kernels	src/fp8_tc.rs	fn:group	block:1	ruling 2026-11-16 01:57
+engine/crates/gpu/kernels	src/fp8_tc.rs	fn:group_rows	block:1	ruling 2026-11-16 01:57
+engine/crates/gpu/kernels	src/fp8_tc.rs	fn:group_tile	block:1	ruling 2026-11-16 01:57
+engine/crates/gpu/kernels	src/fp8_tc.rs	fn:row_body	block:1	ruling 2026-11-16 01:57
+engine/crates/gpu/kernels	src/fp8_tc.rs	fn:run	block:1	ruling 2026-11-16 01:57
+engine/crates/gpu/kernels	src/fp8_tc.rs	fn:tile_body	block:1	ruling 2026-11-16 01:57
+engine/crates/gpu/kernels	src/fp8_tc_rows.rs	macro:rows_entry::fn:$name	block:1	ruling 2026-11-16 01:57
+engine/crates/gpu/kernels	src/fp8_tc_rows.rs	macro:tile_entry::fn:$name	block:1	ruling 2026-11-16 01:57
+# F8TC third block FP8 prompt tile body: approved by LEAD 2026-11-16 13:42; REVC source/contract SOUND.
+engine/crates/gpu/kernels	src/fp8_rows_tile.rs	fn:fp8_rows_tile3	block:1	ruling 2026-11-16 13:42
+engine/crates/gpu/kernels	src/fp8_tc.rs	fn:group_tile3	block:1	ruling 2026-11-16 13:42
+engine/crates/gpu/kernels	src/fp8_tc.rs	fn:tile3_body	block:1	ruling 2026-11-16 13:42
+engine/crates/gpu/kernels	src/fp8_tc_rows.rs	macro:tile3_entry::fn:$name	block:1	ruling 2026-11-16 13:42
+engine/crates/gpu/kernels	src/latent_absorption.rs	fn:resident_latent_absorption_attention	block:1	ruling 2026-11-16 13:56
+engine/crates/gpu/kernels	src/mx_tc.rs	fn:tile_packed	block:1	ruling 2026-11-17 01:00
+engine/crates/gpu/kernels	src/mx_tc.rs	fn:mx_tc_pack	block:1	ruling 2026-11-16 13:56
+# F8TC third form of the latent prompt tile (the same word as latent_absorption_tile, other bodies; one unsafe block a body with a SAFETY note). MAINTAINER RULING 2026-11-16 14:32: approved, these exact rows and no other.
+engine/crates/gpu/kernels	src/latent_tile3.rs	fn:scores3	block:1	ruling 2026-11-16 14:32
+engine/crates/gpu/kernels	src/latent_tile3.rs	fn:weights3	block:1	ruling 2026-11-16 14:32
+engine/crates/gpu/kernels	src/latent_tile3.rs	fn:values3	block:1	ruling 2026-11-16 14:32
+# MXFP8 prompt groups, same word: one launch quantizes and packs the rows (mx_tc_quantize_pack, pack_rows), the tile on packed rows rounds as it stores (apply_packed_rows). MAINTAINER RULING 2026-11-17 01:00: approved, these exact rows, on the review seat's SOUND lines of 00:09:34 and 00:20:03 for each site. The changed bodies fn:tile_packed and impl:ResidentMxfp8Projection::fn:apply_rows keep their rows above and take the column of this ruling.
+engine/crates/gpu/kernels	src/mx_tc.rs	fn:mx_tc_quantize_pack	block:1	ruling 2026-11-17 01:00
+engine/crates/gpu	src/backend/mxfp8_projection.rs	impl:ResidentMxfp8Projection::fn:pack_rows	block:1	ruling 2026-11-17 01:00
+engine/crates/gpu	src/backend/mxfp8_projection.rs	impl:ResidentMxfp8Projection::fn:apply_packed_rows	block:1	ruling 2026-11-17 01:00

@@ -120,7 +120,7 @@ struct HeldStorage<'d> {whole:DeviceVector<'d>,capacity:usize,views:super::held:
     row:Option<Rc<DeviceVector<'d>>>}
 pub struct Value<'b,'d> {vector:Rc<DeviceVector<'d>>,words:usize,lineage:Lineage,known:RefCell<Option<Vec<f32>>>,assumed:Cell<bool>,pending:Option<Rc<RefCell<Pending<'b,'d>>>>,
     /// For a view of held rows: the storage and the storage word where the view starts.
-    held:Option<(Rc<HeldStorage<'d>>,usize)>}
+    held:Option<(Rc<HeldStorage<'d>>,usize)>,prompt_middle:Option<Rc<crate::resident_weights::PromptMiddle<'d>>>}
 impl Value<'_,'_> {
     /// The device address of the first word. A check tells a view of held rows from a copy by it.
     pub fn device_address(&self)->u64 {self.vector.device_address()}
@@ -169,6 +169,7 @@ impl<'b,'d> Device<'b,'d> {
             None=>parameters.upload_boundary(self.backend)?,
         };
         // D1: the one-launch form rides beside the host lane; `begin_next` takes it for one-row passes, `rows_begin` for row groups.
+        let boundary=boundary.without_mixing_output();
         let fused=self.mhc_fused && spark_gpu_probe::mhc_params::fused_admitted(spark_gpu_probe::mhc_params::Shape {rows:1,..parameters.mhc().shape()});
         if fused {Ok(boundary.with_fused(parameters.mhc().weights())?)} else {Ok(boundary)}
     }
@@ -181,7 +182,7 @@ impl<'b,'d> Device<'b,'d> {
     // Keep owners here; a value wrapper needs no separate completion barrier.
     fn value(&self,vector:DeviceVector<'d>,words:usize)->Result<Value<'b,'d>> {self.shared_value(Rc::new(vector.into_resident_shared()?),words)}
     fn shared_value(&self,vector:Rc<DeviceVector<'d>>,words:usize)->Result<Value<'b,'d>> {let source=self.source.get().checked_add(1).ok_or("immutable source identity exhausted")?;self.source.set(source);
-        Ok(Value {vector,words,lineage:Lineage::fresh(source,words),known:RefCell::new(None),assumed:Cell::new(false),pending:None,held:None})}
+        Ok(Value {vector,words,lineage:Lineage::fresh(source,words),known:RefCell::new(None),assumed:Cell::new(false),pending:None,held:None,prompt_middle:None})}
     /// A value of one kept row. A kept row that cannot be viewed is a fault on this rank, not
     /// a miss. The value holds its slot's handle, so the slab does not write the slot while it lives.
     /// The memo's index changed (or the memo was replaced): answers made ahead are no longer its answers.
@@ -351,6 +352,7 @@ impl<'b,'d> Compute for Device<'b,'d> {
         if v.pending.as_ref().is_some_and(|p|p.borrow().post.is_some()) {return false;}
         v.vector.allocations(out);
         if let Some((storage,_))=&v.held {storage.whole.allocations(out);}
+        if let Some(middle)=&v.prompt_middle {middle.allocations(out);}
         true
     }
     fn projects_complete_rows(&self)->bool {true}
@@ -715,7 +717,7 @@ impl<'b,'d> Compute for Device<'b,'d> {
     fn words(&self,v:&Value<'b,'d>)->usize {v.words}
     fn range(&self,v:&Value<'b,'d>,start:usize,len:usize)->Result<Value<'b,'d>> {
         let stamp=self.cost.start(self.backend);need(start.checked_add(len).is_some_and(|n|n<=v.words),"bounded device range differs")?;
-        if start==0 && len==v.words {return Ok(Value {vector:v.vector.clone(),words:len,lineage:v.lineage.clone(),known:RefCell::new(v.known.borrow().clone()),assumed:v.assumed.clone(),pending:v.pending.clone(),held:v.held.clone()});}self.ready(v)?;
+        if start==0 && len==v.words {return Ok(Value {vector:v.vector.clone(),words:len,lineage:v.lineage.clone(),known:RefCell::new(v.known.borrow().clone()),assumed:v.assumed.clone(),pending:v.pending.clone(),held:v.held.clone(),prompt_middle:v.prompt_middle.clone()});}self.ready(v)?;
 if start==0 && v.pending.as_ref().and_then(|p|p.borrow().state_prefix)==Some(len) {
     // A recurrent state must not keep all token outputs in its parent.
     // Copy raw words; the ordered stream and deferred owners preserve them.
@@ -840,11 +842,21 @@ if start==0 && v.pending.as_ref().and_then(|p|p.borrow().state_prefix)==Some(len
     }
     fn greedy_projection(&self,_:&CheckpointAdmission,name:&str,x:&Value<'b,'d>)->Result<u32> {
         self.ready(x)?;self.weights.borrow().check_exchange()?;if let Some(error)=self.backend.fatal_error() {return Err(error);}
-        self.check_selection(None)?;let best=self.weights.borrow_mut().apply_greedy(name,self.backend,&x.vector)?;
+        self.check_selection(None)?;let best=self.weights.borrow_mut().apply_greedy(name,self.backend,&x.vector,false)?.0;
         self.weights.borrow().check_exchange()?;Ok(best)
     }
-    fn round(&self,x:&Value<'b,'d>)->Result<Value<'b,'d>> {self.ready(x)?;let stamp=self.cost.start(self.backend);let rounded=self.backend.round_bf16_lanes(&x.vector)?;let mut out=self.backend.vector(x.words)?;
-        self.backend.copy_prefix(rounded.vector(),&mut out,x.words)?;let value=self.value(out,x.words)?;self.cost.record(||"round".into(),stamp,self.backend,0);Ok(value)}
+    fn greedy_projection_mass(&self,_:&CheckpointAdmission,name:&str,x:&Value<'b,'d>)->Result<(u32,Option<f32>)> {
+        self.ready(x)?;self.weights.borrow().check_exchange()?;if let Some(error)=self.backend.fatal_error() {return Err(error);}
+        self.check_selection(None)?;let picked=self.weights.borrow_mut().apply_greedy(name,self.backend,&x.vector,true)?;
+        self.weights.borrow().check_exchange()?;Ok(picked)
+    }
+    fn round(&self,x:&Value<'b,'d>)->Result<Value<'b,'d>> {self.ready(x)?;let stamp=self.cost.start(self.backend);let rounded=self.backend.round_bf16_lanes(&x.vector)?;
+        // The fresh rounded owner can become the immutable value without a second allocation and copy.
+        let out=if rounded.vector().len()==x.words {rounded.into_vector()} else {
+            // Preserve the prior prefix-copy checks for logical empty/sliced storage.
+            let mut out=self.backend.vector(x.words)?;self.backend.copy_prefix(rounded.vector(),&mut out,x.words)?;out
+        };
+        let value=self.value(out,x.words)?;self.cost.record(||"round".into(),stamp,self.backend,0);Ok(value)}
     fn mean(&self,x:&Value<'b,'d>,streams:u32,hidden:u32)->Result<Value<'b,'d>> {let mut s=shape(Op::StreamMean);s.heads=streams;s.dim=hidden;self.operation(s,[Some(x),None,None,None],&[])}
     fn prompt(&self,s:spark_gpu_probe::prompt_ops::Shape,x:[Option<&Value<'b,'d>>;5],w:&[f32])->Result<Value<'b,'d>> {
         let mut x=x;let poisoned;
@@ -965,12 +977,10 @@ if start==0 && v.pending.as_ref().and_then(|p|p.borrow().state_prefix)==Some(len
     }
     // WIDE COHORT: the gate and up step of the runs of a wide prompt group, one product launch a list for all of them.
     #[allow(clippy::type_complexity)] // the trait's tuple a set.
-    fn rows_experts_gathered_wide(&self,sets:&[(&[(&str,usize)],&[(&str,usize)],f32,&Value<'b,'d>,&[f32],&[f32])])->Result<Option<Vec<Value<'b,'d>>>> {
-        for set in sets {self.ready(set.3)?;}
-        let calls=sets.iter().map(|&(first,second,bound,x,order,places)|(first,second,bound,&*x.vector,order,places)).collect::<Vec<_>>();
-        let Some(out)=self.weights.borrow_mut().apply_experts_gathered_wide(self.backend,&calls)? else {return Ok(None);};
-        out.into_iter().map(|value|{let words=value.len();self.value(value,words)}).collect::<Result<Vec<_>>>().map(Some)
-    }
+    fn rows_experts_gathered_wide(&self,sets:&[(&[(&str,usize)],&[(&str,usize)],f32,&Value<'b,'d>,&[f32],&[f32])])->Result<Option<Vec<Value<'b,'d>>>> {self.experts_gathered_wide(sets,None)}
+    // PACKED MIDDLE: the same step when each result is read by the fold of its down list alone.
+    #[allow(clippy::type_complexity)] // the trait's tuple a set.
+    fn rows_experts_gathered_wide_for(&self,sets:&[(&[(&str,usize)],&[(&str,usize)],f32,&Value<'b,'d>,&[f32],&[f32])],down:&[&[(&str,usize)]],reader:(Shape,Option<&str>))->Result<Option<Vec<Value<'b,'d>>>> {self.experts_gathered_wide(sets,Some((down,reader)))}
     // WIDE COHORT: the down step and its fold of the runs of a wide prompt group, one product launch for all of them.
     #[allow(clippy::type_complexity)] // the trait's tuple a set.
     fn rows_experts_fold_wide(&self,sets:&[(&[(&str,usize)],&Value<'b,'d>,&[f32],&Value<'b,'d>,&Value<'b,'d>,Option<&Value<'b,'d>>,Shape,usize)])->Result<Option<Vec<Value<'b,'d>>>> {
@@ -979,6 +989,25 @@ if start==0 && v.pending.as_ref().and_then(|p|p.borrow().state_prefix)==Some(len
         let calls=sets.iter().map(|&(first,x,places,ids,weights,shared,fold,m)|(first,&*x.vector,places,&*ids.vector,&*weights.vector,shared.map(|shared|&*shared.vector),fold,m)).collect::<Vec<_>>();
         let Some(out)=self.weights.borrow_mut().apply_experts_fold_wide(self.backend,&calls)? else {return Ok(None);};
         out.into_iter().map(|value|{let words=value.len();self.value(value,words)}).collect::<Result<Vec<_>>>().map(Some)
+    }
+    #[allow(clippy::type_complexity)]
+    fn rows_experts_device_wide(&self,steps:&[engine_model::plan::layer::Step],bound:f32,sets:&[(usize,&Value<'b,'d>,&Value<'b,'d>)],reader:(Shape,Option<&str>))->Result<Option<Vec<Value<'b,'d>>>> {
+        if sets.iter().any(|(m,_,_)|!self.folds_groups(*m) || self.routes_rows(*m)) {return Ok(None);}
+        for (_,input,ids) in sets {self.ready(input)?;self.ready(ids)?;}
+        let calls=sets.iter().map(|(m,input,ids)|(*m,input.vector.clone(),ids.vector.clone())).collect::<Vec<_>>();
+        let Some(out)=self.weights.borrow_mut().apply_prompt_native(self.backend,steps,bound,&calls,reader)? else {return Ok(None);};
+        out.into_iter().map(|(vector,middle)|{let words=vector.len();let mut v=self.value(vector,words)?;v.prompt_middle=Some(Rc::new(middle));Ok(v)}).collect::<Result<Vec<_>>>().map(Some)
+    }
+    #[allow(clippy::type_complexity)]
+    fn rows_experts_fold_device_wide(&self,down:&engine_model::plan::layer::Step,sets:&[(usize,&Value<'b,'d>,&Value<'b,'d>,&Value<'b,'d>,Option<&Value<'b,'d>>)],fold:Shape)->Result<Option<Vec<Value<'b,'d>>>> {
+        if sets.iter().all(|(_,middle,_,_,_)|middle.prompt_middle.is_none()) {return Ok(None);}
+        let mut calls=Vec::with_capacity(sets.len());
+        for (m,middle,ids,weights,shared) in sets {
+            self.ready(middle)?;self.ready(ids)?;self.ready(weights)?;if let Some(shared)=shared {self.ready(shared)?;}
+            let marker=middle.prompt_middle.as_deref().ok_or("mixed device expert epochs")?;
+            calls.push((*m,middle.vector.clone(),marker,&*ids.vector,&*weights.vector,shared.map(|v|&*v.vector)));
+        }
+        self.weights.borrow_mut().apply_prompt_native_fold(self.backend,down,&calls,fold)?.into_iter().map(|v|{let words=v.len();self.value(v,words)}).collect::<Result<Vec<_>>>().map(Some)
     }
     fn rows_project_local(&self,_:&CheckpointAdmission,name:&str,x:&Value<'b,'d>,m:usize,round:bool)->Result<Option<Value<'b,'d>>> {
         if !self.folds_rows(m) && !self.folds_groups(m) {return Ok(None);}
@@ -1002,9 +1031,11 @@ if start==0 && v.pending.as_ref().and_then(|p|p.borrow().state_prefix)==Some(len
     }
     fn rows_release(&self)->Result<()> {self.backend.release_group_spares()}
     // GROUP SPARES: the end of a group whose prompt goes on drains, as every group's end does, and frees nothing. The
-    // flag is read once: a second call for the same group (a lease's return) trims.
+    // flag holds for the whole group and ends with it (`rows_peak_end`): a session's first group calls this at its start
+    // too (`trims_spares_first`), and that call took the flag, so the group's end trimmed 1.2 GB of spares that the next
+    // group bought back (run link2-alloc-1: 118 frees, then 113 of 117 new buffers at sizes the first group had).
     fn rows_keep(&self)->Result<()> {
-        if self.group_follows.take() {self.spares_kept.set(true);spark_gpu_probe::prompt_launches::record("prompt_spares_kept");return self.backend.synchronize();}
+        if self.group_follows.get() {self.spares_kept.set(true);spark_gpu_probe::prompt_launches::record("prompt_spares_kept");return self.backend.synchronize();}
         self.spares_kept.set(false);self.backend.keep_group_spares(super::POOL_ROOM)
     }
     fn rows_follow(&self,follows:bool) {self.group_follows.set(follows);}
@@ -1012,7 +1043,12 @@ if start==0 && v.pending.as_ref().and_then(|p|p.borrow().state_prefix)==Some(len
     fn rows_return_lease(&self)->Result<()> {
         // WIDE COHORT: the operand scratch a wide group grew goes back with the lease, before the pool is trimmed.
         self.backend.nv_tc_scratch_return();
-        self.rows_keep()?;
+        // LEASE SPARES: the group's prompt goes on (its end kept the spares, GROUP SPARES), so the next call takes the same
+        // lease and allocates the same buffer sizes: a trim here freed 2.0 to 2.3 GB at each of the three returns inside
+        // a cold 8K read and the next group allocated them again (run link2-alloc-1). The lease's temporary pool cap
+        // ends; no spare is freed. A lease whose last group ended the prompt trims as before (`rows_keep`); spares kept
+        // for a prompt that does not go on leave at the session's end (`rows_settle`), a trim, the budget or host pressure.
+        if self.spares_kept.get() {self.backend.end_group_spares()?;} else {self.rows_keep()?;}
         let stats=self.backend.vector_pool_stats();let (_,_,cap)=self.backend.vector_pool_bound();
         // Vector statistics also include returns and reuses in the decode reserve.
         let pooled=stats.returned_bytes.saturating_sub(stats.reused_bytes).saturating_sub(stats.evicted_bytes);
@@ -1027,7 +1063,7 @@ if start==0 && v.pending.as_ref().and_then(|p|p.borrow().state_prefix)==Some(len
     fn prompt_end(&self)->Result<()> {if self.first_step.get() && self.backend.decode_reserve_configured() {self.backend.keep_group_spares(super::POOL_ROOM+super::DECODE_RETURNS)?;}Ok(())}
     fn rows_charge(&self,bytes:usize) {self.group_charge.set(bytes);}
     fn rows_peak_begin(&self)->usize {self.backend.begin_group_peak()}
-    fn rows_peak_end(&self,whole:usize)->usize {crate::exchange_trace::report(self.sparse_topology().rank);self.backend.end_group_peak(whole)}
+    fn rows_peak_end(&self,whole:usize)->usize {self.group_follows.set(false);crate::exchange_trace::report(self.sparse_topology().rank);self.backend.end_group_peak(whole)}
     fn rows_reserve(&self,words:usize)->Result<Value<'b,'d>> {
         let vector=if self.small_rows.get() {self.backend.resident_workspace(words.max(1),&mut self.row_workspace.borrow_mut())?}
             else {self.backend.vector(words.max(1))?};self.value(vector,words)
@@ -1099,6 +1135,15 @@ if start==0 && v.pending.as_ref().and_then(|p|p.borrow().state_prefix)==Some(len
 }
 
 impl<'b,'d> Device<'b,'d> {
+    /// WIDE COHORT: the body of `rows_experts_gathered_wide`. PACKED MIDDLE, `down`: each set's down list, when the fold of
+    /// that list is the only reader of the set's result (`rows_experts_gathered_wide_for`).
+    #[allow(clippy::type_complexity)] // the trait's tuple a set.
+    fn experts_gathered_wide(&self,sets:&[(&[(&str,usize)],&[(&str,usize)],f32,&Value<'b,'d>,&[f32],&[f32])],down:Option<(&[&[(&str,usize)]],(Shape,Option<&str>))>)->Result<Option<Vec<Value<'b,'d>>>> {
+        for set in sets {self.ready(set.3)?;}
+        let calls=sets.iter().map(|&(first,second,bound,x,order,places)|(first,second,bound,&*x.vector,order,places)).collect::<Vec<_>>();
+        let Some(out)=self.weights.borrow_mut().apply_experts_gathered_wide(self.backend,&calls,down)? else {return Ok(None);};
+        out.into_iter().map(|value|{let words=value.len();self.value(value,words)}).collect::<Result<Vec<_>>>().map(Some)
+    }
     pub fn parameter_counts(&self)->ParameterCounts {self.parameters.borrow().counts()}
     fn operation_bound(&self,s:Shape,x:[Option<&Value<'b,'d>>;4],w:&[f32],prepared:Option<&Rc<StaticParameters>>,reserve:usize)->Result<Value<'b,'d>> {self.operation_identities(s,x,w,prepared,reserve,true)}
     /// `identities`: a Gather also reads its selection and names the source row of each output row, for the expansion memo.

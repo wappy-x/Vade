@@ -139,7 +139,7 @@ impl<'b,'d> Bench<'b,'d> {
                 let second=matrix.begin_after(first,block.clone(),Rc::new(backend.vector(input.len())?))?;
                 let third=matrix.begin_after(second,block.clone(),Rc::new(backend.vector(input.len())?))?;
                 backend.synchronize()?;let stats=backend.stats().since(before);let wall_ns=started.elapsed().as_nanos();let mut planes=Vec::new();let mut pass=Some(&third);
-                while let Some(site)=pass {for vector in [site.residual(),site.mixing_normalized(),site.coefficients(),site.collapsed(),&*site.normalized()] {
+                while let Some(site)=pass {for vector in [site.residual(),site.mixing_normalized()?,site.coefficients(),site.collapsed(),&*site.normalized()] {
                     planes.push(bytes(&backend.read_vector_values(vector)?));
                 }pass=site.previous();}
                 return Ok(Sample {kernel_ns:stats.device_kernel_ns.iter().sum(),wall_ns,launches:stats.queued_calls,planes});
@@ -197,7 +197,7 @@ impl<'b,'d> Bench<'b,'d> {
         backend.synchronize()?;
         let boundary_ns=marks[0].ns_until(&marks[1])?;let project_ns=marks[1].ns_until(&marks[2])?;let total_ns=marks[0].ns_until(&marks[2])?;
         let mut planes=Vec::new();let mut pass=Some(&second);
-        while let Some(site)=pass {for vector in [site.residual(),site.mixing_normalized(),site.coefficients(),site.collapsed(),&*site.normalized()] {planes.push(bytes(&backend.read_vector_values(vector)?));}pass=site.previous();}
+        while let Some(site)=pass {for vector in [site.residual(),site.mixing_normalized()?,site.coefficients(),site.collapsed(),&*site.normalized()] {planes.push(bytes(&backend.read_vector_values(vector)?));}pass=site.previous();}
         planes.push(bytes(&backend.read_vector_values(&output)?));
         Ok(ShadowSample {boundary_ns,project_ns,total_ns,planes})
     }

@@ -218,6 +218,11 @@ unsafe fn project<const SOLO: bool, const PAIR: bool>(layer: MxLayer) {
         }
     });
     let local = block - start;
+    // The tensor-core word: the descriptor's own grid and body (the same in every entry).
+    if p.mode == crate::next_params::MX_TC {
+        crate::mx_tc::layer_block(p, local, false);
+        return;
+    }
     let rows = p.rows.div_ceil(4);
     let r = (local % rows) as usize * 4 + _thread_idx_x() as usize / 32;
     let group = (local / rows) as usize;
@@ -290,6 +295,9 @@ pub(crate) fn resident_flash_resident_projection_batch<const BF16:bool>(batch:cr
                 crate::serial_projection::plain_row!(weights,p.input as *const f32,cols)
             };
             *(p.output as *mut f32).add(row)=if batch.round!=0 {rb(sum)} else {sum};
+        } else if p.mode==crate::next_params::MX_TC {
+            // The tensor-core word, with this launch's BF16 round of every MXFP8 word.
+            crate::mx_tc::layer_block(p,rest,true);
         } else {
             let index=rest as usize*4+thread/32;if index>=p.rows as usize {return;}
             row::<1,true,true>(p,index,0);
@@ -449,6 +457,9 @@ pub(crate) fn resident_projection_bf16_rows<const SPREAD:bool>(batch:crate::next
                 let sum=crate::plain_warp::row_deep::<true>(weights,(p.input as *const f32).add(token*cols),cols);
                 *(p.output as *mut f32).add(token*rows+row)=if batch.round!=0 {rb(sum)} else {sum};
             }});
+        } else if p.mode==crate::next_params::MX_TC {
+            // The tensor-core word for the 2 to 4 source rows of the block's one token tile, rounded as below.
+            crate::mx_tc::layer_block(p,rest,true);
         } else {
             let index=rest as usize*4+thread/32;if index>=rows {return;}
             // ROWS-MX: the row's chains on the one-token load schedule (`mx_rows_small::wave`, one weight row a warp); the same words as `row`.
@@ -567,6 +578,8 @@ pub unsafe extern "ptx-kernel" fn flash_next_mxfp8_bits_r4(layer: MxLayer) {
             start = layer.ends[I + 1];
         }
     });
+    // This entry has the scalar word only: a tensor-core descriptor never reaches it (`MxProjection::kernel`).
+    if p.mode != crate::next_params::MX_SCALAR { core::arch::nvptx::trap(); }
     let r0 = (block - start) as usize * 16 + _thread_idx_x() as usize / 32 * 4;
     if r0 < p.rows as usize {
         rows4(p, r0);

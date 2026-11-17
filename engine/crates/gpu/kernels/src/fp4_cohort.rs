@@ -25,6 +25,14 @@
 //! (ptxas, a lane box, 2026-11-11).
 //! `skip` 1 with one live token in the block: weight columns whose activation code is +-0 are not read (their shared
 //! bytes are set to 0): a zero activation makes every product of that column zero whatever the weight code.
+//! PAIRED PARTS (`merge` S >= 2, work map only): a work record names the first of S consecutive parts of one expert
+//! (the same weights, scales, global and activation; the kernel traps otherwise) and its token tiles run over the S
+//! parts' tokens in part order. A slot table in shared memory gives each token slot of the block its own operand row
+//! and its own output word base and stride, so every token reads its own operands and stores its own words exactly as
+//! its own part would: the weight tile is copied through shared memory once for the S parts' tokens, not once a part.
+//! The slot table is used in every form (S = 1: one part, the old addresses).
+//! DIRECT PLACE (`rowmap` nonzero): a token's words go to the address its operand row names in the row map (token-major,
+//! one row a word), so the down products land in the original pair order the fold reads, with no placement launch.
 use crate::canonical::Acc;
 
 pub use crate::tc_abi::{NvPart as Fp4CohortPart, NvRows as Fp4Cohort};
@@ -46,7 +54,9 @@ const STAGE: usize = AR + AS + B + BS;
 const AT: usize = BR * 12 + BR / 8 * 8;
 const ATS: usize = BR;
 const SK: usize = 1024; // up to 8,192 columns
-const WORDS: usize = 2 * STAGE + AT + ATS + SK;
+// SL: the slot table, four words a token slot: operand row, output word address (low, high), output stride in words.
+const SL: usize = BT * 4;
+const WORDS: usize = 2 * STAGE + AT + ATS + SK + SL;
 const BYTES: usize = WORDS * 4;
 const _: () = assert!(BYTES <= 48 * 1024);
 
@@ -83,6 +93,53 @@ macro_rules! mma {($a:expr,$b:expr,$sa:expr,$sb:expr,$c:expr)=>{{
 // Straight-line copies, so every array index below is a constant and the arrays stay in registers.
 macro_rules! rep4 {($v:ident,$body:block)=>{{{const $v:usize=0;$body}{const $v:usize=1;$body}{const $v:usize=2;$body}{const $v:usize=3;$body}}};}
 macro_rules! rep8 {($v:ident,$body:block)=>{{rep4!($v,$body);{const $v:usize=4;$body}{const $v:usize=5;$body}{const $v:usize=6;$body}{const $v:usize=7;$body}}};}
+// Like the load macros, this expands inside the existing kernel safety boundary.
+// A device-built map selects a part and token tile; it changes no output word.
+macro_rules! routed_tile {($p:expr)=>{{
+    if $p.work==0 { (core::arch::nvptx::_block_idx_z() as usize,core::arch::nvptx::_block_idx_x() as usize,core::arch::nvptx::_block_idx_y() as usize) }
+    else {
+        let at=core::arch::nvptx::_block_idx_y();if at>=$p.work_count {return;}
+        let tile=*($p.work as *const crate::tc_abi::NvTile).add(at as usize);
+        // The caller checks part<count before loading its descriptor. This
+        // also returns on the empty marker without another live predicate.
+        (tile.part as usize,tile.tile as usize,core::arch::nvptx::_block_idx_x() as usize)
+    }
+}};}
+// PAIRED PARTS: the parts a block reads (1, or `merge` consecutive parts of one expert, work map only), their token
+// count, and the slot table of the block's token tile at shared word `$sl` (threads below `$bt`, then a barrier that
+// every thread reaches). Expands inside the kernel's safety boundary: the part records are inside the checked table
+// (part + span <= count is checked here), the slot words inside the static array.
+macro_rules! paired_parts {($p:expr,$part:expr)=>{{
+    let span=if $p.merge>1 {$p.merge as usize} else {1};
+    if span>1 && ($p.work==0 || $part%span!=0 || $part+span>$p.count as usize) {core::arch::asm!("trap;");}
+    let head=*($p.table as *const Fp4CohortPart).add($part);
+    let mut m=0usize;let mut s=0;while s<span {m+=(*($p.table as *const Fp4CohortPart).add($part+s)).tokens as usize;s+=1;}
+    (head,m,span)
+}};}
+macro_rules! paired_slots {($p:expr,$part:expr,$span:expr,$head:expr,$tile:expr,$bt:expr,$sl:expr,$word:expr,$tid:expr)=>{{
+    let (span,head)=($span,$head);
+    if $tid<$bt {
+        let n=$tile*$bt+$tid;let (mut row,mut out,mut stride)=(0u32,0u64,0u32);let mut base=0usize;let mut s=0;
+        while s<span {
+            let r=*($p.table as *const Fp4CohortPart).add($part+s);
+            if r.weight!=head.weight || r.scales!=head.scales || r.global.to_bits()!=head.global.to_bits() || r.activation.to_bits()!=head.activation.to_bits() {core::arch::asm!("trap;");}
+            let t=r.tokens as usize;
+            if n>=base && n<base+t {
+                let j=n-base;row=r.first+j as u32;
+                // DIRECT PLACE: the operand row's own word (row 0) address, token-major (stride one word a row).
+                if $p.rowmap!=0 {out=*($p.rowmap as *const u64).add(row as usize);stride=1;} else {out=r.output+4*j as u64;stride=r.tokens;}
+            }
+            base+=t;s+=1;
+        }
+        st!($word($sl+4*$tid),row);st!($word($sl+4*$tid+1),out as u32);st!($word($sl+4*$tid+2),(out>>32) as u32);st!($word($sl+4*$tid+3),stride);
+    }
+    crate::ptx::sync();
+}};}
+// The output word (row, slot) of a token slot below live: its own part's word.
+macro_rules! slot_out {($sl:expr,$word:expr,$row:expr,$n:expr)=>{{
+    let base=(ld!($word($sl+4*$n+1)) as u64)|((ld!($word($sl+4*$n+2)) as u64)<<32);
+    (base as *mut f32).add($row*ld!($word($sl+4*$n+3)) as usize)
+}};}
 #[inline(always)]
 fn swap(a: &mut u32, b: &mut u32, shift: u32, mask: u32) {
     let t = ((*a >> shift) ^ *b) & mask;
@@ -99,18 +156,31 @@ fn swap(a: &mut u32, b: &mut u32, shift: u32, mask: u32) {
 /// are stored, and every such word is stored, so the output may hold anything before the launch. Shared reads and
 /// writes stay inside this entry's static array; a token slot past the last live token holds zeros. All 256 threads
 /// reach every barrier: loop bounds depend only on the block's part. Any other launch traps.
+/// A nonzero work pointer names work_count immutable NvTile records made from
+/// checked route metadata. Live records cover each (part, token tile) once;
+/// unused records have part=u32::MAX. Its grid is (rows/128, work_count, 1).
+/// PAIRED PARTS (`merge` S >= 2, work map only, checked here): a live record names part e*S and a token tile of the
+/// S parts' tokens joined in part order; records cover each (expert, joined tile) once. The S parts are inside the
+/// table (checked) and carry one expert's weights, scales, global and activation (checked, else trap). A slot's
+/// operand row and output word are its own part's, so the one-writer rule and every span above hold per part.
+/// The slot table is written by threads below BT before one barrier that every thread reaches (the block's part
+/// decides the early return, uniformly, before it).
+/// DIRECT PLACE (`rowmap` nonzero): the host passes a row map of one u64 a checked operand row, written by
+/// `prompt_route_native` from the route's pairs (a permutation of each set's pairs, each checked below the set's pair
+/// count) as the address of that pair's word (row 0) in the set's private output of pairs x rows words; a token's word
+/// (row) is stored at that address + 4 * row. Distinct operand rows of a set name distinct pairs, so each word still
+/// has one writer, and every address lies inside the set's output.
 #[no_mangle]
 pub unsafe extern "ptx-kernel" fn fp4_cohort(p: Fp4Cohort) {
-    use core::arch::nvptx::{_block_dim_x, _block_idx_x, _block_idx_y, _block_idx_z, _thread_idx_x};
+    use core::arch::nvptx::{_block_dim_x, _thread_idx_x};
     if _block_dim_x() as usize != THREADS || p.count == 0 || p.cols == 0 || p.cols % 64 != 0 || p.cols > 8192
-        || p.rows % BR as u32 != 0 || p.layout > 1 || p.chains != 1 {
+        || p.rows % BR as u32 != 0 || p.layout > 1 || p.chains != 1 || p.merge > 8 {
         core::arch::asm!("trap;");
     }
-    let part = _block_idx_z() as usize;
+    let (part,token_tile,row_tile) = routed_tile!(p);
     if part >= p.count as usize { return; }
-    let e = *(p.table as *const Fp4CohortPart).add(part);
-    let (rows, cols, m) = (p.rows as usize, p.cols as usize, e.tokens as usize);
-    let (token_tile, row_tile) = (_block_idx_x() as usize, _block_idx_y() as usize);
+    let (e, m, span) = paired_parts!(p, part);
+    let (rows, cols) = (p.rows as usize, p.cols as usize);
     if row_tile * BR >= rows || token_tile * BT >= m { return; }
     let live = (m - token_tile * BT).min(BT);
     let tid = _thread_idx_x() as usize;
@@ -119,15 +189,19 @@ pub unsafe extern "ptx-kernel" fn fp4_cohort(p: Fp4Cohort) {
     let at = 2 * STAGE;
     let ats = at + AT;
     let sk = ats + ATS;
+    let sl = sk + SK;
+    paired_slots!(p, part, span, e, token_tile, BT, sl, word, tid);
     let steps = cols / 64;
     let tiled = p.layout == 1;
     let skip = p.skip == 1 && live == 1;
-    let codes = (p.codes as *const u8).add((e.first as usize + token_tile * BT) * (cols / 2));
-    let ascales = (p.scales as *const u8).add((e.first as usize + token_tile * BT) * (cols / 16));
+    // This thread's activation copies at step 0: codes of token tid/2 (half tid%2), the scale word of token tid.
+    let codes = if tid < live * 2 { (p.codes as *const u8).add(ld!(word(sl + 4 * (tid / 2))) as usize * (cols / 2) + (tid % 2) * 16) } else { p.codes as *const u8 };
+    let ascales = if tid < live { (p.scales as *const u8).add(ld!(word(sl + 4 * tid)) as usize * (cols / 16)) } else { p.scales as *const u8 };
     if skip {
         // The one live token's codes, cols/2 bytes as cols/8 words.
+        let one = (p.codes as *const u8).add(ld!(word(sl)) as usize * (cols / 2));
         let mut i = tid;
-        while i < cols / 8 { st!(word(sk + i), *(codes as *const u32).add(i)); i += THREADS; }
+        while i < cols / 8 { st!(word(sk + i), *(one as *const u32).add(i)); i += THREADS; }
         crate::ptx::sync();
     }
     let weights = e.weight as *const u8;
@@ -152,22 +226,19 @@ pub unsafe extern "ptx-kernel" fn fp4_cohort(p: Fp4Cohort) {
             let r = row_tile * BR + row;
             crate::ptx::copy16(word(s + row * 8 + q * 4), weights.add(r * (cols / 2) + c * 32 + q * 16).cast());
         }
-        // Activations: 32 bytes a token as two 16-byte copies, and one scale word a token.
-        let mut i = tid;
-        while i < live * 2 {
-            let (n, q) = (i / 2, i % 2);
-            crate::ptx::copy16(word(s + AR + AS + n * 12 + q * 4), codes.add(n * (cols / 2) + c * 32 + q * 16).cast());
-            i += THREADS;
+        // Activations: 32 bytes a token as two 16-byte copies (thread 2n + q), and one scale word a token (thread n).
+        if tid < live * 2 {
+            let (n, q) = (tid / 2, tid % 2);
+            crate::ptx::copy16(word(s + AR + AS + n * 12 + q * 4), codes.add(c * 32).cast());
         }
         if tid < live {
-            crate::ptx::copy4(word(s + AR + AS + B + tid), ascales.add(tid * (cols / 16) + c * 4).cast());
+            crate::ptx::copy4(word(s + AR + AS + B + tid), ascales.add(c * 4).cast());
         }
     };
     let (lane, warp) = (tid % 32, tid / 32);
     let (g, t) = (lane / 4, lane % 4);
     let (wr, wc) = (warp % 2, warp / 2);
     let mut acc = [[crate::canonical::ZERO; 4]; 4];
-    let output = e.output as *mut f32;
     // A token slot past the last live token is never copied. Its codes and its scale word are set to zero in both
     // stages once, before the first step, so every operand of the instruction is defined. (The first read of a stage
     // follows a barrier.) Its words are dropped, never stored.
@@ -247,13 +318,13 @@ pub unsafe extern "ptx-kernel" fn fp4_cohort(p: Fp4Cohort) {
     rep4!(MI, {
         rep4!(NJ, {
             let r = row_tile * BR + 64 * wr + 16 * MI + g;
-            let n = token_tile * BT + 32 * wc + 8 * NJ + 2 * t;
+            let n = 32 * wc + 8 * NJ + 2 * t; // the token slot in the block
             let v = acc[MI][NJ];
-            let put = |row: usize, token: usize, x: f32| {
-                if token < m && p.raw == 1 { *output.add(row * m + token) = x; } else if token < m {
+            let put = |row: usize, slot: usize, x: f32| {
+                if slot < live && p.raw == 1 { *slot_out!(sl, word, row, slot) = x; } else if slot < live {
                     let y: f32;
                     core::arch::asm!("mul.rn.f32 {o}, {a}, {b};", o = out(reg32) y, a = in(reg32) x, b = in(reg32) scale);
-                    *output.add(row * m + token) = crate::expert_ops::round(y);
+                    *slot_out!(sl, word, row, slot) = crate::expert_ops::round(y);
                 }
             };
             put(r, n, v.a);
@@ -269,7 +340,8 @@ pub unsafe extern "ptx-kernel" fn fp4_cohort(p: Fp4Cohort) {
 // in flight. `$bt` tokens a block, `$wr` warps along the 128 rows (8 / $wr along the tokens), `$st` stages.
 macro_rules! cohort_entry {
     ($name:ident, $bt:expr, $wr:expr, $st:expr) => {
-        /// SAFETY: as `fp4_cohort`, for this block shape: grid (ceil(max_tokens/BT), rows/128, count), 256 threads;
+        /// SAFETY: as `fp4_cohort` (PAIRED PARTS included), for this block shape: grid (ceil(max_tokens/BT), rows/128,
+        /// count), or (rows/128, work_count, 1) with a work map in the 64-token form, 256 threads;
         /// `chains` 1, or 4 with cols a multiple of 256. With `chains` 4 a thread stores fl(a0 + a1) of its OWN words in
         /// the part's output after the second quarter and loads its own words back at the join after the fourth. No
         /// other thread reads or writes those words (one writer a word), no barrier is needed for a thread's own store
@@ -277,7 +349,7 @@ macro_rules! cohort_entry {
         /// read it before, because it holds partial sums until the last step.
         #[no_mangle]
         pub unsafe extern "ptx-kernel" fn $name(p: Fp4Cohort) {
-            use core::arch::nvptx::{_block_dim_x, _block_idx_x, _block_idx_y, _block_idx_z, _thread_idx_x};
+            use core::arch::nvptx::{_block_dim_x, _thread_idx_x};
             const BT: usize = $bt;
             const WR: usize = $wr;
             const WC: usize = 8 / WR;
@@ -288,32 +360,36 @@ macro_rules! cohort_entry {
             const BW: usize = BT * 12;
             const STAGE: usize = AR + AS + BW + BT;
             const AT0: usize = S * STAGE;
-            const WORDS: usize = AT0 + AT + ATS + SK;
+            const WORDS: usize = AT0 + AT + ATS + SK + BT * 4;
             const BYTES: usize = WORDS * 4;
             const _: () = assert!(BYTES <= 48 * 1024 && MIC <= 4 && NJC <= 4 && NJC >= 1 && S >= 2);
             if _block_dim_x() as usize != THREADS || p.count == 0 || p.cols == 0 || p.cols % 64 != 0 || p.cols > 8192
-                || p.rows % BR as u32 != 0 || p.layout > 1 || !(p.chains == 1 || p.chains == 4 && p.cols % 256 == 0) {
+                || p.rows % BR as u32 != 0 || p.layout > 1 || !(p.chains == 1 || p.chains == 4 && p.cols % 256 == 0) || p.merge > 8 {
                 core::arch::asm!("trap;");
             }
-            let part = _block_idx_z() as usize;
+            let (part,token_tile,row_tile) = if BT==64 {routed_tile!(p)} else {
+                (core::arch::nvptx::_block_idx_z() as usize,core::arch::nvptx::_block_idx_x() as usize,core::arch::nvptx::_block_idx_y() as usize)
+            };
             if part >= p.count as usize { return; }
-            let e = *(p.table as *const Fp4CohortPart).add(part);
-            let (rows, cols, m) = (p.rows as usize, p.cols as usize, e.tokens as usize);
-            let (token_tile, row_tile) = (_block_idx_x() as usize, _block_idx_y() as usize);
+            let (e, m, span) = paired_parts!(p, part);
+            let (rows, cols) = (p.rows as usize, p.cols as usize);
             if row_tile * BR >= rows || token_tile * BT >= m { return; }
             let live = (m - token_tile * BT).min(BT);
             let tid = _thread_idx_x() as usize;
             let smem = crate::ptx::shared::<BYTES>();
             let word = |w: usize| smem + (w * 4) as u32;
             let (at, ats, sk) = (AT0, AT0 + AT, AT0 + AT + ATS);
+            let sl = sk + SK;
+            paired_slots!(p, part, span, e, token_tile, BT, sl, word, tid);
             let steps = cols / 64;
             let tiled = p.layout == 1;
             let skip = p.skip == 1 && live == 1;
-            let codes = (p.codes as *const u8).add((e.first as usize + token_tile * BT) * (cols / 2));
-            let ascales = (p.scales as *const u8).add((e.first as usize + token_tile * BT) * (cols / 16));
+            let codes = if tid < live * 2 { (p.codes as *const u8).add(ld!(word(sl + 4 * (tid / 2))) as usize * (cols / 2) + (tid % 2) * 16) } else { p.codes as *const u8 };
+            let ascales = if tid < live { (p.scales as *const u8).add(ld!(word(sl + 4 * tid)) as usize * (cols / 16)) } else { p.scales as *const u8 };
             if skip {
+                let one = (p.codes as *const u8).add(ld!(word(sl)) as usize * (cols / 2));
                 let mut i = tid;
-                while i < cols / 8 { st!(word(sk + i), *(codes as *const u32).add(i)); i += THREADS; }
+                while i < cols / 8 { st!(word(sk + i), *(one as *const u32).add(i)); i += THREADS; }
                 crate::ptx::sync();
             }
             let weights = e.weight as *const u8;
@@ -336,14 +412,12 @@ macro_rules! cohort_entry {
                     let r = row_tile * BR + row;
                     crate::ptx::copy16(word(s + row * 8 + q * 4), weights.add(r * (cols / 2) + c * 32 + q * 16).cast());
                 }
-                let mut i = tid;
-                while i < live * 2 {
-                    let (n, q) = (i / 2, i % 2);
-                    crate::ptx::copy16(word(s + AR + AS + n * 12 + q * 4), codes.add(n * (cols / 2) + c * 32 + q * 16).cast());
-                    i += THREADS;
+                if tid < live * 2 {
+                    let (n, q) = (tid / 2, tid % 2);
+                    crate::ptx::copy16(word(s + AR + AS + n * 12 + q * 4), codes.add(c * 32).cast());
                 }
                 if tid < live {
-                    crate::ptx::copy4(word(s + AR + AS + BW + tid), ascales.add(tid * (cols / 16) + c * 4).cast());
+                    crate::ptx::copy4(word(s + AR + AS + BW + tid), ascales.add(c * 4).cast());
                 }
             };
             let (lane, warp) = (tid % 32, tid / 32);
@@ -354,7 +428,6 @@ macro_rules! cohort_entry {
             let mut hold = [[crate::canonical::ZERO; 4]; 4];
             let quarters = p.chains == 4;
             let per_chain = steps / p.chains as usize;
-            let output = e.output as *mut f32;
             // A token slot past the last live token is never copied: zero codes and a zero scale word in every stage,
             // once, before the first step (the first read of a stage follows a barrier). Its words are never stored.
             {
@@ -443,16 +516,16 @@ macro_rules! cohort_entry {
                         } else {
                             let pair = add_acc!(hold[MI][NJ], acc[MI][NJ]);
                             let r = row_tile * BR + (128 / WR) * wr + 16 * MI + g;
-                            let n = token_tile * BT + (BT / WC) * wc + 8 * NJ + 2 * t;
-                            let at = |row: usize, token: usize| output.add(row * m + token);
+                            let n = (BT / WC) * wc + 8 * NJ + 2 * t; // the token slot in the block
+                            let at = |row: usize, slot: usize| slot_out!(sl, word, row, slot);
                             if quarter == 1 {
-                                if n < m { *at(r, n) = pair.a; *at(r + 8, n) = pair.c; }
-                                if n + 1 < m { *at(r, n + 1) = pair.b; *at(r + 8, n + 1) = pair.d; }
+                                if n < live { *at(r, n) = pair.a; *at(r + 8, n) = pair.c; }
+                                if n + 1 < live { *at(r, n + 1) = pair.b; *at(r + 8, n + 1) = pair.d; }
                                 acc[MI][NJ] = crate::canonical::ZERO;
                             } else {
                                 let mut first = crate::canonical::ZERO;
-                                if n < m { first.a = *at(r, n); first.c = *at(r + 8, n); }
-                                if n + 1 < m { first.b = *at(r, n + 1); first.d = *at(r + 8, n + 1); }
+                                if n < live { first.a = *at(r, n); first.c = *at(r + 8, n); }
+                                if n + 1 < live { first.b = *at(r, n + 1); first.d = *at(r + 8, n + 1); }
                                 acc[MI][NJ] = add_acc!(first, pair);
                             }
                         }
@@ -465,13 +538,13 @@ macro_rules! cohort_entry {
                 rep4!(NJ, {
                     if MI < MIC && NJ < NJC {
                         let r = row_tile * BR + (128 / WR) * wr + 16 * MI + g;
-                        let n = token_tile * BT + (BT / WC) * wc + 8 * NJ + 2 * t;
+                        let n = (BT / WC) * wc + 8 * NJ + 2 * t; // the token slot in the block
                         let v = acc[MI][NJ];
-                        let put = |row: usize, token: usize, x: f32| {
-                            if token < m && p.raw == 1 { *output.add(row * m + token) = x; } else if token < m {
+                        let put = |row: usize, slot: usize, x: f32| {
+                            if slot < live && p.raw == 1 { *slot_out!(sl, word, row, slot) = x; } else if slot < live {
                                 let y: f32;
                                 core::arch::asm!("mul.rn.f32 {o}, {a}, {b};", o = out(reg32) y, a = in(reg32) x, b = in(reg32) scale);
-                                *output.add(row * m + token) = crate::expert_ops::round(y);
+                                *slot_out!(sl, word, row, slot) = crate::expert_ops::round(y);
                             }
                         };
                         put(r, n, v.a);
@@ -538,7 +611,7 @@ fn cut_f32(neg: bool, mag: u64, exp: i32) -> u32 {
 pub unsafe extern "ptx-kernel" fn fp4_cohort_cc(p: Fp4Cohort) {
     use core::arch::nvptx::{_block_dim_x, _block_idx_x, _block_idx_y, _block_idx_z, _thread_idx_x};
     if _block_dim_x() as usize != THREADS || p.count == 0 || p.cols == 0 || p.cols % 64 != 0 || p.cols > 8192
-        || p.rows % BR as u32 != 0 || p.layout != 1 || p.chains != 1 {
+        || p.rows % BR as u32 != 0 || p.layout != 1 || p.chains != 1 || p.merge > 1 {
         core::arch::asm!("trap;");
     }
     let part = _block_idx_z() as usize;

@@ -5,6 +5,8 @@ use super::*;
 use spark_gpu_probe::prompt_ops::{Op as Row,Shape as RowShape};
 #[path="rows/pools.rs"] mod pools;
 #[path="rows/seed.rs"] mod seed;
+#[path="rows/shared.rs"] mod shared;
+pub use shared::SharedRows;
 /// ROWS FOLD: what ONE layer of a row pass holds between its routed down step and that step's fold. It lies on the
 /// caller's stack and ends with the layer, so no step reads another layer's row and nothing is allocated for it.
 pub(super) struct RowsFold<V> {
@@ -65,9 +67,14 @@ pub const PROMPT_GROUP_MAX:usize=1024;
 /// sizes and a rest of at most `PROMPT_GROUP_MAX` rows (`lease_groups`). A group above `PROMPT_GROUP_MAX` passes every
 /// layer as runs of `PROMPT_GROUP_MAX` rows (`Decoder::layer_wide`), so no kernel sees more rows than a startup group
 /// gives it; only the routed expert product launches hold the parts of every run (WIDE COHORT).
-pub const PROMPT_GROUP_LEASE:[usize;2]=[4096,2048];
-const _:()=assert!(PROMPT_GROUP_LEASE[0]<=PROMPT_GROUP_CHECK && PROMPT_GROUP_LEASE[1]>PROMPT_GROUP_MAX && PROMPT_GROUP_LEASE[0]>PROMPT_GROUP_LEASE[1]
-    && PROMPT_GROUP_LEASE[0].is_multiple_of(PROMPT_GROUP_MAX) && PROMPT_GROUP_LEASE[1].is_multiple_of(PROMPT_GROUP_MAX));
+/// THREE RUNS (2026-11-17): 3,072 rows stand between the two older sizes. The lease charges a wide group the whole
+/// workspace of a startup group of its size, and a lone chat's spare pool covers that for three runs where it does
+/// not for four (the 8,192-token read: 8.42 GB for 3,072 rows and 12.64 GB for 4,096 against 9.86 GB to lend).
+pub const PROMPT_GROUP_LEASE:[usize;3]=[4096,3072,2048];
+const _:()=assert!(PROMPT_GROUP_LEASE[0]<=PROMPT_GROUP_CHECK && PROMPT_GROUP_LEASE[2]>PROMPT_GROUP_MAX
+    && PROMPT_GROUP_LEASE[0]>PROMPT_GROUP_LEASE[1] && PROMPT_GROUP_LEASE[1]>PROMPT_GROUP_LEASE[2]
+    && PROMPT_GROUP_LEASE[0].is_multiple_of(PROMPT_GROUP_MAX) && PROMPT_GROUP_LEASE[1].is_multiple_of(PROMPT_GROUP_MAX)
+    && PROMPT_GROUP_LEASE[2].is_multiple_of(PROMPT_GROUP_MAX));
 /// The groups of one prompt call of `tokens` rows whose largest group is `rows`: up to `PROMPT_GROUP_MAX` rows the call
 /// is cut as before, in runs of `rows`. Above it only whole groups of a `PROMPT_GROUP_LEASE` size (at most `rows`) are
 /// taken, largest first, and the rest runs in groups of at most `PROMPT_GROUP_MAX` rows. The row bits do not depend on
@@ -195,7 +202,7 @@ pub fn expanded_row_words(row:usize,latent:usize,slots:usize)->Option<usize> {
 }
 /// `group_workspace_bytes_for` for a server whose latent layers took `rows`.
 pub fn group_workspace_bytes_with(c:&CheckpointAdmission,context:usize,group:usize,rows:LatentRows)->Result<usize> {
-    let d=c.description();let (mut per_row,mut selected,mut gather)=(0usize,0usize,0usize);
+    let d=c.description();let (mut per_row,mut selected,mut gather,mut route_epochs)=(0usize,0usize,0usize,0usize);
     for layer in 0..d.layers.len() {
         // Slot and context buffers are charged below from the group's own shapes.
         let plan=LayerPlan::new(d,layer,1,Topology {rank:0,parts:1}).map_err(|e|e.to_string())?;
@@ -205,6 +212,13 @@ pub fn group_workspace_bytes_with(c:&CheckpointAdmission,context:usize,group:usi
             let elements=spec.elements().map_err(|e|e.to_string())?;words=words.checked_add(elements).ok_or("prompt workspace overflow")?;widest=widest.max(elements);
         }
         if let engine_model::shapes::Ffn::Experts(e)=d.layers[layer].ffn {
+            // Fund every routed layer's complete immutable metadata epoch,
+            // even when an ordered pass queue retains them all until its drain.
+            // Weight descriptor templates are allocated before RESIDENT READY.
+            let mut left=group;let mut sets=Vec::new();
+            while left>0 {let rows=left.min(spark_gpu_probe::prompt_route::MAX_ROWS as usize);left-=rows;
+                sets.push(spark_gpu_probe::prompt_route::Shape {rows:rows as u32,picks:e.selected as u32,experts:e.count as u32});}
+            if let Some(bytes)=spark_gpu_probe::prompt_route::epoch_workspace_bytes(&sets) {route_epochs=route_epochs.checked_add(bytes).ok_or("prompt route epoch charge overflow")?;}
             // Quantized activations: seventeen words for sixteen features, for gate, up and down.
             let packed=(e.selected as usize).checked_mul(((d.hidden as usize/16)*17).max(e.width as usize/16*17)).and_then(|n|n.checked_mul(2)).ok_or("prompt workspace overflow")?;
             // Permuted inputs, and the route's complete scratch for each token.
@@ -213,6 +227,7 @@ pub fn group_workspace_bytes_with(c:&CheckpointAdmission,context:usize,group:usi
         }
         if let TokenMixer::LatentAttention(a)=d.layers[layer].mixer {
             let i=a.indexer;let slots=(i.token_budget+if i.select_tail {i.pool-1} else {0}) as usize;let live=slots.min(context);
+            let latent=a.kv_rank as usize;
             let row=(a.heads*(a.key_dim+a.value_dim)) as usize;
             // Two buffers per head, the selection and its validation status, three words per entry of the Scores table,
             // and the pair map, which holds one word per token for each row of a small union.
@@ -231,7 +246,11 @@ pub fn group_workspace_bytes_with(c:&CheckpointAdmission,context:usize,group:usi
             }
             // Absorbed attention replaces the expanded rows with five planes that a group holds at once.
             // Charge the larger alternative, with the same head count as the expanded rows above.
-            selected=selected.max(absorbed_group_words(group,a.heads as usize,a.kv_rank as usize,a.value_dim as usize,live).ok_or("prompt workspace overflow")?);
+            // A large absorbed group can keep one lossless packed cache mirror beside its five planes. Charge it
+            // only for the packed tile's latent width. This is conservative when a rank's head count or alignment
+            // makes it keep the original cache; memory admission does not choose a different execution by topology.
+            let mirror=if group>=17 && latent==512 {context.checked_mul(latent).map(|n|n/2).ok_or("packed latent cache charge overflow")?} else {0};
+            selected=selected.max(absorbed_group_words(group,a.heads as usize,a.kv_rank as usize,a.value_dim as usize,live).and_then(|n|n.checked_add(mirror)).ok_or("prompt workspace overflow")?);
             // Chat steps and prompt groups are ordered. Their larger attention peak funds both forms.
             selected=selected.max(absorbed_chat_words(super::BATCH_ROWS,a.heads as usize,a.kv_rank as usize,a.key_dim as usize,a.value_dim as usize,live).ok_or("chat workspace overflow")?);
         }
@@ -247,7 +266,7 @@ pub fn group_workspace_bytes_with(c:&CheckpointAdmission,context:usize,group:usi
     }
     // Each rank's half plus the peer's half, with the mapped allocation's growth margin.
     let exchange=gather.checked_mul(group).and_then(|n|n.checked_mul(3)).map(|n|n/2).ok_or("prompt workspace overflow")?;
-    per_row.checked_mul(group).and_then(|n|n.checked_add(selected)).and_then(|n|n.checked_add(exchange)).and_then(|n|n.checked_mul(4)).ok_or_else(||"prompt workspace overflow".into())
+    per_row.checked_mul(group).and_then(|n|n.checked_add(selected)).and_then(|n|n.checked_add(exchange)).and_then(|n|n.checked_mul(4)).and_then(|n|n.checked_add(route_epochs)).ok_or_else(||"prompt workspace overflow".into())
 }
 /// Partition a selected union into retained prefix rows and new rows. The row
 /// order may change; each query keeps its original selected order through `map`.
@@ -324,6 +343,15 @@ struct ExpertTables {groups:BTreeMap<usize,Vec<usize>>,spans:Vec<(usize,usize,us
 /// The (matrix, rows) list of a grouped expert step for the experts of `spans`.
 fn expert_names<'s>(step:&'s engine_model::plan::layer::Step,spans:&[(usize,usize,usize)])->Vec<(&'s str,usize)> {spans.iter().map(|&(id,_,count)|(step.weights[id].name.as_str(),count)).collect()}
 fn row_shape(op:Row,m:usize)->Result<RowShape> {RowShape::new(op,m).ok_or_else(||"prompt row count exceeds ABI".into())}
+/// One chat's side of a row pass: its rows (`m` of them from position `first`), its state and held rows, and what its
+/// history steps keep for the steps after them. The one-chat pass has one (`layer_rows`); a shared pass has one a chat
+/// (rows/shared.rs), so both run the same history steps (`Decoder::rows_history`).
+struct RowsChat<'a,V> {first:u64,m:usize,state:&'a BTreeMap<String,V>,expanded:Option<&'a Expanded<V>>,
+    /// The pass keeps the inputs of the recurrent state producers (`OpenRows`), and holds the rows it expands.
+    keep:bool,persist:bool,
+    kept_conv:Option<([V;3],String)>,kept_step:Option<(V,V,String)>,
+    /// The expanded rows this pass reads, and how many; the selection of each row, on the host and on the device.
+    cache:Option<V>,cache_rows:u64,selected:Vec<f32>,selected_device:Option<V>,selection_checked:bool}
 impl<'f,C:Compute> Decoder<'f,C> {
     /// Test and admission control. Bits do not depend on this limit.
     pub fn set_expanded_limit(&self,rows:usize) {self.expanded_limit.set(rows);}
@@ -639,6 +667,11 @@ impl<'f,C:Compute> Decoder<'f,C> {
         let outputs=runs.into_iter().map(|(n,mut values)|Ok((n,values.remove("output").ok_or("prompt layer has no output")?))).collect::<Result<Vec<_>>>()?;
         Ok((outputs,next,held))
     }
+    /// The fold shape sent to both the middle's producer and its sole reader.
+    fn expert_fold_shape(&self,plan:&LayerPlan,step:&engine_model::plan::layer::Step)->Result<Shape> {
+        let route=plan.steps.iter().find(|s|s.kind==Kind::Route).ok_or("prompt expert fold has no route")?;
+        let mut s=shape(Op::ExpertFold);s.rows=number(route.outputs[0].shape[0])?;s.cols=number(self.checkpoint.description().hidden)?;s.taps=u32::from(step.inputs.len()==4);Ok(s)
+    }
     /// WIDE COHORT: the grouped expert step `index` for every run of a wide prompt group at once, when it is one of the
     /// two that launch the routed expert products: the gate step (with up and their SwiGLU: `rows_experts_gathered_wide`)
     /// or the fold step whose grouped down step waited for it (`rows_experts_fold_wide`). Each run gets the tables,
@@ -654,11 +687,30 @@ impl<'f,C:Compute> Decoder<'f,C> {
                 let (Some(up),Some(swiglu))=(plan.steps.get(index+1),plan.steps.get(index+2)) else {return Ok(None);};
                 if up.id!="expert_up" || up.kind!=Kind::ExpertProject || swiglu.kind!=Kind::SwiGlu || runs.iter().any(|(_,values)|!values.contains_key(&step.inputs[0]) || !values.contains_key(&step.inputs[1])) {return Ok(None);}
                 let limit=self.checkpoint.description().swiglu_limit as f32;
+                if let Some(links)=self.fold_links(layer,plan).filter(|links|plan.steps[links.down].kind==Kind::ExpertDown) {
+                    let shared=links.shared.and_then(|(at,_)|plan.steps[at].weights.first()).map(|w|w.name.as_str());
+                    let calls=runs.iter().map(|(m,v)|(*m,&v[&step.inputs[0]],&v[&step.inputs[1]])).collect::<Vec<_>>();
+                    let steps=[step.clone(),up.clone(),plan.steps[links.down].clone()];
+                    if let Some(made)=b.rows_experts_device_wide(&steps,limit,&calls,(self.expert_fold_shape(plan,&plan.steps[links.fold])?,shared))? {
+                        need(made.len()==runs.len(),"device expert result count differs")?;
+                        for ((_,values),middle) in runs.iter_mut().zip(made) {values.insert("expert_middle_grouped".to_owned(),middle);}return Ok(Some(2));
+                    }
+                }
                 let tables=runs.iter().map(|(n,values)|self.expert_tables(plan,step,*n,values)).collect::<Result<Vec<_>>>()?;
                 let lists=tables.iter().map(|tables|(expert_names(step,&tables.spans),expert_names(up,&tables.spans))).collect::<Vec<_>>();
+                // PACKED MIDDLE: when every run's grouped down step will wait for its fold (`rows_group_fold_waits`: a group
+                // that folds, the fold's own down step), the fold's product launch is the only reader of the middle
+                // (`expert_middle_grouped` is read by nothing else, see the fold branch below), so the compute may keep
+                // it in that launch's own form. The down list of a run names the same experts and counts as its gate list.
+                let down=self.fold_links(layer,plan).filter(|links|runs.iter().all(|(n,_)|b.folds_groups(*n)) && plan.steps.get(links.down).is_some_and(|down|down.kind==Kind::ExpertDown))
+                    .map(|links|(links,tables.iter().map(|tables|expert_names(&plan.steps[links.down],&tables.spans)).collect::<Vec<_>>()));
                 let made={
                     let sets=runs.iter().zip(&tables).zip(&lists).map(|(((_,values),tables),(gate,up))|(gate.as_slice(),up.as_slice(),limit,&values[&step.inputs[0]],tables.order.as_slice(),tables.grouped.as_slice())).collect::<Vec<_>>();
-                    b.rows_experts_gathered_wide(&sets)?};
+                    match &down {
+                        Some((links,down))=>{
+                            let shared=links.shared.and_then(|(at,_)|plan.steps[at].weights.first()).map(|weight|weight.name.as_str());
+                            b.rows_experts_gathered_wide_for(&sets,&down.iter().map(Vec::as_slice).collect::<Vec<_>>(),(self.expert_fold_shape(plan,&plan.steps[links.fold])?,shared))?},
+                        None=>b.rows_experts_gathered_wide(&sets)?}};
                 let Some(made)=made else {return Ok(None);};
                 need(made.len()==runs.len(),"wide expert cohort result count differs")?;
                 for ((_,values),middle) in runs.iter_mut().zip(made) {values.insert("expert_middle_grouped".to_owned(),middle);}
@@ -672,9 +724,12 @@ impl<'f,C:Compute> Decoder<'f,C> {
                 // As `experts_group` refuses it: a fold with a shared row that is not this rank's own rows.
                 if step.inputs.len()>=4 && folds.iter().any(|fold|fold.shared.is_none()) {return Ok(None);}
                 if runs.iter().any(|(_,values)|!values.contains_key("expert_middle_grouped") || !values.contains_key(&down.inputs[1]) || step.inputs.iter().take(2).any(|name|!values.contains_key(name))) {return Ok(None);}
-                let d=self.checkpoint.description();
-                let route=plan.steps.iter().find(|s|s.kind==Kind::Route).ok_or("prompt expert fold has no route")?;
-                let mut s=shape(Op::ExpertFold);s.rows=number(route.outputs[0].shape[0])?;s.cols=number(d.hidden)?;s.taps=u32::from(step.inputs.len()==4);
+                let s=self.expert_fold_shape(plan,step)?;
+                let calls=runs.iter().zip(folds.iter()).map(|((m,v),f)|(*m,&v["expert_middle_grouped"],&v[&step.inputs[0]],&v[&step.inputs[1]],step.inputs.get(3).and(f.shared.as_ref()))).collect::<Vec<_>>();
+                if let Some(made)=b.rows_experts_fold_device_wide(down,&calls,s)? {
+                    need(made.len()==runs.len(),"device fold result count differs")?;
+                    for (((_,v),f),value) in runs.iter_mut().zip(folds.iter_mut()).zip(made) {f.waits=false;f.grouped=false;f.shared=None;v.remove("expert_middle_grouped");v.insert(step.outputs[0].name.clone(),value);}return Ok(Some(0));
+                }
                 let tables=runs.iter().map(|(n,values)|self.expert_tables(plan,down,*n,values)).collect::<Result<Vec<_>>>()?;
                 let lists=tables.iter().map(|tables|expert_names(down,&tables.spans)).collect::<Vec<_>>();
                 let made={
@@ -692,27 +747,58 @@ impl<'f,C:Compute> Decoder<'f,C> {
             _=>Ok(None),
         }
     }
-    /// `cut`: None runs the whole layer. WIDE GROUP: Some((step, name)) runs only the steps before `step` (the mixer half,
-    /// `wide_cut`) and returns the value `name` in place of the layer's output; the states and held rows are those of the
-    /// whole layer, which the mixer half alone makes.
     #[allow(clippy::too_many_arguments)]
     fn layer_rows(&self,layer:usize,first:u64,m:usize,residual:C::Value,state:&BTreeMap<String,C::Value>,expanded:Option<&Expanded<C::Value>>,keep:bool,cut:Option<(usize,&str)>)->Result<(C::Value,BTreeMap<String,C::Value>,Option<C::Value>,Option<KeptRows<C::Value>>)> {
-        if let Some(owner)=expanded {need(owner.2==self.sparse_layout(layer)?,"expanded prompt owner layout differs")?;}
-        let c=self.checkpoint;let d=c.description();let b=&self.compute;let last=first+m as u64;
+        let b=&self.compute;let last=first+m as u64;
+        let mut chat=self.rows_chat(layer,first,m,state,expanded,keep)?;
         let planning=std::time::Instant::now();
         let plan={let mut schedules=self.schedules.borrow_mut();schedules.get_mut(layer).ok_or("prompt layer is outside the recipe")?.at(last).cloned().map_err(|e|e.to_string())?};
         b.plan_cost("planning",planning.elapsed().as_nanos());
         let mut values=BTreeMap::new();values.insert("residual".to_owned(),residual);
-        let mut kept_conv=None;let mut kept_step=None;
         // GROUP FOLD: a prompt group (no kept rows) may fold a routed layer's down rows before their exchange.
-        let mut passes=BTreeMap::new();let mut fold=if keep {RowsFold::default()} else {RowsFold::of_group()};let mut skip=0;let mut cache=None;let mut cache_rows=last;let mut selected=Vec::new();let mut selected_device=None;let mut selection_checked=false;
+        let mut passes=BTreeMap::new();let mut fold=if keep {RowsFold::default()} else {RowsFold::of_group()};let mut skip=0;
+        for index in 0..cut.map_or(plan.steps.len(),|cut|cut.0) {
+            if skip>0 {skip-=1;continue;}
+            if let Some(done)=self.rows_stateless(layer,index,&plan,m,&mut values,&mut passes,&mut fold)? {skip=done;continue;}
+            skip=self.rows_history(layer,index,&plan,&mut chat,&mut values)?;
+        }
+        need(skip==0,"prompt layer cut is inside a stage")?;
+        let output=values.remove(cut.map_or("output",|cut|cut.1)).ok_or("prompt layer has no output")?;
+        let (next,cache,kept)=self.rows_chat_end(layer,chat,&mut values)?;
+        Ok((output,next,cache,kept))
+    }
+    /// One chat's side of a row pass of `m` rows that start at position `first` (`RowsChat`).
+    fn rows_chat<'a>(&self,layer:usize,first:u64,m:usize,state:&'a BTreeMap<String,C::Value>,expanded:Option<&'a Expanded<C::Value>>,keep:bool)->Result<RowsChat<'a,C::Value>> {
+        if let Some(owner)=expanded {need(owner.2==self.sparse_layout(layer)?,"expanded prompt owner layout differs")?;}
+        let last=first+m as u64;
         // With a proposer a pass follows a few steps, each time. Its held rows then follow the decoded rows
         // (admission charges them by the request's tokens), so no pass expands a decoded row twice.
         let persist=last as usize<=self.expanded_limit.get() && (first==0 || expanded.is_some_and(|v|v.1==first as usize || self.draft.is_some() && v.1<first as usize));
-        for index in 0..cut.map_or(plan.steps.len(),|cut|cut.0) {
-            if skip>0 {skip-=1;continue;}
-            let step=&plan.steps[index];
-            if let Some(done)=self.rows_stateless(layer,index,&plan,m,&mut values,&mut passes,&mut fold)? {skip=done;continue;}
+        Ok(RowsChat {first,m,state,expanded,keep,persist,kept_conv:None,kept_step:None,cache:None,cache_rows:last,selected:Vec::new(),selected_device:None,selection_checked:false})
+    }
+    /// What a chat's layer leaves: its next state (taken out of `values`, where its history steps put it), its new
+    /// held rows when the pass holds them, and the kept inputs of a recurrent layer.
+    #[allow(clippy::type_complexity)] // one private result: the three things a layer leaves a chat.
+    fn rows_chat_end(&self,layer:usize,chat:RowsChat<'_,C::Value>,values:&mut BTreeMap<String,C::Value>)->Result<(BTreeMap<String,C::Value>,Option<C::Value>,Option<KeptRows<C::Value>>)> {
+        let d=self.checkpoint.description();
+        let names=match d.layers[layer].mixer {
+            TokenMixer::Kda(_)=>vec![("kda.history","next_history"),("kda.state","next_state")],
+            // The complete pools ride with the state, as in the step path.
+            TokenMixer::LatentAttention(_)=>vec![("latent_cache","next_latent_cache"),("index_keys","next_index_keys"),("index_gates","next_index_gates"),("pool_keys","pool_keys")],
+        };
+        let mut next=BTreeMap::new();
+        for (input,name) in names {next.insert(input.into(),values.remove(name).ok_or("prompt layer has no next state")?);}
+        let kept=match (chat.kept_conv,chat.kept_step) {(Some((conv,history)),Some((step,decay,state)))=>Some(KeptRows {conv,history,step,decay,state}),_=>None};
+        need(!chat.keep || kept.is_some()==matches!(d.layers[layer].mixer,TokenMixer::Kda(_)),"recurrent layer kept no rows")?;
+        Ok((next,if chat.persist {chat.cache} else {None},kept))
+    }
+    /// One step of a layer that reads ONE chat's history, for that chat's rows of a row pass: `values` holds the chat's
+    /// own rows of every value the step reads, and gets what the step makes. The one-chat pass gives its own value map
+    /// (`layer_rows`); a shared pass gives each chat's map in turn (rows/shared.rs). Returns how many of the next steps
+    /// are done with this one.
+    fn rows_history(&self,layer:usize,index:usize,plan:&LayerPlan,chat:&mut RowsChat<'_,C::Value>,values:&mut BTreeMap<String,C::Value>)->Result<usize> {
+        let d=self.checkpoint.description();let b=&self.compute;let step=&plan.steps[index];
+        let (first,m,state,expanded,keep,persist)=(chat.first,chat.m,chat.state,chat.expanded,chat.keep,chat.persist);let last=first+m as u64;
             match step.kind {
                 Kind::Conv=>{let TokenMixer::Kda(k)=d.layers[layer].mixer else {return Err("convolution requires a recurrent layer".into());};
                     let mut s=row_shape(Row::ConvRows,m)?;s.heads=number(self.kda_layout(layer)?.local_heads() as u64)?;s.dim=number(k.head_dim)?;s.taps=number(k.conv)?;
@@ -720,7 +806,7 @@ impl<'f,C:Compute> Decoder<'f,C> {
                     let mut weight=Vec::new();for w in &step.weights {weight.extend_from_slice(&self.parameters[&w.name]);}
                     let (convolved,history)=self.conv_rows(s,x,&weight)?;
                     if keep {let (lengths,_,_,_)=s.lengths().ok_or("invalid convolution row shape")?;
-                        kept_conv=Some(([b.range(&values[&step.inputs[0]],0,lengths[0])?,b.range(&values[&step.inputs[1]],0,lengths[1])?,b.range(&values[&step.inputs[2]],0,lengths[2])?],step.inputs[3].clone()));}
+                        chat.kept_conv=Some(([b.range(&values[&step.inputs[0]],0,lengths[0])?,b.range(&values[&step.inputs[1]],0,lengths[1])?,b.range(&values[&step.inputs[2]],0,lengths[2])?],step.inputs[3].clone()));}
                     values.insert(step.outputs[0].name.clone(),convolved);values.insert(step.outputs[1].name.clone(),history);},
                 Kind::KdaStep=>{let TokenMixer::Kda(k)=d.layers[layer].mixer else {return Err("recurrence requires a recurrent layer".into());};
                     let mut s=row_shape(Row::StepRows,m)?;s.heads=number(self.kda_layout(layer)?.local_heads() as u64)?;s.dim=number(k.head_dim)?;
@@ -728,7 +814,7 @@ impl<'f,C:Compute> Decoder<'f,C> {
                     let decay=b.prompt(RowShape {op:Row::StepDecay,..s},[Some(&values[&step.inputs[0]]),None,None,None,None],&[])?;
                     let columns=b.prompt(s,[Some(&values[&step.inputs[0]]),state.get(&step.inputs[1]),Some(&decay),None,None],&[])?;
                     if keep {let (lengths,_,_,_)=s.lengths().ok_or("invalid recurrence row shape")?;
-                        kept_step=Some((b.range(&values[&step.inputs[0]],0,lengths[0])?,b.range(&decay,0,lengths[2])?,step.inputs[1].clone()));}
+                        chat.kept_step=Some((b.range(&values[&step.inputs[0]],0,lengths[0])?,b.range(&decay,0,lengths[2])?,step.inputs[1].clone()));}
                     let (h,d)=(self.kda_layout(layer)?.local_heads(),k.head_dim as usize);let output=b.range(&columns,h*d*d,m*h*d)?;let next=b.range(&columns,0,h*d*d)?;
                     values.insert(step.outputs[0].name.clone(),output);values.insert(step.outputs[1].name.clone(),next);},
                 Kind::CacheAppend=>{let old=state.get(&step.inputs[0]).ok_or("prompt cache state is absent")?;
@@ -752,7 +838,7 @@ impl<'f,C:Compute> Decoder<'f,C> {
                             let x=[old_keys,old_gates,&values[&step.inputs[2]],&values[&step.inputs[3]]];
                             let result=if m<=VERIFY_ROWS {pools::append(b,s,first as usize,m,x,prior,&weight)?} else {pools::append_window(b,s,first as usize,m,x,prior,&weight)?};
                             for (spec,value) in step.outputs.iter().zip(result) {values.insert(spec.name.clone(),value);}
-                            continue;
+                            return Ok(0);
                         }
                     let prefix=|old:&C::Value,new:&C::Value|{let body=b.range(new,0,(m-1)*width)?;b.join(&[old,&body])};
                     let keys=prefix(state.get(&step.inputs[0]).ok_or("prompt index keys are absent")?,&values[&step.inputs[2]])?;
@@ -783,8 +869,8 @@ impl<'f,C:Compute> Decoder<'f,C> {
                         let status=b.read(&status)?;
                         need(status.len()==m && status.iter().all(|&v|v.to_bits()==0),"absorbed prompt selection is invalid")?;
                         spark_gpu_probe::prompt_launches::record("prompt_selection_checked");
-                        selected_device=Some(b.range(&value,0,m*words)?);selection_checked=true;
-                        values.insert(step.outputs[0].name.clone(),value);continue;
+                        chat.selected_device=Some(b.range(&value,0,m*words)?);chat.selection_checked=true;
+                        values.insert(step.outputs[0].name.clone(),value);return Ok(0);
                     }
                     // For small row groups below the pool budget, every token keeps all complete pools, so
                     // IDs and counts are known on the host while `select_known_rows` defers NaN count checks
@@ -797,18 +883,18 @@ impl<'f,C:Compute> Decoder<'f,C> {
                         if self.forced_union.get().is_some() {force_distinct_rows(&mut known,slots as usize,first as usize);}
                         b.plan_cost("prompt_selection",host.elapsed().as_nanos());
                         let uploaded=b.upload_known(&known)?;
-                        selected_device=Some(b.range(&uploaded,0,known.len())?);
-                        selected=known;
+                        chat.selected_device=Some(b.range(&uploaded,0,known.len())?);
+                        chat.selected=known;
                         values.insert(step.outputs[0].name.clone(),uploaded);
                     } else {
                         let read=b.read(&value)?;need(read.len()==m*words,"prompt selection extent differs")?;
                         let host=std::time::Instant::now();
                         for (token,row) in read.chunks_exact(words).enumerate() {need(row[words-1]>=0.0 && row[words-1] as u64<=slots.min(first+1+token as u64),"prompt selection count is invalid")?;}
-                        selected=read;if self.forced_union.get().is_some() {force_distinct_rows(&mut selected,slots as usize,first as usize);}
+                        chat.selected=read;if self.forced_union.get().is_some() {force_distinct_rows(&mut chat.selected,slots as usize,first as usize);}
                         b.plan_cost("prompt_selection",host.elapsed().as_nanos());
                         // Keep the selection that was just checked. Its device words are unchanged;
                         // only a forced test union needs the modified host table uploaded below.
-                        selected_device=if self.forced_union.get().is_none() {Some(b.range(&value,0,selected.len())?)} else {None};
+                        chat.selected_device=if self.forced_union.get().is_none() {Some(b.range(&value,0,chat.selected.len())?)} else {None};
                         values.insert(step.outputs[0].name.clone(),value);
                     }},
                 Kind::Gather=>{},
@@ -816,24 +902,24 @@ impl<'f,C:Compute> Decoder<'f,C> {
                     if b.has_latent_absorption(&step.weights[0].name) {
                         let (query_name,output_name)=indirect::attention_tail(&plan,index).ok_or("absorbed prompt tail is not private")?;
                         let layout=self.sparse_layout(layer)?;let slots=(a.indexer.token_budget+if a.indexer.select_tail {a.indexer.pool-1} else {0}) as usize;
-                        if !selection_checked {need(selected.len()==m*(slots+1),"absorbed prompt selection extent differs")?;}
+                        if !chat.selection_checked {need(chat.selected.len()==m*(slots+1),"absorbed prompt selection extent differs")?;}
                         let queries=self.local_query(&values[query_name],m,layout)?;
                         let host=std::time::Instant::now();
-                        for (token,row) in selected.chunks_exact(slots+1).enumerate() {
+                        for (token,row) in chat.selected.chunks_exact(slots+1).enumerate() {
                             let count=row[slots];need(count.is_finite() && count>=0.0 && count.fract()==0.0 && count<=slots.min(first as usize+token+1) as f32,"absorbed prompt count differs")?;
                             need(row[..count as usize].iter().all(|&id|id.is_finite() && id>=0.0 && id.fract()==0.0 && id<(first as usize+token+1) as f32),"absorbed prompt row exceeds its context")?;
                         }
                         b.plan_cost("prompt_selection",host.elapsed().as_nanos());
                         let uploaded;
-                        let selected=match selected_device.as_ref() {
+                        let selected_value=match chat.selected_device.as_ref() {
                             Some(v)=>v,
-                            None=>{uploaded=b.upload(&selected)?;&uploaded},
+                            None=>{uploaded=b.upload(&chat.selected)?;&uploaded},
                         };
                         let mut s=row_shape(Row::AbsorbQuery,m)?;
                         s.heads=number(layout.local_heads() as u64)?;s.dim=number(a.key_dim)?;s.taps=number(a.value_dim)?;
                         s.cols=number(a.kv_rank)?;s.rows=number(last)?;s.slots=number(slots as u64)?;s.first=number(slots.min(last as usize) as u64)?;
-                        let local=b.latent_absorption_rows(&step.weights[0].name,s,&queries,&values["next_latent_cache"],&selected)?;
-                        values.insert(output_name.to_owned(),b.gather_attended(&local,m,layout)?);skip=3;continue;
+                        let local=b.latent_absorption_rows(&step.weights[0].name,s,&queries,&values["next_latent_cache"],selected_value)?;
+                        values.insert(output_name.to_owned(),b.gather_attended(&local,m,layout)?);return Ok(3);
                     }
                     // The expansion of one latent row depends only on its bits.
                     // Each row is expanded once and every later token reuses it.
@@ -851,7 +937,7 @@ impl<'f,C:Compute> Decoder<'f,C> {
                         let new=self.pack_expanded(&new,count*row_words)?;
                         // With a proposer every pass appends: room for later rows, inside the held limit, so no pass copies the held rows.
                         let room=if self.draft.is_some() {HELD_ROOM.min(self.expanded_limit.get()-last as usize)*packed_words} else {0};
-                        cache=Some(b.rows_extend(expanded.map(|v|&*v.0),held,&new,packed_words,room)?);continue;
+                        chat.cache=Some(b.rows_extend(expanded.map(|v|&*v.0),held,&new,packed_words,room)?);return Ok(0);
                     }
                     // Only rows some token selected. Selected rows are pure, so they
                     // need no order among themselves. New IDs point into this matrix.
@@ -860,7 +946,7 @@ impl<'f,C:Compute> Decoder<'f,C> {
                     // extend the retained prefix or publish the temporary selected union.
                     let held=expanded.map(|v|v.1).unwrap_or(0);
                     let host=std::time::Instant::now();
-                    let (rows,chosen,cached)=expansion_rows(&selected,slots,last as usize,held)?;
+                    let (rows,chosen,cached)=expansion_rows(&chat.selected,slots,last as usize,held)?;
                     if let Some(most)=self.forced_union.get() {self.forced_union.set(Some(most.max(rows.len())));}
                     b.plan_cost("prompt_selection",host.elapsed().as_nanos());
                     let mut cache_values=b.rows_reserve(rows.len()*packed_words)?;
@@ -876,7 +962,7 @@ impl<'f,C:Compute> Decoder<'f,C> {
                     // What the memo is seeded with: the rows the LAST token of the prompt selected. The first decode token
                     // selects nearly the same rows. The whole union of a 256-token group is most of a long prompt's rows.
                     let seed=if self.memo_seed.get() {
-                        let row=&selected[(m-1)*words..m*words];let mut ids=row[..(row[slots] as usize).min(slots)].iter().map(|&v|v as u32).collect::<Vec<_>>();
+                        let row=&chat.selected[(m-1)*words..m*words];let mut ids=row[..(row[slots] as usize).min(slots)].iter().map(|&v|v as u32).collect::<Vec<_>>();
                         ids.sort_unstable();Some(ids)
                     } else {None};
                     if cached<rows.len() {
@@ -896,49 +982,38 @@ impl<'f,C:Compute> Decoder<'f,C> {
                             }
                             at+=count;}
                     }
-                    cache_rows=rows.len() as u64;cache=Some(cache_values);
+                    chat.cache_rows=rows.len() as u64;chat.cache=Some(cache_values);
                     let host=std::time::Instant::now();
-                    for row in selected.chunks_exact_mut(words) {let count=row[slots] as usize;for v in &mut row[..count] {*v=chosen[*v as usize] as f32;}}
+                    for row in chat.selected.chunks_exact_mut(words) {let count=row[slots] as usize;for v in &mut row[..count] {*v=chosen[*v as usize] as f32;}}
                     b.plan_cost("prompt_selection",host.elapsed().as_nanos());
-                    values.insert("selected".to_owned(),b.upload(&selected)?);},
+                    values.insert("selected".to_owned(),b.upload(&chat.selected)?);},
                 Kind::Scores|Kind::Softmax|Kind::Values=>{let TokenMixer::LatentAttention(a)=d.layers[layer].mixer else {return Err("attention requires a latent layer".into());};
                     let i=a.indexer;let slots=i.token_budget+if i.select_tail {i.pool-1} else {0};
                     let mut s=row_shape(match step.kind {Kind::Scores=>Row::ScoresRowsPacked,Kind::Softmax=>Row::SoftmaxRows,_=>Row::ValuesRowsPacked},m)?;
                     let layout=self.sparse_layout(layer)?;
-                    s.heads=number(layout.local_heads() as u64)?;s.dim=number(a.key_dim)?;s.taps=number(a.value_dim)?;s.rows=number(cache_rows)?;s.cols=number(slots.min(last))?;s.slots=number(slots)?;
+                    s.heads=number(layout.local_heads() as u64)?;s.dim=number(a.key_dim)?;s.taps=number(a.value_dim)?;s.rows=number(chat.cache_rows)?;s.cols=number(slots.min(last))?;s.slots=number(slots)?;
                     // Order score chains by row, so tokens reading one key share its lines.
                     let mut table=Vec::new();let mut map=Vec::new();
                     if step.kind==Kind::Scores {let count=slots as usize;
                         // Tiles compute all pairs, so a small union takes a map from pair to slot.
-                        if cache_rows as usize<=SCORE_MAP_ROWS {map=score_map(&selected,count,cache_rows as usize,m);}
+                        if chat.cache_rows as usize<=SCORE_MAP_ROWS {map=score_map(&chat.selected,count,chat.cache_rows as usize,m);}
                         if map.is_empty() {
-                            for (token,row) in selected.chunks_exact(count+1).enumerate() {for (slot,&id) in row[..row[count] as usize].iter().enumerate() {table.push((id as u32,token as u32,slot as u32));}}
+                            for (token,row) in chat.selected.chunks_exact(count+1).enumerate() {for (slot,&id) in row[..row[count] as usize].iter().enumerate() {table.push((id as u32,token as u32,slot as u32));}}
                             table.sort_unstable();s.first=number(table.len() as u64)?;
                         } else {s.op=Row::ScoresMapPacked;}
                     }
                     let order=if !map.is_empty() {Some(b.upload(&map)?)} else if table.is_empty() {None} else {Some(b.upload(&table.iter().flat_map(|e|[e.0 as f32,e.1 as f32,e.2 as f32]).collect::<Vec<_>>())?)};
-                    let selected=values.get("selected").ok_or("prompt selection is absent")?;let e=cache.as_ref().ok_or("prompt expanded rows are absent")?;
+                    let selected_value=values.get("selected").ok_or("prompt selection is absent")?;let e=chat.cache.as_ref().ok_or("prompt expanded rows are absent")?;
                     let value=match step.kind {
-                        Kind::Scores=>{let query=self.local_query(&values[&step.inputs[0]],m,layout)?;b.prompt(s,[Some(&query),Some(e),Some(selected),order.as_ref(),None],&[])?},
-                        Kind::Softmax=>b.prompt(s,[Some(&values[&step.inputs[0]]),Some(selected),None,None,None],&[])?,
-                        _=>b.prompt(s,[Some(&values[&step.inputs[0]]),Some(e),Some(selected),None,None],&[])?,
+                        Kind::Scores=>{let query=self.local_query(&values[&step.inputs[0]],m,layout)?;b.prompt(s,[Some(&query),Some(e),Some(selected_value),order.as_ref(),None],&[])?},
+                        Kind::Softmax=>b.prompt(s,[Some(&values[&step.inputs[0]]),Some(selected_value),None,None,None],&[])?,
+                        _=>b.prompt(s,[Some(&values[&step.inputs[0]]),Some(e),Some(selected_value),None,None],&[])?,
                     };
                     let value=if step.kind==Kind::Values {b.gather_attended(&value,m,layout)?} else {value};
                     values.insert(step.outputs[0].name.clone(),value);},
                 _=>return Err(format!("{}: prompt row operation is unsupported",step.id)),
             }
-        }
-        let names=match d.layers[layer].mixer {
-            TokenMixer::Kda(_)=>vec![("kda.history","next_history"),("kda.state","next_state")],
-            // The complete pools ride with the state, as in the step path.
-            TokenMixer::LatentAttention(_)=>vec![("latent_cache","next_latent_cache"),("index_keys","next_index_keys"),("index_gates","next_index_gates"),("pool_keys","pool_keys")],
-        };
-        need(skip==0,"prompt layer cut is inside a stage")?;
-        let output=values.remove(cut.map_or("output",|cut|cut.1)).ok_or("prompt layer has no output")?;let mut next=BTreeMap::new();
-        for (input,name) in names {next.insert(input.into(),values.remove(name).ok_or("prompt layer has no next state")?);}
-        let kept=match (kept_conv,kept_step) {(Some((conv,history)),Some((step,decay,state)))=>Some(KeptRows {conv,history,step,decay,state}),_=>None};
-        need(!keep || kept.is_some()==matches!(d.layers[layer].mixer,TokenMixer::Kda(_)),"recurrent layer kept no rows")?;
-        Ok((output,next,if persist {cache} else {None},kept))
+        Ok(0)
     }
     /// One step of a layer for `m` rows, when the step reads no history of a chat: each row's
     /// result then depends on that row alone. The rows may be consecutive tokens of one chat (a
@@ -981,19 +1056,16 @@ impl<'f,C:Compute> Decoder<'f,C> {
                 let (_,_,_,words)=s.lengths().ok_or("invalid prompt route shape")?;
                 let result=b.prompt(RowShape::wrapped(s,m).ok_or("prompt row count exceeds ABI")?,[Some(&values[&step.inputs[0]]),None,None,None,None],&weight)?;
                 let k=s.cols as usize;
-                if b.routes_rows(m) {
-                    // ROUTE ROWS: the picks stay on the device. Each row's IDs and weights are the first 2k words of its
-                    // route row; two joins of ranges make the two planes the expert steps and the fold read. No read.
+                {
+                    // IDs and weights are the first 2k words of each route row.
+                    // Two ordered joins extract their planes without reading the
+                    // raw routing result or any selected ID on the host.
                     need(b.words(&result)==m*words,"prompt route extent differs")?;
                     for (output,first) in [(0,0),(1,k)] {
                         let parts=(0..m).map(|token|b.range(&result,token*words+first,k)).collect::<Result<Vec<_>>>()?;
                         values.insert(step.outputs[output].name.clone(),b.join(&parts.iter().collect::<Vec<_>>())?);
                     }
-                } else {
-                let routes=b.read(&result)?;need(routes.len()==m*words,"prompt route extent differs")?;
-                let mut ids=Vec::with_capacity(m*k);let mut chosen=Vec::with_capacity(m*k);
-                for row in routes.chunks_exact(words) {ids.extend_from_slice(&row[..k]);chosen.extend_from_slice(&row[k..2*k]);}
-                values.insert(step.outputs[0].name.clone(),b.upload_known(&ids)?);values.insert(step.outputs[1].name.clone(),b.upload(&chosen)?);}},
+                }},
             // ROWS FOLD: a routed down step that its fold can take (`rows_fold_waits`) runs at the fold step, below.
             Kind::ExpertDown if self.rows_fold_waits(layer,index,plan,m,values)=>{fold.waits=true;fold.grouped=false;fold.shared=None;},
             // GROUP FOLD: the grouped down step of a prompt group that its fold can take (`rows_group_fold_waits`) runs at
@@ -1043,9 +1115,11 @@ impl<'f,C:Compute> Decoder<'f,C> {
     /// (`prompt_admission::GROUP_MAX`) runs them in runs of that many tokens, each with the history after the run before it, as
     /// consecutive groups do: the device has its convolution kernel for runs of that size, and one launch for all tokens would
     /// take the slow generic kernel. A token reads only the rows before it, through the history, so the bits are equal.
+    /// ONE LAUNCH: a run of a swept big size (512, 768 or 1,024 tokens, `prompt_admission::conv_whole`) has that kernel for
+    /// all its tokens, so it takes one launch and one history, and no join copies the convolved plane.
     fn conv_rows(&self,s:RowShape,x:[Option<&C::Value>;5],weight:&[f32])->Result<(C::Value,C::Value)> {
         let b=&self.compute;let (m,run_rows)=(s.tokens as usize,spark_gpu_probe::prompt_admission::GROUP_MAX);
-        if m<=run_rows {return Ok((b.prompt(s,x,weight)?,b.prompt(RowShape {op:Row::HistoryRows,..s},x,&[])?));}
+        if m<=run_rows || spark_gpu_probe::prompt_admission::conv_whole(s) {return Ok((b.prompt(s,x,weight)?,b.prompt(RowShape {op:Row::HistoryRows,..s},x,&[])?));}
         let width=(s.heads as usize).checked_mul(s.dim as usize).ok_or("convolution row width overflow")?;
         let planes=[x[0].ok_or("convolution rows are absent")?,x[1].ok_or("convolution rows are absent")?,x[2].ok_or("convolution rows are absent")?];
         let mut history:Option<C::Value>=None;let mut parts=Vec::with_capacity(m.div_ceil(run_rows));let mut first=0;
@@ -1198,6 +1272,7 @@ impl<'f,C:Compute> Decoder<'f,C> {
     /// of one expert become contiguous, in ascending expert order. The statements `experts_group` always ran first.
     fn expert_tables(&self,plan:&LayerPlan,step:&engine_model::plan::layer::Step,m:usize,values:&BTreeMap<String,C::Value>)->Result<ExpertTables> {
         let b=&self.compute;
+        spark_gpu_probe::prompt_launches::record("prompt_route_host");
         let ids=b.read(&values[&step.inputs[1]])?;let k=step.outputs[0].shape[0] as usize;need(ids.len()==m*k,"prompt route count differs")?;
         let host=std::time::Instant::now();
         let mut groups:BTreeMap<usize,Vec<usize>>=BTreeMap::new();
@@ -1228,6 +1303,25 @@ impl<'f,C:Compute> Decoder<'f,C> {
     fn experts_group(&self,index:usize,plan:&LayerPlan,m:usize,values:&mut BTreeMap<String,C::Value>,fold:Option<(usize,Shape,Option<&C::Value>)>,ahead:Option<(usize,&mut RowsFold<C::Value>)>)->Result<usize> {
         let b=&self.compute;let step=&plan.steps[index];
         if b.routes_rows(m) && let Some(done)=self.experts_routed(index,plan,m,values)? {return Ok(done);}
+        // Both native stages precede the legacy host table read. A private
+        // middle must be consumed here or fail; it never enters that fallback.
+        // Only a pass whose down step waits for its fold (GROUP FOLD: `fold.group`) consumes it: a pass that keeps
+        // rows (`prefill_rows_open`) runs its down step alone, which reads whole rows, so its gate stays legacy.
+        if step.id=="expert_gate" && ahead.as_ref().is_some_and(|(_,state)|state.group) && let Some(links)=self.fold_links(plan.layer,plan).filter(|links|plan.steps[links.down].kind==Kind::ExpertDown) {
+            if let (Some(up),Some(swiglu))=(plan.steps.get(index+1),plan.steps.get(index+2)) && up.id=="expert_up" && swiglu.kind==Kind::SwiGlu {
+                let shared=links.shared.and_then(|(at,_)|plan.steps[at].weights.first()).map(|w|w.name.as_str());
+                let steps=[step.clone(),up.clone(),plan.steps[links.down].clone()];
+                if let Some(mut made)=b.rows_experts_device_wide(&steps,self.checkpoint.description().swiglu_limit as f32,&[(m,&values[&step.inputs[0]],&values[&step.inputs[1]])],(self.expert_fold_shape(plan,&plan.steps[links.fold])?,shared))? {
+                    need(made.len()==1,"device expert result count differs")?;values.insert("expert_middle_grouped".to_owned(),made.pop().unwrap());return Ok(2);
+                }
+            }
+        }
+        if step.kind==Kind::ExpertDown && let Some((sum,shape,kept))=fold && let Some(middle)=values.get("expert_middle_grouped") {
+            let sum=&plan.steps[sum];
+            if let Some(mut made)=b.rows_experts_fold_device_wide(step,&[(m,middle,&values[&sum.inputs[0]],&values[&sum.inputs[1]],sum.inputs.get(3).and(kept))],shape)? {
+                need(made.len()==1,"device fold result count differs")?;values.remove("expert_middle_grouped");values.insert(sum.outputs[0].name.clone(),made.pop().unwrap());return Ok(0);
+            }
+        }
         let ExpertTables {groups,spans,order,grouped,placed}=self.expert_tables(plan,step,m,values)?;let k=step.outputs[0].shape[0] as usize;
         let width=step.weights[0].shape[1] as usize;let out_width=step.weights[0].shape[0] as usize;let down=step.kind==Kind::ExpertDown;
         let permute=|source:&C::Value,table:&[f32],rows:usize,cols:usize,from:usize|->Result<C::Value> {

@@ -70,7 +70,7 @@ mod gpu {
             let t:Vec<_>=line.split_whitespace().collect();let p=root.join(t[0]);let z:Vec<u32>=t[1..].iter().map(|s|s.parse().unwrap()).collect();let (n,k,m,round)=(z[0],z[1],z[2],z[3]);
             let w=upload(b,&p.join("w"))?;let s=upload(b,&p.join("s"))?;let x=upload(b,&p.join("x"))?;let xf=upload(b,&p.join("xf"))?;let y=b.vector((n*m) as usize)?; cases.push((p,n,k,m,round,w,s,x,xf,y));
         }
-        for input_bf16 in [1,0] { for subset in [0..5,5..9] {let mut l=MxLayer::default();for c in &cases[subset.clone()] {l.push(MxProjection{weights:c.5.device_address(),scales:c.6.device_address(),input:if input_bf16==1{c.7.device_address()}else{c.8.device_address()},output:c.9.device_address(),rows:c.1,cols:c.2,tokens:c.3,input_bf16,round:c.4}).map_err(str::to_string)?;}
+        for input_bf16 in [1,0] { for subset in [0..5,5..9] {let mut l=MxLayer::default();for c in &cases[subset.clone()] {l.push(MxProjection{weights:c.5.device_address(),scales:c.6.device_address(),input:if input_bf16==1{c.7.device_address()}else{c.8.device_address()},output:c.9.device_address(),rows:c.1,cols:c.2,tokens:c.3,input_bf16,round:c.4,mode:0}).map_err(str::to_string)?;}
             for _ in 0..2 {unsafe{b.launch_flash_shared(l.projections[0].kernel(),l.ends[l.count as usize],128,0,&mut[(&mut l as *mut MxLayer).cast()])?;} for c in &cases[subset.clone()] {equal(b,&c.9,&c.0.join("y"))?;}}
         } }
         for c in &cases {let w=std::fs::read(c.0.join("w")).map_err(|e|e.to_string())?;let scales=std::fs::read(c.0.join("s")).map_err(|e|e.to_string())?;let x=b.read_vector(&c.8)?;let y=b.read_vector(&c.9)?;let (mut max_ref,mut max_err)=(0.0f64,0.0f64);

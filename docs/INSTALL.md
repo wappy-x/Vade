@@ -627,7 +627,7 @@ has these files:
 | File | What it is |
 | --- | --- |
 | `vade`, `flash-serve`, `vade-harness` | Linux aarch64 programs |
-| `flash.ptx` | The GPU kernels as PTX for `sm_121` (the GB10) |
+| `flash.ptx` | The GPU kernels as PTX for `sm_121a` (the GB10) |
 | `launcher-bundle.conf` | The launcher record that `vade install` reads ([bundle details](../cli/docs/prebuilt.md)) |
 | `MANIFEST` | The commit, its date, the target, the PTX ISA version, the oldest driver and glibc, and the SHA-256 hash of every file |
 | `README-BUNDLE` | Short instructions |

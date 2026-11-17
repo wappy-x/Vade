@@ -1,7 +1,7 @@
 //! Bounded causal recipe interpreter. Full service admission stays separate.
 #![allow(clippy::chunks_exact_to_as_chunks, clippy::collapsible_if, clippy::needless_borrow, clippy::needless_late_init, reason = "kept as on main while lane-byte-cut edits this file; fix after it merges")]
 use crate::{Result,causal_layer,mxfp8_projection::Mxfp8Projection,layer_driver::LayerBoundary};
-use engine_model::{plan::{admission::CheckpointAdmission,layer::{Kind,LayerPlan,LayerSchedule,Topology},state::StatePlan,storage::WeightStorage,description::TokenMixer},safetensors::Dtype,flash::nvfp4};
+use engine_model::{plan::{admission::CheckpointAdmission,layer::{Kind,LayerPlan,LayerSchedule,Topology},state::StatePlan,storage::WeightStorage,description::TokenMixer},safetensors::Dtype};
 use spark_gpu_probe::{causal_ops::{Shape,Op},norm_boundary::{NormShape,WeightType}};
 use std::{cell::RefCell,collections::BTreeMap,rc::Rc};
 #[path="bounded_decoder/parameters.rs"] mod parameters;
@@ -25,6 +25,11 @@ pub(crate) fn greedy_logits(logits:&[f32],words:usize)->Result<u32> {
     let mut best=(logits[0],0);for (id,&value) in logits.iter().enumerate().skip(1) {
         best=spark_gpu_probe::next_math::better(best,(value,u32::try_from(id).map_err(|_|"bounded logits ID overflow")?));
     }Ok(best.1)
+}
+/// DRAFT CONFIDENCE: `greedy_logits` and the probability of its pick under the softmax of `logits`.
+pub(crate) fn greedy_logits_mass(logits:&[f32],words:usize)->Result<(u32,Option<f32>)> {
+    let pick=greedy_logits(logits,words)?;let best=f64::from(logits[pick as usize]);
+    let mass=logits.iter().map(|&value|(f64::from(value)-best).exp()).sum::<f64>();Ok((pick,Some((1.0/mass) as f32)))
 }
 /// CHAIN-SHADOW target: the first static projection that reads the normalized output of the
 /// mHC boundary at `boundary` (its prepare, collapse and norm steps), before the next boundary.
@@ -156,6 +161,12 @@ pub trait Compute {
     fn greedy_projection(&self,c:&CheckpointAdmission,name:&str,x:&Self::Value)->Result<u32> {
         let head=Mxfp8Projection::matrix(c,name,WeightType::F32)?;let values=self.mx(&head,x)?;
         greedy_logits(&self.read(&values)?,head.shape().rows())
+    }
+    /// DRAFT CONFIDENCE: `greedy_projection` and the probability of its pick, a score for the draft head's proposals
+    /// (None where the backend makes none). The pick is `greedy_projection`'s.
+    fn greedy_projection_mass(&self,c:&CheckpointAdmission,name:&str,x:&Self::Value)->Result<(u32,Option<f32>)> {
+        let head=Mxfp8Projection::matrix(c,name,WeightType::F32)?;let values=self.mx(&head,x)?;
+        greedy_logits_mass(&self.read(&values)?,head.shape().rows())
     }
     fn projection_rows(&self,_:&CheckpointAdmission,_:&str,_:&[&Self::Value],_:bool)->Result<Option<Vec<Self::Value>>> {Ok(None)}
     fn projection_batch(&self,_:&CheckpointAdmission,_:&[(&str,&Self::Value)],_:bool)->Result<Option<Vec<Self::Value>>> {Ok(None)}
@@ -334,12 +345,30 @@ pub trait Compute {
     /// None, before any launch: the caller calls `rows_experts_gathered` for each set.
     #[allow(clippy::type_complexity)] // the arguments of `rows_experts_gathered`, a tuple a set.
     fn rows_experts_gathered_wide(&self,_sets:&[(&[(&str,usize)],&[(&str,usize)],f32,&Self::Value,&[f32],&[f32])])->Result<Option<Vec<Self::Value>>> {Ok(None)}
+    /// PACKED MIDDLE: `rows_experts_gathered_wide` when the ONLY reader of each set's result is `rows_experts_fold_wide`
+    /// with the down list `down[set]` (the caller passes each result to that call as its source and to nothing else).
+    /// A compute may then give each result in a private form of that fold: the device sends each rank's packed operand
+    /// bytes of the down products (4-bit codes and scale codes) over the link in place of FP32 words, and the fold's
+    /// product launch reads them. `reader` gives the actual fold shape and its shared projection's name, so a device
+    /// checks the fold admission and local shared-row ownership before packing.
+    /// The fold's words are the words of the plain form. Default: the plain form.
+    #[allow(clippy::type_complexity)] // the arguments of `rows_experts_gathered`, a tuple a set.
+    fn rows_experts_gathered_wide_for(&self,sets:&[(&[(&str,usize)],&[(&str,usize)],f32,&Self::Value,&[f32],&[f32])],_down:&[&[(&str,usize)]],_reader:(Shape,Option<&str>))->Result<Option<Vec<Self::Value>>> {self.rows_experts_gathered_wide(sets)}
     /// WIDE COHORT: `rows_experts_fold` for the down step of TWO OR MORE row sets, with ONE launch of the routed expert
     /// products for all the sets. Each set is (down list, source, places, ids, weights, shared, fold, m), as
     /// `rows_experts_fold` takes them. One result a set, each the words its own `rows_experts_fold` gives.
     /// None, before any launch: the caller calls `rows_experts_fold` for each set.
     #[allow(clippy::type_complexity)] // the arguments of `rows_experts_fold`, a tuple a set.
     fn rows_experts_fold_wide(&self,_sets:&[(&[(&str,usize)],&Self::Value,&[f32],&Self::Value,&Self::Value,Option<&Self::Value>,Shape,usize)])->Result<Option<Vec<Self::Value>>> {Ok(None)}
+    /// Build stable expert tables on the device. Sets hold (rows, source, IDs).
+    /// The private middle belongs only to the matching down/fold call. None
+    /// refuses the complete stage before any route or product is submitted.
+    #[allow(clippy::type_complexity)]
+    fn rows_experts_device_wide(&self,_steps:&[engine_model::plan::layer::Step],_bound:f32,_sets:&[(usize,&Self::Value,&Self::Value)],_reader:(Shape,Option<&str>))->Result<Option<Vec<Self::Value>>> {Ok(None)}
+    /// Consume the private middle with the same immutable route owner. Sets
+    /// hold (rows, middle, IDs, route weights, local shared rows).
+    #[allow(clippy::type_complexity)]
+    fn rows_experts_fold_device_wide(&self,_down:&engine_model::plan::layer::Step,_sets:&[(usize,&Self::Value,&Self::Value,&Self::Value,Option<&Self::Value>)],_fold:Shape)->Result<Option<Vec<Self::Value>>> {Ok(None)}
     /// After a batch step's first routed layer read `picks` total picks across `distinct` experts: sparse sharing
     /// (`picks < 2 * distinct`, below the tensor-core cohort admission line of `expert_group_launch`) switches the
     /// step's remaining routed layers to `rows_routed`; dense sharing keeps the grouped tensor-core form (`nv_rows_tc`).
@@ -698,10 +727,12 @@ impl<'f,C:Compute> Decoder<'f,C> {
         let value=match u.storage {
             WeightStorage::Plain=>self.compute.operation(s,[Some(input),None,None,None],&plain(c,name)?)?,
             WeightStorage::Fp8Block {block}=>{
-                let scales=u.scales.chunks_exact(4).map(|b|f32::from_le_bytes(b.try_into().unwrap())).collect::<Vec<_>>();
-                let (br,bc)=(block[0] as usize,block[1] as usize);let grid=cols.div_ceil(bc);
-                let weight=u.weight.iter().enumerate().map(|(i,&v)|nvfp4::e4m3(v)*scales[(i/cols/br)*grid+i%cols/bc]).collect::<Vec<_>>();
-                self.compute.operation(s,[Some(&self.compute.round(input)?),None,None,None],&weight)?
+                // TENSOR-CORE REBASE (block FP8): the contract word of the format, computed on the host from the checkpoint's
+                // bytes (`matrix_role::fp8_host_product`): the word the resident kernels give for this matrix on every path.
+                // It is rounded to BF16, as on the device. (The one chain of scaled weights of `causal_ops::Op::Project`
+                // is not used.)
+                let word=crate::matrix_role::fp8_host_product(rows,cols,&u.weight,&u.scales,block[0] as usize,block[1] as usize,&self.compute.read(input)?)?;
+                self.compute.upload(&word)?
             },
             WeightStorage::Nvfp4 {..}=>{
                 // TENSOR-CORE REBASE: the contract word of the matrix role, computed on the host from the packed bytes
@@ -1172,14 +1203,14 @@ impl<'f,C:Compute> Decoder<'f,C> {
 #[path="bounded_decoder/batch.rs"] mod batch;
 pub use batch::{BATCH_ROWS,BATCH_MIN_ROWS,BATCH_PAIR_ROWS,expert_union_counts,chat_attention_layers};
 pub use rows::{absorbed_chat_words,expanded_row_words,group_workspace_bytes_with,LatentRows};
-pub use rows::{absorbed_group_words,full_memo_ballast,HeadRows,PROMPT_GROUP,PROMPT_GROUP_MAX,PROMPT_GROUP_LEASE,lease_groups,PROMPT_GROUP_CHECK,PROMPT_SHARED,ROW_STAGE_ROWS,RESERVED_ROWS,HELD_ROOM,POOL_ROOM,DECODE_RESERVE,DECODE_RETURNS,MEMO_KEEP,trims_spares_first,group_pool_cap,PROJECTION_MEMO_BYTES,expanded_bytes,group_workspace_bytes,group_workspace_bytes_for,OpenRows};
+pub use rows::{absorbed_group_words,full_memo_ballast,HeadRows,PROMPT_GROUP,PROMPT_GROUP_MAX,PROMPT_GROUP_LEASE,lease_groups,PROMPT_GROUP_CHECK,PROMPT_SHARED,ROW_STAGE_ROWS,RESERVED_ROWS,HELD_ROOM,POOL_ROOM,DECODE_RESERVE,DECODE_RETURNS,MEMO_KEEP,trims_spares_first,group_pool_cap,PROJECTION_MEMO_BYTES,expanded_bytes,group_workspace_bytes,group_workspace_bytes_for,OpenRows,SharedRows};
 mod indirect;
 #[path="bounded_decoder/projection_stage.rs"] mod projection_stage;
 #[cfg(any(target_os="linux",test))] #[path="bounded_decoder/held.rs"] mod held;
 #[path="bounded_decoder/proposer.rs"] mod proposer;
 pub use proposer::{PROPOSER_HIDDEN,PredictorState};
 #[path="bounded_decoder/verify.rs"] mod verify;
-pub use verify::{Verify,CARRIED_ROWS,VERIFY_ROWS,TRAIL_ROWS,PROMPT_TRAIL,SEED_PASS_ROWS,SEED_ROOM,learned_pass_ms};
+pub use verify::{Verify,CARRIED_ROWS,VERIFY_ROWS,TRAIL_ROWS,PROMPT_TRAIL,SEED_PASS_ROWS,SEED_ROOM,learned_pass_ms,shared_pass};
 #[path="bounded_decoder/host.rs"] mod host;
 pub use host::Host;
 #[cfg(test)] pub(crate) use host::shadow_fixture::Checkpoint as TestCheckpoint;

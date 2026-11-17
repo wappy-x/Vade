@@ -36,7 +36,7 @@ impl Driver for Fake {
     fn error(&self, code: i32) -> String { format!("prebuilt cubin load: {code}") }
     fn notice(&mut self, message: &str) { self.notices.push(message.into()); }
 }
-const ORIGINAL: &CStr = c"// exact original PTX\n.version 8.8\n.target sm_121\n";
+const ORIGINAL: &CStr = c"// exact original PTX\n.version 8.8\n.target sm_121a\n";
 const CUBIN: &[u8] = b"compiler image";
 fn image() -> Option<Image<'static>> {
     Some(Image { bytes: CUBIN, ptx: ORIGINAL.to_bytes(), minimum_driver: 13000 })
@@ -48,7 +48,7 @@ fn successful_cubin_load_transfers_only_the_compiled_handle() {
     let mut driver = Fake::default();
     assert_eq!(load(&mut driver, ORIGINAL, image(), false, false).unwrap(), Loaded { handle: 10, receipt: None });
     assert_eq!(driver.calls, [Call::Query, Call::Cubin(CUBIN.to_vec())]);
-    assert_eq!(driver.notices, ["gpu_backend module=prebuilt_cubin target=sm_121"]);
+    assert_eq!(driver.notices, ["gpu_backend module=prebuilt_cubin target=sm_121a"]);
 }
 
 #[test]

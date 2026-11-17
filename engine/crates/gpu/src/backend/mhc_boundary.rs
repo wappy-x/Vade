@@ -106,11 +106,11 @@ impl Drop for Hosted<'_,'_> {fn drop(&mut self) {self.link.queue.release(self.ta
 struct Fused<'a> {strips:DeviceVector<'a>,scratch:DeviceVector<'a>,bf16:bool,
     /// Bench timing: GPU marks right before and after each launch (after the pass's planes are made).
     timed:std::cell::Cell<u32>,marks:std::cell::RefCell<Vec<(GpuMark<'a>,GpuMark<'a>)>>}
-pub struct ResidentMhcBoundary<'b,'a> {backend:&'b Backend<'a>,shape:Shape,norm:NormShape,parameters:Rc<Parameters<'a>>,host:Option<(MhcHostLink<'b,'a>,Arc<HostBoundary>)>,fused:Option<Rc<Fused<'a>>>}
+pub struct ResidentMhcBoundary<'b,'a> {backend:&'b Backend<'a>,shape:Shape,norm:NormShape,parameters:Rc<Parameters<'a>>,host:Option<(MhcHostLink<'b,'a>,Arc<HostBoundary>)>,fused:Option<Rc<Fused<'a>>>,mixing_output:bool}
 /// All inputs, parameter planes and prior passes survive queued execution.
 pub struct MhcBoundaryPass<'b,'a> {
     backend:&'b Backend<'a>,shape:Shape,parameters:Rc<Parameters<'a>>,
-    source:Rc<DeviceVector<'a>>,residual:Rc<DeviceVector<'a>>,mixing:DeviceVector<'a>,
+    source:Rc<DeviceVector<'a>>,residual:Rc<DeviceVector<'a>>,mixing:Option<DeviceVector<'a>>,
     coefficients:DeviceVector<'a>,collapsed:DeviceVector<'a>,partials:DeviceVector<'a>,output:Rc<DeviceVector<'a>>,
     previous:Option<Box<MhcBoundaryPass<'b,'a>>>,
     /// Some: the host lane computed this pass. Only `output` is on the device until `deliver`.
@@ -123,10 +123,10 @@ impl<'a> Backend<'a> {
             || base.len()!=shape.coefficients() || scale.len()!=3 || weights.iter().chain(base).chain(scale).any(|value| !value.is_finite()) {
             return Err("mHC boundary parameter geometry or value differs".into());
         }
-        self.require_arm_kernels(&["mhc_boundary_project","mhc_boundary_rms","mhc_boundary_dots","mhc_boundary_finish","mhc_bf16_combine","mhc_project_tile","mhc_residual_rows"])?;
+        self.require_arm_kernels(&["mhc_boundary_project","mhc_boundary_rms","mhc_boundary_dots","mhc_boundary_finish","mhc_bf16_combine","mhc_project_tile","mhc_residual_rows","mhc_boundary_block"])?;
         let parameters=Rc::new(Parameters {weights:self.upload_vector(weights)?,base:self.upload_vector(base)?,
             scale:self.upload_vector(scale)?,norm:self.upload_vector(norm_weight)?});self.synchronize()?;
-        Ok(ResidentMhcBoundary {backend:self,shape,norm,parameters,host:None,fused:None})
+        Ok(ResidentMhcBoundary {backend:self,shape,norm,parameters,host:None,fused:None,mixing_output:true})
     }
     /// The same boundary with the host lane for its passes of one row, and of 2 to 8 rows (the chats of a batched
     /// decode step) when the mailbox slot holds that many residual planes: the same planes, bit for bit
@@ -142,6 +142,10 @@ impl<'a> Backend<'a> {
     }
 }
 impl<'b,'a> ResidentMhcBoundary<'b,'a> {
+    /// Omit the unused mixing output on block prompt boundaries. Other entries retain their full planes.
+    /// Residuals, coefficients, collapsed rows and normalized outputs keep the same words.
+    /// `mixing_normalized` returns an error for a pass that omitted this output.
+    pub fn without_mixing_output(mut self)->Self {self.mixing_output=false;self}
     /// Add the fused form to this boundary. `weights` must be the same rows the boundary was made
     /// with (the strip copy is built from them). BF16 strips when every weight is an exact BF16 value and
     /// the strip fits the shared stage, FP32 strips otherwise. Same planes, same bits as `begin`.
@@ -213,7 +217,7 @@ impl<'b,'a> ResidentMhcBoundary<'b,'a> {
         let one=Shape {rows:1,..shape};let rows=shape.rows as usize;
         if !crate::mhc_params::fused_admitted(one) || rows==0 || rows>crate::mhc_params::FUSED_ROWS_MAX {return Err("the fused mHC boundary does not admit this shape".into());}
         let (wide,count,hidden)=(one.wide(),one.coefficients(),one.hidden as usize);let chunks=hidden.div_ceil(128);
-        let pass=MhcBoundaryPass {backend,shape,parameters:self.parameters.clone(),source,residual,mixing:backend.vector(rows*wide)?,
+        let pass=MhcBoundaryPass {backend,shape,parameters:self.parameters.clone(),source,residual,mixing:Some(backend.vector(rows*wide)?),
             coefficients:backend.vector(rows*count)?,collapsed:backend.vector(rows*hidden)?,partials:backend.vector(rows*chunks)?,
             output:Rc::new(backend.vector(rows*hidden)?.into_resident_shared()?),previous,hosted:None};
         // A fused pass after a hosted one reads the last residual and coefficients on the device.
@@ -221,7 +225,7 @@ impl<'b,'a> ResidentMhcBoundary<'b,'a> {
         let strip_words=crate::mhc_params::FUSED_BLOCKS*wide.div_ceil(256)*count*if fused.bf16 {4} else {8};
         // Every row-major plane is checked at its whole extent (`rows` rows): exact length, context, no alias, private outputs.
         // mhc_params::fused_row then gives each launch one row's words of each, so a launch stays inside its checked plane.
-        let mut vectors=vec![&*pass.source,&pass.parameters.base,&pass.parameters.scale,&pass.parameters.norm,&fused.strips,&*pass.residual,&pass.mixing,
+        let mut vectors=vec![&*pass.source,&pass.parameters.base,&pass.parameters.scale,&pass.parameters.norm,&fused.strips,&*pass.residual,pass.mixing_normalized()?,
             &pass.coefficients,&pass.collapsed,&pass.partials,&*pass.output,&fused.scratch];
         let mut lengths=vec![rows*if pass.previous.is_some() {hidden} else {wide},count,3,hidden,strip_words,rows*wide,rows*wide,rows*count,rows*hidden,rows*chunks,rows*hidden,crate::mhc_params::FUSED_SCRATCH_WORDS*crate::mhc_params::FUSED_ROWS_MAX];
         if let Some(previous)=&pass.previous {vectors.extend([&*previous.residual,&previous.coefficients]);lengths.extend([rows*wide,rows*count]);}
@@ -232,7 +236,7 @@ impl<'b,'a> ResidentMhcBoundary<'b,'a> {
         let boundary=Boundary {input:pass.source.device_address(),previous_input:pass.previous.as_ref().map_or(0,|previous|previous.residual.device_address()),
             previous_coefficients:pass.previous.as_ref().map_or(0,|previous|previous.coefficients.device_address()),residual:pass.residual.device_address(),
             weights:pass.parameters.weights.device_address(),base:pass.parameters.base.device_address(),scale:pass.parameters.scale.device_address(),
-            mixing_normalized:pass.mixing.device_address(),coefficients:pass.coefficients.device_address(),collapsed:pass.collapsed.device_address(),
+            mixing_normalized:pass.mixing_normalized()?.device_address(),coefficients:pass.coefficients.device_address(),collapsed:pass.collapsed.device_address(),
             norm_weight:pass.parameters.norm.device_address(),norm_partials:pass.partials.device_address(),output:pass.output.device_address(),shape:one,
             norm_epsilon:self.norm.epsilon(),norm_bf16:u32::from(self.norm.weight_type()==WeightType::Bf16),
             prefetch:0,prefetch_bytes:0,prefetch_policy:0,prefetch_reserved:0};
@@ -267,14 +271,14 @@ impl<'b,'a> ResidentMhcBoundary<'b,'a> {
             if shadow.finish.is_some_and(|range|!ptr::eq(range.context,backend.context)) {return Err("shadow range belongs to another context".into());}
         }
         let residual=Rc::new(residual);
-        let pass=MhcBoundaryPass {backend,shape,parameters:self.parameters.clone(),source:residual.clone(),residual,mixing:backend.vector(rows*wide)?,
+        let pass=MhcBoundaryPass {backend,shape,parameters:self.parameters.clone(),source:residual.clone(),residual,mixing:Some(backend.vector(rows*wide)?),
             coefficients,collapsed:backend.vector(rows*hidden)?,partials:backend.vector(rows*hidden.div_ceil(128))?,
             output:Rc::new(backend.vector(rows*hidden)?.into_resident_shared()?),previous:None,hosted:None};
         backend.mhc_planes(&[&pass.parameters.norm,&pass.residual,&pass.coefficients,&pass.collapsed,&pass.partials,&pass.output],
             &[hidden,rows*wide,rows*count,rows*hidden,rows*hidden.div_ceil(128),rows*hidden],2)?;
         let mut args=Boundary {input:pass.residual.device_address(),previous_input:0,previous_coefficients:0,residual:pass.residual.device_address(),
             weights:pass.parameters.weights.device_address(),base:pass.parameters.base.device_address(),scale:pass.parameters.scale.device_address(),
-            mixing_normalized:pass.mixing.device_address(),coefficients:pass.coefficients.device_address(),collapsed:pass.collapsed.device_address(),
+            mixing_normalized:pass.mixing_normalized()?.device_address(),coefficients:pass.coefficients.device_address(),collapsed:pass.collapsed.device_address(),
             norm_weight:pass.parameters.norm.device_address(),norm_partials:pass.partials.device_address(),output:pass.output.device_address(),shape,
             norm_epsilon:self.norm.epsilon(),norm_bf16:u32::from(self.norm.weight_type()==WeightType::Bf16),
             prefetch:0,prefetch_bytes:0,prefetch_policy:0,prefetch_reserved:0};
@@ -285,7 +289,7 @@ impl<'b,'a> ResidentMhcBoundary<'b,'a> {
     pub fn shape(&self)->Shape {self.shape}
     fn with_rows(&self,rows:usize)->Result<Self,String> {
         let shape=Shape {rows:u32::try_from(rows).map_err(|_|"mHC boundary row count exceeds u32")?,..self.shape};shape.validate()?;
-        Ok(Self {backend:self.backend,shape,norm:self.norm,parameters:self.parameters.clone(),host:self.host.clone(),fused:self.fused.clone()})
+        Ok(Self {backend:self.backend,shape,norm:self.norm,parameters:self.parameters.clone(),host:self.host.clone(),fused:self.fused.clone(),mixing_output:self.mixing_output})
     }
     pub fn begin_rows(&self,input:Rc<DeviceVector<'a>>,rows:usize)->Result<MhcBoundaryPass<'b,'a>,String> {self.with_rows(rows)?.begin(input)}
     pub fn begin_after_rows(&self,previous:MhcBoundaryPass<'b,'a>,block:Rc<DeviceVector<'a>>,residual:Rc<DeviceVector<'a>>,rows:usize)->Result<MhcBoundaryPass<'b,'a>,String> {
@@ -329,18 +333,21 @@ impl<'b,'a> ResidentMhcBoundary<'b,'a> {
                 if !ptr::eq(range.context,backend.context) {return Err("shadow range belongs to another context".into());}
             }
         }let shape=self.shape;let rows=shape.rows as usize;let wide=shape.wide();let count=shape.coefficients();let hidden=shape.hidden as usize;
-        let pass=MhcBoundaryPass {backend,shape,parameters:self.parameters.clone(),source,residual,mixing:backend.vector(rows*wide)?,
+        let mixing_words=(self.mixing_output || !crate::prompt_admission::mhc_block_admitted(shape)).then_some(rows*wide);
+        let pass=MhcBoundaryPass {backend,shape,parameters:self.parameters.clone(),source,residual,mixing:mixing_words.map(|words|backend.vector(words)).transpose()?,
             coefficients:backend.vector(rows*count)?,collapsed:backend.vector(rows*hidden)?,partials:backend.vector(rows*hidden.div_ceil(128))?,
             output:Rc::new(backend.vector(rows*hidden)?.into_resident_shared()?),previous,hosted:None};
-        let mut vectors=vec![&*pass.source,&pass.parameters.weights,&pass.parameters.base,&pass.parameters.scale,&*pass.residual,&pass.mixing,
+        let mut vectors=vec![&*pass.source,&pass.parameters.weights,&pass.parameters.base,&pass.parameters.scale,&*pass.residual,
             &pass.coefficients,&pass.collapsed,&pass.parameters.norm,&pass.partials,&*pass.output];
-        let mut lengths=vec![rows*if pass.previous.is_some() {hidden} else {wide},count*wide,count,3,rows*wide,rows*wide,rows*count,rows*hidden,hidden,rows*hidden.div_ceil(128),rows*hidden];
+        let mut lengths=vec![rows*if pass.previous.is_some() {hidden} else {wide},count*wide,count,3,rows*wide,rows*count,rows*hidden,hidden,rows*hidden.div_ceil(128),rows*hidden];
+        // The omitted plane has no allocation or device access. Validate every retained plane with the original checker.
+        if let Some(mixing)=&pass.mixing {vectors.insert(5,mixing);lengths.insert(5,rows*wide);}
         if let Some(previous)=&pass.previous {vectors.extend([&*previous.residual,&previous.coefficients]);lengths.extend([rows*wide,rows*count]);}
         backend.mhc_planes(&vectors,&lengths,4)?;
         let mut args=Boundary {input:pass.source.device_address(),previous_input:pass.previous.as_ref().map_or(0,|previous|previous.residual.device_address()),
             previous_coefficients:pass.previous.as_ref().map_or(0,|previous|previous.coefficients.device_address()),residual:pass.residual.device_address(),
             weights:pass.parameters.weights.device_address(),base:pass.parameters.base.device_address(),scale:pass.parameters.scale.device_address(),
-            mixing_normalized:pass.mixing.device_address(),coefficients:pass.coefficients.device_address(),collapsed:pass.collapsed.device_address(),
+            mixing_normalized:pass.mixing.as_ref().map_or(0,|mixing|mixing.device_address()),coefficients:pass.coefficients.device_address(),collapsed:pass.collapsed.device_address(),
             norm_weight:pass.parameters.norm.device_address(),norm_partials:pass.partials.device_address(),output:pass.output.device_address(),shape,
             norm_epsilon:self.norm.epsilon(),norm_bf16:u32::from(self.norm.weight_type()==WeightType::Bf16),
             prefetch:0,prefetch_bytes:0,prefetch_policy:0,prefetch_reserved:0};
@@ -377,6 +384,11 @@ impl<'b,'a> ResidentMhcBoundary<'b,'a> {
             let range=shadow.and_then(|shadow|shadow.finish);shadow_args(&mut args,range,evict_last);
             backend.mhc_launch("mhc_boundary_finish",shape,tail(range),&mut args)?;
             return Ok(pass);
+        } else if crate::prompt_admission::mhc_block_admitted(shape) {
+            // The same six planes and feature trees in one token-local block. Smaller groups keep the existing launches.
+            backend.mhc_launch("mhc_boundary_block",shape,0,&mut args)?;
+            crate::prompt_launches::record("prompt_big_group");
+            return Ok(pass);
         } else if crate::prompt_admission::mhc_tile_admitted(shape) {
             // Nine and more rows share one weight stream and one block with the same coefficient tree.
             backend.mhc_launch("mhc_residual_rows",shape,0,&mut args)?;
@@ -407,7 +419,9 @@ impl<'a> MhcBoundaryPass<'_,'a> {
     pub fn previous(&self)->Option<&Self> {self.previous.as_deref()}
     pub fn shape(&self)->Shape {self.shape}
     pub fn residual(&self)->&DeviceVector<'a> {&self.residual}
-    pub fn mixing_normalized(&self)->&DeviceVector<'a> {&self.mixing}
+    pub fn mixing_normalized(&self)->Result<&DeviceVector<'a>,String> {
+        self.mixing.as_ref().ok_or_else(||"this mHC pass omitted the unused mixing output".into())
+    }
     pub fn coefficients(&self)->&DeviceVector<'a> {&self.coefficients}
     pub fn collapsed(&self)->&DeviceVector<'a> {&self.collapsed}
     pub fn normalized(&self)->Rc<DeviceVector<'a>> {self.output.clone()}

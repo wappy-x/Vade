@@ -35,7 +35,7 @@ fn group(g:&mut Gpu,shapes:&[(usize,usize)],o:&Operands,tokens:usize,bf16:bool,r
     for (i,&(rows,cols)) in shapes.iter().enumerate() {
         let out=Buffer::new(g,&vec![f32::NAN;rows*tokens])?;out.poison(g)?;
         batch.layer.projections[i]=MxProjection {weights:o.weights[i],scales:if bf16 {2} else {4},input:reverse.map_or(o.inputs[i],|r|r[i]),output:out.address,
-            rows:rows as u32,cols:cols as u32,tokens:tokens as u32,input_bf16:0,round:0};
+            rows:rows as u32,cols:cols as u32,tokens:tokens as u32,input_bf16:0,round:0,mode:0};
         batch.layer.ends[i+1]=batch.layer.ends[i]+rows.div_ceil(4) as u32;batch.plain|=1<<i;outputs.push(out);
     }
     batch.layer.count=shapes.len() as u32;Ok(Arm {batch,outputs})
@@ -46,7 +46,7 @@ fn one_row(g:&mut Gpu,shapes:&[(usize,usize)],o:&Operands,token:usize,bf16:bool,
     for (i,&(rows,cols)) in shapes.iter().enumerate() {
         let out=Buffer::new(g,&vec![f32::NAN;rows])?;out.poison(g)?;
         batch.layer.projections[i]=MxProjection {weights:o.weights[i],scales:if bf16 {2} else {4},input:o.inputs[i]+(token*cols*4) as u64,output:out.address,
-            rows:rows as u32,cols:cols as u32,tokens:1,input_bf16:0,round:0};
+            rows:rows as u32,cols:cols as u32,tokens:1,input_bf16:0,round:0,mode:0};
         batch.layer.ends[i+1]=batch.layer.ends[i]+if bf16 {rows.div_ceil(4)} else {rows.div_ceil(128)} as u32;batch.plain|=1<<i;outputs.push(out);
     }
     batch.layer.count=shapes.len() as u32;Ok(Arm {batch,outputs})
@@ -206,7 +206,7 @@ pub(crate) fn run(base_path:&str,candidate_path:&str,mode:&str)->Result<()> {
                         for (i,&(rows,cols)) in shapes.iter().enumerate() {for token in 0..tokens {
                             if batch.layer.count==9 {current.push((if bf16 {e.fold_bf16} else {e.batch_f32},if bf16 {160} else {128},batch));batch=Batch::default();}
                             let out=Buffer::new(g,&vec![f32::NAN;rows])?;let at=batch.layer.count as usize;
-                            batch.layer.projections[at]=MxProjection {weights:o.weights[i],scales:if bf16 {2} else {4},input:o.inputs[i]+(token*cols*4) as u64,output:out.address,rows:rows as u32,cols:cols as u32,tokens:1,input_bf16:0,round:0};
+                            batch.layer.projections[at]=MxProjection {weights:o.weights[i],scales:if bf16 {2} else {4},input:o.inputs[i]+(token*cols*4) as u64,output:out.address,rows:rows as u32,cols:cols as u32,tokens:1,input_bf16:0,round:0,mode:0};
                             batch.layer.ends[at+1]=batch.layer.ends[at]+if bf16 {rows.div_ceil(4)} else {rows.div_ceil(128)} as u32;batch.plain|=1<<at;batch.layer.count+=1;
                         }}
                         if batch.layer.count!=0 {current.push((if bf16 {e.fold_bf16} else {e.batch_f32},if bf16 {160} else {128},batch));}
@@ -215,7 +215,7 @@ pub(crate) fn run(base_path:&str,candidate_path:&str,mode:&str)->Result<()> {
                         for (i,&(rows,cols)) in shapes.iter().enumerate() {for view in 0..tokens/part {
                             if batch.layer.count==9 {current.push((e.rows_bf16,128,batch));batch=Batch::default();}
                             let out=Buffer::new(g,&vec![f32::NAN;rows*part])?;let at=batch.layer.count as usize;
-                            batch.layer.projections[at]=MxProjection {weights:o.weights[i],scales:2,input:o.inputs[i]+(view*part*cols*4) as u64,output:out.address,rows:rows as u32,cols:cols as u32,tokens:part as u32,input_bf16:0,round:0};
+                            batch.layer.projections[at]=MxProjection {weights:o.weights[i],scales:2,input:o.inputs[i]+(view*part*cols*4) as u64,output:out.address,rows:rows as u32,cols:cols as u32,tokens:part as u32,input_bf16:0,round:0,mode:0};
                             batch.layer.ends[at+1]=batch.layer.ends[at]+(rows.div_ceil(128)*part) as u32;batch.plain|=1<<at;batch.layer.count+=1;
                         }}
                         if batch.layer.count!=0 {current.push((e.rows_bf16,128,batch));}

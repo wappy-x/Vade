@@ -7,7 +7,8 @@
 //!   (block FP8) or whole 256-column tiles (MXFP8).
 //! - `acc[q]` = the format's own chain of today, run on quarter q alone as if it were the whole matrix: anchored at
 //!   the quarter's first column, from +0.0, and with NO round at its end (raw FP32 bits).
-//!   Block FP8 (`expert_ops`, `Op::Fp8Serial`): one ascending chain, `sum = fl(sum + fl(fl(e4m3(w) * scale) * bf16(x)))`.
+//!   Block FP8 (`expert_ops`, `Op::Fp8Serial`): the range accumulator of the tensor-core contract (`tc_twin_f8::range`):
+//!   a chain of 16-column tensor-core steps a scale block, `sum = fl(sum + fl(block * scale))` in ascending block order.
 //!   MXFP8 (`text_reference::project_row`): 32 lanes; lane L takes columns `tile*256 + L*8 .. +8` of every tile of
 //!   the quarter in ascending order, `sum = fma(fl(e4m3(w) * 2^(s-127)), x, sum)`; then the fixed down-shuffle tree.
 //! - `joined = fl(fl(acc[0] + acc[1]) + fl(acc[2] + acc[3]))`; `word = bf16(joined)`. Neither format has an epilogue
@@ -39,16 +40,11 @@ pub fn e4m3(byte: u8) -> f32 {
 pub fn mx_scale(byte: u8) -> f32 { f32::from_bits(if byte == 0 { 0x0040_0000 } else { u32::from(byte) << 23 }) }
 
 /// Block FP8, one quarter of one row: the raw accumulator. `codes` and `x` are the quarter's columns; `scales` holds
-/// one FP32 scale a block of `block_cols` columns of the quarter.
+/// one FP32 scale a block of `block_cols` columns of the quarter. The range accumulator of the tensor-core contract
+/// (`tc_twin_f8::range`): a chain of 16-column tensor-core steps a scale block, the scale once a block, the blocks
+/// added in ascending order from +0.0.
 pub fn fp8_chain(codes: &[u8], scales: &[f32], block_cols: usize, x: &[f32]) -> u32 {
-    assert!(codes.len() == x.len() && block_cols > 0 && scales.len() == codes.len().div_ceil(block_cols), "block FP8 quarter extent");
-    let mut sum = 0.0f32;
-    for (column, (&code, &value)) in codes.iter().zip(x).enumerate() {
-        let weight = e4m3(code) * scales[column / block_cols];
-        let term = weight * f32::from_bits(bf16_word(value));
-        sum += term;
-    }
-    sum.to_bits()
+    crate::tc_twin_f8::range(codes, scales, block_cols, x)
 }
 
 /// MXFP8, one quarter of one row: the raw accumulator. `codes` and `x` are the quarter's columns (whole 256-column
@@ -185,14 +181,19 @@ mod tests {
     fn the_raw_quarter_role_is_a_tile_kernel_form_of_the_fp8_decode_operation() {
         assert!(fp8_shape(512, 128, FP8_QUARTER).lengths().is_some());
         assert!(fp8_shape(500, 128, FP8_QUARTER).lengths().is_none(), "a quarter is whole scale blocks");
-        assert!(fp8_shape(512, 128, FP8_QUARTER + 1).lengths().is_none());
+        // Role 3 is the unrounded whole word of the check tools (`expert_ops::FP8_UNROUNDED`); no role follows it.
+        assert_eq!(expert_ops::FP8_UNROUNDED, FP8_QUARTER + 1);
+        assert!(fp8_shape(512, 128, expert_ops::FP8_UNROUNDED).lengths().is_some());
+        assert!(fp8_shape(512, 128, expert_ops::FP8_UNROUNDED + 1).lengths().is_none());
         for op in [Op::Fp8Project, Op::Fp8Rows, Op::NvProject, Op::PlainSerial, Op::SwiGlu, Op::Quantize] {
             assert!(Shape { op, bound: 10.0, block_cols: 16, ..fp8_shape(512, 128, FP8_QUARTER) }.lengths().is_none(), "{op:?}");
         }
         let job = |cols: usize, role: u32, weight: u64| Arguments { input: [0x1000, 4, 4, 4], weight, scales: 0x3000, output: 0x4000, shape: fp8_shape(cols, 128, role) };
         let mut four = [job(512, FP8_QUARTER, 0x2000); 4];
         for job in &mut four { job.shape.rows = 4096; }
-        assert_eq!(expert_ops::launch_geometry(&four, 77, 4).unwrap(), (4 * 256, expert_ops::FP8_TILE_THREADS, expert_ops::FP8_TILE_SHARED));
+        // Four raw jobs of 4 scale blocks: 256 row tiles a job, 8 warps a block, the join slots and 7 handing warps of one block.
+        assert_eq!(expert_ops::fp8_row_shared(8, 4, 1, true), 2048 + 7 * 128);
+        assert_eq!(expert_ops::launch_geometry(&four, 77, 4).unwrap(), (4 * 256, 256, expert_ops::FP8_TILE_SHARED_FLOOR));
         // Not a tile launch (an unaligned owner; more than 8 jobs): today's jobs fall back to the one-warp body, a raw quarter is refused.
         assert_eq!(expert_ops::launch_geometry(&[job(512, 0, 0x2008)], 77, 1).unwrap(), (77, 32, 0));
         assert!(expert_ops::launch_geometry(&[job(512, FP8_QUARTER, 0x2008)], 77, 1).is_err());
@@ -238,8 +239,13 @@ mod tests {
                     }
                     // The pair's exchange: the REDUCE of the two partial sums with the one BF16 round and no scale.
                     assert_eq!(reduce_word(partial(acc, 0, 2), partial(acc, 1, 2), None, true), word, "{at}");
+                    // Block FP8 on tensor cores: a nonfinite input is OUTSIDE the contract (`docs/tc-dense-contract.md`,
+                    // Block FP8: the step is defined on finite operands, and the host reference refuses such a row), so
+                    // the three nonfinite classes keep their laws for MXFP8 only. The owner laws above hold for any bits.
+                    let finite_only = format == "fp8";
                     match row.class {
                         "signed zero inputs" => assert_eq!((acc, word), ([0; 4], 0), "{at}: only zero products give +0.0"),
+                        "one NaN input" | "opposite infinite products" | "one infinite input" if finite_only => {}
                         "one NaN input" | "opposite infinite products" => assert_eq!(word, 0x7fff_0000, "{at}"),
                         "one infinite input" => assert_eq!(word & 0x7fff_ffff, 0x7f80_0000, "{at}"),
                         "quarters that cancel in the join" => assert_eq!((joined, word), (0, 0), "{at}"),

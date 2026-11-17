@@ -14,6 +14,7 @@ use super::{Gpu, H, Result, ptr, sha256};
 #[path = "kernel_fp8tile.rs"] pub(super) mod fp8tile;
 #[path = "kernel_mxrows.rs"] pub(super) mod mxrows;
 #[path = "kernel_fp8rows.rs"] pub(super) mod fp8rows;
+#[path = "kernel_fp8tc.rs"] pub(super) mod fp8tc;
 #[path = "kernel_attnsweep.rs"] pub(super) mod attnsweep;
 use crate::{mhc_params::*, mhc_reference::{Fixture, Output, bytes, shapes}};
 #[path = "kernel_mhcproj.rs"] pub(super) mod project;

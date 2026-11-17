@@ -89,6 +89,13 @@ pub enum Op {
     RankRows,
     /// One status per selection row: zero means its count and live IDs are causal integers.
     CheckSelectionRows,
+    /// Lossless wire words: two already-rounded BF16 words per u32. Refuse low bits.
+    WirePackBf16,
+    /// Widen wire halves and place rank packets in token-major or transposed order.
+    WireUnpackBf16,
+    /// The absorbed score/value word over packed BF16 cache pairs. All other operands and outputs keep their layout.
+    AbsorbScoresPacked,AbsorbValuesPacked,
+
 }
 #[repr(C)]
 #[derive(Debug,Clone,Copy)]
@@ -142,6 +149,9 @@ impl Shape {
             Op::ProjectRows if r>0 && k>0=>([m.checked_mul(k)?,0,0,0,0],r.checked_mul(k)?,r.checked_mul(m)?,1),
             Op::ProjectRowsBf16 if r>0 && k>0 && k%2==0=>([m.checked_mul(k)?,0,0,0,0],r.checked_mul(k)?/2,r.checked_mul(m)?,1),
             Op::Transpose if r>0 && k>0=>([r.checked_mul(k)?,0,0,0,0],0,r.checked_mul(k)?,1),
+            Op::WirePackBf16 if k>0 && k%2==0=>([k,0,0,0,0],0,k/2,1),
+            Op::WireUnpackBf16 if r>0 && k>0 && self.first<=1 && (self.first==0 || m==1) && r.checked_mul(m)?.checked_mul(k)?%2==0=>{
+                let words=r.checked_mul(m)?.checked_mul(k)?;([words/2,0,0,0,0],0,words,1)},
             Op::RankRows if r>0 && k>0=>{let words=r.checked_mul(m)?.checked_mul(k)?;([words,0,0,0,0],0,words,1)},
             Op::NormApply if d>0=>([m.checked_mul(d)?,0,0,0,0],d,m.checked_mul(d)?,1),
             Op::ConvRows if width>0 && t>0=>{let row=m.checked_mul(width)?;([row,row,row,3usize.checked_mul(t-1)?.checked_mul(width)?,0],3usize.checked_mul(width)?.checked_mul(t)?,row.checked_mul(3)?,1)},
@@ -279,6 +289,11 @@ pub fn unit(s:Shape,index:usize,x:[&[f32];5],w:&[f32],out:&mut[f32]) {
             let input=&x[0][token*k..(token+1)*k];
             for j in 0..k {let bits=w[(row*k+j)/2].to_bits();let weight=if j%2==0 {f32::from_bits(bits<<16)} else {f32::from_bits(bits&0xffff_0000)};sum+=input[j]*weight;}out[0]=sum;},
         Op::Transpose=>{out[0]=x[0][(index%r)*k+index/r];refuse_non_finite(s,out[0]);},
+        Op::WirePackBf16=>{let a=x[0][index*2].to_bits();let b=x[0][index*2+1].to_bits();
+            assert_eq!((a|b)&0xffff,0,"wire packing needs already-rounded BF16 words");out[0]=f32::from_bits((a>>16)|(b&0xffff0000));},
+        Op::WireUnpackBf16=>{let source=if s.first!=0 {(index%r)*k+index/r} else {rank_row(s,index/k)*k+index%k};
+            let packed=x[0][source/2].to_bits();let bits=if source%2==0 {packed<<16} else {packed&0xffff0000};
+            out[0]=f32::from_bits(bits);assert!(s.slots==0 || out[0].is_finite(),"nonfinite wire value");},
         Op::RankRows=>{out[0]=x[0][rank_row(s,index/k)*k+index%k];refuse_non_finite(s,out[0]);},
         Op::NormApply=>{let v=x[0][index]*w[index%d];out[0]=if k!=0 {round(v)} else {v};},
         Op::ConvRows=>{
@@ -350,7 +365,7 @@ pub fn unit(s:Shape,index:usize,x:[&[f32];5],w:&[f32],out:&mut[f32]) {
         Op::ExpertPlace|Op::ExpertPlaceTile=>{let row=index/k;let lane=index%k;let entry=&x[1][row*3..row*3+3];
             let earlier=entry[0] as usize;let tokens=entry[1] as usize;let at=entry[2] as usize;
             out[0]=x[0][(lane/d)*s.slots as usize+earlier*d+(lane%d)*tokens+at];refuse_non_finite(s,out[0]);},
-        Op::AbsorbQuery|Op::AbsorbScores|Op::AbsorbSoftmax|Op::AbsorbValues|Op::AbsorbProject=>{
+        Op::AbsorbQuery|Op::AbsorbScores|Op::AbsorbSoftmax|Op::AbsorbValues|Op::AbsorbProject|Op::AbsorbScoresPacked|Op::AbsorbValuesPacked=>{
             #[cfg(not(target_arch="nvptx64"))] crate::latent_absorb_rows::unit(s,index,x,w,out);
             #[cfg(target_arch="nvptx64")] panic!("absorbed prompt requires its kernel");
         },
@@ -435,6 +450,31 @@ mod tests {
             }
             assert_eq!(bits(&next),bits(&state),"m={m} taps={taps}");
         }}
+    }
+    /// ONE LAUNCH (`prompt_admission::conv_whole`): the decoder gives a run of 512, 768 or 1,024 tokens to the convolution
+    /// in one operation. It used to make runs of 256 tokens, each with the history after the run before it, and join them.
+    /// Both ways give the same words and the same history after the last token.
+    #[test]
+    fn a_big_convolution_run_in_one_operation_equals_its_runs_of_256_with_history() {
+        let (h,d,taps,m,run)=(32usize,128usize,4usize,512usize,crate::prompt_admission::GROUP_MAX);let width=h*d;
+        let s=Shape {op:Op::ConvRows,heads:h as u32,dim:d as u32,taps:taps as u32,..rows(m)};
+        assert!(crate::prompt_admission::conv_whole(s));
+        let row=|plane:usize|(0..m*width).map(|i|value(i*7+plane*101,0.0625)).collect::<Vec<_>>();let (q,k,v)=(row(0),row(1),row(2));
+        let old=(0..3*(taps-1)*width).map(|i|value(i+11,0.03125)).collect::<Vec<_>>();
+        let w=(0..3*width*taps).map(|i|value(i+5,0.0078125)).collect::<Vec<_>>();
+        let whole=reference(s,[&q,&k,&v,&old,&[]],&w).unwrap();
+        let after=reference(Shape {op:Op::HistoryRows,..s},[&q,&k,&v,&old,&[]],&[]).unwrap();
+        let (mut joined,mut history,mut first)=(Vec::new(),old.clone(),0);
+        while first<m {
+            let n=(m-first).min(run);let part=Shape {tokens:n as u32,..s};
+            let x=[&q[first*width..(first+n)*width],&k[first*width..(first+n)*width],&v[first*width..(first+n)*width]];
+            joined.extend(reference(part,[x[0],x[1],x[2],&history,&[]],&w).unwrap());
+            history=reference(Shape {op:Op::HistoryRows,..part},[x[0],x[1],x[2],&history,&[]],&[]).unwrap();first+=n;
+        }
+        assert_eq!(bits(&whole),bits(&joined));assert_eq!(bits(&after),bits(&history));
+        // A wrong history for the second run is seen: the check above is not blind to the carry.
+        let wrong=reference(Shape {tokens:run as u32,..s},[&q[run*width..],&k[run*width..],&v[run*width..],&old,&[]],&w).unwrap();
+        assert_ne!(bits(&wrong),bits(&whole[run*3*width..]));
     }
     #[test]
     fn recurrence_rows_match_each_scalar_step_in_token_order() {
@@ -642,5 +682,37 @@ mod tests {
         assert!(Shape {op:Op::ProjectRows,rows:u32::MAX,cols:u32::MAX,..rows(1)}.lengths().is_none());
         assert!(Shape {op:Op::StepRows,heads:1,dim:1025,..rows(1)}.lengths().is_none());
         assert!(Shape::wrapped(CausalShape {op:Causal::Pool,heads:0,dim:2,taps:2,rows:3,cols:0,epsilon:0.0,bound:0.0},2).unwrap().lengths().is_none());
+    }
+}
+
+#[cfg(test)] mod wire_tests {
+    use super::*;
+    #[test] fn wire_round_trip_covers_every_finite_bf16_pattern() {
+        let x=(0..=u16::MAX).filter(|&v|v&0x7f80!=0x7f80).map(|v|f32::from_bits(u32::from(v)<<16)).collect::<Vec<_>>();
+        let p=Shape {cols:x.len() as u32,..Shape::new(Op::WirePackBf16,1).unwrap()};
+        let packed=reference(p,[&x,&[],&[],&[],&[]],&[]).unwrap();
+        let u=Shape {rows:1,cols:x.len() as u32,..Shape::new(Op::WireUnpackBf16,1).unwrap()};
+        let out=reference(u,[&packed,&[],&[],&[],&[]],&[]).unwrap();
+        assert!(x.iter().zip(out).all(|(a,b)|a.to_bits()==b.to_bits()));
+    }
+    #[test] fn wire_pack_refuses_loss_of_any_low_bit() {
+        let s=Shape {cols:2,..Shape::new(Op::WirePackBf16,1).unwrap()};
+        assert!(std::panic::catch_unwind(||reference(s,[&[f32::from_bits(0x3f800001),1.0],&[],&[],&[],&[]],&[])).is_err());
+    }
+    #[test] fn wire_transpose_refuses_an_extra_token_dimension() {
+        let s=Shape {rows:2,cols:2,first:1,..Shape::new(Op::WireUnpackBf16,2).unwrap()};
+        assert!(s.lengths().is_none());
+    }
+    #[test] fn wire_rank_and_transpose_keep_raw_words() {
+        for (m,r,k) in [(2,2,4),(3,2,6),(16,4,8),(256,2,1024)] {
+            let x=(0..m*r*k).map(|i|f32::from_bits(((i*17)%0x7f80)<<16)).collect::<Vec<_>>();
+            let p=Shape {cols:x.len() as u32,..Shape::new(Op::WirePackBf16,1).unwrap()};let wire=reference(p,[&x,&[],&[],&[],&[]],&[]).unwrap();
+            for transposed in [false,true] {
+                let (s,old)=if transposed {(Shape {rows:r*k,cols:m,first:1,..Shape::new(Op::WireUnpackBf16,1).unwrap()},Shape {rows:r*k,cols:m,..Shape::new(Op::Transpose,1).unwrap()})}
+                    else {(Shape {rows:r,cols:k,..Shape::new(Op::WireUnpackBf16,m as usize).unwrap()},Shape::rank_rows(m as usize,k as usize,r as usize,true).unwrap())};
+                let out=reference(s,[&wire,&[],&[],&[],&[]],&[]).unwrap();let expected=reference(old,[&x,&[],&[],&[],&[]],&[]).unwrap();
+                assert!(out.iter().zip(expected).all(|(a,b)|a.to_bits()==b.to_bits()));
+            }
+        }
     }
 }

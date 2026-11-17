@@ -10,18 +10,19 @@ const PTX_VERSION: &str = "8.8";
 /// built beside the production image and loaded as a second module.
 #[derive(PartialEq)]
 pub enum Variant { Production, Fp4, Tc }
+// Every image targets `sm_121a`, the GB10's tensor-core target. The production image had `sm_121` until the MXFP8 word
+// took the block-scaled tensor-core step, which `sm_121` refuses (driver error 218). Lead's ruling of 2026-11-16 12:25
+// allows the switch; the receipt is run `yard-11` (`engine/docs/tc-dense-contract.md`, section "The image target"): the
+// pinned offline compiler gives byte-equal machine code for every compared kernel of the image under the two targets.
 impl Variant {
     pub fn features(self) -> &'static str {
         match self { Self::Production => "tensor-cores", Self::Fp4 => "fp4,tensor-cores", Self::Tc => "" }
     }
     fn target_cpu(self) -> &'static str {
-        match self { Self::Production => "sm_121", Self::Fp4 | Self::Tc => "sm_121a" }
+        match self { Self::Production | Self::Fp4 | Self::Tc => "sm_121a" }
     }
     pub fn flags(self) -> &'static str {
-        match self {
-            Self::Production => "-C target-cpu=sm_121 -C overflow-checks=off",
-            Self::Fp4 | Self::Tc => "-C target-cpu=sm_121a -C target-feature=+ptx88 -C overflow-checks=off",
-        }
+        match self { Self::Production | Self::Fp4 | Self::Tc => "-C target-cpu=sm_121a -C target-feature=+ptx88 -C overflow-checks=off" }
     }
     pub fn target_dir(self) -> &'static str {
         match self { Self::Production => "../../target", Self::Fp4 => "../../target/fp4", Self::Tc => "../../target/tc" }
@@ -82,9 +83,9 @@ fn source_files(root: &Path) -> io::Result<Vec<PathBuf>> {
     }
     let mut files = vec![root.join("kernels/Cargo.toml"), root.join("kernel_params.rs"), root.join("src/fp8_abi.rs"), root.join("src/fp4_abi.rs"),
         root.join("src/projection_params.rs"), root.join("src/gdn_params.rs"), root.join("src/next_params.rs"), root.join("src/router_abi.rs"), root.join("src/mhc_params.rs"),
-        root.join("src/mhc_boundary.rs"), root.join("src/tp_payload.rs"), root.join("src/expert_ops.rs"), root.join("src/tc_contract.rs"), root.join("src/tc_abi.rs"), root.join("src/next_math.rs"),
-        root.join("src/causal_ops.rs"), root.join("src/latent_ops.rs"), root.join("src/latent_absorb.rs"), root.join("src/latent_absorb_rows.rs"), root.join("src/prompt_ops.rs"), root.join("src/mxfp8_quantize.rs"),
-        root.join("src/resident_launch.rs"), root.join("src/device_route.rs"), root.join("src/bus_shadow.rs"), root.join("src/tp_put_wide.rs"), root.join("src/tp_put_join.rs"), root.join("src/pair_split.rs"), root.join("src/plain_admission.rs"), root.join("src/prompt_admission.rs"), root.join("src/compact.rs"),
+        root.join("src/mhc_boundary.rs"), root.join("src/tp_payload.rs"), root.join("src/expert_ops.rs"), root.join("src/tc_contract.rs"), root.join("src/tc_f8.rs"), root.join("src/tc_abi.rs"), root.join("src/next_math.rs"),
+        root.join("src/causal_ops.rs"), root.join("src/latent_ops.rs"), root.join("src/latent_absorb.rs"), root.join("src/latent_absorb_rows.rs"), root.join("src/absorb_tc.rs"), root.join("src/prompt_ops.rs"), root.join("src/mxfp8_quantize.rs"),
+        root.join("src/resident_launch.rs"), root.join("src/device_route.rs"), root.join("src/prompt_route.rs"), root.join("src/bus_shadow.rs"), root.join("src/tp_put_wide.rs"), root.join("src/tp_put_join.rs"), root.join("src/pair_split.rs"), root.join("src/plain_admission.rs"), root.join("src/prompt_admission.rs"), root.join("src/compact.rs"),
         root.join("src/ordered_projection_kernel.rs"), root.join("src/frontend_math.rs"), root.join("src/quantize_sweep.rs"), root.join("src/wide_weights.rs"), root.join("src/head_bound.rs"),
         root.join("build-kernels/src/main.rs"), root.join("ptx_stamp.rs")];
     visit(&root.join("kernels/src"), &mut files)?;
@@ -143,12 +144,21 @@ pub fn stamp(root: &Path, ptx: &Path, variant: Variant) -> io::Result<()> {
 /// latent_absorption_tile (256 threads): 128 keeps two CTAs (16 warps) per SM; unbounded it runs one. Measured on the
 /// device with the same output bytes: the cap alone 1.10 to 1.19 times the speed, with the low-register form of the
 /// kernel 1.22 to 1.39 (docs/latent-absorption.md). 112 and 85 spill and are slower than no cap.
+/// resident_launch_mx (128 threads): the recorded one-job MXFP8 entry holds two bodies, the scalar wave body (it takes 40
+/// registers) and the tensor-core row body (`mx_tc::block`, about 64). The cap was 40 (12 blocks an SM for the scalar
+/// body); under it the tensor-core body spills to stack memory and the served one-row step lost 0.89 ms (traced run
+/// `onerow-tr-1`: 91.0 us a launch against 67.0 us on main, local memory 704 against 576 bytes a thread). 64 keeps 8 blocks
+/// an SM and no spill. Measured (`kernel-bench --mx-tc cap`, run `onerow-cap-1`, us a launch cold / after a 6 MiB
+/// prefix, 2048 x 8192): tensor-core body cap 40 82.3 / 66.5, 48 80.8 / 58.4, 56 79.9 / 54.5, 64 80.0 / 54.6, none
+/// 79.8 / 54.1; the scalar output head in the same entry (77,440 x 4,096) 1416.7 at 40, 1399.0 at 64, 1396.9 with none.
+/// A scalar one-job layer launch is slower above 40 (77.6 to 81.3 us cold): no layer matrix is on the scalar word.
 #[allow(dead_code)]
 // The project block can have 1024 threads; 64 registers allow that block to launch.
-const REGISTER_CAPS: [(&str, u32); 26] = [("mx_rows_tile", 160), ("resident_launch_mx_rows_tile", 160), ("latent_absorption_tile", 128), ("resident_launch_mx", 40), ("mhc_boundary_project", 64),
-    // Absorbed attention values: 1024-thread blocks, eager and recorded (the recorded entry also holds the 128-thread
-    // scores arm). 64 registers is the most a 1024-thread block can launch with; the driver takes 40 and 48 today.
-    ("latent_absorption_values", 64), ("resident_launch_absorb_attention", 64),
+const REGISTER_CAPS: [(&str, u32); 30] = [("mx_rows_tile", 160), ("resident_launch_mx_rows_tile", 160), ("resident_launch_mx", 64), ("mhc_boundary_project", 64), ("mhc_boundary_block", 128),
+    // Absorbed attention on the tensor cores: 256-thread blocks, the prompt entry, the three step entries and the two
+    // recorded entries. 128 registers keep two blocks (16 warps) an SM; a warp carries 48 accumulator registers.
+    ("latent_absorption_tile", 128), ("latent_absorption", 128), ("latent_absorption_scores", 128),
+    ("latent_absorption_values", 128), ("resident_launch_absorb_dense", 128), ("resident_launch_absorb_attention", 128),
     // Recorded row selection uses the same 1024-thread bound.
     ("resident_launch_prompt_select_rows", 64),
     ("flash_bf16_mma_latency", 128), ("flash_bf16_mma_latency_group", 128), ("gemm_fp8_block128", 128), ("fp8_routed_gate", 128), ("fp8_routed_up", 128),
@@ -191,6 +201,12 @@ pub fn verify(root: &Path, ptx: &Path, bytes: &[u8], variant: Variant) -> io::Re
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// The recorded one-job MXFP8 entry also holds the tensor-core row body (about 64 registers): a lower cap spills it.
+    #[test]
+    fn the_one_job_mx_entry_cap_fits_the_tensor_core_body_and_eight_blocks() {
+        let cap=REGISTER_CAPS.iter().find(|(name,_)|*name=="resident_launch_mx").expect("the one-job MXFP8 entry has a register cap").1;
+        assert!(cap>=64 && 8*128*cap<=65_536,"cap {cap}");
+    }
     #[test]
     fn latent_tile_cap_keeps_two_blocks_an_sm() {
         // An SM has 65,536 registers (the other entries of the table). Two 256-thread blocks need 128 or fewer a thread.

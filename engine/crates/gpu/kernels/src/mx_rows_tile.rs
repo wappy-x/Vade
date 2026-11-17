@@ -42,7 +42,8 @@ pub(crate) fn tile(p:MxProjection) {
         macro_rules! fma {($acc:expr,$a:expr,$b:expr)=>{{asm!("fma.rn.f32 {c}, {a}, {b}, {c};",c=inout(reg32)$acc,a=in(reg32)$a,b=in(reg32)$b,options(nomem,nostack));}};}
         let tid=core::arch::nvptx::_thread_idx_x() as usize;
         let (n,k,m)=(p.rows as usize,p.cols as usize,p.tokens as usize);
-        if core::arch::nvptx::_block_dim_x()!=(WARPS*32) as u32 || p.round!=0 || p.input_bf16!=0 || k%32!=0 || (p.weights|p.input)&15!=0 {core::arch::asm!("trap;");}
+        // This entry has the scalar word only: the host launches `mx_tc_tile` for a tensor-core descriptor.
+        if core::arch::nvptx::_block_dim_x()!=(WARPS*32) as u32 || p.round!=0 || p.input_bf16!=0 || p.mode!=crate::next_params::MX_SCALAR || k%32!=0 || (p.weights|p.input)&15!=0 {core::arch::asm!("trap;");}
         let (row_tile,token_tile)=(core::arch::nvptx::_block_idx_x() as usize,core::arch::nvptx::_block_idx_y() as usize);
         if row_tile*WARPS*4>=n || token_tile*TOKENS>=m {return;}
         let (warp,lane)=(tid/32,tid%32);

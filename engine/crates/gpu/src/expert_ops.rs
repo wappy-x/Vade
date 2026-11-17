@@ -38,10 +38,15 @@ pub enum Op {Quantize,NvProject,Fp8Project,SwiGlu,Fold,QuantizeRows,NvRows,Fp8Ro
 pub const NV_FIRST:u32=0;
 pub const NV_SECOND:u32=1;
 /// `FP8_QUARTER` (2), on `Op::Fp8Serial` only: the job is ONE COLUMN QUARTER of a block-FP8 second matrix (shared expert
-/// down, latent o) in the pair split. Its word is the RAW FP32 accumulator of today's chain over the job's own columns,
-/// from +0.0: no BF16 round at the end (`tc_twin_quarter::fp8_chain`). The quarter join and the one BF16 round of the
-/// sublayer come after it (`nv_quarter_fold`, `tp_reduce_take`). Only the tile kernel has this form.
+/// down, latent o) in the pair split. Its word is the RAW range accumulator of the contract (`tc_f8`) over the job's own
+/// scale blocks, from +0.0: no join and no BF16 round (`tc_twin_f8::range`). The quarter join and the one BF16 round of
+/// the sublayer come after it (`nv_quarter_fold`, `tp_reduce_take`). Only the tile kernel has this form.
 pub const FP8_QUARTER:u32=2;
+/// `FP8_UNROUNDED` (3), on a block-FP8 shape only: the whole word of the contract with NO BF16 round at its end: the
+/// joined FP32 accumulator fl(fl(R0 + R1) + fl(R2 + R3)). A check tool's form: the last BF16 round hides almost every
+/// difference of a sum order (measured: 1 word in 200,000 tells one range from four after the round), so a device
+/// check compares all 32 bits of this word with the twin (`tc_twin_f8::accumulator`). The served path never builds it.
+pub const FP8_UNROUNDED:u32=3;
 /// Chains a word of an NVFP4 product shape: 1 or 4.
 #[inline(always)]
 pub fn nv_chains(s:&Shape)->u32 {if s.role==NV_SECOND {crate::tc_contract::CHAINS_SECOND} else {crate::tc_contract::CHAINS_FIRST}}
@@ -55,7 +60,8 @@ impl Shape {
     pub fn lengths(self)->Option<([usize;4],usize,usize,usize,usize)> {
         let (r,k,br,bc)=(self.rows as usize,self.cols as usize,self.block_rows as usize,self.block_cols as usize);
         if r==0 || k==0 || !self.global.is_finite() || self.global<=0.0 || !self.activation.is_finite()
-            || self.activation<=0.0 || !self.bound.is_finite() || self.role>FP8_QUARTER
+            || self.activation<=0.0 || !self.bound.is_finite() || self.role>FP8_UNROUNDED
+            || self.role==FP8_UNROUNDED && !matches!(self.op,Op::Fp8Project|Op::Fp8Serial|Op::Fp8Rows)
             // A quantizer shape is made from its matrix's shape and carries that role; it does not read it.
             || self.role==NV_SECOND && !matches!(self.op,Op::NvProject|Op::NvRows|Op::Quantize|Op::QuantizeRows)
             // A raw quarter job is a block-FP8 decode projection of whole scale blocks.
@@ -219,22 +225,47 @@ pub fn serial_projection_index(rows:u32,count:u32,thread:usize)->Option<(usize,u
     let job=thread/32/blocks;let row=thread/32%blocks*32+thread%32;
     if job>=count as usize || row>=rows as usize {None} else {Some((job,row))}
 }
-/// Decode-time block-FP8 rows may run in the shared-memory tile kernel (`fp8_tile`): the same one
-/// ascending FP32 chain per output row, with the products made by many threads and staged in
-/// shared memory. The tile launch is TILE_THREADS threads per block and TILE_SHARED dynamic shared
-/// bytes; one block owns TILE_ROWS consecutive rows of one job.
+/// Decode-time block-FP8 rows run in the tensor-core row kernel (`fp8_tile`, the body `fp8_tc::row_body`): the
+/// contract word of `tc_f8`, the same word as every other block FP8 entry. A block owns ONE tile of FP8_TILE_ROWS
+/// consecutive rows of one job, on `fp8_row_warps` warps (4, 8, 16 or 32: a speed choice by shape and token count;
+/// the word does not depend on it), with `fp8_row_shared` dynamic shared bytes.
 pub const FP8_TILE_ROWS:u32=16;
-pub const FP8_TILE_COLS:u32=128;
-pub const FP8_TILE_DEPTH:u32=4;
-/// Chunks ahead of the copies at which each row's next line is named to the L2 cache (0 = none).
-pub const FP8_TILE_PREFETCH:u32=2;
-pub const FP8_TILE_THREADS:u32=32+FP8_TILE_ROWS*FP8_TILE_COLS/16;
-pub const FP8_TILE_SHARED:u32=fp8_tile_shared(FP8_TILE_ROWS,FP8_TILE_COLS,FP8_TILE_DEPTH);
-/// Dynamic shared bytes of one tile block: raw weight stages, scale stages, raw input stages, three rounded
-/// input buffers and two product buffers (row pitch cols+4 words).
-pub const fn fp8_tile_shared(rows:u32,cols:u32,depth:u32)->u32 {
-    depth*rows*cols+depth*(rows*cols/16)*4+depth*cols*4+3*cols*4+2*rows*(cols+4)*4
+/// Steps of 16 columns that the row body prefetches ahead of its weight loads (4 steps are one 64-byte line), and
+/// the steps between two prefetches of a row (a power of two).
+pub const FP8_ROW_PREFETCH:usize=4;
+pub const FP8_ROW_STRIDE:usize=2;
+/// Bytes of the join slots of a row-body block: one FP32 quad a lane and a range.
+pub const FP8_ROW_JOIN:u32=4*32*16;
+/// The dynamic shared bytes a launch has without a function attribute.
+pub const FP8_ROW_SHARED_LIMIT:u32=48*1024;
+/// The warp count the row body is launched with before the shared-memory limit is looked at.
+pub const FP8_ROW_WARPS:u32=8;
+/// Dynamic shared bytes of one row-body block of `warps` warps (a power of two of at least 4) for a matrix of
+/// `blocks` scale blocks and `tokens` token rows (1 to 8): the join slots, then the handed block sums. A range's
+/// first warp carries the range sum in its registers; each other warp of the range hands one quad a lane and a
+/// scale block. Only the lanes whose accumulator columns are live tokens (`2 * (lane % 4) < tokens`) hand a quad.
+/// A raw job is ONE range over all the warps.
+pub const fn fp8_row_shared(warps:u32,blocks:u32,tokens:u32,raw:bool)->u32 {
+    // Every division here is a shift.
+    let range_shift=if raw {0} else {2};
+    let per=warps>>range_shift;
+    if per<=1 {return FP8_ROW_JOIN;}
+    let most=(((blocks+(1<<range_shift)-1)>>range_shift)+per-1)>>per.trailing_zeros();
+    FP8_ROW_JOIN+(1<<range_shift)*(per-1)*most*8*tokens.div_ceil(2)*16
 }
+/// Warps of a row-body block for `tokens` token rows (1 to 8) of a matrix of `blocks` scale blocks: FP8_ROW_WARPS,
+/// halved while the block's shared bytes are over the limit. Four warps of a job that is not raw always fit.
+pub const fn fp8_row_warps(blocks:u32,tokens:u32,raw:bool)->u32 {
+    let mut warps=FP8_ROW_WARPS;
+    while warps>4 && fp8_row_shared(warps,blocks,tokens,raw)>FP8_ROW_SHARED_LIMIT {warps/=2;}
+    warps
+}
+/// True when `threads` is a block of the row body: 4, 8, 16 or 32 whole warps. The one-warp body has 32 threads.
+pub const fn fp8_row_threads(threads:u32)->bool {matches!(threads,128|256|512|1024)}
+/// Dynamic shared bytes of one block of the block FP8 tensor-core body: `depth` stages, each the 128-column weight
+/// bytes of `warps` warps (16 rows a warp) and the 128-column FP32 activations of `tokens` token rows
+/// (`fp8_tc::stage_bytes`).
+pub const fn fp8_tc_shared(warps:u32,tokens:u32,depth:u32)->u32 {depth*(warps*16*128+tokens*128*4)}
 /// The shape-only launch predicate of the tile kernel. Every other Fp8Serial shape keeps the
 /// one-thread-per-row kernel. The device byte sweep covers this envelope; it reads nothing but the shape.
 pub const FP8_TILE_MAX_ROWS:u32=16384;
@@ -245,15 +276,33 @@ pub fn fp8_tile_admits(shape:&Shape)->bool {
     shape.op==Op::Fp8Serial && (1..=FP8_TILE_MAX_ROWS).contains(&shape.rows) && (16..=FP8_TILE_MAX_COLS).contains(&shape.cols) && shape.cols%16==0
         && (1..=1024).contains(&shape.block_rows) && shape.block_cols.is_power_of_two() && (16..=4096).contains(&shape.block_cols)
 }
+/// The least dynamic shared bytes a decode launch asks for. The body needs 3 to 4 KiB for most shapes, and with so
+/// little the driver runs the kernel in a smaller shared-memory configuration (32 KiB a multiprocessor) than the
+/// kernels the recorded step runs BESIDE it on another stream (the routed-expert tile and main's block FP8 kernel
+/// run at 100 KiB). Then the neighbour's blocks wait until this kernel's blocks have left. MEASURED 2026-11-16,
+/// traces `f8tc-r2-4-tb` and `-tc`: the routed-expert tile started 12 us late 42 times a step, the step lost 0.65 ms.
+/// A launch that asks for 10,240 bytes (the model's widest shape does) runs at 100 KiB. More bytes than the body
+/// needs change no word: the body only checks that it has enough.
+pub const FP8_TILE_SHARED_FLOOR:u32=10*1024;
+/// Threads and dynamic shared bytes of a block of a decode launch of these jobs (one token row a job): the warp count
+/// of the job that needs the fewest warps, and the most shared bytes a job needs at that count, at least
+/// `FP8_TILE_SHARED_FLOOR`.
+#[cfg(not(target_arch="nvptx64"))]
+pub fn fp8_tile_block(jobs:&[Arguments])->(u32,u32) {
+    let scale_blocks=|job:&Arguments|job.shape.cols.div_ceil(job.shape.block_cols.max(1));
+    let warps=jobs.iter().map(|job|fp8_row_warps(scale_blocks(job),1,job.shape.role==FP8_QUARTER)).min().unwrap_or(4);
+    (32*warps,jobs.iter().map(|job|fp8_row_shared(warps,scale_blocks(job),1,job.shape.role==FP8_QUARTER)).max().unwrap_or(FP8_ROW_JOIN).max(FP8_TILE_SHARED_FLOOR))
+}
 /// The launch shape (blocks, threads, dynamic shared bytes) of these jobs: the shared-memory tile kernel when every
 /// job is an admitted block-FP8 decode shape with 16-byte aligned weight and input owners (a property of shape and
 /// owners, never of the model), otherwise `grid` blocks of one warp.
 #[cfg(not(target_arch="nvptx64"))]
 pub fn launch_geometry(jobs:&[Arguments],grid:u32,count:u32)->Result<(u32,u32,u32),String> {
     if (1..=FP8_TILE_MAX_JOBS).contains(&count) && jobs.len()==count as usize
-        && jobs.iter().all(|job|fp8_tile_admits(&job.shape) && (job.weight|job.input[0])&15==0) {
+        && jobs.iter().all(|job|fp8_tile_admits(&job.shape) && (job.weight|job.input[0])&15==0) && fp8_tile_block(jobs).1<=FP8_ROW_SHARED_LIMIT {
         let blocks=fp8_tile_blocks(jobs[0].shape.rows).checked_mul(count).ok_or("expert projection tile grid overflow")?;
-        Ok((blocks,FP8_TILE_THREADS,FP8_TILE_SHARED))
+        let (threads,shared)=fp8_tile_block(jobs);
+        Ok((blocks,threads,shared))
     // The one-warp body rounds every word: a raw quarter job is never sent to it.
     } else if jobs.iter().any(|job|job.shape.role==FP8_QUARTER) {Err("a raw FP8 quarter job needs the tile kernel (admitted shape, 16-byte aligned owners, 1 to 8 jobs)".into())
     } else {Ok((grid,32,0))}
@@ -369,16 +418,27 @@ fn nv_row_table(s:Shape,row:usize,x:&[f32],w:&[u8],scales:&[u8],lut:&[f32;LUT_WO
         }
     }round(sum)
 }
-/// One weight row for one token. `x` holds BF16-rounded lanes, so this skips
-/// the round that `fp8_row` applies. Rounding a rounded value changes no bit.
+/// The FP32 accumulator of one block FP8 word on the tensor-core contract (`tc_f8`, `docs/tc-dense-contract.md`):
+/// weight row `row` of the matrix times the token row `x` (FP32; the contract rounds each value once to BF16).
+/// `raw`: one range over all the scale blocks and no join (a raw quarter job). The host reference and the generic
+/// device bodies run this; the tensor-core kernels (`kernels/src/fp8_tc.rs`) give the same bits.
+#[inline(always)]
+pub fn fp8_acc(s:Shape,row:usize,x:&[f32],w:&[u8],scales:&[u8],raw:bool)->f32 {
+    let k=s.cols as usize;let bc=s.block_cols as usize;let band=(row/s.block_rows as usize)*k.div_ceil(bc);
+    crate::tc_f8::accumulator(k,bc,raw,&|column|w[row*k+column],&|column|x[column],
+        &|block|{let at=(band+block)*4;f32::from_le_bytes(scales[at..at+4].try_into().unwrap())})
+}
+/// The block FP8 word of a shape, by its role: the contract word (rounded to BF16); the raw range accumulator of a
+/// quarter job (`FP8_QUARTER`); the joined accumulator with no round (`FP8_UNROUNDED`).
+#[inline(always)]
+pub fn fp8_word(s:Shape,row:usize,x:&[f32],w:&[u8],scales:&[u8])->f32 {
+    let acc=fp8_acc(s,row,x,w,scales,s.role==FP8_QUARTER);
+    if s.role==FP8_QUARTER || s.role==FP8_UNROUNDED {acc} else {round(acc)}
+}
+/// One weight row for one token: the contract word. The decode table is not read (the weight operand is exact).
 #[inline(always)]
 fn fp8_row_table(s:Shape,row:usize,x:&[f32],w:&[u8],scales:&[u8],lut:&[f32;LUT_WORDS])->f32 {
-    let k=s.cols as usize;let mut sum=0.0f32;let br=s.block_rows as usize;let bc=s.block_cols as usize;let blocks=k.div_ceil(bc);
-    let bytes=&w[row*k..(row+1)*k];
-    for (block,(input,weights)) in x.chunks(bc).zip(bytes.chunks(bc)).enumerate() {let at=((row/br)*blocks+block)*4;
-        let scale=f32::from_le_bytes(scales[at..at+4].try_into().unwrap());
-        for (&value,&code) in input.iter().zip(weights) {sum+=(lut[512+code as usize]*scale)*value;}
-    }round(sum)
+    let _=lut;fp8_word(s,row,x,w,scales)
 }
 /// One unit of a whole-layer launch.
 #[inline(always)]
@@ -445,14 +505,7 @@ fn nv_row(s:Shape,index:usize,x:&[f32],w:&[u8],scales:&[u8])->f32 {
     }round(sum)
 }
 #[inline(always)]
-fn fp8_row(s:Shape,index:usize,x:&[f32],w:&[u8],scales:&[u8])->f32 {
-    let k=s.cols as usize;
-    let mut sum=0.0f32;let br=s.block_rows as usize;let bc=s.block_cols as usize;let blocks=k.div_ceil(bc);
-    for block in 0..blocks {let at=((index/br)*blocks+block)*4;
-        let scale=f32::from_le_bytes(scales[at..at+4].try_into().unwrap());
-        for j in block*bc..((block+1)*bc).min(k) {sum+=(e4m3(w[index*k+j])*scale)*round(x[j]);}
-    }round(sum)
-}
+fn fp8_row(s:Shape,index:usize,x:&[f32],w:&[u8],scales:&[u8])->f32 {fp8_word(s,index,x,w,scales)}
 /// A single decode-time `Op::Quantize` may run one lane per element (`nv_quantize`, 128-thread blocks of eight 16-value
 /// blocks); the retained sweep covers 16..1024 by 16 and eight larger widths. Every other shape keeps the original launch.
 pub const QUANTIZE_LANES_THREADS:u32=128;
@@ -491,6 +544,19 @@ pub fn pack_block(words:&[f32])->(u32,u32,u32) {
     for e in 0..8 {lo|=crate::tc_contract::e2m1_code_f32(words[e].to_bits())<<(4*e);hi|=crate::tc_contract::e2m1_code_f32(words[8+e].to_bits())<<(4*e);}
     (lo,hi,crate::tc_contract::ue4m3_code_f32(words[16].to_bits()) as u8 as u32)
 }
+/// PACKED MIDDLE: the words of ONE rank's packed block of `rows` operand rows of `local` columns (the columns of a
+/// matrix input that one rank of a pair makes): (code words a row, scale words a row, the rows of `code words` words the
+/// block holds). A row packs to local / 2 code bytes and local / 16 scale bytes, so with `local` a multiple of 64 both
+/// are whole words and a row's codes are 8 times its scale codes; with `rows` a multiple of 8 the block (the code rows,
+/// then the scale rows) is then a whole number of code-width rows: rows * 9 / 8. One rank row copy
+/// (`prompt_ops::Op::RankRows`) over the blocks of all ranks therefore sets the code rows of the ranks side by side
+/// (tp resident_weights `experts_exchange_packed`). None: a width or a row count without those whole numbers.
+#[cfg(not(target_arch="nvptx64"))]
+pub fn packed_middle_words(rows:usize,local:usize)->Option<(usize,usize,usize)> {
+    if rows==0 || local==0 || !local.is_multiple_of(64) || !rows.is_multiple_of(8) {return None;}
+    let (code,scale)=(local/8,local/64);
+    Some((code,scale,rows.checked_mul(code+scale)?/code))
+}
 /// CPU twin of `nv_quantize_pack` for whole rows: `rows` rows of `cols` FP32 values, row r at its own input scale
 /// `activations[r]`. Returns the code bytes (cols/2 a row, low nibble = even column) and the scale bytes (cols/16 a row).
 #[cfg(not(target_arch="nvptx64"))]
@@ -527,11 +593,8 @@ pub fn unit(s:Shape,index:usize,x:[&[f32];4],w:&[u8],scales:&[u8],out:&mut[f32])
             }out[0]=sum;
         },
         Op::Fp8Project|Op::Fp8Serial=>{
-            let mut sum=0.0f32;let br=s.block_rows as usize;let bc=s.block_cols as usize;let blocks=k.div_ceil(bc);
-            for block in 0..blocks {let at=((index/br)*blocks+block)*4;
-                let scale=f32::from_le_bytes(scales[at..at+4].try_into().unwrap());
-                for j in block*bc..((block+1)*bc).min(k) {sum+=(e4m3(w[index*k+j])*scale)*round(x[0][j]);}
-            }out[0]=if s.role==FP8_QUARTER {sum} else {round(sum)};
+            // The contract word (`tc_f8`). A raw quarter job keeps its one range accumulator: no join, no round.
+            out[0]=fp8_word(s,index,x[0],w,scales);
         },
         Op::NvRows=>{
             // Adjacent token lanes read the same immutable weight row. Each
@@ -618,15 +681,16 @@ mod tests {
         assert!(!batch_launch_geometry(&[down;8],77,8).unwrap().0);
         assert!(!batch_launch_geometry(&[down;16],77,16).unwrap().0);
         let fp8=job(Op::Fp8Serial,1024,4096,128,128);
-        assert_eq!(batch_launch_geometry(&[fp8;2],77,2).unwrap(),(false,128,160,30720));
+        // The body needs 4,096 bytes here; the launch asks for the floor.
+        assert_eq!(fp8_row_shared(8,32,1,false),4096);assert_eq!(batch_launch_geometry(&[fp8;2],77,2).unwrap(),(false,128,256,FP8_TILE_SHARED_FLOOR));
         // The job count is part of the admission: 8 jobs take the tile, 9 and more keep the original launch.
-        assert_eq!(batch_launch_geometry(&[fp8;8],77,8).unwrap(),(false,64*8,160,30720));
+        assert_eq!(batch_launch_geometry(&[fp8;8],77,8).unwrap(),(false,64*8,256,FP8_TILE_SHARED_FLOOR));
         for jobs in [9usize,12,16] {
             let list=vec![fp8;jobs];
             assert_eq!(batch_launch_geometry(&list,77,jobs as u32).unwrap(),(false,77,32,0),"{jobs} jobs");
             assert_eq!(launch_geometry(&list,77,jobs as u32).unwrap(),(77,32,0),"{jobs} jobs");
         }
-        assert_eq!(launch_geometry(&[fp8;8],77,8).unwrap(),(64*8,FP8_TILE_THREADS,FP8_TILE_SHARED));
+        assert_eq!(launch_geometry(&[fp8;8],77,8).unwrap(),(64*8,256,FP8_TILE_SHARED_FLOOR));
         assert_eq!(FP8_TILE_MAX_JOBS,8);
         let mut outside=nv;outside.shape.rows=258;
         assert_eq!(batch_launch_geometry(&[outside],77,1).unwrap(),(false,77,32,0));
@@ -638,7 +702,7 @@ mod tests {
         let fp8=job(Op::Fp8Serial,17,256,128,128);
         for count in [1,8,9] {
             let jobs=vec![fp8;count as usize];let legacy=count;
-            let expected=if count<=FP8_TILE_MAX_JOBS {(2*count,FP8_TILE_THREADS,FP8_TILE_SHARED)} else {(legacy,32,0)};
+            let expected=if count<=FP8_TILE_MAX_JOBS {(2*count,256,FP8_TILE_SHARED_FLOOR)} else {(legacy,32,0)};assert_eq!(fp8_row_shared(8,2,1,false),2560);
             assert_eq!(launch_geometry(&jobs,legacy,count).unwrap(),expected);
             // Both the eager and recorded batch paths use this shared decision.
             let (stream,blocks,threads,shared)=batch_launch_geometry(&jobs,legacy,count).unwrap();
@@ -653,8 +717,10 @@ mod tests {
     fn tile_geometry_is_chosen_by_shape_and_alignment_only() {
         let old=(77,32,0);
         for (rows,cols,br,bc) in [(1024,4096,128,128),(2048,2048,128,128),(2048,16384,128,128),(8192,1536,128,128),(768,4096,128,128),(1,16,1,16),(17,48,3,16),(16384,32768,1024,4096)] {
-            assert_eq!(geometry(&[job(Op::Fp8Serial,rows,cols,br,bc)]),(rows.div_ceil(16),FP8_TILE_THREADS,FP8_TILE_SHARED),"{rows}x{cols}");
-            assert_eq!(launch_geometry(&[job(Op::Fp8Serial,rows,cols,br,bc);3],77,3).unwrap(),(rows.div_ceil(16)*3,FP8_TILE_THREADS,FP8_TILE_SHARED));
+            let (threads,shared)=fp8_tile_block(&[job(Op::Fp8Serial,rows,cols,br,bc)]);
+            assert!(fp8_row_threads(threads) && shared<=FP8_ROW_SHARED_LIMIT && shared==fp8_row_shared(threads/32,cols.div_ceil(bc),1,false).max(FP8_TILE_SHARED_FLOOR) && shared>=FP8_TILE_SHARED_FLOOR,"{rows}x{cols}");
+            assert_eq!(geometry(&[job(Op::Fp8Serial,rows,cols,br,bc)]),(rows.div_ceil(16),threads,shared),"{rows}x{cols}");
+            assert_eq!(launch_geometry(&[job(Op::Fp8Serial,rows,cols,br,bc);3],77,3).unwrap(),(rows.div_ceil(16)*3,threads,shared));
         }
         for shape in [(Op::Fp8Project,1024,4096,128,128),(Op::PlainSerial,1024,4096,128,128),(Op::NvProject,1024,4096,1,16),(Op::Fp8Rows,1024,4096,128,128),
             (Op::Fp8Serial,1024,4100,128,128),(Op::Fp8Serial,1024,8,128,128),(Op::Fp8Serial,1024,0,128,128),(Op::Fp8Serial,0,4096,128,128),
@@ -672,9 +738,18 @@ mod tests {
     }
     #[test]
     fn tile_launch_constants_fit_the_default_shared_limit() {
-        assert_eq!(FP8_TILE_THREADS,160);assert_eq!(FP8_TILE_SHARED,30720);
-        assert_eq!(fp8_tile_shared(16,128,4),4*16*128+4*128*4+4*128*4+3*128*4+2*16*132*4);
-        assert!(FP8_TILE_SHARED<=48*1024 && FP8_TILE_THREADS%32==0);
+        // One token row of 32 scale blocks on 8 warps: the join slots, and 4 handing warps of 4 blocks of 128 bytes.
+        assert_eq!(fp8_row_shared(8,32,1,false),2048+4*4*128);assert_eq!(fp8_row_shared(4,32,1,false),2048);
+        // A raw job is one range: 7 handing warps of 4 blocks. Eight tokens hand four quads a quad of lanes.
+        assert_eq!(fp8_row_shared(8,32,1,true),2048+7*4*128);assert_eq!(fp8_row_shared(8,128,8,false),2048+4*16*512);
+        // The warp count is halved until the block fits; four warps of a job that is not raw always fit.
+        assert_eq!(fp8_row_warps(32,1,false),FP8_ROW_WARPS);assert_eq!(fp8_row_warps(2048,1,false),4);assert_eq!(fp8_row_shared(4,2048,8,false),FP8_ROW_JOIN);
+        for blocks in [1u32,2,3,12,16,32,128,256,2048] {for tokens in 1..=8 {for raw in [false,true] {
+            let warps=fp8_row_warps(blocks,tokens,raw);
+            assert!(fp8_row_threads(32*warps) && (raw || fp8_row_shared(warps,blocks,tokens,raw)<=FP8_ROW_SHARED_LIMIT),"{blocks} {tokens} {raw}");
+        }}}
+        assert!(fp8_row_threads(128) && fp8_row_threads(1024) && !fp8_row_threads(32) && !fp8_row_threads(64) && !fp8_row_threads(160) && !fp8_row_threads(2048));
+        assert_eq!(fp8_tc_shared(2,8,6),49152);
     }
     #[test]
     fn serial_projection_grid_and_reference_keep_complete_rows() {
@@ -1043,6 +1118,48 @@ mod quantize_pack_tests {
         let mut words=[0f32;17];unit(quantizer(activation),0,[block,&[],&[],&[]],&[],&[],&mut words);pack_block(&words)
     }
     fn one_pass(block:&[f32;16],activation:f32)->(u32,u32,u32) {let (lo,hi,scale)=quantize_packed(block,activation);(lo,hi,scale as u8 as u32)}
+    /// PACKED MIDDLE: each rank packs the columns it owns of every row; one message a rank carries its code rows and then
+    /// its scale rows; the rank row copies of `experts_exchange_packed` (the same index function the kernel runs,
+    /// `prompt_ops::rank_row`) then give, byte for byte, the operands `nv_quantize_pack` writes for the whole rows.
+    #[test]
+    fn each_rank_packs_its_own_columns_and_the_rank_rows_give_the_whole_rows_operands() {
+        for (rows,local,parts) in [(8usize,64usize,2usize),(16,128,2),(24,1024,2),(8,64,4)] {
+            let cols=local*parts;
+            // Values of both signs, zeros, and magnitudes on both sides of every row's input scale.
+            let input=(0..rows*cols).map(|i|{let v=((i.wrapping_mul(2654435761)>>7)%4001) as f32/173.0-11.5;if i%29==0 {0.0} else {v}}).collect::<Vec<_>>();
+            let activations=(0..rows).map(|r|0.37+r as f32*0.61).collect::<Vec<_>>();
+            let (codes,scales)=quantize_pack_rows(&input,cols,&activations).unwrap();
+            let (code,scale,code_rows)=packed_middle_words(rows,local).unwrap();assert_eq!((code,scale,code_rows),(local/8,local/64,rows*9/8));
+            let block=rows*(code+scale);
+            let words=|bytes:&[u8]|bytes.chunks_exact(4).map(|b|u32::from_le_bytes([b[0],b[1],b[2],b[3]])).collect::<Vec<_>>();
+            // The exchange buffer: each rank's block in rank order.
+            let mut exchange=Vec::with_capacity(block*parts);
+            for rank in 0..parts {
+                let own=input.chunks_exact(cols).flat_map(|row|row[rank*local..(rank+1)*local].iter().copied()).collect::<Vec<_>>();
+                let (c,s)=quantize_pack_rows(&own,local,&activations).unwrap();
+                assert_eq!((c.len(),s.len()),(rows*code*4,rows*scale*4));
+                exchange.extend(words(&c));exchange.extend(words(&s));
+            }
+            assert_eq!(exchange.len(),block*parts);
+            // ONE rank row copy of code-width rows over the whole exchange; then the scale rows out of each block, side by side.
+            let rank_rows=|x:&[u32],tokens:usize,width:usize| {
+                let s=crate::prompt_ops::Shape::rank_rows(tokens,width,parts,false).unwrap();
+                (0..tokens*parts).flat_map(|row|{let from=crate::prompt_ops::rank_row(s,row);x[from*width..(from+1)*width].to_vec()}).collect::<Vec<_>>()
+            };
+            let mut packed=rank_rows(&exchange,code_rows,code);assert_eq!(packed.len(),block*parts);
+            let mut blocks=vec![0u32;rows*scale*parts];
+            for rank in 0..parts {blocks[rank*rows*scale..(rank+1)*rows*scale].copy_from_slice(&exchange[rank*block+rows*code..(rank+1)*block]);}
+            let joined=rank_rows(&blocks,rows,scale);
+            packed[rows*parts*code..].copy_from_slice(&joined);
+            let bytes=packed.iter().flat_map(|w|w.to_le_bytes()).collect::<Vec<_>>();
+            assert_eq!(&bytes[..rows*cols/2],&codes[..],"codes {rows} {local} {parts}");assert_eq!(&bytes[rows*cols/2..],&scales[..],"scales {rows} {local} {parts}");
+            // Control: a rank that packed another rank's columns gives other bytes.
+            let other=input.chunks_exact(cols).flat_map(|row|row[local..2*local].iter().copied()).collect::<Vec<_>>();
+            assert_ne!(quantize_pack_rows(&other,local,&activations).unwrap().0,codes.chunks_exact(cols/2).flat_map(|row|row[..local/2].to_vec()).collect::<Vec<_>>());
+        }
+        assert_eq!(packed_middle_words(12,1024),None);assert_eq!(packed_middle_words(8,96),None);assert_eq!(packed_middle_words(0,64),None);
+        assert_eq!(packed_middle_words(8192,1024),Some((128,16,9216)));
+    }
     #[test]
     fn one_pass_equals_the_pack_of_the_quantizer_on_hard_blocks() {
         // Signed zeros, subnormals, the E2M1 values and their midpoints (ties), saturating values, the largest finite

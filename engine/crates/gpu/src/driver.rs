@@ -342,6 +342,7 @@ impl Context {
     fn clear_vector_pool(&self) { self.vector_pool.borrow_mut().clear(self); self.clear_decode_reserve(); }
     fn trim_vector_pool(&self, room: usize) { self.vector_pool.borrow_mut().trim(self, room); }
     fn group_vector_pool(&self, cap: usize, ceiling: usize) { self.vector_pool.borrow_mut().group_cap(cap, ceiling); }
+    fn end_group_vector_pool(&self) { self.vector_pool.borrow_mut().end_group(); }
     fn vector_pool_stats(&self) -> crate::KvArenaStats { self.vector_pool.borrow().stats() }
     fn clear_reserves(&self) {
         self.clear_decode_reserve();
@@ -873,7 +874,7 @@ impl<'a> Module<'a> {
         let loaded = crate::module_loading::load(&mut ModuleDriver { context }, ptx, image, receipt, force_ptx)?;
         Ok(Self { raw: Cell::new(loaded.handle), context, jit_module: Cell::new(loaded.receipt), functions: Default::default() })
     }
-    /// The second image: PTX only (no prebuilt cubin yet; the release cubin check accepts sm_121 alone).
+    /// The second image: PTX only (no prebuilt cubin yet; the release cubin check covers the first image alone).
     fn load_second(context: &'a Context, ptx: &CStr) -> Result<Self, String> {
         context.activate()?;
         let receipt = context.jit_receipts.is_some();
@@ -934,11 +935,14 @@ pub use backend::{with_backend, with_backend_mode, Backend, HostRegistration, Ma
     Fp8GroupedScratch, Fp8RoutingFlag, WeightArena, ExchangeSlot, TpMailbox, TpMailboxHost, TP_MAILBOX_SLOTS};
 pub use backend::{BackendStats, Fence, FrontendStream, set_put_narrow, nv_capture::nv_capture_configure};
 pub use backend::ResidentTextEdges;
-pub use backend::{ResidentMxfp8Projection,Mxfp8ProjectionPass,ResidentProjection};
+pub use backend::{ResidentMxfp8Projection,Mxfp8ProjectionPass,ResidentProjection,MxPackedRows};
 pub use backend::{DecodeGraph, PromptBuffer, ResidentQueue, ResidentProgram};
 pub use backend::{Bf16Vector,ResidentMhc,MhcPass,ResidentNorm,NormOutput};
 pub use backend::{ResidentMhcBoundary,MhcBoundaryPass,MhcHostLink,Shadow,ShadowRange,GpuMark,mhc_fused_launches,mhc_fused_row_launches};
 pub use backend::DeviceRouteTable;
+pub use backend::PromptRoute;
+pub use backend::{PromptExpertTable,PromptRowScales,PromptNativeBatch,PromptNativeKeep,PromptOperandSource,PromptPacked};
+pub use backend::ARGMAX_MASS;
 #[cfg(feature="kernel-bench")]
 pub use backend::{RefereePlan,RefereeShape};
 

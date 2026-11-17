@@ -119,7 +119,7 @@ fn the_shape_rule_takes_the_fold_shapes_at_2_to_8_rows_and_nothing_else() {
 #[test]
 fn a_fold_rows_batch_keeps_the_one_row_fold_grid_and_refuses_other_row_counts() {
     use crate::next_params::{MxProjection,ResidentProjectionBatch};
-    let p=|rows:u32,tokens:u32|MxProjection {weights:256,scales:4,input:512,output:1024,rows,cols:4096,tokens,input_bf16:0,round:0};
+    let p=|rows:u32,tokens:u32|MxProjection {weights:256,scales:4,input:512,output:1024,rows,cols:4096,tokens,input_bf16:0,round:0,mode:0};
     let mut batch=ResidentProjectionBatch::default();
     for (rows,tokens) in [(144,2),(128,8),(5,3)] {batch.push_fold_rows(p(rows,tokens)).unwrap();}
     assert_eq!((batch.layer.count,batch.plain,&batch.layer.ends[..4]),(3,0b111,&[0,36,68,70][..]));

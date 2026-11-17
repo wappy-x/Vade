@@ -43,6 +43,8 @@ fn a_request_of_depth_two_or_more_proposes_its_whole_depth_or_nothing_by_its_own
             Factory::new(checkpoint,split,80,vec![0]).unwrap().with_predictor(3).unwrap().worker().unwrap();});
         let split=Split::new(Host,Wire {topology:Topology {rank:0,parts:2},controller:true,tx:a_tx,rx:a_rx}).unwrap();
         let engine=Factory::new(checkpoint,split,80,vec![0]).unwrap().with_predictor(3).unwrap();
+        // These counts are of whole-depth proposals: the confidence rule (row_split confidence.rs) is off here.
+        engine.set_confidence(false);
         let best=|v:&[f32]|(0..v.len()).reduce(|a,b|if v[b]>v[a] {b} else {a}).unwrap() as u32;
         let count=72;
         let mut limits=spark_tp::row_split::limits(80,count).unwrap();limits.next_mtp_depth=Some(3);

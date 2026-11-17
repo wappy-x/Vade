@@ -823,6 +823,8 @@ fn model_proposals_keep_the_plain_ids(loaded:usize) {
             let first=session.prefill(&prompt).unwrap();
             let mut spec=Speculator::from_selected(&prompt,prompt.len(),best(&first),vocab as usize,Config::strict(count-1),request(depth).sampling).unwrap();
             let target=session.draft_target().unwrap();assert_eq!(target.model_draft_width(),depth);
+            // The confidence rule is on (the default): chains end by their probability and passes check only the tokens
+            // that pay, the worker following the controller's flag. The ids stay the plain ids on both ranks.
             while !spec.is_done() {spec.step(target,16,|_|false).unwrap();}
             assert_eq!(spec.tokens(),&plain[..count-1],"depth {depth}");
             eprintln!("depth {depth}: cycles={} rows={} model proposals={} accepted={}",spec.stats.cycles,spec.stats.rows,spec.stats.model_proposals,spec.stats.accepted);
@@ -834,6 +836,8 @@ fn model_proposals_keep_the_plain_ids(loaded:usize) {
             // 2 for each proposal it makes above that level, and holds 8 at most. A whole keep goes one level deeper when
             // that level does not wait. At -4 a level is left and waits 2 cycles, then 8, 32 and 128; a score of 8 puts
             // the wait back to 2. A request of depth 3 or less proposes its whole depth.
+            // By hand the proposals are counted at their whole length: the confidence rule is off for this part.
+            engine.set_confidence(false);
             let by_hand=|whole:bool| {
             let mut session=engine.session().unwrap();session.configure_request(&request(depth)).unwrap();
             let first=session.prefill(&prompt).unwrap();assert_eq!(best(&first),plain[0]);
@@ -859,6 +863,7 @@ fn model_proposals_keep_the_plain_ids(loaded:usize) {
             let deepest=by_hand(false);assert!(deepest<=depth);if depth<=3 {assert_eq!(deepest,depth);}
             // The whole depth in every cycle: the deep chain's own command and a check pass of depth+1 rows, on both ranks.
             if depth>3 {engine.set_deep_always(true);assert_eq!(by_hand(true),depth);engine.set_deep_always(false);}
+            engine.set_confidence(true);
         }
         assert_eq!(engine.request_reservation_bytes(80).unwrap(),charged);
         engine.shutdown().unwrap();worker.join().unwrap();

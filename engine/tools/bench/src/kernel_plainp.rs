@@ -237,7 +237,7 @@ pub(crate) fn run(base_path: &str, candidate_path: &str, names: &str, mode: &str
 
 /// Mirror of gpu/src/next_params.rs (repr(C)): MxProjection 56 bytes, MxLayer 552, ResidentProjectionBatch 560.
 #[repr(C)] #[derive(Clone, Copy, Default)]
-struct MxProjection { weights: u64, scales: u64, input: u64, output: u64, rows: u32, cols: u32, tokens: u32, input_bf16: u32, round: u32 }
+struct MxProjection { weights: u64, scales: u64, input: u64, output: u64, rows: u32, cols: u32, tokens: u32, input_bf16: u32, round: u32, mode: u32 }
 #[repr(C)] #[derive(Clone, Copy, Default)]
 struct MxLayer { projections: [MxProjection; 9], ends: [u32; 10], count: u32 }
 #[repr(C)] #[derive(Clone, Copy, Default)]
@@ -260,7 +260,7 @@ fn build(g: &mut Gpu, jobs: &[Job], round: bool, seed: u64, kinds: (u32, u32)) -
         let (weights, scales) = if j.plain { (g.upload(&le(&pattern(kinds.0, j.rows * j.cols, s)))?, 0) } else { (g.upload(&mx_bytes(j.rows * j.cols, s, false))?, g.upload(&mx_bytes(j.rows * j.cols / 32, s ^ 9, true))?) };
         parts.push((weights, scales, input, j.rows));
         let blocks = if j.plain { j.rows.div_ceil(128) } else { j.rows.div_ceil(4) } as u32;
-        batch.layer.projections[i] = MxProjection { weights, scales, input, output: 0, rows: j.rows as u32, cols: j.cols as u32, tokens: 1, input_bf16: 0, round: 0 };
+        batch.layer.projections[i] = MxProjection { weights, scales, input, output: 0, rows: j.rows as u32, cols: j.cols as u32, tokens: 1, input_bf16: 0, round: 0, mode: 0 };
         batch.layer.ends[i + 1] = batch.layer.ends[i] + blocks;
         if j.plain { batch.plain |= 1 << i; }
     }

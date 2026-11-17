@@ -17,6 +17,23 @@ pub const MAX_TOKENS: usize = 1024;
 /// (and 3 and 4 tokens to `mx_rows_small4`), and the device sweep covers exactly that (`kernel-bench --mx-small {OLD} {X} head`).
 pub const HEAD_ROWS: usize = 77_440;
 pub const HEAD_COLS: usize = 4096;
+/// The tensor-core tile `mx_tc_tile` (kernels `mx_tc::TILE_WARPS`, `TILE_TOKENS`): 8 warps of 16 weight rows, 64 tokens.
+/// Its grid is (ceil(tokens / 64), ceil(rows / 128)): the token tile on x.
+pub const TC_ROWS_PER_BLOCK: usize = 128;
+pub const TC_TOKENS_PER_BLOCK: usize = 64;
+pub const TC_THREADS: u32 = 256;
+/// The tensor-core tile reads PACKED token rows when the width is a multiple of 1,024 columns (every MXFP8 matrix of the
+/// model): `mx_tc_quantize_pack` writes a row's E4M3 codes, then one UE8M0 scale code a group of 32 columns, once for the
+/// matrices that read the rows (from the RAW rows: the quantize pass and the pack in one launch), and each tile piece
+/// (`mx_tc_tile_packed`) reads 33 bytes where the tile on FP32 rows reads 128 and encodes them again in every block.
+/// Other widths keep the quantize launch and the tile on FP32 rows. The word is the same either way.
+pub fn tc_packed(cols:usize)->bool {cols!=0 && cols.is_multiple_of(1024)}
+/// Bytes of one packed token row.
+pub fn tc_packed_line(cols:usize)->usize {cols+cols/32}
+/// Blocks of the one `mx_tc_quantize_pack` launch: a thread packs one group of 32 columns of one token row.
+pub fn tc_pack_blocks(tokens:usize,cols:usize)->Option<u32> {u32::try_from(tokens.checked_mul(cols/32)?.div_ceil(TC_THREADS as usize)).ok()}
+/// Token rows of one launch of the tile on packed rows: the size the device runs measured for all four shapes of the model.
+pub const TC_PACKED_TOKENS: usize = 1024;
 /// Wider launches win in the device sweep through 16 MiB of weight codes.
 /// Larger matrices keep the existing 256-token pieces.
 pub fn token_limit(rows:usize,cols:usize)->usize {
@@ -66,6 +83,16 @@ mod tests {
         for (r, c, t) in corners { assert_eq!(admitted(r, c, t, 0, 0, 16, 16, 4),t<=token_limit(r,c), "corner {r} {c} {t}"); }
         // One past each end of every axis is refused.
         assert!(!admitted(MAX_ROWS + 1, 32, 1, 0, 0, 0, 0, 0) && !admitted(1, MAX_COLS + 32, 1, 0, 0, 0, 0, 0) && !admitted(1, 32, MAX_TOKENS + 1, 0, 0, 0, 0, 0));
+    }
+    #[test]
+    fn packed_rows_are_whole_items_and_whole_words() {
+        for cols in [1024usize,4096,8192,DENSE_COLS] {
+            assert!(tc_packed(cols) && tc_packed_line(cols)==cols/32*33 && tc_packed_line(cols).is_multiple_of(16));
+            assert_eq!(tc_pack_blocks(TC_PACKED_TOKENS,cols),Some((4*cols/32) as u32));
+        }
+        for cols in [0usize,32,512,1056,4064] {assert!(!tc_packed(cols),"{cols}");}
+        assert_eq!((tc_pack_blocks(9,1024),tc_pack_blocks(usize::MAX,1024)),(Some(2),None));
+        assert!(TC_PACKED_TOKENS.is_multiple_of(TC_TOKENS_PER_BLOCK));
     }
     #[test]
     fn grid_counts_tiles() {

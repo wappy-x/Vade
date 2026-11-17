@@ -1,7 +1,6 @@
 //! Complete feature rows stay local. Finished output rows gather in rank order.
 use crate::Result;
 use engine_model::plan::{glm_index::{KdaTensor,TensorRole},storage::WeightStorage,layer::Topology};
-
 #[derive(Debug,Clone,Copy,PartialEq,Eq)]
 pub struct Rows {pub start:usize,pub count:usize,pub total:usize,pub split:bool}
 impl Rows {
@@ -30,6 +29,21 @@ impl Rows {
     }
 }
 #[cfg(any(target_os="linux",test))]
+/// The place and fold shapes of the dedicated grouped reader. A private packed middle may be made only when this
+/// reader takes its actual shape; otherwise the producer keeps FP32 rows and their existing fallback.
+fn group_fold_shapes(local:usize,rows:usize,fold:spark_gpu_probe::causal_ops::Shape,m:usize)->Result<Option<(spark_gpu_probe::prompt_ops::Shape,spark_gpu_probe::prompt_ops::Shape)>> {
+    use spark_gpu_probe::prompt_ops::{Op as Row,Shape as RowShape};
+    if m==0 || fold.op!=spark_gpu_probe::causal_ops::Op::ExpertFold || fold.rows==0 || m.checked_mul(fold.rows as usize)!=Some(rows) {return Ok(None);}
+    let number=|value:usize|u32::try_from(value).map_err(|_|"prompt expert rows exceed ABI".to_string());
+    let mut place=RowShape::new(Row::ExpertPlaceTile,1).ok_or("prompt expert place shape")?;
+    place.rows=number(rows)?;place.cols=number(local)?;place.dim=number(local)?;place.taps=1;place.slots=number(rows.checked_mul(local).ok_or("prompt expert rows overflow")?)?;
+    // The fold alone never reads dim; the wrapped row fold gets none.
+    let Some(wrapped)=RowShape::wrapped(spark_gpu_probe::causal_ops::Shape {cols:number(local)?,dim:0,..fold},m) else {return Ok(None);};
+    let fast=spark_gpu_probe::prompt_admission::fast_kernel(wrapped)==Some("prompt_fold") || spark_gpu_probe::prompt_chunks::runs(wrapped).is_some();
+    if !spark_gpu_probe::prompt_admission::place_admitted(place) || !fast {return Ok(None);}
+    Ok(Some((place,wrapped)))
+}
+#[cfg(any(target_os="linux",test))]
 pub fn merge_argmax(values:&[f32],rows:&[Rows])->Result<u32> {
     if rows.is_empty() || values.len()!=rows.len()*3 {return Err("resident argmax extent differs".into());}
     let mut best=None;
@@ -43,6 +57,7 @@ pub fn merge_argmax(values:&[f32],rows:&[Rows])->Result<u32> {
         let candidate=(value[0],id);best=Some(best.map_or(candidate,|current|spark_gpu_probe::next_math::better(current,candidate)));
     }Ok(best.unwrap().1)
 }
+#[cfg(any(target_os="linux",test))] #[path="resident_weights/argmax_mass.rs"] mod argmax_mass;
 #[cfg(any(target_os="linux",test))]
 fn gathered_batch(values:&[f32],local_rows:usize,total_rows:usize,jobs:usize)->Result<Vec<Vec<f32>>> {
     let chunks=total_rows.checked_div(local_rows).filter(|&chunks|chunks>0).ok_or("resident batch row geometry is empty")?;
@@ -69,18 +84,13 @@ fn gathered_mixed(values:&[f32],rows:&[Rows])->Result<Vec<Vec<f32>>> {
         output.push(matrix);offset+=row.count;
     }Ok(output)
 }
-
 #[cfg(any(target_os="linux",test))]
 #[path="resident_weights/batch_layout.rs"] mod batch_layout;
-
 #[path="resident_weights/rows_fold.rs"] pub mod rows_fold;
-
 #[cfg(any(target_os="linux",test))]
 #[path="resident_weights/load_rows.rs"] mod load_rows;
-
 #[cfg(any(target_os="linux",test))]
 #[path="resident_weights/kda_plan.rs"] mod kda_plan;
-
 /// Bytes and matrices of the resident BF16 copy kept beside the FP32 copy (MEASURING FORM: on in code, no switch; the shipping ticket moves every reader to BF16 and drops the FP32 copies); printed in TEXT ADMISSION.
 pub static BF16_COPY_BYTES:std::sync::atomic::AtomicUsize=std::sync::atomic::AtomicUsize::new(0);
 pub static BF16_COPY_MATRICES:std::sync::atomic::AtomicUsize=std::sync::atomic::AtomicUsize::new(0);
@@ -92,7 +102,6 @@ pub static ABSORPTION_CALLS:std::sync::atomic::AtomicU64=std::sync::atomic::Atom
 /// Diagnostic proof that absorbed layers gathered without a host read of the selection.
 #[cfg(feature="kernel-bench")]
 pub static UNREAD_GATHERS:std::sync::atomic::AtomicU64=std::sync::atomic::AtomicU64::new(0);
-
 #[cfg(target_os="linux")]
 mod device {
     use super::*;
@@ -101,11 +110,15 @@ mod device {
     use crate::{mxfp8_projection::Mxfp8Projection,dynamic_projection::ResidentDynamicProjection,transport::Ring};
     use std::collections::{BTreeMap,BTreeSet};
     mod route_device;
+    mod prompt_native;
+    pub use prompt_native::PromptMiddle;
     mod absorption;
     mod tile_stream;
     mod projection_stage;
     #[cfg(test)] mod lookahead_device;
     mod row_stage;
+    mod wire_bf16;
+    mod mass_gather;
     pub use projection_stage::{gather_stage,gather_stage_rounds,gather_stage_selected};
     pub use route_device::fold_then_gather;
     enum Storage<'b,'d> {Mx(ResidentDynamicProjection<'b,'d>),Plain {shape:spark_gpu_probe::causal_ops::Shape,weight:DeviceVector<'d>,bf16:Option<DeviceVector<'d>>},
@@ -148,6 +161,7 @@ mod device {
         /// LOOKAHEAD: the one exchange whose link step waits while the caller queues work that does not read it
         /// (`apply_experts_open`). While it is Some, no other exchange may start (`gather_mapped_open`, `gather_small`).
         ahead:Option<OpenExperts<'d>>,small:std::cell::Cell<bool>,deferring:std::rc::Rc<std::cell::Cell<bool>>,rounds:Vec<bool>,routes:BTreeMap<String,Option<route_device::Group<'d>>>,place_tables:BTreeMap<usize,(bool,DeviceVector<'d>)>,verify_rows:usize,collecting:std::rc::Rc<std::cell::Cell<bool>>,routed_layers:usize,
+        prompt_tables:BTreeMap<String,Option<prompt_native::Inventory<'d>>>,
         /// PROJ-DELIVERY: plain projection stages may fork (off for a decode step that reads a selection back); stages forked
         /// and stages kept whole on the main stream by that rule, for the check tool's COUNTS.
         side_on:bool,side_stages:[u64;2]}
@@ -215,7 +229,7 @@ mod device {
     impl<'b,'d> Weights<'b,'d> {
         pub fn new(ring:Option<Ring>,cost:bool)->Self {
             let topology=ring.as_ref().map_or(Topology {rank:0,parts:1},|r|Topology {rank:r.rank() as u32,parts:r.world() as u32});
-            Self {kda_local:BTreeSet::new(),kda_plans:kda_plan::Plans::default(),matrices:BTreeMap::new(),embedding:None,ring,mailbox:None,mhc_host:None,sequence:0,topology,identity:None,cost:crate::resident_profile::Cost::new(cost),timings:[[0;3];5],lut:None,exchange:None,read:None,ahead:None,small:std::cell::Cell::new(false),deferring:std::rc::Rc::new(std::cell::Cell::new(false)),rounds:Vec::new(),routes:BTreeMap::new(),place_tables:BTreeMap::new(),verify_rows:0,collecting:std::rc::Rc::new(std::cell::Cell::new(false)),routed_layers:0,side_on:true,side_stages:[0;2]}
+            Self {kda_local:BTreeSet::new(),kda_plans:kda_plan::Plans::default(),matrices:BTreeMap::new(),embedding:None,ring,mailbox:None,mhc_host:None,sequence:0,topology,identity:None,cost:crate::resident_profile::Cost::new(cost),timings:[[0;3];5],lut:None,exchange:None,read:None,ahead:None,small:std::cell::Cell::new(false),deferring:std::rc::Rc::new(std::cell::Cell::new(false)),rounds:Vec::new(),routes:BTreeMap::new(),place_tables:BTreeMap::new(),verify_rows:0,collecting:std::rc::Rc::new(std::cell::Cell::new(false)),routed_layers:0,prompt_tables:BTreeMap::new(),side_on:true,side_stages:[0;2]}
         }
         pub fn attach_mailbox(&mut self,mailbox:&'b spark_gpu_probe::driver::TpMailbox<'d>)->Result<()> {
             let physical=Topology {rank:self.topology.rank,parts:mailbox.layout().world.try_into().map_err(|_|"mailbox topology exceeds ABI")?};
@@ -299,6 +313,12 @@ mod device {
             self.identity=Some(identity);
             // The tensor-core image compiles here, inside the load, not at the first dense prompt group.
             let tc_started=std::time::Instant::now();b.tc_preload()?;let tc_ns=tc_started.elapsed().as_nanos();
+            // Immutable native inventories belong to startup resident memory.
+            // The session clock never allocates a persistent descriptor table.
+            for layer in 0..c.description().layers.len() {
+                let plan=LayerPlan::new(c.description(),layer,1,self.topology).map_err(|e|e.to_string())?;
+                for step in &plan.steps {if matches!(step.kind,Kind::ExpertProject|Kind::ExpertDown) {self.warm_prompt_inventory(b,step)?;}}
+            }
             let total_ns=started.elapsed().as_nanos();let p=&load.payload;
             let measured=load.wait_ns+load.convert_ns+load.upload_ns+load.mxfp8_ns+embedding_ns+barrier_ns+tc_ns;
             // Phases are this thread's exclusive wall time; read_wait is the reading the uploads did not hide.
@@ -470,22 +490,25 @@ let mut bytes=vec![0;rows.total*4];
             let output=b.upload_vector(&values)?;b.synchronize()?;
             self.cost.record(||"exchange_upload".into(),stamp,b,0);self.timings[class][2]+=started.elapsed().as_nanos();Ok(output)
         }
-        pub fn apply_greedy(&mut self,name:&str,b:&Backend<'d>,input:&DeviceVector<'_>)->Result<u32> {
+        /// `mass` (DRAFT CONFIDENCE): also the pick's probability, for a row split over the ranks and gathered on the mailbox.
+        pub fn apply_greedy(&mut self,name:&str,b:&Backend<'d>,input:&DeviceVector<'_>,mass:bool)->Result<(u32,Option<f32>)> {
             let rows=self.matrices.get(name).ok_or_else(||format!("projection is not resident: {name}"))?.rows;
-            if rows.count>1<<24 {let output=self.apply(name,b,input,true)?;return crate::bounded_decoder::greedy_logits(&b.read_vector_values(&output)?,rows.total);}
+            if rows.count>1<<24 {let output=self.apply(name,b,input,true)?;return Ok((crate::bounded_decoder::greedy_logits(&b.read_vector_values(&output)?,rows.total)?,None));}
             let (output,rows,_,_)=self.project_local(name,b,input,true,false)?;
-            let mut partials=b.vector(output.len().div_ceil(1024)*3)?;let mut result=b.vector(3)?;
-            b.enqueue_argmax_device(&output,&mut partials,&mut result,0)?;
-            if !rows.split {return b.read_argmax_raw(&result,1,|values|merge_argmax(values,&[rows]));}
+            let mass=mass && rows.split && self.mailbox.is_some();let words=if mass {4} else {3};
+            let mut partials=b.vector(output.len().div_ceil(1024)*words)?;let mut result=b.vector(words)?;
+            b.enqueue_argmax_device(&output,&mut partials,&mut result,if mass {spark_gpu_probe::driver::ARGMAX_MASS} else {0})?;
+            if !rows.split {return Ok((b.read_argmax_raw(&result,1,|values|merge_argmax(values,&[rows]))?,None));}
             let parts=self.topology.parts as usize;
             if rows.count.checked_mul(parts)!=Some(rows.total) || rows.start!=rows.count*self.topology.rank as usize {return Err("resident argmax ownership differs".into());}
             let owners=(0..parts).map(|rank|Rows {start:rank*rows.count,..rows}).collect::<Vec<_>>();
             if let Some(mailbox)=self.mailbox {let stamp=self.cost.start(b);
-                let selected=gather_argmax(b,mailbox,&mut self.sequence,self.topology,&result,&owners);
+                let selected=if mass {mass_gather::gather_argmax_mass(b,mailbox,&mut self.sequence,self.topology,&result,&owners).map(|(id,p)|(id,Some(p)))}
+                    else {gather_argmax(b,mailbox,&mut self.sequence,self.topology,&result,&owners).map(|id|(id,None))};
                 self.cost.record(||"exchange_argmax".into(),stamp,b,0);return selected;
             }
             self.gather_mapped(b,&result)?;let gathered=self.exchange.as_ref().ok_or("resident argmax exchange is absent")?;
-            b.read_argmax_raw(gathered,parts,|values|merge_argmax(values,&owners))
+            Ok((b.read_argmax_raw(gathered,parts,|values|merge_argmax(values,&owners))?,None))
         }
         #[allow(clippy::needless_range_loop)] // index loops keep the arithmetic order.
         pub fn apply_batch(&mut self,b:&Backend<'d>,input:&[(&str,&DeviceVector<'_>)],round:bool)->Result<Option<Vec<DeviceVector<'d>>>> {
@@ -539,7 +562,6 @@ let mut bytes=vec![0;rows.total*4];
                 let rows=vec![first.rows;input.len()];let result=gather_device(b,mailbox,&mut self.sequence,self.topology,&[(&output,owed)],&rows)?;
                 self.cost.record(||"exchange_device".into(),stamp,b,0);self.timings[2][0]+=input.len() as u128;self.timings[2][1]+=compute;self.timings[2][2]+=started.elapsed().as_nanos()-compute;return Ok(Some(result));
             }
-
             let local=b.read_vector_values(&output)?;let ranks=if first.rows.split {self.topology.parts as usize} else {1};
             let mut bytes=vec![0;local.len().checked_mul(ranks).and_then(|words|words.checked_mul(4)).ok_or("resident batch exchange overflow")?];
             let start=if first.rows.split {self.topology.rank as usize*local.len()*4} else {0};
@@ -581,7 +603,6 @@ let mut bytes=vec![0;rows.total*4];
                 let rows=matrices.iter().map(|matrix|matrix.rows).collect::<Vec<_>>();let result=gather_device(b,mailbox,&mut self.sequence,self.topology,&[(&output,false)],&rows)?;
                 self.cost.record(||"exchange_device".into(),stamp,b,0);self.timings[4][0]+=input.len() as u128;self.timings[4][1]+=compute;self.timings[4][2]+=started.elapsed().as_nanos()-compute;return Ok(Some(result));
             }
-
             let local=b.read_vector_values(&output)?;let split=matrices.iter().any(|matrix|matrix.rows.split);let ranks=if split {self.topology.parts as usize} else {1};
             let mut bytes=vec![0;local.len().checked_mul(ranks).and_then(|words|words.checked_mul(4)).ok_or("resident mixed batch exchange overflow")?];
             let start=if split {self.topology.rank as usize*local.len()*4} else {0};
@@ -671,12 +692,14 @@ let mut bytes=vec![0;rows.total*4];
         /// caller queues between the two halves then runs on this rank's GPU while the link carries the blocks. Such work
         /// must not read or write the exchange buffer and must not exchange (`none_ahead`). Not `ahead`: the close drains
         /// the stream, and the two halves back to back are the exchange as it was.
-        fn gather_mapped_open(&mut self,b:&Backend<'d>,local:&[&DeviceVector<'_>],ahead:bool)->Result<OpenGather<'d>> {
+        fn gather_mapped_open(&mut self,b:&Backend<'d>,local:&[&DeviceVector<'_>],ahead:bool)->Result<OpenGather<'d>> {self.gather_mapped_open_wire(b,local,ahead,false)}
+        fn gather_mapped_open_wire(&mut self,b:&Backend<'d>,local:&[&DeviceVector<'_>],ahead:bool,packed:bool)->Result<OpenGather<'d>> {
             self.none_ahead()?;
             let stamp=self.cost.start(b);
             // EXCHANGE TRACE: host times around the waits this path already makes (None unless the trace is on).
             let trace=crate::exchange_trace::now;let started=trace();
             let parts=self.topology.parts as usize;let words=local.iter().try_fold(0usize,|sum,part|sum.checked_add(part.len())).ok_or("prompt exchange overflow")?;
+            if packed && local.iter().any(|part|!part.len().is_multiple_of(2)) {return Err("BF16 wire part has an odd extent".into());}let words=if packed {words/2} else {words};
             let total=words.checked_mul(parts).ok_or("prompt exchange overflow")?;
             let fresh=self.exchange.as_mut().is_none_or(|v|v.resize_within_capacity(total).is_err());
             if fresh {
@@ -689,7 +712,12 @@ let mut bytes=vec![0;rows.total*4];
             let first=self.receive_first(b,parts,words,fresh)?;
             let packed=(||{
                 let exchange=self.exchange.as_mut().ok_or("prompt exchange is absent")?;let mut at=self.topology.rank as usize*words;
-                for part in local {b.copy_range(part,exchange,0,at,part.len())?;at+=part.len();}
+                for part in local {
+                    if packed {
+                        let count=part.len()/2;let shape=spark_gpu_probe::prompt_ops::Shape {cols:u32::try_from(part.len()).map_err(|_|"wire pack extent exceeds ABI")?,..spark_gpu_probe::prompt_ops::Shape::new(spark_gpu_probe::prompt_ops::Op::WirePackBf16,1).ok_or("wire pack shape")?};
+                        let _packed=b.prompt_operation_output(shape,[Some(part),None,None,None,None],None,Some(exchange.resident_range(at..at+count)?))?;at+=count;
+                    } else {b.copy_range(part,exchange,0,at,part.len())?;at+=part.len();}
+                }
                 let packed=trace();
                 // LOOKAHEAD: the mark is the end of the pack copy, the last queued write to this rank's block.
                 let mark=if ahead {Some(b.fence_frees()?)} else {None};
@@ -778,6 +806,9 @@ let mut bytes=vec![0;rows.total*4];
                     else {Self::rank_rows(b,&gathered,m,local,self.topology.parts as usize,false)?};
                 self.cost.record(||"exchange_upload".into(),stamp,b,0);return Ok(out);
             }
+            if round && m>16 && source.len().is_multiple_of(2) {
+                return self.exchange_bf16(b,&source,m,local,row_major,true);
+            }
             self.gather_mapped(b,&source)?;drop(source);let stamp=self.cost.start(b);
             let exchange=self.exchange.as_ref().ok_or("prompt exchange is absent")?;
             // One token still copies out: the exchange buffer is reused by the next gather.
@@ -812,7 +843,7 @@ let mut bytes=vec![0;rows.total*4];
             // Output in [local rows,m] when row-major, else [m,local rows].
             let (output,row_major,class)=match &matrix.storage {
                 // The rounded rows are the value: `m * local` words, private to this call. No second copy of them is made.
-                Storage::Mx(p)=>{let out=p.project_rows(input,m)?.into_vector();if out.len()!=m*local {return Err("MXFP8 prompt rows extent differs".into());}(out,false,0)},
+                Storage::Mx(p)=>{let out=p.project_rows(input,m)?;if out.len()!=m*local {return Err("MXFP8 prompt rows extent differs".into());}(out,false,0)},
                 Storage::Plain {shape,weight,..}=>{let mut s=RowShape::new(Row::ProjectRows,m).ok_or("prompt rows exceed ABI")?;s.rows=shape.rows;s.cols=shape.cols;
                     let out=b.prompt_operation(s,[Some(input),None,None,None,None],Some(weight))?;
                     // The cast output is the value. No second copy of it is made.
@@ -974,8 +1005,14 @@ let mut bytes=vec![0;rows.total*4];
         /// None, before any launch: fewer than two sets, a set its own call would not take with gate and up on one set
         /// of operands, or sets the backend does not launch together. The caller then calls each set on its own.
         #[allow(clippy::type_complexity)] // the arguments of `apply_experts_gathered`, a tuple a set.
-        pub fn apply_experts_gathered_wide(&mut self,b:&Backend<'d>,sets:&[(&[(&str,usize)],&[(&str,usize)],f32,&DeviceVector<'_>,&[f32],&[f32])])->Result<Option<Vec<DeviceVector<'d>>>> {
+        ///
+        /// PACKED MIDDLE, `down`: the down list of each set, given when the ONLY reader of each result is
+        /// `apply_experts_fold_wide` with that list. A set's result may then be the packed operands of its down products
+        /// (`experts_exchange_packed`) in place of the FP32 rows; `apply_experts_fold_wide` knows the form by its extent.
+        /// Every set takes the packed form or none does (`experts_packed_scales`).
+        pub fn apply_experts_gathered_wide(&mut self,b:&Backend<'d>,sets:&[(&[(&str,usize)],&[(&str,usize)],f32,&DeviceVector<'_>,&[f32],&[f32])],down:Option<(&[&[(&str,usize)]],(spark_gpu_probe::causal_ops::Shape,Option<&str>))>)->Result<Option<Vec<DeviceVector<'d>>>> {
             if sets.len()<2 {return Ok(None);}
+            if down.is_some_and(|(down,_)|down.len()!=sets.len()) {return Err("prompt expert down lists differ from the sets".into());}
             let mut extents=Vec::with_capacity(sets.len());
             let middles={
                 let mut ready=Vec::with_capacity(sets.len());
@@ -1009,9 +1046,105 @@ let mut bytes=vec![0;rows.total*4];
                 self.cost.settle(b)?;self.cost.record(||"projection_2".into(),stamp,b,0);
                 middles
             };
+            // PACKED MIDDLE: the input scale of every row of every set's down products, when every set takes the packed form.
+            let mut scales=Vec::with_capacity(sets.len());
+            if let Some((down,reader))=down {
+                for ((set,list),&(local,total)) in sets.iter().zip(down).zip(&extents) {
+                    match self.experts_packed_scales(b,set.0,list,set.5,(local,total),reader)? {Some(rows)=>scales.push(rows),None=>{scales.clear();break;}}
+                }
+            }
+            let packed=scales.len()==sets.len();
             let mut out=Vec::with_capacity(sets.len());
-            for ((output,set),(local,total)) in middles.into_iter().zip(sets).zip(extents) {out.push(self.experts_exchange_place(b,output,set.0[0].0,true,set.5,local,total)?);}
+            for (at,((output,set),(local,total))) in middles.into_iter().zip(sets).zip(extents).enumerate() {
+                out.push(if packed {self.experts_exchange_packed(b,output,set.0[0].0,set.5,local,total,&scales[at])?} else {self.experts_exchange_place(b,output,set.0[0].0,true,set.5,local,total)?});
+            }
             Ok(Some(out))
+        }
+        /// PACKED MIDDLE: the checks of `experts_exchange_packed` for one set, before any work, and the input scale of each
+        /// of its down products' rows. `gate`: the set's gate list (its row counts, expert for expert). `down`: its down
+        /// list. `places`: the place table of its middle rows. `local`, `total`: this rank's rows and all rows of the
+        /// middle. None: the rows keep the FP32 exchange (`experts_exchange_place`): this rank does not fold groups, the
+        /// down matrices do not read the middle part for part, a shape outside the swept place and the whole-word
+        /// operand rows, or a list the product launch does not take from packed operands.
+        fn experts_packed_scales(&self,b:&Backend<'d>,gate:&[(&str,usize)],down:&[(&str,usize)],places:&[f32],(local,total):(usize,usize),(fold,shared):(spark_gpu_probe::causal_ops::Shape,Option<&str>))->Result<Option<Vec<f32>>> {
+            use spark_gpu_probe::prompt_ops::{Op as Row,Shape as RowShape};
+            let rows=places.len()/3;
+            // Part ownership follows the resident matrix extent, as in `experts_exchange_place`; `expert_parts` bound
+            // the matrices to this rank at load. No separate topology choice is needed for this representation.
+            if !self.folds_groups() || local==0 || !total.is_multiple_of(local) || spark_gpu_probe::expert_ops::packed_middle_words(rows,local).is_none() {return Ok(None);}
+            // The down list reads the middle rows of the same experts, in the gate list's order and counts.
+            if down.len()!=gate.len() || down.iter().zip(gate).any(|(x,y)|x.1!=y.1) || gate.iter().map(|v|v.1).sum::<usize>()!=rows {return Ok(None);}
+            let Some((list,(down_local,cols,down_total)))=Self::expert_parts(&self.matrices,down)? else {return Ok(None);};
+            if cols!=total || fold.cols as usize!=down_total || fold.rows==0 || !rows.is_multiple_of(fold.rows as usize) {return Ok(None);}
+            if group_fold_shapes(down_local,rows,fold,rows/fold.rows as usize)?.is_none() {return Ok(None);}
+            // The later shared projection must take rows_project_local, rather than gather its rows and refuse this fold.
+            let Some(name)=shared else {return Ok(None);};let Some(matrix)=self.matrices.get(name) else {return Ok(None);};
+            if self.mailbox.is_none() || self.kda_local.contains(name) || !matrix.rows.split || matrix.rows.count!=down_local || matrix.rows.total!=down_total {return Ok(None);}
+            // The tile place of ONE part at this rank's width, and a table it takes.
+            if spark_gpu_probe::prompt_ops::place_table(places).is_none() {return Ok(None);}
+            let number=|value:usize|u32::try_from(value).map_err(|_|"prompt expert rows exceed ABI".to_string());
+            let mut place=RowShape::new(Row::ExpertPlaceTile,1).ok_or("prompt expert place shape")?;
+            place.rows=number(rows)?;place.cols=number(local)?;place.dim=number(local)?;place.taps=1;place.slots=number(rows.checked_mul(local).ok_or("prompt expert rows overflow")?)?;
+            if !spark_gpu_probe::prompt_admission::place_admitted(place) {return Ok(None);}
+            // The product launch takes this list from packed operands (asked before anything is packed).
+            let mut jobs=Vec::with_capacity(list.len());let mut scales=Vec::with_capacity(rows);let mut row=0;
+            for (shape,weight,owner,count) in &list {jobs.push((Shape {op:Op::NvRows,tokens:*count as u32,..*shape},Some((*weight,*owner)),row));row+=count;scales.extend(std::iter::repeat_n(shape.activation,*count));}
+            if scales.len()!=rows || !b.expert_group_packed_takes(&jobs,rows,cols)? {return Ok(None);}
+            Ok(Some(scales))
+        }
+        /// PACKED MIDDLE: `experts_exchange_place` for a middle whose only reader is the down product launch.
+        ///
+        /// `experts_exchange_place` sends this rank's FP32 words of every (expert, token) row (1,024 of a row's 2,048 words
+        /// on the model: 32 MiB a group of 1,024 rows) and places both ranks' words; the down products then quantize and
+        /// pack each row (`nv_quantize_pack`: 4-bit codes and one scale byte a block of 16 words, at the row's static input
+        /// scale). A block's bytes depend on its own 16 words and the row's scale alone, so each rank can pack the blocks of
+        /// the words it owns: here this rank's words are placed in (row, word) order on this rank (the tile place with ONE
+        /// part), packed at the down products' input scale of each row (`scales`), and ONE exchange carries the packed
+        /// bytes (4.5 MiB). `rank_rows` then sets each row's bytes of the ranks side by side: the bytes `nv_quantize_pack`
+        /// writes for the whole rows, so the down products read the operands they always read.
+        /// Result: rows of total / 8 code words, then rows of total / 64 scale words (`Backend::expert_group_sets_packed`).
+        /// `experts_packed_scales` checked the shapes before the gate and up products ran.
+        #[allow(clippy::too_many_arguments)]
+        fn experts_exchange_packed(&mut self,b:&Backend<'d>,output:DeviceVector<'d>,name:&str,places:&[f32],local:usize,total:usize,scales:&[f32])->Result<DeviceVector<'d>> {
+            use spark_gpu_probe::prompt_ops::{Op as Row,Shape as RowShape};
+            let parts=total/local;let rows=places.len()/3;let words=output.len();
+            if scales.len()!=rows || words!=rows.checked_mul(local).ok_or("prompt expert rows overflow")? {return Err("packed expert middle extent differs".into());}
+            let (code_words,scale_words,code_rows)=spark_gpu_probe::expert_ops::packed_middle_words(rows,local).ok_or("packed expert middle extent differs")?;
+            let stamp=self.cost.start(b);
+            let tiled=spark_gpu_probe::prompt_ops::place_table(places).ok_or("packed expert middle place table differs")?;
+            let table=b.upload_vector(&tiled)?;
+            let number=|value:usize|u32::try_from(value).map_err(|_|"prompt expert rows exceed ABI".to_string());
+            let mut place=RowShape::new(Row::ExpertPlaceTile,1).ok_or("prompt expert place shape")?;
+            place.rows=number(rows)?;place.cols=number(local)?;place.dim=number(local)?;place.taps=1;place.slots=number(words)?;
+            // Carry the generic place reader's finite-check flag. The admitted fast `prompt_place` moves raw words
+            // and does not inspect this flag, as the prior two-rank fast place did. This is not a device finite check.
+            place.first=1;
+            let placed=b.prompt_operation(place,[Some(&output),Some(&table),None,None,None],None)?;
+            let row_scales=b.upload_vector(scales)?;
+            let (codes,scale_codes)=b.nv_quantize_pack_planes(&placed,local,&row_scales)?;
+            if codes.len()!=rows*code_words || scale_codes.len()!=rows*scale_words {return Err("packed expert middle extent differs".into());}
+            self.cost.settle(b)?;self.cost.record(||"pack_first".into(),stamp,b,0);
+            crate::exchange_trace::kind(||format!("experts {} +up packed",name));
+            // ONE link step: this rank's codes, then its scale codes. The exchange drains the stream first, so the rows
+            // and the tables end with it, as the rows of `experts_exchange_place` do.
+            self.gather_mapped_parts(b,&[&codes,&scale_codes])?;drop(codes);drop(scale_codes);drop(row_scales);drop(placed);drop(table);drop(output);
+            let stamp=self.cost.start(b);
+            let block=rows*(code_words+scale_words);
+            let exchange=self.exchange.as_ref().ok_or("prompt exchange is absent")?;
+            if exchange.len()!=block*parts {return Err("packed expert middle exchange extent differs".into());}
+            // The codes: each rank's block is rows * 9 / 8 rows of `code_words` words (its code rows, then its scale rows as
+            // an eighth more rows; rows is a multiple of 8), so ONE rank row copy over the whole exchange sets the code
+            // rows of the ranks side by side: the first rows * parts * code_words words. The words after them (the
+            // scale rows, copied as if they were code rows) are replaced below. Raw words: no finite check.
+            let mut packed=Self::rank_rows(b,exchange,code_rows,code_words,parts,false)?;
+            if packed.len()!=block*parts {return Err("packed expert middle extent differs".into());}
+            // The scale codes: each rank's scale rows out of its block, side by side, into the words after the codes.
+            let mut blocks=b.vector(rows*scale_words*parts)?;
+            for rank in 0..parts {b.copy_range(exchange,&mut blocks,rank*block+rows*code_words,rank*rows*scale_words,rows*scale_words)?;}
+            let joined=Self::rank_rows(b,&blocks,rows,scale_words,parts,false)?;
+            b.copy_range(&joined,&mut packed,0,rows*parts*code_words,rows*parts*scale_words)?;
+            crate::exchange_trace::reader();self.exchange_read(b)?;
+            self.cost.settle(b)?;self.cost.record(||"exchange_upload".into(),stamp,b,0);Ok(packed)
         }
         /// GROUP FOLD: true when `apply_experts_fold` can run on this rank: the rows are split and this rank exchanges them.
         /// The shapes decide the rest there: the fold is admitted at half the output's width only.
@@ -1036,7 +1169,7 @@ let mut bytes=vec![0;rows.total*4];
             if first.is_empty() || !places.len().is_multiple_of(3) {return Err("prompt expert group is empty".into());}
             if !self.folds_groups() || m==0 {return Ok(None);}
             let Some((list,extent))=Self::expert_parts(&self.matrices,first)? else {return Ok(None);};
-            let Some(plan)=Self::experts_fold_plan(extent,first.iter().map(|v|v.1).sum::<usize>(),input,places,ids,weights,shared,fold,m)? else {return Ok(None);};
+            let Some(plan)=Self::experts_fold_plan(extent,first.iter().map(|v|v.1).sum::<usize>(),input,places,ids,weights,shared,fold,m,false)? else {return Ok(None);};
             if self.lut.is_none() {self.lut=Some(b.upload_vector(&spark_gpu_probe::expert_ops::decode_lut())?);}
             let stamp=self.cost.start(b);
             let output={
@@ -1055,8 +1188,7 @@ let mut bytes=vec![0;rows.total*4];
         /// total rows)` whose lists name `listed` rows: the place table, the place shape, the wrapped fold shape and the
         /// extents. None: a shape outside the two swept kernels, or a shared row that is not this rank's rows.
         #[allow(clippy::too_many_arguments)]
-        fn experts_fold_plan((local,cols,total):(usize,usize,usize),listed:usize,input:&DeviceVector<'_>,places:&[f32],ids:&DeviceVector<'_>,weights:&DeviceVector<'_>,shared:Option<&DeviceVector<'_>>,fold:spark_gpu_probe::causal_ops::Shape,m:usize)->Result<Option<FoldPlan>> {
-            use spark_gpu_probe::prompt_ops::{Op as Row,Shape as RowShape};
+        fn experts_fold_plan((local,cols,total):(usize,usize,usize),listed:usize,input:&DeviceVector<'_>,places:&[f32],ids:&DeviceVector<'_>,weights:&DeviceVector<'_>,shared:Option<&DeviceVector<'_>>,fold:spark_gpu_probe::causal_ops::Shape,m:usize,packed:bool)->Result<Option<FoldPlan>> {
             let rows=places.len()/3;let picks=fold.rows as usize;
             // The part count comes from the matrix shapes, as in `apply_experts`: each part owns `local` of the `total` rows,
             // and a part's rows are one block of the output at its place, as `rank_rows` sets them.
@@ -1065,15 +1197,10 @@ let mut bytes=vec![0;rows.total*4];
             if shared.is_some_and(|shared|shared.len()!=m*local) || ids.len()!=rows || weights.len()!=rows {return Ok(None);}
             let Some(table)=spark_gpu_probe::prompt_ops::place_table(places) else {return Ok(None);};
             let parts=total/local;let words=rows.checked_mul(local).ok_or("prompt expert rows overflow")?;
-            let number=|value:usize|u32::try_from(value).map_err(|_|"prompt expert rows exceed ABI".to_string());
-            let mut place=RowShape::new(Row::ExpertPlaceTile,1).ok_or("prompt expert place shape")?;
-            place.rows=number(rows)?;place.cols=number(local)?;place.dim=number(local)?;place.taps=1;place.slots=number(words)?;
-            // The fold alone never reads `dim` (a decoder may leave a layer value there): the row fold gets none.
-            let Some(wrapped)=RowShape::wrapped(spark_gpu_probe::causal_ops::Shape {cols:number(local)?,dim:0,..fold},m) else {return Ok(None);};
-            // Only the two swept kernels: the tile place of one part, and the row fold of this rank's width (one launch, or runs of tokens).
-            let fast=spark_gpu_probe::prompt_admission::fast_kernel(wrapped)==Some("prompt_fold") || spark_gpu_probe::prompt_chunks::runs(wrapped).is_some();
-            if !spark_gpu_probe::prompt_admission::place_admitted(place) || !fast {return Ok(None);}
-            if input.len()!=rows.checked_mul(cols).ok_or("prompt expert input overflow")? || input.is_segmented() {return Err("prompt expert input extent differs".into());}
+            let Some((place,wrapped))=group_fold_shapes(local,rows,fold,m)? else {return Ok(None);};
+            // The rows the products read: FP32 words, or PACKED MIDDLE's code words and scale words a row.
+            let row_words=if packed {cols/8+cols/64} else {cols};
+            if input.len()!=rows.checked_mul(row_words).ok_or("prompt expert input overflow")? || input.is_segmented() {return Err("prompt expert input extent differs".into());}
             Ok(Some(FoldPlan {table,place,wrapped,local,cols,parts,words}))
         }
         /// The second half of `apply_experts_fold`: this rank's down rows `output` are placed to (token, pick) order,
@@ -1090,6 +1217,7 @@ let mut bytes=vec![0;rows.total*4];
             spark_gpu_probe::prompt_launches::record("prompt_fold_first");
             crate::exchange_trace::kind(||format!("experts {} folded",name));
             // The rows and the placed rows end with the exchange's drain, as the rows of `apply_experts` do.
+            if m>16 && folded.len().is_multiple_of(2) {return self.exchange_bf16(b,&folded,m,local,false,false);}
             let gathered=self.gather_small(b,&folded)?;if gathered.is_none() {self.gather_mapped(b,&folded)?;}drop(folded);drop(placed);drop(output);let stamp=self.cost.start(b);
             let exchange=match &gathered {Some(blocks)=>blocks,None=>self.exchange.as_ref().ok_or("prompt exchange is absent")?};
             // The reader of this exchange checked no word before (the tile place has no check), and none is checked now.
@@ -1111,13 +1239,19 @@ let mut bytes=vec![0;rows.total*4];
             if sets.len()<2 {return Ok(None);}
             let mut plans=Vec::with_capacity(sets.len());
             let stamp=self.cost.start(b);
+            // PACKED MIDDLE: a set's rows are FP32 words or the packed operands `experts_exchange_packed` made; the extent
+            // names the form (a row is `cols` words or cols / 8 + cols / 64 words), and every set has the same one.
+            // Packed rows have no other reader, so a packed set that this call cannot take is an error, never None.
+            let mut packed=None;
             let outputs={
                 let mut jobs=Vec::with_capacity(sets.len());
                 for &(first,input,places,ids,weights,shared,fold,m) in sets {
                     if first.is_empty() || !places.len().is_multiple_of(3) {return Err("prompt expert group is empty".into());}
-                    if !self.folds_groups() || m==0 {return Ok(None);}
                     let Some((list,extent))=Self::expert_parts(&self.matrices,first)? else {return Ok(None);};
-                    let Some(plan)=Self::experts_fold_plan(extent,first.iter().map(|v|v.1).sum::<usize>(),input,places,ids,weights,shared,fold,m)? else {return Ok(None);};
+                    let form=extent.1.is_multiple_of(64) && input.len()==(places.len()/3)*(extent.1/8+extent.1/64);
+                    if *packed.get_or_insert(form)!=form {return Err("prompt expert sets mix packed and FP32 rows".into());}
+                    if !self.folds_groups() || m==0 {return if form {Err("packed expert middle has no fold".into())} else {Ok(None)};}
+                    let Some(plan)=Self::experts_fold_plan(extent,first.iter().map(|v|v.1).sum::<usize>(),input,places,ids,weights,shared,fold,m,form)? else {return if form {Err("packed expert middle has no fold".into())} else {Ok(None)};};
                     plans.push(plan);
                     let mut p=Vec::with_capacity(list.len());let mut row=0;
                     for (shape,weight,scales,count) in &list {p.push((Shape {op:Op::NvRows,tokens:*count as u32,..*shape},Some((*weight,*scales)),row));row+=count;}
@@ -1125,7 +1259,8 @@ let mut bytes=vec![0;rows.total*4];
                 }
                 let lists=jobs.iter().map(|p|[p.as_slice()]).collect::<Vec<_>>();
                 let calls=lists.iter().zip(sets).zip(&plans).map(|((list,set),plan)|(list.as_slice(),set.1,None,plan.cols)).collect::<Vec<_>>();
-                let Some(made)=b.expert_group_sets(&calls)? else {return Ok(None);};
+                let made=if packed==Some(true) {b.expert_group_sets_packed(&calls)?.ok_or("packed expert middle is not taken by the product launch")?}
+                    else {let Some(made)=b.expert_group_sets(&calls)? else {return Ok(None);};made};
                 made.into_iter().map(|mut one|one.pop().ok_or_else(||"prompt expert products are absent".to_string())).collect::<std::result::Result<Vec<_>,_>>()?
             };
             if outputs.iter().zip(&plans).any(|(output,plan)|output.len()!=plan.words) {return Err("prompt expert rows extent differs".into());}
@@ -1266,11 +1401,22 @@ let mut bytes=vec![0;rows.total*4];
     }
 }
 #[cfg(target_os="linux")]
-pub use device::{Weights,gather_stage,gather_stage_rounds,gather_stage_selected,gather_argmax,fold_then_gather};
+pub use device::{Weights,PromptMiddle,gather_stage,gather_stage_rounds,gather_stage_selected,gather_argmax,fold_then_gather};
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn packed_middle_requires_the_actual_fold_reader_before_packing() {
+        use spark_gpu_probe::causal_ops::{Op,Shape};
+        let fold=Shape {op:Op::ExpertFold,heads:0,dim:128,taps:1,rows:8,cols:4096,epsilon:0.0,bound:0.0};
+        for m in [1,256,1024] {
+            assert!(group_fold_shapes(2048,m*8,fold,m).unwrap().is_some());
+            assert!(group_fold_shapes(2048,m*8,Shape {taps:0,..fold},m).unwrap().is_none(),"no shared expert keeps the FP32 fallback");
+            assert!(group_fold_shapes(2048,m*4,Shape {rows:4,..fold},m).unwrap().is_none(),"four picks keep the FP32 fallback");
+            for local in [1024,3072,4096] {assert!(group_fold_shapes(local,m*8,fold,m).unwrap().is_none(),"unsupported local width {local}");}
+        }
+    }
     #[test]
     fn compact_argmax_uses_global_origins_and_rejects_every_invalid_part() {
         let rows=[Rows {start:4096,count:4096,total:8192,split:true},Rows {start:0,count:4096,total:8192,split:true}];

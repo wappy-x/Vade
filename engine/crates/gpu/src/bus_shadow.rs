@@ -49,7 +49,7 @@ pub fn more(command:&Command)->Option<Window> {
     use core::mem::offset_of;
     let (weight,bytes)=if command.kind==Kind::PlainBf16 as u32 {
         (word(&command.payload,0)?,word(&command.payload,24)?.checked_mul(word(&command.payload,32)?)?.checked_mul(2)?)
-    } else if command.kind==Kind::Expert as u32 {
+    } else if command.kind==Kind::Expert as u32 || command.kind==Kind::Fp8Tile as u32 {
         let single=offset_of!(LaunchArguments,single);let shape=single+offset_of!(Arguments,shape);
         if word(&command.payload,offset_of!(LaunchArguments,batch))?!=0 || number(&command.payload,shape+offset_of!(Shape,tokens))?!=1 {return None;}
         let cells=u64::from(number(&command.payload,shape+offset_of!(Shape,rows))?).checked_mul(u64::from(number(&command.payload,shape+offset_of!(Shape,cols))?))?;
@@ -74,6 +74,41 @@ pub fn batch(command:&Command)->Option<Window> {
     let cells=u64::from(number(&command.payload,offset_of!(MxProjection,rows))?).checked_mul(u64::from(number(&command.payload,offset_of!(MxProjection,cols))?))?;
     let bytes=if number(&command.payload,offset_of!(ResidentProjectionBatch,plain))?&1!=0 {cells.checked_mul(2)?} else {cells};
     let weight=word(&command.payload,0)?;
+    (weight!=0 && weight%8==0 && bytes>=MIN_TARGET).then_some(Window {weight,bytes:bytes.min(BUDGET),ids:0,experts:0,picks:0})
+}
+/// Most token rows of a ROW launch that gets a side window (`rows`): the row groups of a decode step of several chats and
+/// the check rows of a drafting pass. A larger group is a prompt group; it keeps its own path.
+#[cfg(not(target_arch="nvptx64"))]
+pub const ROW_TOKENS:u32=8;
+/// ROW SHADOW (seat CHATS4): the first weights of a row launch of 2 to `ROW_TOKENS` token rows, as a side-branch window of
+/// `BUDGET` bytes at most, as `more` and `batch` give a one-token launch: an MXFP8 row projection (`mx_rows_small*`,
+/// `mx_rows_tile`), a mixed row stage (`flash_resident_projection_bf16_rows`) and the fold rows (`..._fold_rows`, `_f32`) by
+/// their first projection, a block-FP8 row group (`fp8_rows_*`) by the first part of its table, read from the staged
+/// bytes the command names. Side form only. Prefetch only: no value can change.
+#[cfg(not(target_arch="nvptx64"))]
+pub fn rows(command:&Command,stage_base:u64,staged:&[u8])->Option<Window> {
+    use crate::expert_ops::{GroupArguments,GroupEntry,Shape};
+    use crate::next_params::{MxLayer,MxProjection,ResidentProjectionBatch};
+    use core::mem::offset_of;
+    let kind=command.kind;let is=|k:Kind|kind==k as u32;
+    let tokens_ok=|t:u32|(2..=ROW_TOKENS).contains(&t);
+    let (weight,bytes)=if is(Kind::MxRows2) || is(Kind::MxRows4) || is(Kind::MxRows8) || is(Kind::MxRows8w) || is(Kind::MxRowsTile) {
+        if !tokens_ok(number(&command.payload,offset_of!(MxProjection,tokens))?) {return None;}
+        let cells=u64::from(number(&command.payload,offset_of!(MxProjection,rows))?).checked_mul(u64::from(number(&command.payload,offset_of!(MxProjection,cols))?))?;
+        (word(&command.payload,offset_of!(MxProjection,weights))?,cells)
+    } else if is(Kind::MixedRows) || is(Kind::FoldRows) || is(Kind::FoldRowsF32) {
+        if number(&command.payload,offset_of!(MxLayer,count))?==0 || !tokens_ok(number(&command.payload,offset_of!(MxProjection,tokens))?) {return None;}
+        let cells=u64::from(number(&command.payload,offset_of!(MxProjection,rows))?).checked_mul(u64::from(number(&command.payload,offset_of!(MxProjection,cols))?))?;
+        // A word of the first projection: 4 bytes (FP32 fold rows), 2 (a plain BF16 projection) or 1 (an MXFP8 one).
+        let width=if is(Kind::FoldRowsF32) {4} else if is(Kind::FoldRows) || number(&command.payload,offset_of!(ResidentProjectionBatch,plain))?&1!=0 {2} else {1};
+        (word(&command.payload,0)?,cells.checked_mul(width)?)
+    } else if is(Kind::Fp8RowsSmall) || is(Kind::Fp8RowsMulti) || is(Kind::Fp8RowsFew) || is(Kind::Fp8RowsShare) {
+        if number(&command.payload,offset_of!(GroupArguments,count))?==0 {return None;}
+        let at=usize::try_from(word(&command.payload,offset_of!(GroupArguments,table))?.checked_sub(stage_base)?).ok()?;
+        let entry=staged.get(at..)?.get(..core::mem::size_of::<GroupEntry>())?;
+        if !tokens_ok(number(entry,offset_of!(GroupEntry,shape)+offset_of!(Shape,tokens))?.max(2)) {return None;}
+        (word(entry,offset_of!(GroupEntry,weight))?,u64::from(number(entry,offset_of!(GroupEntry,weight_bytes))?))
+    } else {return None;};
     (weight!=0 && weight%8==0 && bytes>=MIN_TARGET).then_some(Window {weight,bytes:bytes.min(BUDGET),ids:0,experts:0,picks:0})
 }
 #[cfg(not(target_arch="nvptx64"))]
@@ -217,5 +252,50 @@ const _:()={assert!(OFFSET.is_multiple_of(16));assert!(OFFSET+core::mem::size_of
         assert!(more(&target).is_none() && mx(&target).is_none(),"the batch window is its own family");
         // The window passes the take's checks as every side window does, and makes a side command.
         let w=batch(&target).unwrap();assert_eq!(side(&command(),[6,1,1,256,0],w,0,&[]).unwrap().kind,Kind::ShadowSide as u32);
+    }
+    #[test] fn row_targets_are_launches_of_two_to_eight_rows_by_their_first_weights() {
+        use crate::expert_ops::{GroupArguments,GroupEntry,Shape};use crate::next_params::{MxLayer,MxProjection,ResidentProjectionBatch};use core::mem::offset_of;
+        // An MXFP8 row projection: a byte a cell, 2 to ROW_TOKENS rows.
+        let mut mx_rows=Command::new(Kind::MxRows8);
+        mx_rows.put(offset_of!(MxProjection,weights),&0x8000u64.to_ne_bytes());mx_rows.put(offset_of!(MxProjection,rows),&4096u32.to_ne_bytes());
+        mx_rows.put(offset_of!(MxProjection,cols),&4096u32.to_ne_bytes());
+        for tokens in 2..=ROW_TOKENS {mx_rows.put(offset_of!(MxProjection,tokens),&tokens.to_ne_bytes());let w=rows(&mx_rows,0,&[]).unwrap();assert_eq!((w.weight,w.bytes,w.ids,w.experts,w.picks),(0x8000,BUDGET,0,0,0));}
+        for tokens in [0u32,1,9,64] {mx_rows.put(offset_of!(MxProjection,tokens),&tokens.to_ne_bytes());assert!(rows(&mx_rows,0,&[]).is_none(),"{tokens} rows");}
+        mx_rows.put(offset_of!(MxProjection,tokens),&4u32.to_ne_bytes());mx_rows.put(offset_of!(MxProjection,rows),&256u32.to_ne_bytes());assert!(rows(&mx_rows,0,&[]).is_none(),"1 MB is under the least target");
+        mx_rows.put(offset_of!(MxProjection,rows),&1024u32.to_ne_bytes());assert_eq!(rows(&mx_rows,0,&[]).unwrap().bytes,4<<20);
+        mx_rows.put(offset_of!(MxProjection,weights),&0x8004u64.to_ne_bytes());assert!(rows(&mx_rows,0,&[]).is_none(),"unaligned weight");
+        for kind in [Kind::MxRows2,Kind::MxRows4,Kind::MxRows8w,Kind::MxRowsTile] {let mut other=mx_rows;other.kind=kind as u32;other.put(0,&0x8000u64.to_ne_bytes());assert_eq!(rows(&other,0,&[]).unwrap().bytes,4<<20);}
+        // The one-token families do not take a row launch, and a row window is no one-token window.
+        let mut one=mx_rows;one.kind=Kind::Mx as u32;one.put(0,&0x8000u64.to_ne_bytes());assert!(rows(&one,0,&[]).is_none());
+        let mut row_mx=mx_rows;row_mx.put(0,&0x8000u64.to_ne_bytes());assert!(mx(&row_mx).is_none() && more(&row_mx).is_none() && batch(&row_mx).is_none());
+        // A mixed row stage and the fold rows, by their first projection: 1, 2 or 4 bytes a cell.
+        let mut stage=Command::new(Kind::MixedRows);
+        stage.put(0,&0x9000u64.to_ne_bytes());stage.put(offset_of!(MxProjection,rows),&1024u32.to_ne_bytes());stage.put(offset_of!(MxProjection,cols),&2048u32.to_ne_bytes());
+        stage.put(offset_of!(MxProjection,tokens),&3u32.to_ne_bytes());stage.put(offset_of!(MxLayer,count),&2u32.to_ne_bytes());
+        assert_eq!(rows(&stage,0,&[]).unwrap().bytes,2<<20);
+        stage.put(offset_of!(ResidentProjectionBatch,plain),&1u32.to_ne_bytes());assert_eq!(rows(&stage,0,&[]).unwrap().bytes,4<<20);
+        let mut fold=stage;fold.kind=Kind::FoldRows as u32;fold.put(offset_of!(ResidentProjectionBatch,plain),&0u32.to_ne_bytes());assert_eq!(rows(&fold,0,&[]).unwrap().bytes,4<<20);
+        fold.kind=Kind::FoldRowsF32 as u32;fold.put(offset_of!(MxProjection,rows),&144u32.to_ne_bytes());fold.put(offset_of!(MxProjection,cols),&4096u32.to_ne_bytes());
+        assert_eq!(rows(&fold,0,&[]).unwrap().bytes,144*4096*4);
+        stage.put(offset_of!(MxLayer,count),&0u32.to_ne_bytes());assert!(rows(&stage,0,&[]).is_none(),"an empty stage");
+        stage.put(offset_of!(MxLayer,count),&1u32.to_ne_bytes());stage.put(offset_of!(MxProjection,tokens),&1u32.to_ne_bytes());assert!(rows(&stage,0,&[]).is_none(),"one row");
+        // A block-FP8 row group: the first part of the staged table the command names.
+        let mut entry=GroupEntry {shape:Shape {op:crate::expert_ops::Op::Fp8Rows,rows:1024,cols:4096,block_rows:128,block_cols:128,tokens:4,global:1.0,activation:1.0,bound:0.0,role:0},
+            weight:0xa000,scales:0xb000,first:0,first_row:0,input_words:0,weight_bytes:4<<20,scale_bytes:0,pad:0};
+        // The staged bytes: 16 bytes of another table, then the entry's fields that the window reads.
+        let as_bytes=|e:&GroupEntry|{let mut v=vec![0u8;16+core::mem::size_of::<GroupEntry>()];
+            for (at,b) in [(offset_of!(GroupEntry,shape)+offset_of!(Shape,tokens),e.shape.tokens.to_ne_bytes().to_vec()),(offset_of!(GroupEntry,weight),e.weight.to_ne_bytes().to_vec()),
+                (offset_of!(GroupEntry,weight_bytes),e.weight_bytes.to_ne_bytes().to_vec())] {v[16+at..16+at+b.len()].copy_from_slice(&b);}v};
+        let base=0x10_0000u64;let mut group=Command::new(Kind::Fp8RowsMulti);
+        group.put(offset_of!(GroupArguments,table),&(base+16).to_ne_bytes());group.put(offset_of!(GroupArguments,count),&2u32.to_ne_bytes());
+        let w=rows(&group,base,&as_bytes(&entry)).unwrap();assert_eq!((w.weight,w.bytes),(0xa000,4<<20));
+        for kind in [Kind::Fp8RowsSmall,Kind::Fp8RowsFew,Kind::Fp8RowsShare] {let mut other=group;other.kind=kind as u32;assert!(rows(&other,base,&as_bytes(&entry)).is_some());}
+        assert!(rows(&group,base,&as_bytes(&entry)[..40]).is_none(),"a table past the staged bytes");
+        assert!(rows(&group,base+32,&as_bytes(&entry)).is_none(),"a table below the stage");
+        entry.shape.tokens=16;assert!(rows(&group,base,&as_bytes(&entry)).is_none(),"a prompt-sized part");
+        entry.shape.tokens=1;assert!(rows(&group,base,&as_bytes(&entry)).is_some(),"parts of one row in a row group");
+        group.put(offset_of!(GroupArguments,count),&0u32.to_ne_bytes());assert!(rows(&group,base,&as_bytes(&entry)).is_none(),"an empty group");
+        // The window passes the take's checks as every side window does, and makes a side command.
+        assert_eq!(side(&command(),[6,1,1,256,0],w,0,&[]).unwrap().kind,Kind::ShadowSide as u32);
     }
 }

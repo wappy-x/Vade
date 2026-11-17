@@ -95,7 +95,7 @@ pub(crate) fn run(path:&str)->Result<()> {
                 let s=901+copy as u64*31+i as u64;let xv=pattern(0,j.cols*m,s+5);let input=g.upload(&le(&xv))?;
                 let (weights,scales)=if plain {let values=pattern(5,j.rows*j.cols,s);if packed {wide.push(g.upload(&le(&values.iter().map(|v|f32::from_bits(v.to_bits()&0xffff0000)).collect::<Vec<_>>()))?);(g.upload(&values.iter().flat_map(|v| ((v.to_bits()>>16) as u16).to_le_bytes()).collect::<Vec<_>>())?,2)} else {(g.upload(&le(&values))?,4)}}
                     else {(g.upload(&mx_bytes(j.rows*j.cols,s,false))?,g.upload(&mx_bytes(j.rows*j.cols/32,s+9,true))?)};
-                base.layer.projections[i]=MxProjection {weights,scales,input,output:0,rows:j.rows as u32,cols:j.cols as u32,tokens:1,input_bf16:0,round:0};
+                base.layer.projections[i]=MxProjection {weights,scales,input,output:0,rows:j.rows as u32,cols:j.cols as u32,tokens:1,input_bf16:0,round:0,mode:0};
                 if plain {base.plain|=1<<i;}
             }
             base.layer.count=jobs.len() as u32;

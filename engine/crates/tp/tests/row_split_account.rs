@@ -46,6 +46,8 @@ fn with_service(run:impl FnOnce(&Service<'_>,&spark_serve::protocol::Request,&[u
             Factory::new(checkpoint,split,80,vec![0]).unwrap().with_predictor(3).unwrap().worker().unwrap();});
         let split=Split::new(Host,Wire {topology:Topology {rank:0,parts:2},controller:true,tx:a_tx,rx:a_rx}).unwrap();
         let engine=Factory::new(checkpoint,split,80,vec![0]).unwrap().with_predictor(3).unwrap();
+        // These counts are of whole-depth proposals: the confidence rule (row_split confidence.rs) is off here.
+        engine.set_confidence(false);
         let best=|v:&[f32]|(0..v.len()).reduce(|a,b|if v[b]>v[a] {b} else {a}).unwrap() as u32;
         let mut limits=spark_tp::row_split::limits(80,64).unwrap();limits.next_mtp_depth=Some(3);
         let request=spark_serve::protocol::parse(br#"{"messages":[{"role":"user","content":"Say hello."}],"max_tokens":40,"mtp_depth":3}"#,true,&limits).unwrap();

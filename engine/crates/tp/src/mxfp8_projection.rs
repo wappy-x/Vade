@@ -28,7 +28,27 @@ impl<'f> Component<'f> {
 pub struct Mxfp8Projection<'f> {
     shape:Shape,origin:u64,total_rows:u64,topology:Topology,input:String,output:String,gather:bool,
     weight:Component<'f>,scale:Component<'f>,
+    /// The word function of this matrix (`next_params::MX_SCALAR` or `MX_TC`), fixed at the binding by the tensor's role
+    /// (`word_of`). The device matrix and the host reference both take it from here, so every path of the matrix has one word.
+    word:u32,
+    /// Not the output head: a launch of this matrix on the scalar word is counted (`mx_scalar_layer`).
+    layer:bool,
 }
+/// THE SWITCH of the MXFP8 word function. Every MXFP8 matrix of a layer (attention q, k, v, o; dense gate, up, down; every
+/// other MXFP8 projection a layer binds) takes the tensor-core word of `docs/tc-dense-contract.md`, section MXFP8. The output
+/// head keeps the scalar word: its kernels (`text_edges`, the head row forms) are not part of this switch.
+pub const LAYER_WORD:u32=spark_gpu_probe::next_params::MX_TC;
+/// The served proof lines of one rank: the MXFP8 word counters, every launch counter and the block FP8 word counters of this process so far, at the end
+/// of a session's prompt (`at` = "prompt") and at the session's end ("end"), on every rank. The difference of the two is the
+/// decode and verify phase of a lone session.
+pub fn served_counts(rank:impl std::fmt::Display,session:impl std::fmt::Display,at:&str) {
+    eprintln!("SERVED MX COUNTS rank={rank} session={session} at={at} {}",spark_gpu_probe::prompt_launches::mx_line());
+    eprintln!("SERVED BF COUNTS rank={rank} session={session} at={at} {}",spark_gpu_probe::prompt_launches::line());
+    // BLOCK FP8 on the tensor cores: which body the parts of every block FP8 launch took (`fp8_generic_layer` stays 0).
+    eprintln!("SERVED FP8 COUNTS rank={rank} session={session} at={at} {}",spark_gpu_probe::prompt_launches::fp8_line());
+}
+fn is_layer(view:&engine_model::plan::admission::WeightView)->bool {view.binding().operation!=engine_model::plan::glm_index::TensorRole::Head}
+fn word_of(view:&engine_model::plan::admission::WeightView)->u32 {if is_layer(view) {LAYER_WORD} else {spark_gpu_probe::next_params::MX_SCALAR}}
 impl LayerBoundary<'_> {
     /// The actual norm parameter dtype determines its completed candidate output.
     /// Other producer dtypes follow the conditional layer boundary contract.
@@ -67,11 +87,15 @@ impl LayerBoundary<'_> {
         need(op.outputs[0].shape==[w.shape[0]] && op.output_splits==[op.weights[0].split],"MXFP8 output placement differs from its weight rows")?;
         Ok(Mxfp8Projection {shape,origin,total_rows:w.shape[0],topology:p.topology,input:op.inputs[0].clone(),output:op.outputs[0].name.clone(),
             gather:op.gather.contains(&op.outputs[0].name),weight:Component::bind(&c[0],checkpoint,origin,rows,w.shape[1])?,
-            scale:Component::bind(&c[1],checkpoint,origin,rows,w.shape[1]/32)?})
+            scale:Component::bind(&c[1],checkpoint,origin,rows,w.shape[1]/32)?,word:word_of(view),layer:is_layer(view)})
     }
 }
 impl Mxfp8Projection<'_> {
     pub fn shape(&self)->Shape {self.shape}
+    /// The word function of this matrix: `next_params::MX_SCALAR` or `MX_TC`.
+    pub fn word(&self)->u32 {self.word}
+    /// The same rows on the scalar word. For a check tool that compares a device entry of the scalar word; never a served path.
+    pub fn scalar_word(mut self)->Self {self.word=spark_gpu_probe::next_params::MX_SCALAR;self}
     pub fn row_origin(&self)->u64 {self.origin}
     pub fn total_rows(&self)->u64 {self.total_rows}
     pub fn topology(&self)->Topology {self.topology}
@@ -107,7 +131,7 @@ impl Mxfp8Projection<'_> {
             WeightRange {file_offset:self.scale.file_offset,destination:self.weight.bytes,bytes:self.scale.bytes,row_bytes:0,row_stride:0}];
         let arena=b.load_weight_arena(self.shape.arena_bytes()?,&[
             WeightFile {file:self.weight.file.file(),ranges:&ranges[..1]},WeightFile {file:self.scale.file.file(),ranges:&ranges[1..]}])?;
-        b.resident_mxfp8_projection(&arena,shape)
+        let matrix=b.resident_mxfp8_projection_mode(&arena,shape,self.word)?;Ok(if self.layer {matrix.counted_as_layer()} else {matrix})
     }
     /// The arena of `load_shape` from the bytes `read` returned (read once, checked there): the E4M3 rows, then their scale rows.
     #[cfg(target_os="linux")]
@@ -116,7 +140,7 @@ impl Mxfp8Projection<'_> {
         need(weight.len()==self.weight.bytes && scale.len()==self.scale.bytes && weight.len()==shape.weight_bytes() && scale.len()==shape.scale_bytes(),
             "MXFP8 host rows differ from their selected components")?;
         let arena=b.upload_weight_arena(shape.arena_bytes()?,&[(0,weight),(weight.len(),scale)])?;
-        b.resident_mxfp8_projection(&arena,shape)
+        let matrix=b.resident_mxfp8_projection_mode(&arena,shape,self.word)?;Ok(if self.layer {matrix.counted_as_layer()} else {matrix})
     }
 }
 impl<'f> Mxfp8Projection<'f> {
@@ -133,7 +157,7 @@ impl<'f> Mxfp8Projection<'f> {
         };
         Ok(Self {shape:Shape::new(r.len(),self.shape.cols(),self.shape.input())?,origin:r.start as u64,total_rows:self.total_rows,
             topology,input:self.input.clone(),output:self.output.clone(),gather:true,
-            weight:component(&self.weight,self.shape.cols())?,scale:component(&self.scale,self.shape.cols()/32)?})
+            weight:component(&self.weight,self.shape.cols())?,scale:component(&self.scale,self.shape.cols()/32)?,word:self.word,layer:self.layer})
     }
     /// Bind one complete matrix by its retained recipe. No producer name tuning.
     pub fn matrix(checkpoint:&'f CheckpointAdmission,name:&str,input:WeightType)->Result<Self> {
@@ -149,7 +173,7 @@ impl<'f> Mxfp8Projection<'f> {
         let c=view.components();need(c.len()==2 && c[0].dtype==Dtype::F8E4M3 && c[0].shape==w.shape
             && c[1].dtype==Dtype::U8 && c[1].shape==[w.shape[0],w.shape[1]/32],"MXFP8 matrix components differ")?;
         Ok(Self {shape,origin:interval.start,total_rows:w.shape[0],topology,input:String::new(),output:String::new(),gather:rows!=w.shape[0],
-            weight:Component::bind(&c[0],checkpoint,interval.start,rows,w.shape[1])?,scale:Component::bind(&c[1],checkpoint,interval.start,rows,w.shape[1]/32)?})
+            weight:Component::bind(&c[0],checkpoint,interval.start,rows,w.shape[1])?,scale:Component::bind(&c[1],checkpoint,interval.start,rows,w.shape[1]/32)?,word:word_of(view),layer:is_layer(view)})
     }
 }
 
@@ -164,6 +188,7 @@ impl<'f> Mxfp8Projection<'f> {
         need(c.len()==2 && c[0].name==w.name && c[0].dtype==Dtype::F8E4M3 && c[0].shape==w.shape
             && c[1].dtype==Dtype::U8 && c[1].shape==[w.shape[0],w.shape[1]/32],"head MXFP8 component layout differs")?;
         Ok(Self {shape,origin:0,total_rows:w.shape[0],topology:Topology {rank:0,parts:1},input:"final_norm".into(),output:"logits".into(),gather:false,
-            weight:Component::bind(&c[0],checkpoint,0,w.shape[0],w.shape[1])?,scale:Component::bind(&c[1],checkpoint,0,w.shape[0],w.shape[1]/32)?})
+            weight:Component::bind(&c[0],checkpoint,0,w.shape[0],w.shape[1])?,scale:Component::bind(&c[1],checkpoint,0,w.shape[0],w.shape[1]/32)?,
+            word:spark_gpu_probe::next_params::MX_SCALAR,layer:false})
     }
 }

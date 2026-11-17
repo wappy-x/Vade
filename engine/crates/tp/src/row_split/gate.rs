@@ -105,8 +105,9 @@ impl Gate {
         else {self.begin();self.pay.step();self.steps+=1;self.picked+=u64::from(picked);}
     }
     /// The verdict of the open cycle: the rows are kept up to `kept_to`, in `ms`; `partial` when rows were dropped.
-    pub(super) fn verdict(&mut self,kept_to:u64,ms:f64,partial:bool) {
-        let Some(mut cycle)=self.open.take() else {return;};cycle.parts[3]=ms;let mut parts=cycle.parts;
+    /// Returns what the cycle drafted, kept (its own row included) and cost in ms, for a pair's record (pair.rs).
+    pub(super) fn verdict(&mut self,kept_to:u64,ms:f64,partial:bool)->Option<(u64,u64,f64)> {
+        let mut cycle=self.open.take()?;cycle.parts[3]=ms;let mut parts=cycle.parts;
         self.edge_ms+=(cycle.started.elapsed().as_secs_f64()*1000.0-parts.iter().sum::<f64>()).max(0.0);
         if partial {self.partial+=1;self.partial_ms+=parts[3];}
         if self.tried==0 {self.seed_ms=parts[1];parts[1]=0.0;}
@@ -117,6 +118,7 @@ impl Gate {
         if cycle.drafted>=super::trial::TRIAL_DEPTH as u64 {self.score=(self.score+kept as i32-1-even_tokens(cycle.drafted)).min(STOP_BANK);}
         self.deeper.verdict(cycle.drafted,kept);
         self.kept+=kept as f64;self.cycle_ms+=ms;self.tried+=1;
+        Some((cycle.drafted,kept,ms))
     }
     /// What a proposing cycle costs beside its pass and its proposals: the waiting rows and the verdict.
     pub(super) fn beside_ms(&self)->f64 {if self.tried==0 {0.0} else {(self.parts[1]+self.parts[3])/f64::from(self.tried)}}

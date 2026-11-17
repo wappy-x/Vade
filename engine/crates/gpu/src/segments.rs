@@ -107,6 +107,10 @@ impl Reserve {
     /// this cap adds above the pool's own leave before an allocation takes the device past it
     /// (`make_room`), so the group's peak stays inside its charge whatever the cap is.
     pub(super) fn group_cap(&mut self, bytes: usize, ceiling: usize) { self.group = bytes; self.ceiling = ceiling; }
+    /// LEASE SPARES: the group's cap and ceiling end, as at the start of `trim`, and no spare leaves. A spare above the
+    /// pool's own cap then stays until the next group's `group_cap`, a trim, a clear, the device budget (`make_room`) or
+    /// the pressure rule releases it; a return that finds the pool full is freed (`keep`).
+    pub(super) fn end_group(&mut self) { self.group = 0; self.ceiling = usize::MAX; }
     /// A plain return. No group: `keep` as it is, so a full pool refuses it. In a group: the
     /// pressure rule still decides, a return larger than the whole cap is still refused, and
     /// otherwise spares leave from the front, as in `trim`, until the return fits.

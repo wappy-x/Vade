@@ -23,8 +23,10 @@ pub use fp8::{Fp8GroupedScratch, Fp8RoutingFlag};
 #[path = "backend/mhc.rs"] mod mhc; pub use mhc::{Bf16Vector,ResidentMhc,MhcPass}; use kernels::AbKernels; #[path = "backend/mhc_boundary.rs"] mod mhc_boundary; pub use mhc_boundary::{ResidentMhcBoundary,MhcBoundaryPass,MhcHostLink,Shadow,ShadowRange,GpuMark,fused_launches as mhc_fused_launches,fused_row_launches as mhc_fused_row_launches};
 #[path = "backend/tc_family.rs"] mod tc_family; #[cfg(feature="kernel-bench")] #[path = "backend/launch_split.rs"] mod launch_split; #[path = "backend/pair_split.rs"] mod pair_split;
 #[path = "backend/nv_capture.rs"] pub(crate) mod nv_capture;
+#[path = "backend/prompt_route.rs"] mod prompt_route; pub use prompt_route::PromptRoute;
+#[path = "backend/prompt_native.rs"] mod prompt_native; pub use prompt_native::{PromptExpertTable,PromptRowScales,PromptNativeBatch,PromptNativeKeep,PromptOperandSource,PromptPacked};
 #[cfg(test)] #[path="backend/lookahead_device.rs"] mod lookahead_device; #[path="backend/start.rs"] mod start;
-#[path = "backend/text_edges.rs"] mod text_edges; pub use text_edges::ResidentTextEdges; #[path = "backend/norm.rs"] mod norm; pub use norm::{ResidentNorm,NormOutput}; #[path = "backend/mxfp8_projection.rs"] mod mxfp8_projection; pub use mxfp8_projection::{ResidentMxfp8Projection,Mxfp8ProjectionPass,ResidentProjection};
+#[path = "backend/text_edges.rs"] mod text_edges; pub use text_edges::ResidentTextEdges; #[path = "backend/norm.rs"] mod norm; pub use norm::{ResidentNorm,NormOutput}; #[path = "backend/mxfp8_projection.rs"] mod mxfp8_projection; pub use mxfp8_projection::{ResidentMxfp8Projection,Mxfp8ProjectionPass,ResidentProjection,MxPackedRows};
 
 pub struct Matrix<'a> { buffer: Buffer<'a>, rows: usize, cols: usize, packed: bool, packed_blocked: bool, stride: usize, row_offset: usize, column_offset: usize, scalar_f32: bool, fp8_scales: Option<Buffer<'a>>, fp8_fragments: bool }
 /// One official-dtype allocation; views are offsets and packing only permutes bytes.
@@ -136,6 +138,9 @@ impl DeviceVector<'_> {
 }
 
 struct LayerKernels<'a> { _module: Module<'a>, functions: Cell<LayerFunctions> }
+/// In the row argument of `Backend::enqueue_argmax_device`: the row also gets the softmax mass of its logits (four
+/// words a row, `logits_argmax_mass`). The draft head's pick reads it as the probability of its proposal.
+pub const ARGMAX_MASS: usize = 1 << 40;
 #[derive(Clone, Copy)]
 struct LayerFunctions {
     embedding: Handle, embedding_selected: Handle, rms: Handle, residual_rms: Handle, rms_apply: Handle,
@@ -144,7 +149,7 @@ struct LayerFunctions {
     model_rms: Handle, model_rms_apply: Handle, model_qkv: Handle, model_elementwise: Handle,
     bounded_scores: Handle, bounded_scores_grouped: Handle, bounded_softmax: Handle, bounded_values: Handle, bounded_flash: Handle, bounded_split: Handle, bounded_merge: Handle,
     swiglu: Handle, residual: Handle, logits_bf16: Handle, argmax: Handle, argmax_finish: Handle,
-    top_k: Handle, top_k_finish: Handle,
+    top_k: Handle, top_k_finish: Handle, argmax_mass: Handle, argmax_mass_finish: Handle,
 }
 impl<'a> LayerKernels<'a> {
     fn load(context: &'a Context) -> Result<Self, String> {
@@ -176,6 +181,7 @@ impl LayerFunctions {
             residual: module.function("layer_residual")?, argmax: module.function("logits_argmax")?,
             argmax_finish: module.function("logits_argmax_finish")?, logits_bf16: module.function("logits_bf16")?,
             top_k: module.function("logits_top_k")?, top_k_finish: module.function("logits_top_k_finish")?,
+            argmax_mass: module.function("logits_argmax_mass")?, argmax_mass_finish: module.function("logits_argmax_mass_finish")?,
         })
     }
 }

@@ -48,6 +48,8 @@ fn run<const KIND:u32>(table:*const Command,index:u64) {
             // One recorded kind for the NV decode tile of either storage layout: the shape of the launch names the layout.
             k if k==Kind::NvTile as u32=>{let launch=p.cast::<crate::expert_ops::LaunchArguments>().read();
                 if crate::expert_ops::nv_tiled(&launch.single.shape) {crate::nv_cols::project(launch)} else {crate::nv_tile::project::<16,8,4,2>(launch)}},
+            // The block FP8 decode tile alone (the body `expert_operation` ran for these launches before).
+            k if k==Kind::Fp8Tile as u32=>crate::fp8_tile::tile(p.cast::<crate::expert_ops::LaunchArguments>().read()),
             k if k==Kind::DeviceRoute as u32=>crate::device_route::build(p.cast::<crate::device_route_abi::Build>().read()),
             // The pair split. The raw quarter launch names the quarters a row gets in the word after its arguments.
             k if k==Kind::NvQuarters as u32=>{let launch=p.cast::<crate::expert_ops::LaunchArguments>().read();
@@ -60,9 +62,7 @@ fn run<const KIND:u32>(table:*const Command,index:u64) {
                 *words.add(5),*words.add(6) as _,*words.add(7),*words.add(8)),
             k if k==Kind::Plain as u32=>crate::ordered_projection::resident_project_f32_ordered(*words as _,*words.add(1) as _,*words.add(2) as _,*words.add(3) as u32,*words.add(4) as u32),
             k if k==Kind::AbsorbDense as u32=>crate::latent_absorption::resident_latent_absorption(p.cast::<crate::causal_ops::Arguments>().read()),
-            k if k==Kind::AbsorbAttention as u32=>{let args=p.cast::<crate::causal_ops::Arguments>().read();
-                if args.shape.op==crate::causal_ops::Op::AbsorbScores {crate::latent_absorption::resident_latent_absorption_scores(args)}
-                else {crate::latent_absorption::resident_latent_absorption_values(args)}},
+            k if k==Kind::AbsorbAttention as u32=>crate::latent_absorption::resident_latent_absorption_attention(p.cast::<crate::causal_ops::Arguments>().read()),
             k if k==Kind::PlainBf16 as u32=>crate::plain_bf16::resident_project_bf16_ordered(*words as _,*words.add(1) as _,*words.add(2) as _,*words.add(3) as u32,*words.add(4) as u32),
             k if k==Kind::Mx as u32=>crate::mx_rows_small::decode::<2,false>(p.cast::<crate::next_params::MxLayer>()),
             k if k==Kind::Mixed as u32=>crate::next_decode::resident_flash_resident_projection_batch::<false>(p.cast::<crate::next_params::ResidentProjectionBatch>().read()),
@@ -111,6 +111,7 @@ entry!(resident_launch_plain_batch,Kind::PlainBatch as u32);
 entry!(resident_launch_nv_stream,18);
 entry!(resident_launch_causal_fast,19);
 entry!(resident_launch_nv_tile,20);
+entry!(resident_launch_fp8_tile,Kind::Fp8Tile as u32);
 entry!(resident_launch_device_route,21);
 entry!(resident_launch_put_wide,23);
 entry!(resident_launch_plain_bf16,26);

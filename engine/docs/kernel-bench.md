@@ -185,3 +185,15 @@ can contain spaces. Copy the complete built folder to a Spark without changing
 its manifest. The builder still receives an absolute image output path.
 The runner hot-swaps each image without reloading weights. Large sweeps should
 be split across sub-minute sessions or independent Sparks, never hold a pair.
+
+### Latent tensor-core timing
+
+`kernel-bench --absorb-tc-time BASE.ptx CANDIDATE.ptx` times the four latent
+folds at 1, 2, 4, 8, 256 and 1,024 prompt rows, then one decode row with
+2,051, 256 and 16 selected rows. BASE must use the scalar latent kernels;
+CANDIDATE must use the tensor-core latent kernels. The tool uses each
+image's launch grid and thread count, including the decode score bucket.
+Each cell uses A X X A order after warm-up and reports launch-plus-sync
+medians in milliseconds. It excludes allocations and host dispatch. It is
+a timing tool; `resident-decode-check absorb-tc-rows OUT` supplies the twin,
+wrong-word control, row placement and recorded decode proofs.

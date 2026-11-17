@@ -89,7 +89,7 @@ if [ "${1-}" = --from-payload ]; then
         8.8) ptx_cuda=12.9 ptx_driver=575.51.03 ;;
         *) fail "no driver row for PTX ISA '$isa'; add it from the CUDA release notes" ;;
     esac
-    [ "$gpu" = sm_121 ] || fail "PTX targets '$gpu', not the GB10 (sm_121)"
+    [ "$gpu" = sm_121a ] || fail "PTX targets '$gpu', not the GB10 (sm_121a)"
     output=${output_arg:-"$root/.local/bundles"}
     [ ! -e "$output" ] && [ ! -L "$output" ] || fail 'output already exists; choose a fresh output directory'
     mkdir -p -- "$(dirname -- "$output")"

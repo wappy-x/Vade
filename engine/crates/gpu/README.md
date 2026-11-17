@@ -90,13 +90,13 @@ user, without sudo. Report the last lines of both builds. Do not commit.
 
 1. It checks that the pinned nightly Rust and its NVPTX target are
    installed. If not, it prints the `rustup` command to run.
-2. It builds the kernels for the GB10 (`sm_121`) with tensor cores on.
+2. It builds the kernels for the GB10 (`sm_121a`) with tensor cores on.
 3. It writes `spark_rust_kernels.ptx` and `spark_layer_kernels.ptx` to
    `target/nvptx64-nvidia-cuda/release/`.
 4. It stamps both files against the kernel sources, shared launch types in
    `kernel_params.rs`, features, target CPU, PTX version and Rust flags.
 
-`cargo kernels --fp4` builds `sm_121a` separately under `target/fp4/`, with
+`cargo kernels --fp4` builds its own image (also `sm_121a`) under `target/fp4/`, with
 `spark_rust_kernels_fp4.ptx` and `spark_layer_kernels_fp4.ptx` names. Host
 builds keep selecting production PTX unless `SPARK_PTX_VARIANT=fp4` is set.
 See [the FP4 kernel contract](../../docs/fp4-kernels.md).
@@ -116,7 +116,7 @@ nightly.</dd>
 must match the selected variant.</dd>
 <dt><code>SPARK_PTX_VARIANT</code></dt>
 <dd>Select <code>fp4</code> explicitly to embed FP4 PTX in both host crates.
-Unset, or <code>production</code>, selects the ordinary <code>sm_121</code> PTX.</dd>
+Unset, or <code>production</code>, selects the ordinary PTX.</dd>
 </dl>
 
 </details>
@@ -279,7 +279,7 @@ checks the file against the pinned hash. The compiler is Linux aarch64 only:
 sh scripts/make-cubin.sh spark_layer_kernels.ptx cubin-out
 ```
 
-The script runs `ptxas --gpu-name=sm_121 -m64 -O3 flash.ptx -o flash.cubin`, with
+The script runs `ptxas --gpu-name=sm_121a -m64 -O3 flash.ptx -o flash.cubin`, with
 no arithmetic overrides. It writes three files: `flash.cubin`, `flash.ptx` (the
 bytes that the compiler read) and `flash.cubin.conf`. The manifest records the
 SHA256 digests, the lowest driver API version the build toolkit needs (CUDA 13.0
@@ -287,14 +287,20 @@ uses `13000`) and the compiler:
 
 ```ini
 format=vade-cubin-v1
-target=sm_121
+target=sm_121a
 ptx_sha256=<SHA256 of the PTX>
 cubin_sha256=<SHA256 of flash.cubin>
 min_driver_api=13000
 ptxas_version=13.0.88
 ptxas_sha256=<SHA256 of the ptxas program>
-ptxas_args=--gpu-name=sm_121 -m64 -O3
+ptxas_args=--gpu-name=sm_121a -m64 -O3
 ```
+
+The target was `sm_121` until rebase R3 (2026-11-16). The MXFP8 word now takes
+the block-scaled tensor-core step, which `sm_121` does not have. The change
+was allowed on a receipt: the pinned compiler gives the same machine code,
+byte for byte, for every one of the 664 kernels of the image under both
+targets (lab bench run `yard-11`).
 
 Set `SPARK_CUBIN=/absolute/path/flash.cubin` only for the engine build,
 including a Mac cross-build. `scripts/make-bundle.sh` does this in its native
@@ -305,8 +311,10 @@ proof. If validation fails on the build machine, it prints one plain error and
 exits with a failure.
 
 Accepted images use CUDA ELF64 OSABI `0x41`, ABI version `8`, executable type
-`2`, ELF version `1`, and exact target flags `0x06007902` for `sm_121`. The
-`sm_121a` encoding (`0x0a007902`) and other ABI/feature encodings are refused,
+`2`, ELF version `1`, and exact target flags `0x06007902`. The pinned compiler
+writes these flags for this image under `sm_121a` (measured, lab runs
+`r3-code-1` to `r3-code-4`), as it did under `sm_121`. The other encoding on
+record (`0x0a007902`) and other ABI/feature encodings are refused,
 even when their numeric compute capability is 12.1 and their digests match.
 [Compiler-produced header fixtures](fixtures/README.md) record those rules; a
 new compiler encoding needs review.

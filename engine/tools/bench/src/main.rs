@@ -401,7 +401,7 @@ pub(crate) fn run(arguments: &[String]) -> Result<()> {
         let parent = report.records.last().and_then(|r| r.replies.first());
         if let Some(parent) = parent.filter(|r| r.status == "ok") {
             prompt.push(Message::new(Role::Assistant, &parent.text));
-            prompt.push(Message::new(Role::User, &format!("Add one more useful tip.{}", no_think(&c.model))));
+            prompt.push(Message::new(Role::User, format!("Add one more useful tip.{}", no_think(&c.model))));
             serial(&c, &mut report, "followup/turn2", &prompt, count(Some(t), &prompt), None, c.max_tokens, 1, end)?;
         } else {
             report.skip(&c, "followup/turn2", "first turn did not complete")?;

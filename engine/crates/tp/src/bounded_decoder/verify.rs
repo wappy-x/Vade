@@ -99,6 +99,24 @@ impl<V> Verify<V> {
         else {self.hidden=Some(decoder.open_hidden(&kept,all.len()-1)?);}
         self.open=all;self.ahead=Some(next);self.kept=Some(kept);Ok(logits)
     }
+    /// SHARED PASS, before: the rows this chat brings to a pass it shares with other chats (`shared_pass`): the rows it
+    /// carries, then `tokens`, with the count of carried rows. The state they follow is `shared_state`. What `rows`
+    /// does before its own pass.
+    fn shared_rows<C:Compute<Value=V>>(&mut self,decoder:&Decoder<'_,C>,tokens:&[u32])->Result<(Vec<u32>,usize)> {
+        if tokens.is_empty() || tokens.len()>VERIFY_ROWS {return Err("verify row count differs".into());}
+        self.kept=None;if let Some(ahead)=self.ahead.take() {self.state=ahead;self.open.clear();}
+        if self.open.len()>CARRIED_ROWS {let (_,next)=decoder.prefill_rows(&self.open,&self.state,HeadRows::Last)?;self.state=next;self.open.clear();}
+        let carried=self.open.len();let mut all=self.open.clone();all.extend_from_slice(tokens);Ok((all,carried))
+    }
+    /// Rows a shared pass would compute for this chat: the rows it carries and `new` rows.
+    pub fn shared_count(&self,new:usize)->usize {new+if self.ahead.is_some() || self.open.len()>CARRIED_ROWS {0} else {self.open.len()}}
+    /// SHARED PASS, after: this chat's part of the pass, installed as `rows` installs its own pass.
+    #[allow(clippy::needless_range_loop)] // index loops keep the arithmetic order.
+    fn shared_done<C:Compute<Value=V>>(&mut self,decoder:&Decoder<'_,C>,all:Vec<u32>,carried:usize,next:State<V>,kept:OpenRows<V>)->Result<()> {
+        if self.tracking {for row in carried..all.len() {let [before,after]=decoder.open_hidden(&kept,row)?;self.push_trail(all[row],if PROPOSER_HIDDEN==0 {before} else {after});}}
+        else {self.hidden=Some(decoder.open_hidden(&kept,all.len()-1)?);}
+        self.open=all;self.ahead=Some(next);self.kept=Some(kept);Ok(())
+    }
     /// Append one row as the plain greedy step: the head picks the token on the device, no logits
     /// are read, and the step is the launch program of plain decoding. The same state and the
     /// same kept hidden row as `rows` with one token. None, with nothing changed, when rows are
@@ -160,13 +178,20 @@ impl<V> Verify<V> {
     /// SEED_PASS_ROWS waiting rows or more (the prompt rows, before a chat's first proposal) take ONE pass of the
     /// layer's cache half for all of them (`Decoder::seed_predictor`): the caches of the row-by-row form.
     pub fn propose<C:Compute<Value=V>>(&mut self,decoder:&Decoder<'_,C>,next:u32,depth:usize)->Result<(Vec<u32>,f64)> {
-        if self.trail.is_empty() || depth==0 {return Ok((Vec::new(),0.0));}
+        self.propose_mass(decoder,next,depth,false).map(|(tokens,_,waited)|(tokens,waited))
+    }
+    /// DRAFT CONFIDENCE: `propose`, with the probability of each proposal under the predictor's row (None where the
+    /// backend makes none). The same launches and the same state on every rank: only the controller reads the scores.
+    #[allow(clippy::type_complexity)] // proposals, their scores and the catch-up seconds.
+    /// `stop`: the chain may end early by its probability (`Decoder::propose_after_mass`); every rank passes the same.
+    pub fn propose_mass<C:Compute<Value=V>>(&mut self,decoder:&Decoder<'_,C>,next:u32,depth:usize,stop:bool)->Result<(Vec<u32>,Vec<Option<f32>>,f64)> {
+        if self.trail.is_empty() || depth==0 {return Ok((Vec::new(),Vec::new(),0.0));}
         let (cache,waited)=self.catch_up(decoder,self.trail.len()-1)?;
-        let (tokens,after)=decoder.propose_after(&self.trail[self.trail.len()-1].1,next,depth,cache.as_ref())?;
+        let (tokens,mass,after)=decoder.propose_after_mass(&self.trail[self.trail.len()-1].1,next,depth,cache.as_ref(),stop)?;
         // The pass that checks this proposal has up to `depth`+1 rows, and each kept one waits here for the next
         // proposal. With less room a deep pass would push its own first rows off the trail and leave a gap in the
         // layer's cache at every cycle. Up to depth 3 this is TRAIL_ROWS, as before. Both ranks get the same depth.
-        self.predictor=Some(after);self.trail.clear();self.trail_cap=TRAIL_ROWS.max(depth+1);self.plane=None;Ok((tokens,waited))
+        self.predictor=Some(after);self.trail.clear();self.trail_cap=TRAIL_ROWS.max(depth+1);self.plane=None;Ok((tokens,mass,waited))
     }
     /// Check what a proposal of `depth` tokens `depth` rows back on the trail would have matched against the kept
     /// tokens that followed it (ending at `best`), stopping the chain on the first wrong token. The rows before that
@@ -179,10 +204,43 @@ impl<V> Verify<V> {
         let (matched,after)=decoder.propose_until(&self.trail[at].1,self.trail[at+1].0,&expected,cache.as_ref())?;
         self.predictor=Some(after);self.trail.drain(..=at);self.trail_cap=TRAIL_ROWS+depth;self.plane=None;Ok((matched,waited))
     }
+    /// Commit the latest complete pass while retaining the predictor cache and trail for a shared step.
+    /// A partial rollback must first run its carried rows through the ordinary verify path.
+    pub fn batch_state(&mut self)->Result<&State<V>> {
+        if self.carried()>0 {return Err("tracked batch step has carried rows".into());}
+        if let Some(ahead)=self.ahead.take() {self.state=ahead;self.open.clear();}
+        self.kept=None;Ok(&self.state)
+    }
+    /// The committed state after `batch_state`, for the shared decoder's immutable row table.
+    pub fn batch_state_ref(&self)->Result<&State<V>> {
+        if !self.open.is_empty() || self.ahead.is_some() {return Err("tracked batch state is not committed".into());}Ok(&self.state)
+    }
+    /// Install one exact shared-step result. It is committed, as an ordinary plain batch row is.
+    pub fn batch_advanced(&mut self,token:u32,next:State<V>,hidden:V)->Result<()> {
+        if !self.open.is_empty() || next.position!=self.state.position+1 {return Err("tracked batch position differs".into());}
+        self.state=next;self.hidden=None;
+        if self.tracking {self.push_trail(token,hidden);}Ok(())
+    }
     /// The state after every kept row.
     pub fn settle<C:Compute<Value=V>>(mut self,decoder:&Decoder<'_,C>)->Result<State<V>> {
         if let Some(ahead)=self.ahead.take() {return Ok(ahead);}
         if self.open.is_empty() {return Ok(self.state);}
         Ok(decoder.prefill_rows(&self.open,&self.state,HeadRows::Last)?.1)
     }
+}
+/// SHARED PASS: ONE pass appends `tokens` to each chat (`Decoder::prefill_rows_shared`). Result `i` is the logits of
+/// chat `i`'s new rows, with the bits of its own `Verify::rows`; each chat's open rows, its state ahead and its trail
+/// are what its own pass leaves, so each takes its own `truncate` afterwards. `decoder` is any chat's: the chats of
+/// one service share its weights and its plans.
+pub fn shared_pass<C:Compute>(decoder:&Decoder<'_,C>,chats:&mut [(&mut Verify<C::Value>,&[u32])])->Result<Vec<Vec<Vec<f32>>>> {
+    let mut rows=Vec::with_capacity(chats.len());
+    for (verify,tokens) in chats.iter_mut() {rows.push(verify.shared_rows(decoder,tokens)?);}
+    let results={let shared=chats.iter().zip(&rows).map(|((verify,_),(all,carried))|super::SharedRows {tokens:all,state:&verify.state,head:*carried}).collect::<Vec<_>>();
+        decoder.prefill_rows_shared(&shared)?};
+    let mut logits=Vec::with_capacity(chats.len());
+    for (((verify,tokens),(all,carried)),(own,next,kept)) in chats.iter_mut().zip(rows).zip(results) {
+        if own.len()!=tokens.len() {return Err("shared pass logits row count differs".into());}
+        verify.shared_done(decoder,all,carried,next,kept)?;logits.push(own);
+    }
+    Ok(logits)
 }

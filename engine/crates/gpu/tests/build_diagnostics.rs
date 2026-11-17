@@ -51,9 +51,9 @@ fn engine_stamp_names_the_embedded_image_and_is_empty_without_one() {
     let cubin = scratch.0.join("flash.cubin");
     fs::write(&cubin, image).unwrap();
     // This host build sees no PTX, so the bound PTX bytes are empty.
-    fs::write(cubin.with_extension("cubin.conf"), format!("format=vade-cubin-v1\ntarget=sm_121\nptx_sha256={}\ncubin_sha256={}\n\
+    fs::write(cubin.with_extension("cubin.conf"), format!("format=vade-cubin-v1\ntarget=sm_121a\nptx_sha256={}\ncubin_sha256={}\n\
         min_driver_api=13000\nptxas_version=13.0.88\nptxas_sha256=a1941a04ca4fd233b2fbe50c625b1e72b3d5f79ebe80209a272c85482dfbb487\n\
-        ptxas_args=--gpu-name=sm_121 -m64 -O3\n", sha256::digest(b""), sha256::digest(image))).unwrap();
+        ptxas_args=--gpu-name=sm_121a -m64 -O3\n", sha256::digest(b""), sha256::digest(image))).unwrap();
     let build = |cubin: Option<&PathBuf>| {
         let mut command = Command::new(&executable);
         command.env("CARGO_MANIFEST_DIR", &manifest).env("OUT_DIR", &scratch.0).env("CARGO_CFG_TARGET_OS", "macos")

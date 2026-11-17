@@ -16,6 +16,8 @@ impl<'a> Backend<'a> {
         }
         let rows=if shape.op==Op::NvProject {crate::expert_ops::nv_rows_per_warp(shape.rows,shape.cols,1)} else {32};
         let (grid,threads,shared)=crate::expert_ops::launch_geometry(&[arguments],(units as u32).div_ceil(rows),1)?;
+        // The block FP8 word counters (proof lines), as in the batch launch.
+        if matches!(shape.op,Op::Fp8Serial|Op::Fp8Project) {crate::prompt_launches::record(if shape.op==Op::Fp8Serial && crate::expert_ops::fp8_row_threads(threads) {"fp8_tc_step"} else {"fp8_generic_layer"});}
         // No fill on these two bodies: the region is fully written by nv_quantize::lanes or fp8_tile before any read.
         if crate::fill_free::expert_operation(shape.op,threads) {self.skip_fill(&mut output)?;} else {self.zero_vector(&mut output)?;}
         self.launch_experts(LaunchArguments {single:arguments,batch:0,count:1},grid,threads,shared)?;
@@ -45,7 +47,11 @@ impl<'a> Backend<'a> {
         let words=(first.rows as usize).checked_mul(jobs.len()).filter(|&words|words<=u32::MAX as usize && words<=isize::MAX as usize/4).ok_or("expert projection batch output overflow")?;
         let mut descriptors=jobs.iter().map(|(shape,input,weight,scales)|self.expert_arguments(*shape,[Some(input),None,None,None],Some(weight),if shape.op==Op::PlainSerial {None} else {Some(scales)})).collect::<Result<Vec<_>,_>>()?;
         let (stream,grid,threads,shared)=crate::expert_ops::batch_launch_geometry(&descriptors,legacy_grid,count)?;
+        // The block FP8 word counters (proof lines): the row body on tensor cores (the entry `fp8_tile`), or a generic body.
+        if matches!(first.op,Op::Fp8Serial|Op::Fp8Project) {crate::prompt_launches::record(if first.op==Op::Fp8Serial && !stream && crate::expert_ops::fp8_row_threads(threads) {"fp8_tc_step"} else {"fp8_generic_layer"});}
         let (kind,entry)=if stream && shared>0 {(crate::resident_launch::Kind::NvTile,if crate::expert_ops::nv_tiled(&first) {"nv_cols"} else {"nv_tile"})} else if stream {(crate::resident_launch::Kind::NvStream,"nv_rows_stream")}
+            // TENSOR-CORE REBASE (block FP8): the decode tile has an entry of its own (`fp8_tile`, kind Fp8Tile).
+            else if first.op==Op::Fp8Serial && crate::expert_ops::fp8_row_threads(threads) {(crate::resident_launch::Kind::Fp8Tile,"fp8_tile")}
             else {(crate::resident_launch::Kind::Expert,"expert_operation")};
         // A needed zero fill runs on the device in stream order. No host zeros are uploaded.
         // No fill for a tile kind: the region is fully written by nv_tile or fp8_tile before any read.
@@ -56,10 +62,11 @@ impl<'a> Backend<'a> {
         // the same kernel, grid and descriptor bytes, with no upload of its own.
         let bytes=words.iter().flat_map(|word|word.to_ne_bytes()).collect::<Vec<u8>>();self.require_arm_kernels(&[entry])?;
         if self.record_resident_tabled(kind,[grid,1,1,threads,shared],&bytes,|address|{
-            let p=LaunchArguments {single:descriptors[0],batch:address,count};match kind {crate::resident_launch::Kind::NvTile=>crate::resident_launch_encode::nv_tile(p),crate::resident_launch::Kind::NvStream=>crate::resident_launch_encode::nv_stream(p),_=>crate::resident_launch_encode::expert(p)}
+            let p=LaunchArguments {single:descriptors[0],batch:address,count};match kind {crate::resident_launch::Kind::NvTile=>crate::resident_launch_encode::nv_tile(p),crate::resident_launch::Kind::NvStream=>crate::resident_launch_encode::nv_stream(p),
+                crate::resident_launch::Kind::Fp8Tile=>crate::resident_launch_encode::fp8_tile(p),_=>crate::resident_launch_encode::expert(p)}
         })? {
             self.resident_completion()?;if stream {self.stats.borrow_mut().projection_dispatches[if shared>0 {6} else {0}]+=1;}
-            if !stream && first.op==Op::Fp8Serial && threads==crate::expert_ops::FP8_TILE_THREADS {self.stats.borrow_mut().projection_dispatches[1]+=1;}return Ok(output);}
+            if !stream && first.op==Op::Fp8Serial && crate::expert_ops::fp8_row_threads(threads) {self.stats.borrow_mut().projection_dispatches[1]+=1;}return Ok(output);}
         let table=self.upload_vector(&words.into_iter().map(f32::from_bits).collect::<Vec<_>>())?;
         let mut arguments=LaunchArguments {single:descriptors[0],batch:table.device_address(),count};
         if stream {let launched=self.launch_checked_expert_payload(entry,grid,1,threads,shared,&mut arguments);let completed=self.resident_completion();launched.and(completed)?;
@@ -109,7 +116,10 @@ impl<'a> Backend<'a> {
         Ok(Arguments {input:addresses,weight:raw[0],scales:raw[1],output:0,shape})
     }
     fn launch_experts(&self,mut arguments:LaunchArguments,grid:u32,threads:u32,shared:u32)->Result<(),String> {
-        self.require_arm_kernels(&["expert_operation"])?;
+        // TENSOR-CORE REBASE (block FP8): a decode tile launch (an admitted Fp8Serial job on a row-body block) takes the
+        // entry of its own; the recorder maps it to the kind Fp8Tile by its name.
+        let entry=if arguments.single.shape.op==Op::Fp8Serial && crate::expert_ops::fp8_row_threads(threads) {"fp8_tile"} else {"expert_operation"};
+        self.require_arm_kernels(&[entry])?;
         // SAFETY: Shape checks all slice extents and disjoint output units.
         // check_vector checks exact lengths and context. All buffers are
         // contiguous. Raw owners fund each byte. Output is retained, aligned, private storage. On a
@@ -119,9 +129,9 @@ impl<'a> Backend<'a> {
         // launch keeps lane A's queued completion: queued owner drops defer allocations
         // through the real drain, including a batch's local descriptor table.
         // Ordinary calls complete before return.
-        let launched=self.launch_checked_expert_payload("expert_operation",grid,1,threads,shared,&mut arguments);
+        let launched=self.launch_checked_expert_payload(entry,grid,1,threads,shared,&mut arguments);
         let completed=self.resident_completion();launched.and(completed)?;
-        if arguments.single.shape.op==Op::Fp8Serial && threads==crate::expert_ops::FP8_TILE_THREADS {self.stats.borrow_mut().projection_dispatches[1]+=1;}Ok(())
+        if arguments.single.shape.op==Op::Fp8Serial && crate::expert_ops::fp8_row_threads(threads) {self.stats.borrow_mut().projection_dispatches[1]+=1;}Ok(())
     }
     pub(super) fn launch_checked_expert_payload<T>(&self,entry:&str,blocks:u32,rows:u32,threads:u32,shared:u32,arguments:&mut T)->Result<(),String> {
         // SAFETY: Only checked expert calls and the feature-gated referee plans call this
@@ -226,11 +236,36 @@ impl<'a> Backend<'a> {
     /// None, before any allocation, upload or launch: a set its own call would not take, or sets whose lists differ.
     #[allow(clippy::type_complexity)] // the part tuple of `expert_group`, a list of lists, for each set.
     pub fn expert_group_sets(&self,sets:&[(&[&[(Shape,Option<(&DeviceVector<'_>,&DeviceVector<'_>)>,usize)]],&DeviceVector<'_>,Option<&DeviceVector<'_>>,usize)])->Result<Option<Vec<Vec<DeviceVector<'a>>>>,String> {
+        self.expert_group_sets_from(sets,false)
+    }
+    /// PACKED MIDDLE: `expert_group_sets` for sets whose operands are packed already. The vector of a set holds its
+    /// rows as `tc_family::NvOperands::Packed` reads them (rows of cols / 8 code words, then rows of cols / 64 scale
+    /// words): the bytes its own `nv_quantize_pack` launch would write for the set's FP32 rows, so every product word is
+    /// the word `expert_group_sets` stores for those rows. One list a set (the down list); no index.
+    /// None, before any allocation, upload or launch: as `expert_group_sets`.
+    #[allow(clippy::type_complexity)] // the part tuple of `expert_group`, a list of lists, for each set.
+    pub fn expert_group_sets_packed(&self,sets:&[(&[&[(Shape,Option<(&DeviceVector<'_>,&DeviceVector<'_>)>,usize)]],&DeviceVector<'_>,Option<&DeviceVector<'_>>,usize)])->Result<Option<Vec<Vec<DeviceVector<'a>>>>,String> {
+        if sets.iter().any(|set|set.0.len()!=1 || set.2.is_some()) {return Err("packed expert operands serve one list and take no index".into());}
+        self.expert_group_sets_from(sets,true)
+    }
+    /// PACKED MIDDLE: true when `expert_group_sets_packed` takes a set of this ONE list for `rows_in` packed rows of
+    /// `cols` columns: the predicates of `expert_group_sets` that read no vector (the image, the check-tool switches,
+    /// a dense admitted table). A caller asks BEFORE it packs rows that nothing else can read. Nothing is allocated,
+    /// uploaded or launched.
+    #[allow(clippy::type_complexity)] // the part tuple of `expert_group`.
+    pub fn expert_group_packed_takes(&self,list:&[(Shape,Option<(&DeviceVector<'_>,&DeviceVector<'_>)>,usize)],rows_in:usize,cols:usize)->Result<bool,String> {
+        if list.is_empty() || cols==0 || !cols.is_multiple_of(64) || rows_in==0 {return Ok(false);}
+        if !self.tc_image_present() || self.nv_tc_groups_off() || self.nv_quantize_pack_off() || self.nv_capture_active() || !self.nv_quantize_pack_present() {return Ok(false);}
+        Ok(self.expert_set_tables_of(&[list],rows_in,cols,0)?.is_some())
+    }
+    /// The body of `expert_group_sets` (`packed` false: a set's vector holds FP32 rows) and of `expert_group_sets_packed`.
+    #[allow(clippy::type_complexity)] // the part tuple of `expert_group`, a list of lists, for each set.
+    fn expert_group_sets_from(&self,sets:&[(&[&[(Shape,Option<(&DeviceVector<'_>,&DeviceVector<'_>)>,usize)]],&DeviceVector<'_>,Option<&DeviceVector<'_>>,usize)],packed:bool)->Result<Option<Vec<Vec<DeviceVector<'a>>>>,String> {
         self.require_resident_stream()?;
         if sets.is_empty() {return Err("expert group is empty or its input is segmented".into());}
         let mut ready=Vec::with_capacity(sets.len());
         for &(lists,input,index,cols) in sets {
-            let Some(set)=self.expert_set_tables(lists,input,index,cols)? else {return Ok(None);};
+            let Some(set)=self.expert_set_tables(lists,input,index,cols,packed)? else {return Ok(None);};
             ready.push(set);
         }
         // The sets of one launch: the same lists, list for list the same matrix shape and word function.
@@ -242,7 +277,7 @@ impl<'a> Backend<'a> {
             let mut made=Vec::with_capacity(ready.len());
             for (tables,_) in &ready {let mut output=self.vector(tables[at].1)?;self.skip_fill(&mut output)?;made.push(output);}
             let launch=ready.iter().zip(sets).zip(&made).map(|(((tables,activations),&(_,input,index,_)),output)| {
-                let operands=match (at,index) {(0,Some(index))=>tc_family::NvOperands::Gathered(input,index,activations),(0,None)=>tc_family::NvOperands::Fp32(input,activations),_=>tc_family::NvOperands::Kept};
+                let operands=match (at,index) {(0,_) if packed=>tc_family::NvOperands::Packed(input),(0,Some(index))=>tc_family::NvOperands::Gathered(input,index,activations),(0,None)=>tc_family::NvOperands::Fp32(input,activations),_=>tc_family::NvOperands::Kept};
                 tc_family::NvSet {table:&tables[at].0,operands,output,rows_in:tables[at].2}
             }).collect::<Vec<_>>();
             self.nv_rows_tc(&launch,head[at].3)?;drop(launch);
@@ -255,8 +290,10 @@ impl<'a> Backend<'a> {
     /// one-pass operands (not dense, not admitted to the tensor-core image, the active primary image has no entry for
     /// it, a check-tool switch or a capture is on, lists that do not read the same rows at the same scales).
     #[allow(clippy::type_complexity)] // the part tuple of `expert_group`, a list of lists; the tables are private to the two callers.
-    fn expert_set_tables(&self,lists:&[&[(Shape,Option<(&DeviceVector<'_>,&DeviceVector<'_>)>,usize)]],input:&DeviceVector<'_>,index:Option<&DeviceVector<'_>>,cols:usize)->Result<Option<(Vec<(Vec<GroupEntry>,usize,usize,u32)>,Vec<f32>)>,String> {
-        if lists.is_empty() || input.is_segmented() || cols==0 || !cols.is_multiple_of(16) || !input.len().is_multiple_of(cols) {return Err("expert group is empty or its input is segmented".into());}
+    fn expert_set_tables(&self,lists:&[&[(Shape,Option<(&DeviceVector<'_>,&DeviceVector<'_>)>,usize)]],input:&DeviceVector<'_>,index:Option<&DeviceVector<'_>>,cols:usize,packed:bool)->Result<Option<(Vec<(Vec<GroupEntry>,usize,usize,u32)>,Vec<f32>)>,String> {
+        // The words a row of `input`: FP32 words, or PACKED MIDDLE's code words and scale words (cols a multiple of 64 there).
+        let row_words=if packed {if !cols.is_multiple_of(64) {return Err("packed expert operands need whole words a row".into());}cols/8+cols/64} else {cols};
+        if lists.is_empty() || input.is_segmented() || cols==0 || !cols.is_multiple_of(16) || !input.len().is_multiple_of(row_words) {return Err("expert group is empty or its input is segmented".into());}
         self.check_vector(input,input.len())?;
         if let Some(index)=index {
             if index.is_segmented() || index.is_empty() || input.is_empty() {return Err("expert group index is empty or segmented".into());}
@@ -266,7 +303,14 @@ impl<'a> Backend<'a> {
         if !self.tc_image_present() || self.nv_tc_groups_off() || self.nv_quantize_pack_off() || self.nv_capture_active() || !self.nv_quantize_pack_present() {return Ok(None);}
         if index.is_some() && (self.nv_quantize_gather_off() || !self.nv_quantize_gather_present()) {return Ok(None);}
         // The rows the lists read: one a word of the index, or the rows of the input.
-        let stride=cols/16*17;let rows_in=match index {Some(index)=>index.len(),None=>input.len()/cols};
+        let rows_in=match index {Some(index)=>index.len(),None=>input.len()/row_words};
+        self.expert_set_tables_of(lists,rows_in,cols,input.device_address())
+    }
+    /// The part of `expert_set_tables` that reads no vector: the lists, the rows they read (`rows_in`), the row width and
+    /// the address of the rows (its alignment alone is read).
+    #[allow(clippy::type_complexity)] // the part tuple of `expert_group`, a list of lists; the tables are private to the callers.
+    fn expert_set_tables_of(&self,lists:&[&[(Shape,Option<(&DeviceVector<'_>,&DeviceVector<'_>)>,usize)]],rows_in:usize,cols:usize,address:u64)->Result<Option<(Vec<(Vec<GroupEntry>,usize,usize,u32)>,Vec<f32>)>,String> {
+        let stride=cols/16*17;
         let mut tables=Vec::with_capacity(lists.len());
         for parts in lists {
             if parts.iter().any(|(shape,raw,_)|shape.op!=Op::NvRows || raw.is_none() || shape.cols as usize!=cols) {return Ok(None);}
@@ -278,7 +322,7 @@ impl<'a> Backend<'a> {
             let cumulative=crate::nv_small::contiguous(table.iter().map(|e|(e.first_row as usize,e.shape.tokens as usize)));
             let chains=crate::expert_ops::nv_chains(&table[0].shape);
             if table.iter().any(|e|crate::expert_ops::nv_chains(&e.shape)!=chains) {return Err("expert group mixes first and second matrices".into());}
-            if !dense || row_major || !tc_family::nv_rows_tc_admitted(&table,stride,cumulative,words,input.device_address(),chains) {return Ok(None);}
+            if !dense || row_major || !tc_family::nv_rows_tc_admitted(&table,stride,cumulative,words,address,chains) {return Ok(None);}
             tables.push((table,units*words,end_row,chains));
         }
         // Every list reads the same rows at the same scales, so one set of packed operands serves them all.
@@ -375,12 +419,21 @@ impl<'a> Backend<'a> {
             Some((kernel,blocks,threads,shared))=>(kernel,Some([blocks,1,1]),threads,shared),
             None=>match (tiles.or(column_tiles),fp8_tiles) {
                 (Some(grid),_)=>(if column_tiles.is_some() {"nv_rows_cols"} else {"nv_rows_tile"},Some(grid),crate::nv_rows::THREADS,0),
-                (_,Some(grid))=>("fp8_rows_tile",Some(grid),crate::fp8_rows::THREADS,0),
+                // The third form of the tile body where the kernel takes the parts: the same word, bit for bit.
+                (_,Some(grid))=>match crate::fp8_rows::third(&fp8) {
+                    Some(grid)=>(crate::fp8_rows::THIRD_KERNEL,Some(grid),crate::fp8_rows::THIRD_THREADS,crate::fp8_rows::THIRD_SHARED),
+                    None=>("fp8_rows_tile",Some(grid),crate::fp8_rows::THREADS,crate::fp8_rows::shared(&fp8)),
+                },
                 _=>("expert_group",None,32,0),
             },
         };
         if tile.is_some() {self.require_arm_kernels(&[kernel])?;}
         crate::prompt_launches::record(kernel);
+        // The block FP8 word counters (proof lines): which body the parts of a block FP8 group took.
+        if table.iter().any(|e|e.shape.op==crate::expert_ops::Op::Fp8Rows) {
+            crate::prompt_launches::record(match kernel {"fp8_rows_small"|"fp8_rows_few"|"fp8_rows_multi"=>"fp8_tc_rows","fp8_rows_tile"|"fp8_rows_tile3"=>"fp8_tc_tile",_=>"fp8_generic_layer"});
+            if kernel=="fp8_rows_tile3" {crate::prompt_launches::record("fp8_tc_tile3");}
+        }
         // Keep this table with its command in the existing recorder. The upload
         // and every replay use the same stream, before the next table write.
         if self.resident_rows_active() {

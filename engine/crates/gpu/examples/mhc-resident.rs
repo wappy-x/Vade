@@ -201,7 +201,7 @@ fn boundary_device(out:&Path)->Result<()> {
             let oldest=3-saved.len();
             for (at,value) in saved.into_iter().rev().enumerate() {let site=oldest+at;
                 let normalized=value.normalized();
-                let planes=[value.mixing_normalized(),value.coefficients(),value.collapsed(),&*normalized,value.residual()];
+                let planes=[value.mixing_normalized()?,value.coefficients(),value.collapsed(),&*normalized,value.residual()];
                 for (plane,vector) in planes.into_iter().enumerate() {
                     let got=bytes(&backend.read_vector_values(vector)?);let want=bytes(&expected[site][plane]);
                     let label=format!("case={index} precision={precision:?} site={site} plane={plane}");equal(&label,&got,&want)?;

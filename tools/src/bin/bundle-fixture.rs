@@ -47,7 +47,7 @@ fn tool(name: &str, args: &[String]) -> Result<()> {
             if mode == "path-leak" { data.push_str(&work); }
             if mode == "remapped-path-leak" { data.push_str(Path::new(&work).file_name().unwrap().to_str().unwrap()); }
             let artifact = variable("TEST_ARTIFACT");
-            if artifact.ends_with(".ptx") { data.push_str("\n.target sm_121\n"); }
+            if artifact.ends_with(".ptx") { data.push_str("\n.target sm_121a\n"); }
             if let Ok(image) = env::var("SPARK_CUBIN") {
                 assert!(artifact.ends_with("/flash-serve"),"SPARK_CUBIN reached {artifact}");
                 if mode != "no-cubin-in-engine" { data.push_str(&format!(" cubin_sha256={}",sha256::digest_reader(fs::File::open(image)?)?)); }

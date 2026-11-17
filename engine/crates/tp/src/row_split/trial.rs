@@ -36,6 +36,24 @@ pub(super) const THINK_WAIT:u32=TRIAL_START;
 pub(super) const ANSWER_SKIP:u32=16;
 /// Steps between a probe that was right and the next probe (at least TRIAL_DEPTH, so consecutive lookback windows do not overlap).
 pub(super) const PROBE_GAP:u32=8;
+/// PAIR TRIAL (pair.rs, `Trial::pair`): the trial of one chat of two strict chats that would check their proposals in
+/// ONE shared pass. Its rule is not the lone chat's, because its job is not: the requests asked for drafting, a
+/// shared tick gives 8 rows in about the time of 2.6 steps of two chats, and after the start the pair's measured
+/// record decides (pair.rs). So this trial only keeps out text that is far from paying, and it must be quick: every
+/// step before the start costs the pair most of its gain.
+/// (1) It does not wait for the think block's end or for step TRIAL_START. Its first probe comes after PAIR_SKIP
+/// steps (an answer's first tokens lose rows whatever follows: structured kept 2, 1, 2 rows and then 4), and its
+/// probes are PAIR_GAP steps apart. MEASURED 2026-11-16 (two Sparks, run duox-b-c1-1): with the lone trial's wait,
+/// one structured chat's think block ended at token 34, the first shared tick came at step 69 of 256, and the pair
+/// made 40.4 tok/s where its shared ticks alone make 47. The same chat alone keeps 3.3 of 4 rows inside that block.
+/// (2) It counts the tokens its probes matched: PAIR_NEED tokens within PAIR_PROBES probes start it, and it gives up
+/// at the first probe after which that is out of reach. A shared tick pays when the chat that keeps fewer rows keeps
+/// about 2.7 of its 4 (pair.rs), which is 1.7 matched tokens a probe, and PAIR_NEED asks for 1.75. Code is such
+/// text: alone it keeps 3.0 rows a cycle and gains a fifth, and its probes matched 0, 3, 3, 1.
+pub(super) const PAIR_PROBES:u32=4;
+pub(super) const PAIR_NEED:u32=7;
+pub(super) const PAIR_SKIP:u32=8;
+pub(super) const PAIR_GAP:u32=4;
 /// Resolved probes the trial keeps for a reader.
 pub(super) const KEPT_SHADOWS:usize=16;
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
@@ -49,12 +67,22 @@ pub(super) struct Trial {
     /// Decoded steps seen, steps waited for the end of the think block, whether that wait is over, and steps to skip.
     steps:u32,waited:u32,reading:bool,skip:u32,
     /// The ms the first probe spent on its waiting rows: the prompt and decoded rows, in one pass (print only).
-    seed_ms:Option<f64>}
+    seed_ms:Option<f64>,
+    /// PAIR TRIAL: this is the trial of one chat of a pair, and the tokens its probes matched so far.
+    pair:bool,right:u32}
 impl Trial {
+    /// The trial of one chat of a pair (PAIR TRIAL above).
+    pub(super) fn pair()->Self {Self {pair:true,..Self::default()}}
     /// One of the request's steps gave `token`: whether a probe is due at this step. `marker` is the token that ends
     /// the think block; no probe is due before step TRIAL_START, so an answer of TRIAL_START tokens or fewer pays nothing.
     pub(super) fn due(&mut self,token:u32,marker:Option<u32>)->bool {
         self.steps+=1;
+        // PAIR TRIAL: no wait for the think block; PAIR_SKIP steps, then a probe every PAIR_GAP+1 steps.
+        if self.pair {
+            if !self.reading {self.reading=true;self.skip=PAIR_SKIP;}
+            if self.skip>0 {self.skip-=1;return false;}
+            return true;
+        }
         if !self.reading {
             self.waited+=1;
             match marker {
@@ -81,6 +109,12 @@ impl Trial {
         self.proposals+=1;self.proposal_low=Some(self.proposal_low.map_or(ms,|low|low.min(ms)));
         if self.results.len()==KEPT_SHADOWS {self.results.pop_front();}
         self.results.push_back((proposed as u8,matched.min(proposed) as u8));
+        if self.pair {
+            if proposed<TRIAL_DEPTH {return Verdict::GiveUp;}
+            self.right+=matched.min(proposed) as u32;if matched>=proposed {self.score+=1;}
+            let left=PAIR_PROBES.saturating_sub(self.proposals);
+            return if self.right>=PAIR_NEED {Verdict::Start} else if self.right+left*(TRIAL_DEPTH as u32)<PAIR_NEED {Verdict::GiveUp} else {self.skip=PAIR_GAP;Verdict::Go};
+        }
         if matched<proposed || proposed<TRIAL_DEPTH {return Verdict::GiveUp;}
         self.score+=1;
         if self.score>=TRIAL_PROBES as i32 {Verdict::Start} else {self.skip=PROBE_GAP;Verdict::Go}
@@ -151,6 +185,33 @@ impl Trial {
         assert_eq!(probes(200,Some(9),|step|if step==THINK_WAIT+2 {9} else {4}),probes(200,Some(9),|_|4));
         let mut trial=Trial::default();for _ in 1..TRIAL_START {assert!(!trial.due(4,Some(9)));}
         assert_eq!((trial.proposals(),trial.score(),trial.waited()),(0,0,TRIAL_START-1));
+    }
+    /// PAIR TRIAL: the verdicts of a pair chat's trial whose probes match `matched` tokens in turn.
+    fn pair_verdicts(matched:&[usize])->Vec<Verdict> {let mut trial=Trial::pair();matched.iter().map(|&matched|trial.record(3,matched,11.0,0.5)).collect()}
+    #[test] fn a_pair_trial_counts_matched_tokens_and_does_not_wait_for_the_think_block() {
+        use Verdict::{Go,Start,GiveUp};
+        assert_eq!((PAIR_PROBES,PAIR_NEED,PAIR_SKIP,PAIR_GAP),(4,7,8,4));assert!(PAIR_GAP as usize>=TRIAL_DEPTH,"lookback windows do not overlap");
+        // Structured text: PAIR_NEED tokens are matched at the third probe. A probe that is not right in full does not end it.
+        assert_eq!(pair_verdicts(&[3,3,3]),[Go,Go,Start]);assert_eq!(pair_verdicts(&[3,2,2]),[Go,Go,Start]);assert_eq!(pair_verdicts(&[3,1,2,1]),[Go,Go,Go,Start]);
+        // Code (MEASURED 2026-11-16, run duox-b-c1-1: 0, 3, 3, 1 matched): it starts, and the pair's record decides.
+        assert_eq!(pair_verdicts(&[0,3,3,1]),[Go,Go,Go,Start]);
+        // Text that is far from paying: out as soon as PAIR_NEED is out of reach.
+        assert_eq!(pair_verdicts(&[0,0]),[Go,GiveUp]);assert_eq!(pair_verdicts(&[0,1,2]),[Go,Go,GiveUp]);assert_eq!(pair_verdicts(&[1,1,1]),[Go,Go,GiveUp]);
+        assert_eq!(pair_verdicts(&[2,2,1,1]),[Go,Go,Go,GiveUp]);assert_eq!(pair_verdicts(&[1,2,3,1]),[Go,Go,Go,Start]);
+        let mut short=Trial::pair();assert_eq!(short.record(2,2,7.0,0.5),GiveUp);
+        // Every pair trial ends within PAIR_PROBES probes, and starts only with PAIR_NEED matched tokens.
+        for pattern in 0..4usize.pow(PAIR_PROBES) {
+            let matched=(0..PAIR_PROBES).map(|at|pattern/4usize.pow(at)%4).collect::<Vec<_>>();let all=pair_verdicts(&matched);
+            let end=all.iter().position(|verdict|*verdict!=Go).expect("a pair trial ends");
+            assert_eq!(all[end]==Start,matched[..=end].iter().sum::<usize>()>=PAIR_NEED as usize,"{matched:?}");
+        }
+        // No wait for step TRIAL_START or for the think block's end: the first probe comes after PAIR_SKIP steps, the
+        // next ones every PAIR_GAP+1 steps, wherever the think block ends and whether the service names one or not.
+        let due=|marker:Option<u32>,token:&dyn Fn(u32)->u32| {let (mut trial,mut made)=(Trial::pair(),Vec::new());
+            for step in 1..=200 {if trial.due(token(step),marker) {made.push(step);if trial.record(3,3,11.0,0.5)!=Go {break;}}}made};
+        let (first,gap)=(PAIR_SKIP+1,PAIR_GAP+1);let steps=[first,first+gap,first+2*gap];
+        assert_eq!(due(Some(9),&|step|if step==4 {9} else {4}),steps);assert_eq!(due(Some(9),&|step|if step==34 {9} else {4}),steps);
+        assert_eq!(due(None,&|_|4),steps);assert_eq!(due(Some(9),&|_|4),steps);assert!(first+2*gap<TRIAL_START/2);
     }
     #[test] fn only_the_last_probes_are_kept() {
         let mut trial=Trial::default();

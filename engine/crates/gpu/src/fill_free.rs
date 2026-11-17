@@ -18,18 +18,20 @@ pub fn set_mode(mode:Mode) {MODE.store(mode as u8,Ordering::Relaxed);}
 pub const POISON:u32=u32::MAX;
 /// `expert_operation`: the two bodies that write through raw stores. Its generic body forms output slices and keeps the fill.
 pub fn expert_operation(op:crate::expert_ops::Op,threads:u32)->bool {
-    use crate::expert_ops::{FP8_TILE_THREADS,Op,QUANTIZE_LANES_THREADS};
-    matches!((op,threads),(Op::Quantize,QUANTIZE_LANES_THREADS)|(Op::Fp8Serial,FP8_TILE_THREADS))
+    use crate::expert_ops::{fp8_row_threads,Op,QUANTIZE_LANES_THREADS};
+    matches!((op,threads),(Op::Quantize,QUANTIZE_LANES_THREADS)) || op==Op::Fp8Serial && fp8_row_threads(threads)
 }
 /// `expert_projection_batch`: `nv_tile`, or the FP8 tile body. `nv_rows_stream` and the generic body keep the fill.
 pub fn projection_batch(op:crate::expert_ops::Op,kind:crate::resident_launch::Kind,threads:u32)->bool {
     use crate::resident_launch::Kind;
-    kind==Kind::NvTile || kind==Kind::Expert && expert_operation(op,threads)
+    kind==Kind::NvTile || matches!(kind,Kind::Expert|Kind::Fp8Tile) && expert_operation(op,threads)
 }
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::expert_ops::{FP8_TILE_THREADS,Op,QUANTIZE_LANES_THREADS};
+    use crate::expert_ops::{Op,QUANTIZE_LANES_THREADS};
+    // A block of the block FP8 row body (4, 8, 16 or 32 warps).
+    const FP8_TILE_THREADS:u32=256;
     use crate::resident_launch::Kind;
     #[test]
     fn only_the_raw_store_bodies_skip_the_fill() {

@@ -92,7 +92,7 @@ fn check_cubin(conf: &str, ptx: &str) -> Result<()> {
     }
     let expected = ["format","target","ptx_sha256","cubin_sha256","min_driver_api","ptxas_version","ptxas_sha256","ptxas_args"];
     if fields.len() != expected.len() || expected.iter().any(|k| !fields.contains_key(k)) { return Err("invalid cubin fields".into()); }
-    if fields["format"] != "vade-cubin-v1" || fields["target"] != "sm_121" { return Err("wrong cubin format or target".into()); }
+    if fields["format"] != "vade-cubin-v1" || fields["target"] != "sm_121a" { return Err("wrong cubin format or target".into()); }
     if fields["ptx_sha256"] != ptx { return Err("cubin names other PTX bytes".into()); }
     if !is_lower_hex(fields["cubin_sha256"],64) || !is_lower_hex(fields["ptxas_sha256"],64) { return Err("invalid cubin hash".into()); }
     Ok(())

@@ -334,7 +334,10 @@ pub(crate) fn rows_fold_rows<const BF16:bool, const LAYOUT: usize>(weights: *con
     // shared memory private to this block (2 slots x FOLD_ROWS * LAYOUT chains x (1024 / LAYOUT + 4) words fit it for every LAYOUT).
     // Global reads: a producer loads a weight vector only for a row below `rows` and columns below `cols` (a whole 16-byte vector,
     // cols a multiple of 4), and an input vector only for a source row below `tokens` and columns below `cols`; so every read stays
-    // in the matrix and the input. Shared memory: a slot is written only by producers between the empty barrier of that slot (or the
+    // in the matrix and the input. A producer issues the loads of chunk c + 1 before it makes the products of chunk c (LOAD
+    // AHEAD, into the other of its two register sets); loads read only the immutable weights and input under the bounds above, so
+    // they need no barrier, and the order of the shared-memory protocol below is the one-chunk order it was.
+    // Shared memory: a slot is written only by producers between the empty barrier of that slot (or the
     // start, for the first FOLD_SLOTS chunks) and their arrival at its full barrier; a word is written by exactly one producer
     // (`fold_rows_vector` maps the producers and their eight product vectors onto the chunk's (source row, weight row, vector)
     // triples one to one for each LAYOUT; a host test walks it); it is read only by a folding lane after the full barrier, and only
@@ -410,43 +413,62 @@ pub(crate) fn rows_fold_rows<const BF16:bool, const LAYOUT: usize>(weights: *con
                 asm!("mul.rn.f32 {product}, {w}, {x};", product = out(reg32) product, w = in(reg32) $w, x = in(reg32) $x, options(nomem, nostack));
                 product.to_bits()
             }};}
-            let mut c = 0;
-            while c < chunks {
+            // LOAD AHEAD (seat CHATS4): the global loads of chunk c + 1 issue before the products of chunk c are made, into the
+            // other of two register sets (`a` and `b`, used in turn), so a producer has two chunks of loads in the memory system
+            // and a chunk no longer waits a whole load round trip. The products, their slots, the barriers and the adds are
+            // those of one chunk at a time, as before.
+            // Product vector j of this producer: weight vector slot k, source row t, block weight row r, vector q of the chunk.
+            // A warp reads 32 neighbouring vectors of one weight row. A weight vector is loaded once (at its first source row) and
+            // used for every source row.
+            let (mut wa, mut xa) = ([[0.0f32; 4]; 8], [[0.0f32; 4]; 8]);
+            let (mut wb, mut xb) = ([[0.0f32; 4]; 8], [[0.0f32; 4]; 8]);
+            macro_rules! fetch {($w:ident, $x:ident, $c:expr, $j:expr)=>{{
+                let first = $c * ch; let span = (cols - first).min(ch);
+                let (k, t, r, q) = fold_rows_vector(LAYOUT, p, $j);
+                if q * 4 < span {
+                    if t < tokens { $x[$j] = ld4!(input.add(t * cols + first + q * 4)); }
+                    if t == 0 && first_row + r < rows {
+                        let at=(first_row+r)*cols+first+q*4;
+                        $w[k]=if BF16 {
+                            let (a,b):(u32,u32);
+                            asm!("ld.global.v2.u32 {{{a},{b}}}, [{p}];",a=out(reg32)a,b=out(reg32)b,p=in(reg64)weights.cast::<u16>().add(at));
+                            [f32::from_bits(a<<16),f32::from_bits(a&0xffff0000),f32::from_bits(b<<16),f32::from_bits(b&0xffff0000)]
+                        } else {ld4!(weights.add(at))};
+                    }
+                }
+            }};}
+            macro_rules! fetch_all {($w:ident, $x:ident, $c:expr)=>{{
+                fetch!($w, $x, $c, 0); fetch!($w, $x, $c, 1); fetch!($w, $x, $c, 2); fetch!($w, $x, $c, 3);
+                fetch!($w, $x, $c, 4); fetch!($w, $x, $c, 5); fetch!($w, $x, $c, 6); fetch!($w, $x, $c, 7);
+            }};}
+            // Chunk c from one register set: wait for its slot, make and store its products, mark the slot full.
+            macro_rules! produce {($w:ident, $x:ident, $c:expr)=>{{
+                let c = $c;
                 let s = c % FOLD_SLOTS;
                 if c >= FOLD_SLOTS { asm!("bar.sync {id}, {n};", id = in(reg32) FOLD_EMPTY + s as u32, n = in(reg32) n); }
                 let first = c * ch;
                 let span = (cols - first).min(ch);
                 let slot = smem + (s * slot_bytes) as u32;
-                // Product vector j of this producer: weight vector slot k, source row t, block weight row r, vector q of the chunk.
-                // A warp reads 32 neighbouring vectors of one weight row. All loads of the chunk issue before any product; a weight
-                // vector is loaded once (at its first source row) and used for every source row.
-                let mut w = [[0.0f32; 4]; 8];
-                let mut x = [[0.0f32; 4]; 8];
-                macro_rules! fetch {($j:expr)=>{{
-                    let (k, t, r, q) = fold_rows_vector(LAYOUT, p, $j);
-                    if q * 4 < span {
-                        if t < tokens { x[$j] = ld4!(input.add(t * cols + first + q * 4)); }
-                        if t == 0 && first_row + r < rows {
-                            let at=(first_row+r)*cols+first+q*4;
-                            w[k]=if BF16 {
-                                let (a,b):(u32,u32);
-                                asm!("ld.global.v2.u32 {{{a},{b}}}, [{p}];",a=out(reg32)a,b=out(reg32)b,p=in(reg64)weights.cast::<u16>().add(at));
-                                [f32::from_bits(a<<16),f32::from_bits(a&0xffff0000),f32::from_bits(b<<16),f32::from_bits(b&0xffff0000)]
-                            } else {ld4!(weights.add(at))};
-                        }
-                    }
-                }};}
-                fetch!(0); fetch!(1); fetch!(2); fetch!(3); fetch!(4); fetch!(5); fetch!(6); fetch!(7);
                 macro_rules! put {($j:expr)=>{{
                     let (k, t, r, q) = fold_rows_vector(LAYOUT, p, $j);
                     if q * 4 < span && first_row + r < rows && t < tokens {
-                        let (a, b, cc, d) = (mul!(w[k][0], x[$j][0]), mul!(w[k][1], x[$j][1]), mul!(w[k][2], x[$j][2]), mul!(w[k][3], x[$j][3]));
+                        let (a, b, cc, d) = (mul!($w[k][0], $x[$j][0]), mul!($w[k][1], $x[$j][1]), mul!($w[k][2], $x[$j][2]), mul!($w[k][3], $x[$j][3]));
                         asm!("st.shared.v4.b32 [{at}], {{{a}, {b}, {c}, {d}}};", at = in(reg32) slot + (fold_rows_word(LAYOUT, t, r, q * 4) * 4) as u32, a = in(reg32) a, b = in(reg32) b, c = in(reg32) cc, d = in(reg32) d);
                     }
                 }};}
                 put!(0); put!(1); put!(2); put!(3); put!(4); put!(5); put!(6); put!(7);
                 asm!("bar.warp.sync 0xffffffff;");
                 asm!("bar.arrive {id}, {n};", id = in(reg32) FOLD_FULL + s as u32, n = in(reg32) n);
+            }};}
+            fetch_all!(wa, xa, 0);
+            let mut c = 0;
+            while c < chunks {
+                if c + 1 < chunks { fetch_all!(wb, xb, c + 1); }
+                produce!(wa, xa, c);
+                c += 1;
+                if c >= chunks { break; }
+                if c + 1 < chunks { fetch_all!(wa, xa, c + 1); }
+                produce!(wb, xb, c);
                 c += 1;
             }
             0.0

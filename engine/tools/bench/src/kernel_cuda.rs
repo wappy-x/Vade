@@ -181,7 +181,13 @@ impl Gpu {
         Some(u32::from_le_bytes(v[..4].try_into().ok()?))
     }
     fn launch(&self, f: H, grid: [u32; 3], threads: u32, shared: u32, args: &mut [H]) -> Result<()> {
-        unsafe { check((self.d.launch)(f, grid[0], grid[1], grid[2], threads, 1, 1, shared, self.s, args.as_mut_ptr(), null_mut())) }
+        // SAFETY: The loaded function and stream belong to this live context. The callers
+        // keep the argument storage and device buffers alive through completion. Attribute
+        // 8 sets the dynamic shared-memory limit; the driver checks the device limit.
+        unsafe {
+            if shared > 48 * 1024 { check((self.d.func_attr)(f, 8, i32::try_from(shared).map_err(|_| "shared memory exceeds driver ABI")?))?; }
+            check((self.d.launch)(f, grid[0], grid[1], grid[2], threads, 1, 1, shared, self.s, args.as_mut_ptr(), null_mut()))
+        }
     }
     /// cuLaunchKernelEx with CU_LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION (6) = 1:
     /// the kernel may start once the previous one triggers; it must griddepcontrol.wait.

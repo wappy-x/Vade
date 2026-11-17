@@ -73,6 +73,7 @@ impl<'b,'d> Weights<'b,'d> {
             return b.resident_join(&output.iter().map(|value|(value,value.len())).collect::<Vec<_>>(),&mut None,0);
         }
         crate::exchange_trace::kind(||format!("attended heads={} dim={}",layout.total_heads(),layout.value_dim()));
+        if tokens>16 && local.len().is_multiple_of(2) {return self.exchange_bf16(b,local,tokens,width,false,true);}
         self.gather_mapped(b,local)?;
         let out=Self::rank_rows(b,self.exchange.as_ref().ok_or("attended exchange is absent")?,tokens,width,self.topology.parts as usize,true)?;
         crate::exchange_trace::reader();self.exchange_read(b)?;Ok(out)

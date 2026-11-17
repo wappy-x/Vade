@@ -41,7 +41,7 @@ pub(super) fn run(out:&Path)->Result<()> {
                 }
                 expected[4]=input.iter().copied().map(spark_gpu_probe::bf16::rounded).collect();
                 let source=Rc::new(backend.upload_vector(&input)?);let pass=resident.begin_rows(source,2)?;
-                let normalized=pass.normalized();let planes=[pass.mixing_normalized(),pass.coefficients(),pass.collapsed(),&*normalized,pass.residual()];
+                let normalized=pass.normalized();let planes=[pass.mixing_normalized()?,pass.coefficients(),pass.collapsed(),&*normalized,pass.residual()];
                 for (plane,vector) in planes.into_iter().enumerate() {
                     let got=bytes(&backend.read_vector_values(vector)?);let want=bytes(&expected[plane]);
                     write(&out.join(format!("special-{case}-{precision:?}-{plane}.f32")),&got)?;

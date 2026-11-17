@@ -40,7 +40,23 @@ pub struct NvRows {
     pub raw: u32,
     /// The word function (`tc_contract`): 1 = one chain (first matrices), 4 = quarter chains (second matrices).
     pub chains: u32,
+    /// Zero: the rectangular grid. Otherwise work_count NvTile records, grid
+    /// (rows/128, work_count, 1), with unused records marked part=u32::MAX.
+    pub work: u64,
+    pub work_count: u32,
+    /// PAIRED PARTS, work map only. 0 or 1: a work record names one part. S in 2..=8: a work record names the first
+    /// of S consecutive parts of ONE expert (the same weights, scales, global and activation), and its token tiles
+    /// run over the S parts' tokens in part order; each token keeps its own operand row and its own output word.
+    pub merge: u32,
+    /// DIRECT PLACE: 0 = a part's word (row, token) at its record's output + 4 * (row * tokens + token). Otherwise
+    /// the u64 address of each operand row's word (row 0), indexed by the operand row (part first + token): the word
+    /// (row, token) is at that address + 4 * row (built by `prompt_route_native` from the route's checked pairs).
+    pub rowmap: u64,
 }
+#[repr(C)]
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]
+pub struct NvTile {pub part:u32,pub tile:u32}
+const _:()={assert!(core::mem::size_of::<NvPart>()==40);assert!(core::mem::size_of::<NvRows>()==80);assert!(core::mem::offset_of!(NvRows,work)==56);assert!(core::mem::size_of::<NvTile>()==8);};
 /// Threads a block and the grid of `fp4_cohort`: (ceil(max tokens / NV_ROWS_BLOCK_TOKENS), rows / 128, count).
 pub const NV_ROWS_THREADS: u32 = 256;
 pub const NV_ROWS_BLOCK_TOKENS: u32 = 128;

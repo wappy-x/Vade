@@ -18,7 +18,7 @@ fn p1_build(g: &mut Gpu, jobs: &[Job], tokens: usize, round: bool, seed: u64, ki
         let input = g.upload(&le(&pattern(kinds.1, j.cols * tokens, s ^ 5)))?;
         let (weights, scales) = if j.plain { (g.upload(&bf16_bits(&pattern(kinds.0, j.rows * j.cols, s)))?, 0) }
             else { (g.upload(&mx_bytes(j.rows * j.cols, s, false))?, g.upload(&mx_bytes(j.rows * j.cols / 32, s ^ 9, true))?) };
-        batch.layer.projections[i] = MxProjection { weights, scales, input, output: 0, rows: j.rows as u32, cols: j.cols as u32, tokens: 1, input_bf16: 0, round: 0 };
+        batch.layer.projections[i] = MxProjection { weights, scales, input, output: 0, rows: j.rows as u32, cols: j.cols as u32, tokens: 1, input_bf16: 0, round: 0, mode: 0 };
         if j.plain { batch.plain |= 1 << i; }
         inputs.push(input);
     }

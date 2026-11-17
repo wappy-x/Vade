@@ -42,7 +42,7 @@ pub(crate) fn load<D: Driver>(driver: &mut D, ptx: &CStr, image: Option<Image<'_
             let (code, handle) = driver.cubin(image.bytes);
             if code == 0 {
                 let handle = handle.ok_or("prebuilt cubin load returned no module")?;
-                driver.notice("gpu_backend module=prebuilt_cubin target=sm_121");
+                driver.notice("gpu_backend module=prebuilt_cubin target=sm_121a");
                 return Ok(Loaded { handle, receipt: None });
             }
             let error = driver.error(code);

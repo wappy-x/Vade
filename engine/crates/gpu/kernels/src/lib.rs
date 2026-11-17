@@ -1,7 +1,7 @@
 //! Genuine Rust-authored kernels compiled by the official rustc NVPTX backend.
 //! No CUDA C, external Rust GPU crate, or runtime library.
 #![no_std]
-#![feature(abi_ptx, stdarch_nvptx, link_llvm_intrinsics, asm_experimental_arch)]
+#![feature(abi_ptx, stdarch_nvptx, link_llvm_intrinsics, asm_experimental_arch, stmt_expr_attributes)]
 #![feature(core_float_math)]
 
 use core::arch::nvptx::{_block_dim_x, _block_idx_x, _thread_idx_x};
@@ -17,6 +17,7 @@ mod causal_ops;
 #[path = "../../src/latent_ops.rs"]
 mod latent_ops;
 #[path = "../../src/latent_absorb.rs"] mod latent_absorb;
+#[path = "../../src/absorb_tc.rs"] mod absorb_tc;
 #[path = "../../src/latent_absorb_rows.rs"] mod latent_absorb_rows;
 #[path = "../../src/resident_launch.rs"] mod resident_launch_abi;
 mod resident_launch;
@@ -30,20 +31,22 @@ mod resident_causal_group;
 mod causal_operation;
 mod latent_absorption;
 mod latent_absorption_tile;
+mod latent_tile3;
 mod causal_fast;
 mod causal_small;
 mod select_fast;
 #[path = "../../src/prompt_admission.rs"] mod prompt_admission;
 mod prompt_move;
+mod prompt_wire_bf16;
 mod prompt_fast;
 mod prompt_softmax;
 #[path = "../../src/expert_ops.rs"] mod expert_ops;
 use mhc_math::reduction;
 use mhc_math::reduction as tree_reduction;
 #[path = "../../src/tc_contract.rs"] mod tc_contract;
+#[path = "../../src/tc_f8.rs"] mod tc_f8;
 #[path = "../../src/tc_abi.rs"] mod tc_abi;
 #[path = "../../src/quantize_sweep.rs"] mod quantize_sweep;
-mod fp8_rows;
 #[path = "../../src/prompt_ops.rs"] mod prompt_ops;
 #[path = "prompt_ops.rs"] mod prompt_operation;
 mod plain_rows_tile;
@@ -68,6 +71,8 @@ mod strip_warp;
 #[path = "../../src/plain_admission.rs"] mod plain_admission;
 mod plain_warp;
 mod plain_bf16;
+mod fp8_tc;
+mod fp8_tc_rows;
 mod fp8_tile;
 mod attention_table;
 mod nv_projection;
@@ -75,6 +80,7 @@ mod nv_rows_stream;
 mod nv_rows_tile;
 mod nv_rows_cols;
 mod mx_rows_tile;
+mod mx_tc;
 mod fp8_rows_tile;
 mod nv_quantize;
 mod nv_quantize_pack;
@@ -88,6 +94,8 @@ mod nv_repack;
 #[path="../../src/pair_split.rs"] mod pair_split_abi;
 mod pair_split;
 mod device_route;
+#[path="../../src/prompt_route.rs"] mod prompt_route_abi;
+mod prompt_route;
 
 #[path = "../../src/next_math.rs"]
 mod next_math;
