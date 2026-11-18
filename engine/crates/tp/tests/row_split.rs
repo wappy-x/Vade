@@ -1119,10 +1119,13 @@ fn without_the_switch_no_session_forks() {
 /// drafting at its first closed shadow, so the speculator is made inside the request, drafts, and is dropped when
 /// the request's own cycles stop it. `marker`: the token that ends a think block; the trial makes no shadow before the
 /// request's own steps give it (or before its bound of steps). Every answer must be the plain one.
-fn default_drafting_run(force:bool,marker:Option<u32>) {default_drafting_loaded(3,force,marker);}
+/// DRAFT CONFIDENCE is off here (a test control): with it on, a lone chat's default request drafts as a strict one and
+/// runs no trial (`default_requests_of_a_lone_chat_draft_without_a_trial_and_give_the_plain_ids_on_two_ranks`).
+fn default_drafting_run(force:bool,marker:Option<u32>) {default_drafting_loaded(3,force,marker,false);}
 /// `loaded`: the predictor depth both ranks load. Above TRIAL_DEPTH the service's default depth stays TRIAL_DEPTH, and
 /// real drafting that a trial started may go as deep as the loaded predictor (with the test control: in every cycle).
-fn default_drafting_loaded(loaded:usize,force:bool,marker:Option<u32>) {
+/// `confident`: DRAFT CONFIDENCE on, as the service runs.
+fn default_drafting_loaded(loaded:usize,force:bool,marker:Option<u32>,confident:bool) {
     use std::{io::{Read,Write},net::{TcpListener,TcpStream},sync::atomic::{AtomicBool,Ordering::SeqCst},time::Duration};
     let listener=TcpListener::bind("127.0.0.1:0").unwrap();let address=listener.local_addr().unwrap();
     let c=fixture::Checkpoint::new_with_predictor(144);
@@ -1140,7 +1143,7 @@ fn default_drafting_loaded(loaded:usize,force:bool,marker:Option<u32>) {
         let server=scope.spawn(move || {
             let split=Split::new(Host,Counted(Wire {topology:Topology {rank:0,parts:2},controller:true,tx:a_tx,rx:a_rx},counter)).unwrap();
             let engine=Factory::new(checkpoint,split,144,vec![0]).unwrap().with_predictor(loaded).unwrap();if force {engine.set_trial_always();}
-            if loaded>spark_tp::row_split::TRIAL_DEPTH {engine.set_deep_always(true);}
+            if loaded>spark_tp::row_split::TRIAL_DEPTH {engine.set_deep_always(true);}engine.set_confidence(confident);
             if let Some(marker)=marker {engine.set_answer_marker(marker);}
             let mut limits=spark_tp::row_split::limits(144,96).unwrap();limits.next_mtp_depth=Some(engine.predictor_depth());
             let cache=spark_serve::cache::CacheLimits {entries:1,retained_bytes:0,tokens_per_entry:8,logits_per_entry:16,idle_ttl:Duration::from_secs(1)};
@@ -1151,7 +1154,9 @@ fn default_drafting_loaded(loaded:usize,force:bool,marker:Option<u32>) {
             assert_eq!(engine.fatal_error(),None);let [started,stopped,gave_up]=engine.trial_counts();
             // Forced: every lone trial past TRIAL_START starts real drafting, and on this model its cycles lose, so it
             // stops and the request ends by plain steps. Not forced: this model's proposals are not kept, so trials give up.
-            if marker.is_some() {assert!(started+stopped+gave_up<=requests as u32);}
+            // With DRAFT CONFIDENCE no request runs a trial: a lone chat drafts as a strict one, a chat beside another goes plain.
+            if confident {assert_eq!([started,stopped,gave_up],[0,0,0]);}
+            else if marker.is_some() {assert!(started+stopped+gave_up<=requests as u32);}
             else if force {assert!(started>=prompts.len() as u32 && stopped>=1,"started {started} stopped {stopped}");} else {assert!(gave_up>=prompts.len() as u32,"gave up {gave_up}");assert_eq!(started,0);}
             engine.shutdown().unwrap();
         });
@@ -1203,7 +1208,15 @@ fn a_trial_that_starts_real_drafting_and_stops_gives_the_plain_ids_on_two_ranks(
 /// both ranks. Every answer is the plain one, alone, beside other chats and at the end of the context.
 #[test]
 fn default_requests_on_a_deeper_predictor_give_the_plain_ids_on_two_ranks() {
-    default_drafting_loaded(spark_engine::draft::PREDICTOR_DEPTH_MAX,true,None);default_drafting_loaded(spark_engine::draft::PREDICTOR_DEPTH_MAX,false,None);
+    default_drafting_loaded(spark_engine::draft::PREDICTOR_DEPTH_MAX,true,None,false);default_drafting_loaded(spark_engine::draft::PREDICTOR_DEPTH_MAX,false,None,false);
+}
+/// DEFAULT DRAFTING as the service runs it (DRAFT CONFIDENCE on): a lone chat's request that names no draft mode drafts
+/// as a strict request from its first step and runs no trial; beside another chat it decodes by plain steps. The same
+/// requests as above, with the depth the service loads by default (TRIAL_DEPTH) and the deepest predictor: every answer
+/// is the plain one, alone, at every output cap, beside one to three chats, beside a strict chat and at the context's end.
+#[test]
+fn default_requests_of_a_lone_chat_draft_without_a_trial_and_give_the_plain_ids_on_two_ranks() {
+    default_drafting_loaded(spark_tp::row_split::TRIAL_DEPTH,false,None,true);default_drafting_loaded(spark_engine::draft::PREDICTOR_DEPTH_MAX,false,None,true);
 }
 /// The trial waits for the token that ends the think block: a token of this model's answers (the wait ends inside the
 /// answer), and a token no answer holds (the wait ends at its bound).
@@ -1229,7 +1242,8 @@ fn short_answers_make_no_probes_and_draft_over_eos_keeps_both_ranks_clean() {
     // Pick a token that first appears past prompt token 1 (so EOS stops before TRIAL_START even with max_tokens=96).
     let short_eos=*seq[4..40].iter().find(|&&t|t!=seq[0]).unwrap();
     let short_len=seq.iter().position(|&t|t==short_eos).unwrap()+1;assert!(short_len<=spark_tp::row_split::TRIAL_START as usize);
-    for (eos,force,expect_zero) in [(short_eos,false,true),(seq[74],true,false)] {
+    // DRAFT CONFIDENCE off: the trial (short answers, and real drafting the trial started). On: a lone default request drafts as a strict one.
+    for (eos,force,expect_zero,confident) in [(short_eos,false,true,false),(seq[74],true,false,false),(seq[74],false,false,true)] {
         let listener=TcpListener::bind("127.0.0.1:0").unwrap();let address=listener.local_addr().unwrap();
         let (a_tx,b_rx)=sync_channel(1);let (b_tx,a_rx)=sync_channel(1);
         std::thread::scope(|scope| {
@@ -1238,13 +1252,14 @@ fn short_answers_make_no_probes_and_draft_over_eos_keeps_both_ranks_clean() {
                 Factory::new(checkpoint,split,144,vec![eos]).unwrap().with_predictor(3).unwrap().worker().unwrap();});
             let server=scope.spawn(move || {
                 let split=Split::new(Host,Wire {topology:Topology {rank:0,parts:2},controller:true,tx:a_tx,rx:a_rx}).unwrap();
-                let engine=Factory::new(checkpoint,split,144,vec![eos]).unwrap().with_predictor(3).unwrap();if force {engine.set_trial_always();}
+                let engine=Factory::new(checkpoint,split,144,vec![eos]).unwrap().with_predictor(3).unwrap();if force {engine.set_trial_always();}engine.set_confidence(confident);
                 let mut limits=spark_tp::row_split::limits(144,96).unwrap();limits.next_mtp_depth=Some(engine.predictor_depth());
                 let cache=spark_serve::cache::CacheLimits {entries:1,retained_bytes:0,tokens_per_entry:8,logits_per_entry:16,idle_ttl:Duration::from_secs(1)};
                 let config=spark_serve::scheduler::Config {active:8,connections:32,prefill_chunk:4,foreground_rows:1,background_rows:1,active_bytes:1<<26,session_budget_bytes:1<<26,
                     draft:spark_serve::protocol::DraftMode::Strict,mtp_depth:spark_tp::row_split::TRIAL_DEPTH,draft_global_bank:false,prefix_cache:false,sharing:Default::default()};
                 spark_serve::scheduler::serve_requests(listener,&engine,None::<&spark_serve::tokenizer::ModelTokenizer>,&limits,&cache,&config,&AtomicBool::new(false),"short+eos",4).unwrap();
                 assert_eq!(engine.fatal_error(),None);
+                if confident {assert_eq!(engine.trial_counts(),[0,0,0],"a lone default request runs no trial");}
                 if expect_zero {assert_eq!(engine.trial_counts(),[0,0,0],"short answers must never seed or probe");}
                 engine.shutdown().unwrap();
             });

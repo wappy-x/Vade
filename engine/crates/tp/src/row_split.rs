@@ -229,6 +229,7 @@ impl<C:Compute,E:Exchange> Compute for Split<C,E> {
     fn rows_release(&self)->Result<()> {self.compute.rows_release()}
     fn rows_keep(&self)->Result<()> {self.compute.rows_keep()}
     fn rows_return_lease(&self)->Result<()> {self.compute.rows_return_lease()}
+    fn rows_phase_end(&self)->Result<()> {self.compute.rows_phase_end()}
     fn rows_unrecorded(&self,p:bool)->Result<bool> {self.compute.rows_unrecorded(p)}
     fn prompt_end(&self)->Result<()> {self.compute.prompt_end()}
     fn prompt_seeds(&self)->bool {self.compute.prompt_seeds()}
@@ -321,7 +322,7 @@ pub struct Factory<'f,C:Compute,E> {checkpoint:&'f CheckpointAdmission,split:Spl
     /// The prompts this rank keeps now, and the cold account of their bytes, byte cap, and test fault masks (`None` off).
     kept:Cell<usize>,kept_account:Cell<Option<Box<KeptAccount>>>,
     /// DRAFT CONFIDENCE (confidence.rs): the controller's calibration of the draft head; off by `set_confidence` (tests).
-    confidence:RefCell<confidence::Calibration>,confidence_on:Cell<bool>}
+    confidence:RefCell<confidence::Tables>,confidence_on:Cell<bool>}
 /// The worker rank's live sessions by number: decoder, committed state, open verify rows.
 type WorkerSessions<'f,'s,C,E>=BTreeMap<u64,(Decoder<'f,&'s Split<C,E>>,Option<State<<C as Compute>::Value>>,Option<Verify<<C as Compute>::Value>>)>;
 impl<'f,C:Compute,E:Exchange> Factory<'f,C,E> {
@@ -480,8 +481,6 @@ impl<'f,C:Compute,E:Exchange> Factory<'f,C,E> {
     /// whatever its proposals kept (deeper.rs). A test model keeps few proposals, so its cycles would stay at
     /// TRIAL_DEPTH and no deep chain or deep check pass would run. No server calls this.
     pub fn set_deep_always(&self,on:bool) {self.deep_always.set(on);}
-    /// Test control: off, a strict lone chat proposes and checks its whole depth (confidence.rs `Session::confident`).
-    pub fn set_confidence(&self,on:bool) {self.confidence_on.set(on);}
     /// Test control: every tick of a pair of strict chats is in turns, whatever its record says (pair.rs).
     pub fn set_pair_always(&self,on:bool) {self.pair.borrow_mut().set_always(on);}
     /// PAIR DRAFTING: pairs that ended after a tick in turns or a step of two, their ticks in turns, and their steps of two.
@@ -708,7 +707,7 @@ pub fn workspace_reservation_bytes(&self)->usize {self.workspace}
                     // A chain deeper than this rank's loaded predictor is a command the controller never sends.
                     let depth=(if code<=11 {code-8} else {code-17}) as usize;if depth>self.predictor {return Err("worker proposal exceeds the loaded predictor depth".into());}
                     if let Some(groups)=self.tails.borrow_mut().remove(&id) {open.seed_trail(decoder,&groups)?;}
-                    if (18..=20).contains(&code) {open.probe(decoder,token,depth)?;} else {open.propose_mass(decoder,token&!confidence::CHAIN_STOP_FLAG,depth,token&confidence::CHAIN_STOP_FLAG!=0)?;}
+                    if (18..=20).contains(&code) {open.probe(decoder,token,depth)?;} else {let (token,stop)=confidence::chain_stop(token);open.propose_mass(decoder,token,depth,stop)?;}
                     self.split.exchange.borrow_mut().complete()
                 })?;},
                 // Command 8 is a pass of one row: its token rides in the command. Command 14 is the same
@@ -804,10 +803,10 @@ const _:()=assert!(PROPOSE_DEEP_LAST<25,"deep proposal commands reach the prompt
 // A check pass of the deepest proposal is one pass: its rows fit the pass bound.
 const _:()=assert!(spark_engine::draft::PREDICTOR_DEPTH_MAX>=3 && spark_engine::draft::PREDICTOR_DEPTH_MAX<crate::bounded_decoder::VERIFY_ROWS);
 use gate::Gate;pub use gate::Account;use trial::Trial;pub use trial::{TRIAL_DEPTH,TRIAL_START};
-/// DEFAULT DRAFTING: where a request that named no draft mode stands. Off: a plain or a strict request. Trial: it
-/// decodes by its own steps and makes shadows (trial.rs). Drafting: its trial started real drafting (`strict` is set).
-/// Over: it drafts no more and decodes by plain steps.
-#[derive(Clone,Copy,Debug,PartialEq,Eq)] enum Phase {Off,Trial,Drafting,Over}
+/// DEFAULT DRAFTING: where a request that named no draft mode stands. Off: a plain or a strict request. Alone: it drafts as a strict
+/// request with DRAFT CONFIDENCE (confidence.rs) while its chat is alone. Trial (DRAFT CONFIDENCE off): it decodes by its own steps
+/// and makes shadows (trial.rs). Drafting: its trial started real drafting (`strict` is set). Over: it decodes by plain steps.
+#[derive(Clone,Copy,Debug,PartialEq,Eq)] enum Phase {Off,Alone,Trial,Drafting,Over}
 /// `open` holds the state once a request decodes by verify passes. `state` is then empty.
 pub struct Session<'a,C:Compute,E:Exchange> {factory:&'a Factory<'a,C,E>,decoder:Decoder<'a,&'a Split<C,E>>,state:Option<State<C::Value>>,id:u64,open:Option<Verify<C::Value>>,strict:bool,
     /// HANDOFF stopped the predictor under a drafting invoice. Explicit plain retirement must still reach both ranks.
@@ -825,7 +824,7 @@ pub struct Session<'a,C:Compute,E:Exchange> {factory:&'a Factory<'a,C,E>,decoder
     /// session has no `state` and no `open`, so no step or prompt group can run in it.
     kept:Option<KeptSlot<C::Value>>,
     /// DRAFT CONFIDENCE (confidence.rs): the draft head's probabilities of the tokens the open cycle's pass checks.
-    checked:Vec<f32>}
+    checked:Vec<f32>,chooser:confidence::Chooser,alone:bool}
 impl<C:Compute,E:Exchange> spark_serve::Engine for Factory<'_,C,E> {
     type Session<'a>=Session<'a,C,E> where Self:'a;
     fn prepare_prompt_workspace(&self,available:usize)->Result<()> {self.prepare_prompt_lease(available)}
@@ -841,7 +840,7 @@ impl<C:Compute,E:Exchange> spark_serve::Engine for Factory<'_,C,E> {
         let result=(|| {let started=std::time::Instant::now();self.split.command_for(1,0,id)?;
             // The other sessions that are open now: the worker counts the same ones.
             let decoder=Decoder::from_prepared(&self.prepared,&self.split,self.context as u64,self.active.get()-1)?;
-            let state=decoder.zero_state()?;self.split.exchange.borrow_mut().complete()?;eprintln!("SERVED SESSION rank={} session={id} active={} setup_seconds={:.9}",self.split.topology.rank,self.active.get(),started.elapsed().as_secs_f64());self.split.cost_report("setup");self.split.trace_start();Ok(Session {factory:self,decoder,state:Some(state),id,open:None,strict:false,draft_handoff:false,phase:Phase::Off,trial:Trial::default(),depth:0,step_low:None,step_ms:None,pass_ms:[None;17],after_step:false,gate:Gate::default(),limit:0,kept:None,checked:Vec::new()})})();
+            let state=decoder.zero_state()?;self.split.exchange.borrow_mut().complete()?;eprintln!("SERVED SESSION rank={} session={id} active={} setup_seconds={:.9}",self.split.topology.rank,self.active.get(),started.elapsed().as_secs_f64());self.split.cost_report("setup");self.split.trace_start();Ok(Session {factory:self,decoder,state:Some(state),id,open:None,strict:false,draft_handoff:false,phase:Phase::Off,trial:Trial::default(),depth:0,step_low:None,step_ms:None,pass_ms:[None;17],after_step:false,gate:Gate::default(),limit:0,kept:None,checked:Vec::new(),chooser:Default::default(),alone:false})})();
         if result.is_err() {self.active.set(self.active.get()-1);}self.finish(result)
     }
     fn fatal_error(&self)->Option<String> {self.failure_reason()}
@@ -995,7 +994,7 @@ impl<C:Compute,E:Exchange> Session<'_,C,E> {
         // DEFAULT DRAFTING: a trial runs only while its chat is alone (only then are shadows made). Beside another chat it
         // ends before the pass: a pass of one row on open verify rows costs more than a plain step, and chats that
         // form no batch step would pay that for their whole answers (8 chats, pair three 2026-11-11: 1 percent).
-        if self.phase==Phase::Trial && factory.active.get()!=1 {self.end_trial();}
+        if matches!(self.phase,Phase::Trial|Phase::Alone) && factory.active.get()!=1 {self.end_trial();}
         // A request that drafts no more decodes by plain steps: the bits of its pass of one row.
         if self.phase==Phase::Over && tokens.len()==1 && self.open.as_ref().is_none_or(|open|open.carried()==0) {return self.token_prediction(tokens[0],false,greedy);}
         let output=factory.finish(factory.split.work(||self.rows_inner(tokens,greedy)))?;
@@ -1026,9 +1025,9 @@ impl<C:Compute,E:Exchange> Session<'_,C,E> {
     /// is a proposal that no pass verified: the cheap way to see how deep a proposal would have been kept.
     pub fn shadows(&self)->Vec<(usize,usize)> {self.trial.shadows().collect()}
     /// A trial ends with no start (the chat is not alone, the session rides a batch step, its step reads logits, or
-    /// its proposer gives no token): the request decodes by plain steps from now on. Nothing happens to a session
-    /// that is not in its trial.
-    fn end_trial(&mut self) {if self.phase==Phase::Trial {self.phase=Phase::Over;self.factory.trial_counted(2);}}
+    /// its proposer gives no token), and a lone chat's default drafting ends beside another chat: the request decodes
+    /// by plain steps from now on. Only a trial is counted. Nothing happens to a session in another phase.
+    fn end_trial(&mut self) {match self.phase {Phase::Trial=>{self.phase=Phase::Over;self.factory.trial_counted(2);},Phase::Alone=>self.phase=Phase::Over,_=>{}}}
     fn validate_row(&self,tokens:&[u32],output:spark_serve::BatchOutput)->Result<()> {
         #[cfg(test)] validation_tests::VALIDATIONS.with(|count|count.set(count.get()+1));
         if self.kept.is_some() {return Err("row split session only holds a kept prompt".into());}
@@ -1138,7 +1137,7 @@ impl<'a,C:Compute,E:Exchange> Session<'a,C,E> {
     pub fn kept_expanded_rows(&self)->Option<usize> {self.kept.as_deref().map(crate::bounded_decoder::Parked::held_rows)}
     #[cold] #[inline(never)]
     fn fresh_session(factory:&'a Factory<'a,C,E>,decoder:Decoder<'a,&'a Split<C,E>>,state:Option<State<C::Value>>,id:u64,kept:Option<KeptSlot<C::Value>>)->Self {
-        Session {factory,decoder,state,id,open:None,strict:false,draft_handoff:false,phase:Phase::Off,trial:Trial::default(),depth:0,step_low:None,step_ms:None,pass_ms:[None;17],after_step:false,gate:Gate::default(),limit:0,kept,checked:Vec::new()}
+        Session {factory,decoder,state,id,open:None,strict:false,draft_handoff:false,phase:Phase::Off,trial:Trial::default(),depth:0,step_low:None,step_ms:None,pass_ms:[None;17],after_step:false,gate:Gate::default(),limit:0,kept,checked:Vec::new(),chooser:Default::default(),alone:false}
     }
     #[cold] #[inline(never)]
     fn send_keep(&self,id:u64,state:&State<C::Value>)->Result<std::result::Result<crate::bounded_decoder::Parked<C::Value>,String>> {
@@ -1286,11 +1285,11 @@ impl<C:Compute,E:Exchange> spark_engine::draft::Target for Session<'_,C,E> {
             eprintln!("SERVED DRAFT STOP rank={} session={} cycles={} score={} net_ms={:.1} step_ms={step:.1}",self.factory.split.topology.rank,self.id,self.gate.cycles(),self.gate.score(),self.gate.net_ms(step));}
         if self.phase==Phase::Over {return Ok(Some(spark_engine::draft::ModelProposal {tokens:Vec::new(),proposal_ms:0.0,catchup_ms:0.0}));}
         if !self.gate.allows(self.step_ms) {return Ok(Some(spark_engine::draft::ModelProposal {tokens:Vec::new(),proposal_ms:0.0,catchup_ms:0.0}));}
-        let limit=limit.min(if self.phase==Phase::Drafting {self.cycle_depth()} else {self.limit});if limit==0 {return Ok(Some(spark_engine::draft::ModelProposal {tokens:Vec::new(),proposal_ms:0.0,catchup_ms:0.0}));}
+        let limit=limit.min(if self.phase==Phase::Drafting {self.cycle_depth()} else {self.limit});let limit=self.chosen_depth(limit);if limit==0 {return Ok(Some(spark_engine::draft::ModelProposal {tokens:Vec::new(),proposal_ms:0.0,catchup_ms:0.0}));}
         let entry=spark_engine::draft::Target::checkpoint(self) as u64;let waiting=self.open.as_ref().map_or(0,Verify::waiting)+self.factory.tail_rows(self.id);
         let started=std::time::Instant::now();let (mut tokens,mass,waited)=self.propose(next,limit)?;let total=started.elapsed().as_secs_f64();
         if !tokens.is_empty() {self.gate.proposed((total-waited).max(0.0)*1000.0,waited*1000.0,entry,started,tokens.len(),waiting.saturating_sub(1));}
-        self.checked.clear();if !tokens.is_empty() {let width=self.confident_width(&mass);tokens.truncate(width);self.checked.extend(mass.iter().take(width).map(|p|p.unwrap_or(f32::NAN)));}
+        self.checked.clear();if !tokens.is_empty() {let width=self.checked_width(&mass,(total-waited).max(0.0)*1000.0);tokens.truncate(width);self.checked.extend(mass.iter().take(width).map(|p|p.unwrap_or(f32::NAN)));}
         Ok(Some(spark_engine::draft::ModelProposal {tokens,proposal_ms:(total-waited).max(0.0)*1000.0,catchup_ms:waited*1000.0}))
     }
     fn verify_costs(&self,_context:usize)->Option<spark_engine::draft::CostCurve> {self.measured_costs()}
@@ -1302,17 +1301,19 @@ impl<C:Compute,E:Exchange> spark_serve::Session for Session<'_,C,E> {
         if r.mtp_depth.is_some_and(|v|v>self.factory.predictor) || r.draft.is_some_and(|v|!matches!(v,DraftMode::Auto|DraftMode::Plain|DraftMode::Strict)) {return Err("row split service supports plain decoding, strict drafting, and mtp_depth up to its loaded predictor depth".into());}
         // "strict" drafts as before: mtp_depth asks the predictor layer for proposals; without it strict uses the free ones.
         // DEFAULT DRAFTING: a request that names no draft mode (or "auto"), with greedy sampling, a depth of TRIAL_DEPTH
-        // or more, and an output cap above TRIAL_START (the cheap guard; longer caps still neither seed nor probe before
-        // step TRIAL_START), starts in its TRIAL (trial.rs) and drafts at TRIAL_DEPTH only when its probes all match.
+        // or more, and an output cap above TRIAL_START drafts as a strict request from its first step while its chat is
+        // alone (Phase::Alone, DRAFT CONFIDENCE: its passes check only the tokens that pay) and decodes by plain steps from
+        // the first pass beside another chat. With DRAFT CONFIDENCE off (a test control) it starts in its TRIAL (trial.rs).
         // "plain", a smaller depth, caps at or under TRIAL_START, and sampled requests decode by plain steps.
         let default=matches!(r.draft,None|Some(DraftMode::Auto)) && r.mtp_depth.is_some_and(|depth|depth>=trial::TRIAL_DEPTH) && r.max_tokens>trial::TRIAL_START as usize && spark_engine::draft::plain_greedy(r.sampling);
-        self.strict=r.draft==Some(DraftMode::Strict);self.phase=if default {Phase::Trial} else {Phase::Off};self.trial=Trial::default();
+        let (named,alone)=(r.draft==Some(DraftMode::Strict),default && self.factory.confidence_on.get());self.chooser=Default::default();
+        self.strict=named || alone;self.phase=if alone {Phase::Alone} else if default {Phase::Trial} else {Phase::Off};self.alone=confidence::default_rules(self.phase);self.trial=Trial::default();
         // The whole depth of a request: the most proposals one of its cycles makes. A strict request and a request that
         // names "auto" have their own mtp_depth. A request that omits both draft mode and depth (its mtp_depth is then the
         // service's default, TRIAL_DEPTH) leaves the depth to the service: its trial probes at TRIAL_DEPTH, its real
         // drafting starts there, and goes as deep as the loaded predictor while its deeper proposals are kept
         // (deeper.rs). With a predictor of TRIAL_DEPTH that is TRIAL_DEPTH, as before.
-        self.depth=if self.strict {r.mtp_depth.unwrap_or(0)} else if !default {0} else if r.draft.is_none() && !r.mtp_depth_explicit {self.factory.predictor} else {r.mtp_depth.unwrap_or(trial::TRIAL_DEPTH)};
+        self.depth=if named {r.mtp_depth.unwrap_or(0)} else if !default {0} else if r.draft.is_none() && !r.mtp_depth_explicit {self.factory.predictor} else {r.mtp_depth.unwrap_or(trial::TRIAL_DEPTH)};
         // PAIR DRAFTING (pair.rs): a strict request that the service keeps drafting beside another one is a chat of a pair.
         self.factory.pair_leave(self.id);if spark_serve::Engine::drafts_contended(self.factory,r) {self.factory.pair.borrow_mut().join(self.id);}
         if self.strict && !spark_engine::draft::plain_greedy(r.sampling) {return Err("strict drafting on the row split service requires greedy sampling".into());}

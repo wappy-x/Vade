@@ -4,19 +4,22 @@ use crate::bounded_decoder::{PROMPT_GROUP,PROMPT_GROUP_MAX,PROMPT_GROUP_LEASE};
 /// The groups a prompt call can borrow for, largest first: the three lease-only sizes, then the startup sizes above
 /// `PROMPT_GROUP`. A service borrows only for a size above its startup group.
 pub(super) const SIZES:[usize;5]=[PROMPT_GROUP_LEASE[0],PROMPT_GROUP_LEASE[1],PROMPT_GROUP_LEASE[2],PROMPT_GROUP_MAX,PROMPT_GROUP_MAX/2];
-/// The largest group a service offers to borrow for: the largest lease size whose peak and whose words a pair has
-/// measured (3,072 rows: three runs of 1,024 rows that share the routed expert product launches; 2,048 rows when the
-/// spare pool does not cover three runs). The largest lease size stays in the cut (`lease_groups`), in the plan and
-/// in the host bit checks, and no service offers it.
-pub(super) const SERVED:usize=PROMPT_GROUP_LEASE[1];
+/// The largest group a service offers to borrow for: every lease size. Each keeps runs of at most 1,024 rows that
+/// share the routed expert product launches. 4,096 rows are charged by the two phases of a wide pass where every
+/// latent layer is absorbed and no predictor expands (`wide_phase_workspace`, bounded_decoder/rows/wide_charge.rs), and as a whole
+/// group otherwise; 3,072 and 2,048 rows are charged as whole groups. An offer needs exactly one live session and,
+/// on both ranks, the whole difference of its size and of every smaller size above the startup group
+/// (`agree_prompt_lease`: the price list is not monotone).
+pub(super) const SERVED:usize=PROMPT_GROUP_LEASE[0];
 /// A group size the ranks may agree on: the startup sizes and the lease sizes.
 fn agreed(rows:usize)->bool {rows==PROMPT_GROUP || SIZES.contains(&rows)}
 impl<C:Compute,E:Exchange> Factory<'_,C,E> {
     pub(super) fn current_prompt_group(&self)->usize {self.group.max(self.lease_rows.get())}
     /// Fixed checkpoint geometry belongs at startup, never on a request's clock.
-    /// The extra bytes of each size are the whole workspace formula of that group (`workspace_for_prompt_group`) less
+    /// The extra bytes of each size are the workspace formula of that group (`workspace_for_prompt_group`) less
     /// this service's own: every buffer that grows with the rows, the attention planes, the exchange and the state
-    /// copies, as a startup group of that size would be charged.
+    /// copies, as a startup group of that size would be charged; above 3,072 rows the two-phase charge of a wide
+    /// pass where it applies (`wide_phase_workspace`).
     pub(super) fn init_prompt_lease_plan(&mut self)->Result<()> {
         let workspace=|group|crate::service_memory::workspace_for_prompt_group_with(self.checkpoint,self.context,self.workspace,group,self.latent_rows);
         let base=workspace(self.group)?;
@@ -32,18 +35,28 @@ impl<C:Compute,E:Exchange> Factory<'_,C,E> {
     }
     /// Same scheduler remainder on both ranks. Geometry can differ; gather the
     /// smaller offer before either rank executes a larger group.
+    ///
+    /// The offer is the top of the run of sizes above the startup group that the spare bytes fund, smallest first.
+    /// The peer may answer with any smaller size, and the price list is not monotone: 4,096 rows at the phase charge
+    /// cost less than 3,072 rows at the whole-group charge. So a size is offered only when every smaller size is
+    /// funded too, and whatever the ranks agree on is funded here. With a monotone list this is the largest funded
+    /// size, as before.
     pub(super) fn agree_prompt_lease(&self,available:usize,live:usize)->Result<()> {
         if self.lease_rows.get()!=0 {return Err("previous prompt lease was not returned".into());}
         let mut offer=self.group;
         if self.memo_admitted && live==1 {
-            for rows in SIZES {
-                if rows>self.group && rows<=SERVED && self.prompt_lease_extra(rows)?<=available {offer=rows;break;}
+            for rows in SIZES.into_iter().rev() {
+                if rows<=self.group {continue;}
+                if rows>SERVED || self.prompt_lease_extra(rows)?>available {break;}
+                offer=rows;
             }
         }
         let rows=self.negotiate_available_bytes(offer)?;
         if !agreed(rows) || rows<self.group || rows>offer {return Err("ranks disagree on prompt lease".into());}
         if rows>self.group {
             let bytes=self.prompt_lease_extra(rows)?;
+            // The agreed size is this rank's offer or a smaller size, and the offer funds each of them.
+            if bytes>available {return Err("agreed prompt lease exceeds the spare bytes".into());}
             self.lease_bytes.set(bytes);self.lease_rows.set(rows);
             eprintln!("TEXT PROMPT LEASE rank={} rows={rows} borrowed_bytes={bytes} available_bytes={available}",self.split.topology.rank);
         }

@@ -662,7 +662,8 @@ impl Exchange for Batches {
 ///
 /// `force`: every trial starts real drafting at its first closed shadow, so the probe is proven to have run on
 /// both ranks and the request drafts from a predictor that saw no prompt row.
-fn kept_prompts_under_default_drafting(force:bool) {
+/// `confident`: DRAFT CONFIDENCE on, as the service runs: a lone chat's default request drafts as a strict one, no trial.
+fn kept_prompts_under_default_drafting(force:bool,confident:bool) {
     use std::{io::{Read,Write},net::{TcpListener,TcpStream},sync::atomic::{AtomicBool,AtomicUsize,Ordering::SeqCst},time::Duration};
     let listener=TcpListener::bind("127.0.0.1:0").unwrap();let address=listener.local_addr().unwrap();
     let c=fixture::Checkpoint::new_with_predictor(144);
@@ -676,7 +677,7 @@ fn kept_prompts_under_default_drafting(force:bool) {
             assert_eq!(factory.kept_prompts(),(0,0),"the worker rank forgot every kept prompt when the server stopped");});
         let counter=batches.clone();
         scope.spawn(move || {let split=Split::new(Host,Batches(Wire {topology:Topology {rank:0,parts:2},controller:true,tx:a_tx,rx:a_rx},counter)).unwrap();
-            let engine=Factory::new(checkpoint,split,144,vec![0]).unwrap().with_predictor(3).unwrap().with_prompt_keep();if force {engine.set_trial_always();}
+            let engine=Factory::new(checkpoint,split,144,vec![0]).unwrap().with_predictor(3).unwrap().with_prompt_keep();if force {engine.set_trial_always();}engine.set_confidence(confident);
             let mut limits=spark_tp::row_split::limits(144,96).unwrap();limits.next_mtp_depth=Some(engine.predictor_depth());
             let pool=(1usize<<26).max(4*engine.full_state_reservation_bytes());let cap=engine.keep_within(pool);
             let cache=spark_serve::cache::CacheLimits {entries:spark_tp::row_split::KEPT_PROMPTS,retained_bytes:cap,tokens_per_entry:144,logits_per_entry:engine.vocab_size(),idle_ttl:Duration::from_secs(300)};
@@ -688,7 +689,8 @@ fn kept_prompts_under_default_drafting(force:bool) {
             assert_eq!(engine.fatal_error(),None);let [started,_,gave_up]=engine.trial_counts();
             // Four lone requests name no draft mode (the first read, the same prompt again, the second turn, and at
             // least the first of the two at once runs alone for a while or ends its trial beside the other).
-            if force {assert!(started>=3,"a trial from a kept prompt started real drafting: started {started}");} else {assert_eq!(started,0);assert!(gave_up>=3,"gave up {gave_up}");}
+            if confident {assert_eq!(engine.trial_counts(),[0,0,0],"lone default requests run no trial");}
+            else if force {assert!(started>=3,"a trial from a kept prompt started real drafting: started {started}");} else {assert_eq!(started,0);assert!(gave_up>=3,"gave up {gave_up}");}
             engine.shutdown().unwrap();});
         // `mode`: the cache and draft fields of the request body; empty is a request that names neither.
         let ask=move|prompt:&str,tokens:usize,mode:&str| {
@@ -718,9 +720,11 @@ fn kept_prompts_under_default_drafting(force:bool) {
     });
 }
 #[test]
-fn default_requests_from_kept_prompts_give_the_plain_ids_on_two_ranks() {kept_prompts_under_default_drafting(false);}
+fn default_requests_from_kept_prompts_give_the_plain_ids_on_two_ranks() {kept_prompts_under_default_drafting(false,false);}
 #[test]
-fn trials_from_kept_prompts_that_start_real_drafting_give_the_plain_ids_on_two_ranks() {kept_prompts_under_default_drafting(true);}
+fn trials_from_kept_prompts_that_start_real_drafting_give_the_plain_ids_on_two_ranks() {kept_prompts_under_default_drafting(true,false);}
+#[test]
+fn default_requests_of_lone_chats_from_kept_prompts_draft_without_a_trial_on_two_ranks() {kept_prompts_under_default_drafting(false,true);}
 
 /// KEPT PROMPTS WITH 2, 4 AND 8 LIVE CHATS, through the scheduler on two ranks, as the text service runs by default
 /// (predictor loaded, the server default strict at TRIAL_DEPTH, prompt keep on, private counts). The older test of

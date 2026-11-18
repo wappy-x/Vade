@@ -17,7 +17,7 @@ impl<C:Compute,E:Exchange> Factory<'_,C,E> {
     pub(super) fn shares_pass(&self,sessions:&[&Session<'_,C,E>],tokens:&[&[u32]])->bool {
         let rows=sessions.iter().zip(tokens).map(|(session,rows)|session.open.as_ref().map_or(rows.len(),|open|open.shared_count(rows.len()))).sum::<usize>();
         (2..=LIVE_SESSIONS).contains(&sessions.len()) && rows<=crate::bounded_decoder::VERIFY_ROWS
-            && sessions.iter().all(|session|session.strict && session.phase!=Phase::Over && session.phase!=Phase::Trial && session.kept.is_none() && session.decoder.predictor_enabled())
+            && sessions.iter().all(|session|session.strict && !matches!(session.phase,Phase::Over|Phase::Trial|Phase::Alone) && session.kept.is_none() && session.decoder.predictor_enabled())
     }
     /// One shared pass on both ranks: `tokens[i]` are the new rows of `sessions[i]`. Each chat gets the logits of its
     /// own rows, with the bits of its own pass (`Session::pass`). The caller validated every row (`validate_row`).

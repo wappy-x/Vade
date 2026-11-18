@@ -108,6 +108,7 @@ impl<C:Compute> Compute for &C {
     fn rows_release(&self)->Result<()> {(**self).rows_release()}
     fn rows_keep(&self)->Result<()> {(**self).rows_keep()}
     fn rows_return_lease(&self)->Result<()> {(**self).rows_return_lease()}
+    fn rows_phase_end(&self)->Result<()> {(**self).rows_phase_end()}
     fn rows_unrecorded(&self,p:bool)->Result<bool> {(**self).rows_unrecorded(p)}
     fn prompt_end(&self)->Result<()> {(**self).prompt_end()}
     fn prompt_seeds(&self)->bool {(**self).prompt_seeds()}

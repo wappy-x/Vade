@@ -233,7 +233,7 @@ under its dated name.
 |---|---|---|---|---|---|
 | 0 | none (main) | `1508efce96fd732edf93704c95c34b813afcebaf` | `baseline/` | PARTIAL; no landing | NOT RUN |
 | R1 | MXFP8 layer matrices and the BF16 latent group | the gate seat writes it at landing | `baseline-tc/02/` | NOT RUN on the merged head | parts 1 and 2 MEASURED on the frozen candidate; merged head NOT RUN |
-| R3 (candidate, not landed) | MXFP8 layer matrices on a new word (scales inside the step), for the prompt read | the gate seat writes it at landing | a new numbered folder, written by the gate seat | NOT RUN | NOT RUN |
+| R3 (landed 2026-11-17 01:17:48 as train 16) | MXFP8 layer matrices on a new word (scales inside the step), for the prompt read | main `1194b2a8e6c56e0c06e3cb8e4febcc8ed5ac79b2` | `baseline-tc/04/` | train 16; the gate seat's record | train 16; the gate seat's record |
 
 ## The image target
 
@@ -1023,8 +1023,8 @@ NOT PROVEN, and open:
 Status of the word below (rebase R3, branch `tc-rebase-r3`, seat TRUTH,
 2026-11-16): kernels, twin and host path written; the word is proven on
 the device against the twin and meets the word accuracy measure (section
-Proofs, runs `r3-proof-5` and `r3-code-4`); NOT gated, NOT landed. Until R3
-lands, the served word is candidate A.
+Proofs, runs `r3-proof-5` and `r3-code-4`). R3 was gated and landed as train
+16 on 2026-11-17 01:17:48 (main `1194b2a8e6`), for the prompt read.
 
 Status of candidate A: WIRED on branch `tc-onerow` (seat ONEROW, 2026-11-16), merged onto
 main `27276fcc0f` in rebase train R1 (branch `tc-rebase-r1`), not landed.

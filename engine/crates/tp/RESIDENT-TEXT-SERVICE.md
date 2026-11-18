@@ -12,17 +12,24 @@ vade up --sparks 2 --context 32768 --output 8192 --mtp 0 --diagnostic-unqualifie
 ```
 
 `--mtp 0` loads no draft head. `--mtp 1`, `2` or `3` loads the predictor
-layer at that depth before admission counts the resident bytes. With `--mtp 3`,
+layer at that depth before admission counts the resident bytes. With `--mtp 3`
+(the depth `vade up --diagnostic-unqualified-text` loads when no depth is named),
 a greedy request that names no draft mode and allows more than `64` output
-tokens drafts after a trial. It decodes plain steps up to token
-`64` and makes no proposal before then. From token `64` on, the trial makes
-three proposals of depth `3` and checks them against the plain tokens. When
-the think block ends before token `64`, the trial first skips the `16` tokens
-after it. `8` plain tokens lie between one proposal and the next. Only when
-all three match in full does the request draft at depth `3`. A miss, or
-another active chat, ends the trial, and the request decodes plain steps from
-then on. A request that drafts stops for the rest of its answer when its
-drafts keep too few tokens. With `--mtp 1` or `2`, without a predictor, with
+tokens drafts at depth `3` while its chat is the only one. Its first two passes are
+plain steps, which time its step; it proposes from the third.
+Each cycle the draft head proposes up to three tokens. The proposal ends early
+when the draft head's own probability of the whole proposal falls under one
+half. The check pass takes only the proposed tokens that are likely to pay, by
+that probability and this request's own timed passes; when none would pay, the
+cycle is a plain step. A request proposes a third token only while third tokens
+have paid in its own cycles. It tries one again after 4 cycles, then after 8, 16
+and 32 while they still do not pay
+([`confidence.rs`](src/row_split/confidence.rs)). A request that names
+`"draft":"strict"` proposes its whole depth in every cycle, and its proposal ends
+early under a probability of `0.3`. It reads a table of kept shares that no
+request without a named draft mode writes, so such a request cannot change its
+decisions. When another chat becomes
+active, the request decodes plain steps from then on. With `--mtp 1` or `2`, without a predictor, with
 `max_tokens` of `64` or less, or with sampling, such a request decodes plain
 steps. `"draft":"plain"` or `"mtp_depth":0` turns drafting off. A request
 also drafts when it sets `"draft":"strict"`, or when it sends `"mtp_depth"`

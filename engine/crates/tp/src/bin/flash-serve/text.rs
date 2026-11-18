@@ -156,8 +156,8 @@ pub fn run(args:&[String],checkpoint:CheckpointAdmission,root:&Path,output_setti
         // back before a request waits (`rebalance_within`). A kept prompt is charged all it holds (`retained_bytes`):
         // it holds no expanded rows, a chat that starts from it builds them again.
         let cache=spark_serve::cache::CacheLimits {entries:if keep {spark_tp::row_split::KEPT_PROMPTS} else {1},retained_bytes:kept_cap,tokens_per_entry:context,logits_per_entry:engine.vocab_size(),idle_ttl:Duration::from_secs(300)};
-        // DEFAULT DRAFTING: with a predictor of at least TRIAL_DEPTH loaded, a request that names no draft mode
-        // runs a trial and drafts at TRIAL_DEPTH (row_split.rs configure_request); "plain" and mtp_depth 0 turn it off.
+        // DEFAULT DRAFTING: with a predictor of at least TRIAL_DEPTH loaded, a request that names no draft mode drafts
+        // as a strict one while its chat is alone (row_split.rs configure_request); "plain" and mtp_depth 0 turn it off.
         let default_depth=if engine.predictor_depth()>=spark_tp::row_split::TRIAL_DEPTH {spark_tp::row_split::TRIAL_DEPTH} else {0};
         let schedule=spark_serve::scheduler::Config {active:spark_tp::row_split::LIVE_SESSIONS,connections:32,prefill_chunk:spark_tp::bounded_decoder::PROMPT_ROWS,foreground_rows:1,background_rows:1,active_bytes:pool,session_budget_bytes:pool,
             draft:if default_depth>0 {spark_serve::protocol::DraftMode::Strict} else {spark_serve::protocol::DraftMode::Plain},mtp_depth:default_depth,

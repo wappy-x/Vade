@@ -6,6 +6,9 @@ use spark_gpu_probe::prompt_ops::{Op as Row,Shape as RowShape};
 #[path="rows/pools.rs"] mod pools;
 #[path="rows/seed.rs"] mod seed;
 #[path="rows/shared.rs"] mod shared;
+#[path="rows/wide_charge.rs"] mod wide_charge;
+use wide_charge::{wide_phase_group,wide_phase_workspace};
+#[cfg(test)] pub(crate) use wide_charge::wide_cut_layers;
 pub use shared::SharedRows;
 /// ROWS FOLD: what ONE layer of a row pass holds between its routed down step and that step's fold. It lies on the
 /// caller's stack and ends with the layer, so no step reads another layer's row and nothing is allocated for it.
@@ -70,6 +73,8 @@ pub const PROMPT_GROUP_MAX:usize=1024;
 /// THREE RUNS (2026-11-17): 3,072 rows stand between the two older sizes. The lease charges a wide group the whole
 /// workspace of a startup group of its size, and a lone chat's spare pool covers that for three runs where it does
 /// not for four (the 8,192-token read: 8.42 GB for 3,072 rows and 12.64 GB for 4,096 against 9.86 GB to lend).
+/// FOUR RUNS: 4,096 rows are charged by the two phases of their wide pass where that charge applies
+/// (`wide_phase_workspace`), which the spare pool of that read covers; where it does not apply they keep the whole charge.
 pub const PROMPT_GROUP_LEASE:[usize;3]=[4096,3072,2048];
 const _:()=assert!(PROMPT_GROUP_LEASE[0]<=PROMPT_GROUP_CHECK && PROMPT_GROUP_LEASE[2]>PROMPT_GROUP_MAX
     && PROMPT_GROUP_LEASE[0]>PROMPT_GROUP_LEASE[1] && PROMPT_GROUP_LEASE[1]>PROMPT_GROUP_LEASE[2]
@@ -200,8 +205,14 @@ pub enum LatentRows {
 pub fn expanded_row_words(row:usize,latent:usize,slots:usize)->Option<usize> {
     slots.checked_mul(row.checked_mul(3)?.checked_add(latent)?)?.checked_add(PROMPT_GROUP.checked_mul(row)?)
 }
-/// `group_workspace_bytes_for` for a server whose latent layers took `rows`.
+/// `group_workspace_bytes_for` for a server whose latent layers took `rows`: the whole-group charge
+/// (`whole_group_workspace`), or for a group above the largest whole-charged lease size the charge of the two phases
+/// of its wide pass (`wide_phase_group`, `wide_phase_workspace`).
 pub fn group_workspace_bytes_with(c:&CheckpointAdmission,context:usize,group:usize,rows:LatentRows)->Result<usize> {
+    if wide_phase_group(group,rows) {wide_phase_workspace(c,context,group)} else {whole_group_workspace(c,context,group,rows)}
+}
+/// The charge of a group of `group` rows that passes each layer whole.
+fn whole_group_workspace(c:&CheckpointAdmission,context:usize,group:usize,rows:LatentRows)->Result<usize> {
     let d=c.description();let (mut per_row,mut selected,mut gather,mut route_epochs)=(0usize,0usize,0usize,0usize);
     for layer in 0..d.layers.len() {
         // Slot and context buffers are charged below from the group's own shapes.
@@ -645,6 +656,11 @@ impl<'f,C:Compute> Decoder<'f,C> {
             // As between two groups: a run that made held rows replaces them, any other run keeps what was held.
             if let Some(cache)=cache {held=Some(Expanded(std::rc::Rc::new(cache),first as usize+n,self.sparse_layout(layer)?));}
             made.push((n,middle));before=Some(next);at+=n;
+            // WIDE PHASE: the charge of a group above the whole-charged sizes holds ONE run in a mixer half
+            // (`wide_phase_workspace`). The run's own values are dropped (`layer_rows` returned) and so is the state
+            // before it (the assignment above); drain, so none of them is charged when the next run starts. The
+            // carries in `made`, the new state and the held rows stay owned here.
+            if m>PROMPT_GROUP_LEASE[1] {self.compute.rows_phase_end()?;}
         }
         let next=before.ok_or("wide prompt group has no rows")?;
         let Some((cut,carry))=cut else {return Ok((made,next,held));};
@@ -665,6 +681,9 @@ impl<'f,C:Compute> Decoder<'f,C> {
             }
         }
         let outputs=runs.into_iter().map(|(n,mut values)|Ok((n,values.remove("output").ok_or("prompt layer has no output")?))).collect::<Result<Vec<_>>>()?;
+        // WIDE PHASE: the layer's end. Every value of the routed half but each run's output is dropped here (the
+        // maps above, the passes, the folds); drain, so the next layer's first mixer run starts with none charged.
+        if m>PROMPT_GROUP_LEASE[1] {drop(passes);drop(folds);self.compute.rows_phase_end()?;}
         Ok((outputs,next,held))
     }
     /// The fold shape sent to both the middle's producer and its sole reader.

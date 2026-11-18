@@ -382,6 +382,11 @@ pub trait Compute {
     fn rows_keep(&self)->Result<()> {self.rows_release()}
     /// Return a temporary prompt workspace and report actual spare ownership.
     fn rows_return_lease(&self)->Result<()> {self.rows_keep()}
+    /// WIDE PHASE: a prompt group above the whole-charged lease sizes ended a mixer run or a layer. Submit what is
+    /// queued, wait for it, and free every buffer dropped before: the group's charge counts none of them
+    /// (`wide_phase_workspace`, rows/wide_charge.rs). Carries, states and pool spares stay. Default: the group's end, which drains
+    /// too (a compute that forgets this call trims its spares; it never skips the drain). No row arithmetic changes.
+    fn rows_phase_end(&self)->Result<()> {self.rows_keep()}
     /// Pause (true) or resume (false) launch recording around a prompt rows pass; returns the
     /// previous paused value. A compute that records nothing ignores it.
     fn rows_unrecorded(&self,_pause:bool)->Result<bool> {Ok(false)}
@@ -1203,12 +1208,13 @@ impl<'f,C:Compute> Decoder<'f,C> {
 #[path="bounded_decoder/batch.rs"] mod batch;
 pub use batch::{BATCH_ROWS,BATCH_MIN_ROWS,BATCH_PAIR_ROWS,expert_union_counts,chat_attention_layers};
 pub use rows::{absorbed_chat_words,expanded_row_words,group_workspace_bytes_with,LatentRows};
+#[cfg(test)] pub(crate) use rows::wide_cut_layers;
 pub use rows::{absorbed_group_words,full_memo_ballast,HeadRows,PROMPT_GROUP,PROMPT_GROUP_MAX,PROMPT_GROUP_LEASE,lease_groups,PROMPT_GROUP_CHECK,PROMPT_SHARED,ROW_STAGE_ROWS,RESERVED_ROWS,HELD_ROOM,POOL_ROOM,DECODE_RESERVE,DECODE_RETURNS,MEMO_KEEP,trims_spares_first,group_pool_cap,PROJECTION_MEMO_BYTES,expanded_bytes,group_workspace_bytes,group_workspace_bytes_for,OpenRows,SharedRows};
 mod indirect;
 #[path="bounded_decoder/projection_stage.rs"] mod projection_stage;
 #[cfg(any(target_os="linux",test))] #[path="bounded_decoder/held.rs"] mod held;
 #[path="bounded_decoder/proposer.rs"] mod proposer;
-pub use proposer::{PROPOSER_HIDDEN,PredictorState};
+pub use proposer::{PROPOSER_HIDDEN,CHAIN_STOP,CHAIN_STOP_NAMED,PredictorState};
 #[path="bounded_decoder/verify.rs"] mod verify;
 pub use verify::{Verify,CARRIED_ROWS,VERIFY_ROWS,TRAIL_ROWS,PROMPT_TRAIL,SEED_PASS_ROWS,SEED_ROOM,learned_pass_ms,shared_pass};
 #[path="bounded_decoder/host.rs"] mod host;

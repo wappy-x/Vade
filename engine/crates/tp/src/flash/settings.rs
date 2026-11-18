@@ -958,10 +958,11 @@ fn text_options_list_both_prompt_keep_names_and_refuse_two_of_them_with_the_list
 }
 /// The drafting words of the text service start line. `default_depth` is the service's default for a request that names
 /// no draft mode: TRIAL_DEPTH when a predictor of at least that depth is loaded, else 0. With it, a greedy request longer
-/// than TRIAL_START tokens runs a trial and drafts at that depth only if the trial wins (default_draft=trial); without it,
+/// than TRIAL_START tokens drafts as a strict request while its chat is alone, checking only the proposed tokens that pay
+/// (row_split/confidence.rs), and decodes plain from its first pass beside another chat (default_draft=alone); without it,
 /// such a request decodes plain. `predictor` is the loaded predictor depth; 0 means that no predictor layer is loaded.
 pub fn text_drafting_words(default_depth:usize,predictor:usize)->String {
-    if default_depth>0 {format!("default_draft=trial default_depth={default_depth} predictor_depth={predictor}")} else {format!("default_draft=plain predictor_depth={predictor}")}
+    if default_depth>0 {format!("default_draft=alone default_depth={default_depth} predictor_depth={predictor}")} else {format!("default_draft=plain predictor_depth={predictor}")}
 }
 #[test]
 fn the_text_start_line_names_the_default_draft_and_the_loaded_predictor_depth() {
@@ -969,7 +970,7 @@ fn the_text_start_line_names_the_default_draft_and_the_loaded_predictor_depth() 
     for predictor in 0..=spark_engine::draft::PREDICTOR_DEPTH_MAX {
         // The default depth as the text service sets it from the loaded predictor depth: TRIAL_DEPTH, also for a deeper predictor.
         let default_depth=if predictor>=TRIAL_DEPTH {TRIAL_DEPTH} else {0};
-        let words=if predictor>=TRIAL_DEPTH {format!("default_draft=trial default_depth={TRIAL_DEPTH} predictor_depth={predictor}")} else {format!("default_draft=plain predictor_depth={predictor}")};
+        let words=if predictor>=TRIAL_DEPTH {format!("default_draft=alone default_depth={TRIAL_DEPTH} predictor_depth={predictor}")} else {format!("default_draft=plain predictor_depth={predictor}")};
         assert_eq!(text_drafting_words(default_depth,predictor),words);
     }
     // The start line takes these words from the scheduler's default depth and the loaded engine, keeps cache={keep},

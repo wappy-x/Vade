@@ -178,13 +178,13 @@ impl<V> Verify<V> {
     /// SEED_PASS_ROWS waiting rows or more (the prompt rows, before a chat's first proposal) take ONE pass of the
     /// layer's cache half for all of them (`Decoder::seed_predictor`): the caches of the row-by-row form.
     pub fn propose<C:Compute<Value=V>>(&mut self,decoder:&Decoder<'_,C>,next:u32,depth:usize)->Result<(Vec<u32>,f64)> {
-        self.propose_mass(decoder,next,depth,false).map(|(tokens,_,waited)|(tokens,waited))
+        self.propose_mass(decoder,next,depth,None).map(|(tokens,_,waited)|(tokens,waited))
     }
     /// DRAFT CONFIDENCE: `propose`, with the probability of each proposal under the predictor's row (None where the
     /// backend makes none). The same launches and the same state on every rank: only the controller reads the scores.
     #[allow(clippy::type_complexity)] // proposals, their scores and the catch-up seconds.
-    /// `stop`: the chain may end early by its probability (`Decoder::propose_after_mass`); every rank passes the same.
-    pub fn propose_mass<C:Compute<Value=V>>(&mut self,decoder:&Decoder<'_,C>,next:u32,depth:usize,stop:bool)->Result<(Vec<u32>,Vec<Option<f32>>,f64)> {
+    /// `stop`: the chain ends early under this probability (`Decoder::propose_after_mass`); every rank passes the same.
+    pub fn propose_mass<C:Compute<Value=V>>(&mut self,decoder:&Decoder<'_,C>,next:u32,depth:usize,stop:Option<f32>)->Result<(Vec<u32>,Vec<Option<f32>>,f64)> {
         if self.trail.is_empty() || depth==0 {return Ok((Vec::new(),Vec::new(),0.0));}
         let (cache,waited)=self.catch_up(decoder,self.trail.len()-1)?;
         let (tokens,mass,after)=decoder.propose_after_mass(&self.trail[self.trail.len()-1].1,next,depth,cache.as_ref(),stop)?;

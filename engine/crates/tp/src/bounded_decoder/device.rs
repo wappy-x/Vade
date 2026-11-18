@@ -1055,6 +1055,9 @@ if start==0 && v.pending.as_ref().and_then(|p|p.borrow().state_prefix)==Some(len
         let (decode,_,decode_cap)=self.backend.decode_reserve_bound();let held=pooled.saturating_sub(decode);
         eprintln!("TEXT PROMPT SCRATCH retained_spare_bytes={held} normal_cap_bytes={cap} room_bytes={} decode_spare_bytes={decode} decode_cap_bytes={decode_cap} pooled_spare_bytes={pooled}",super::POOL_ROOM);Ok(())
     }
+    // WIDE PHASE: `Backend::synchronize` submits the recorded launches, waits for the stream and frees every dropped
+    // buffer (`release_deferred`). No spare leaves the pool and no cap changes: the group goes on.
+    fn rows_phase_end(&self)->Result<()> {self.backend.synchronize()?;spark_gpu_probe::prompt_launches::record("wide_mixer_complete");Ok(())}
     fn rows_unrecorded(&self,pause:bool)->Result<bool> {
         let was=self.backend.pause_resident_launches(pause)?;if pause && !was {spark_gpu_probe::prompt_launches::record("rows_unrecorded");}Ok(was)
     }

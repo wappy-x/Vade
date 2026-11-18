@@ -3,7 +3,7 @@ use crate::bounded_decoder::{Host,TestCheckpoint};
 use engine_model::safetensors::Dtype;
 use spark_serve::{Engine as _,Session as _};
 #[derive(Default)]
-struct Observed {spares:RefCell<Vec<u8>>,returns:Cell<usize>,fail:Cell<bool>}
+struct Observed {spares:RefCell<Vec<u8>>,returns:Cell<usize>,phases:Cell<usize>,fail:Cell<bool>}
 // Delegate arithmetic to the host twin. Only scratch ownership and faults differ.
 macro_rules! host {($(fn $name:ident($($arg:ident:$ty:ty),*)->$out:ty;)*)=>{$(
     fn $name(&self,$($arg:$ty),*)->$out {Host.$name($($arg),*)}
@@ -43,6 +43,7 @@ impl Compute for Observed {
     fn state_allocations(&self,v:&Self::Value,out:&mut Vec<(usize,usize)>)->bool {Host.state_allocations(v,out)}
     fn memory_bytes(&self)->Option<(usize,usize,usize)> {Some((self.spares.borrow().capacity(),0,0))}
     fn rows_keep(&self)->Result<()> {self.spares.replace(Vec::new());self.returns.set(self.returns.get()+1);Ok(())}
+    fn rows_phase_end(&self)->Result<()> {self.phases.set(self.phases.get()+1);Ok(())}
     fn rows_embedding(&self,_:&[u32],_:usize)->Result<Option<Self::Value>> {
         self.spares.replace(vec![0;4096]);
         if self.fail.replace(false) {return Err("injected prompt allocation failure".into());}Ok(None)
@@ -66,6 +67,18 @@ fn engine(c:&CheckpointAdmission)->Factory<'_,Observed,Wire> {
     // Test geometry has no draft layer. Exercise the workspace policy without
     // enabling predictor arithmetic in the tiny host model.
     e.predictor=3;e.memo_admitted=true;e.init_prompt_lease_plan().unwrap();e
+}
+/// WIDE PHASE: the drain of a wide pass reaches the compute through both wrappers (`Split` and `&C`) and is not the
+/// group's end: the pool's spares stay. A wrapper that did not forward it would fall to the default, which trims them.
+#[test]
+fn phase_completion_crosses_both_wrappers_without_returning_group_spares() {
+    let compute=Observed::default();compute.spares.replace(vec![0;4096]);
+    let split=Split::new(&compute,Wire::new()).unwrap();
+    split.rows_phase_end().unwrap();
+    assert_eq!((compute.phases.get(),compute.returns.get()),(1,0));
+    assert!(compute.spares.borrow().capacity()>=4096,"a phase end keeps the pool's spares");
+    split.rows_keep().unwrap();assert_eq!((compute.phases.get(),compute.returns.get()),(1,1));
+    assert_eq!(compute.spares.borrow().capacity(),0);
 }
 #[test]
 fn returned_lease_releases_actual_host_scratch_allocation() {
@@ -119,17 +132,17 @@ fn predictor_off_borrows_when_bytes_are_spare_and_sends_nothing_when_none_are() 
     assert!(e.split.exchange.borrow().commands.borrow().contains(&25));e.finish_prompt_workspace().unwrap();
     assert_eq!((e.lease_bytes.get(),e.lease_rows.get(),e.current_prompt_group()),(0,0,256));drop(a);
 }
-/// GROUP LEASE: 2,048 and 3,072 rows are borrowed at exactly their own workspace difference, one byte less funds the
-/// next smaller size, the peer's smaller offer wins, and the startup workspace never changes. 4,096 rows have their own
-/// difference in the plan and no service offers them (`SERVED`), whatever is spare.
+/// GROUP LEASE: 2,048, 3,072 and 4,096 rows are borrowed at exactly their own workspace difference, one byte less
+/// funds the next smaller size, the peer's smaller offer wins, and the startup workspace never changes. (Expanded
+/// latent rows: every size is charged as a whole group.)
 #[test]
 fn lease_only_sizes_need_their_whole_workspace_difference() {
     let c=checkpoint();let e=engine(&c.admission);let a=e.session().unwrap();e.split.exchange.borrow().peer.set(4096);
     let base=e.workspace;let [four,three,two,one,half]=e.lease_extra;assert!(four>three && three>two && two>one && one>half && half>0);
     let workspace=|rows|crate::service_memory::workspace_for_prompt_group(&c.admission,8193,base,rows).unwrap();
     assert_eq!((four,three,two),(workspace(4096)-base,workspace(3072)-base,workspace(2048)-base));
-    assert_eq!(SERVED,3072);
-    for (room,rows) in [(two-1,1024),(two,2048),(three-1,2048),(three,3072),(four-1,3072),(four,3072),(usize::MAX,3072)] {
+    assert_eq!(SERVED,4096);
+    for (room,rows) in [(two-1,1024),(two,2048),(three-1,2048),(three,3072),(four-1,3072),(four,4096),(usize::MAX,4096)] {
         e.prepare_prompt_workspace(room).unwrap();assert_eq!(e.current_prompt_group(),rows,"room {room}");assert_eq!(e.workspace,base);
         assert_eq!(e.lease_bytes.get(),e.prompt_lease_extra(rows).unwrap());
         e.finish_prompt_workspace().unwrap();assert_eq!((e.lease_bytes.get(),e.lease_rows.get()),(0,0));
@@ -140,6 +153,60 @@ fn lease_only_sizes_need_their_whole_workspace_difference() {
     e.finish_prompt_workspace().unwrap();
     // A second live chat: nothing is borrowed, whatever is offered.
     let b=e.session().unwrap();e.prepare_prompt_workspace(usize::MAX).unwrap();assert_eq!((e.current_prompt_group(),e.lease_bytes.get()),(256,0));drop(b);drop(a);
+}
+/// WIDE PHASE: a service whose latent layers are all absorbed, with no predictor that expands, borrows 4,096 rows at
+/// the phase charge (`wide_phase_workspace`) and every smaller size at its whole-group charge. One byte still decides
+/// the size; a size is offered when the room funds it and every smaller size; and the peer's smaller offer wins.
+#[test]
+fn an_absorbed_wide_lease_borrows_its_phase_charge_to_the_byte() {
+    use crate::bounded_decoder::{group_workspace_bytes_with,LatentRows,PROMPT_GROUP,PROMPT_GROUP_MAX};
+    let c=checkpoint();let mut e=engine(&c.admission);
+    let rows=LatentRows::Absorbed {draft:false};e.latent_rows=rows;e.init_prompt_lease_plan().unwrap();
+    let a=e.session().unwrap();e.split.exchange.borrow().peer.set(4096);
+    let [four,three,two,one,half]=e.lease_extra;assert!(three>two && two>one && one>half && half>0 && four>0);
+    // The plan's bytes for 4,096 rows are the phase charge less this service's own group, plus the state copies.
+    let charge=|group|group_workspace_bytes_with(&c.admission,8193,group,rows).unwrap();
+    assert_eq!(four,charge(4096)+crate::service_memory::state_copy_bytes(&c.admission).unwrap()-charge(PROMPT_GROUP));
+    assert!(charge(4096)>=charge(PROMPT_GROUP_MAX),"the phase charge holds a whole run");
+    // The offer: the top of the run of sizes the room funds, smallest first (the phase charge of 4,096 rows may be
+    // below the whole-group charge of 3,072).
+    let sizes=[(512usize,half),(1024,one),(2048,two),(3072,three),(4096,four)];
+    let offered=|room:usize|sizes.iter().take_while(|(_,extra)|*extra<=room).last().map_or(256,|(rows,_)|*rows);
+    for room in [half-1,half,one,two-1,two,three-1,three,four-1,four,three.max(four)-1,three.max(four),usize::MAX] {
+        e.prepare_prompt_workspace(room).unwrap();assert_eq!(e.current_prompt_group(),offered(room),"room {room}");
+        assert_eq!(e.lease_bytes.get(),e.prompt_lease_extra(offered(room)).unwrap());assert!(e.lease_bytes.get()<=room);e.finish_prompt_workspace().unwrap();
+    }
+    assert_eq!((offered(three.max(four)),offered(usize::MAX)),(4096,4096));
+    e.split.exchange.borrow().peer.set(2048);e.prepare_prompt_workspace(usize::MAX).unwrap();
+    assert_eq!((e.current_prompt_group(),e.lease_bytes.get()),(2048,two));e.finish_prompt_workspace().unwrap();drop(a);
+}
+/// NOT MONOTONE: 4,096 rows at the phase charge cost less than 3,072 rows at the whole-group charge (below: the
+/// prices of the served model, run wide4-speed-2-n1). The peer may answer any smaller size, so 4,096 rows are offered
+/// only when the room funds 3,072 and 2,048 rows too; an agreed size never borrows more than the room; and where
+/// 2,048 rows fit they are served, not refused. (The review seat's counterexample: room 8,100,000,000, peer 3,072.)
+#[test]
+fn a_peers_smaller_size_is_funded_when_the_prices_are_not_monotone() {
+    let c=checkpoint();let mut e=engine(&c.admission);
+    let (four,three,two)=(7_982_780_416usize,8_484_896_768usize,4_242_448_384usize);assert!(four<three && two<four);
+    e.lease_extra=[four,three,two,0,0];let a=e.session().unwrap();
+    let band=8_100_000_000usize;assert!(four<=band && band<three);
+    for (peer,room,rows,bytes) in [
+        // The counterexample: the old offer was 4,096 rows, the peer answered 3,072, and 8,484,896,768 bytes were borrowed.
+        (3072,band,2048,two),
+        // 4,096 rows alone would fit there. They are not offered: the peer's 3,072 would not be funded.
+        (4096,band,2048,two),(4096,four,2048,two),(4096,three-1,2048,two),(2048,band,2048,two),
+        // The room funds every size: 4,096 rows, and whatever smaller size the peer answers.
+        (4096,three,4096,four),(3072,three,3072,three),(2048,three,2048,two),
+        (4096,usize::MAX,4096,four),(3072,usize::MAX,3072,three),(2048,usize::MAX,2048,two),
+        // Below 2,048 rows' price: the startup sizes, which cost nothing here.
+        (4096,two-1,1024,0),(4096,two,2048,two),
+    ] {
+        e.split.exchange.borrow().peer.set(peer);e.prepare_prompt_workspace(room).unwrap();
+        assert_eq!((e.current_prompt_group(),e.lease_bytes.get()),(rows,bytes),"peer {peer} room {room}");
+        assert!(e.lease_bytes.get()<=room,"peer {peer}: {} rows borrow {} above the room {room}",e.current_prompt_group(),e.lease_bytes.get());
+        e.finish_prompt_workspace().unwrap();assert_eq!((e.lease_bytes.get(),e.lease_rows.get()),(0,0));
+    }
+    drop(a);
 }
 /// GROUP LEASE: a leased call runs whole groups of 4,096, 3,072 or 2,048 rows and a rest of at most 1,024, never another
 /// count above 1,024 (a wide group is whole runs of 1,024 rows). Up to 1,024 rows the cut is the old one.
@@ -157,22 +224,27 @@ fn a_leased_call_is_cut_into_lease_sizes_and_a_small_rest() {
     for rows in [2048usize,3072,4096] {for tokens in 1..=9000usize {let cut=lease_groups(tokens,rows);
         assert_eq!(cut.iter().sum::<usize>(),tokens);assert!(cut.iter().all(|&n|n>0 && (n<=1024 || n==2048 || n==3072 || n==4096) && n<=rows));}}
 }
-/// GROUP LEASE: the bits of a prompt do not depend on its groups. One call of 4,096 rows as a borrowed group of 3,072
-/// rows and a rest of 1,024, or as two borrowed groups of 2,048 rows, gives the logits and the state of the same rows
-/// read in groups of 1,024 and of 256, and the worker side accepts it.
+/// GROUP LEASE: the bits of a prompt do not depend on its groups. One call of 4,096 rows as ONE borrowed group, as a
+/// borrowed group of 3,072 rows and a rest of 1,024, or as two borrowed groups of 2,048 rows, gives the logits and the
+/// state of the same rows read in groups of 1,024 and of 256, and the worker side accepts it. WIDE PHASE: only the
+/// group above 3,072 rows drains: after each of its four mixer runs in every layer, and at the end of every layer
+/// that has a routed half.
 #[test]
-fn borrowed_groups_of_3072_and_2048_rows_give_the_bits_of_smaller_groups() {
+fn borrowed_groups_of_4096_3072_and_2048_rows_give_the_bits_of_smaller_groups() {
     let c=checkpoint();let vocab=u32::try_from(c.admission.description().vocab).unwrap();assert!(vocab>=2);let tokens=(0..4096u32).map(|i|(i*7+3)%vocab.min(13)).collect::<Vec<_>>();
     let read=|peer:usize,room:usize| {
         let e=engine(&c.admission);e.split.exchange.borrow().peer.set(peer);let mut a=e.session().unwrap();
         e.prepare_prompt_workspace(room).unwrap();let rows=e.current_prompt_group();let logits=a.prefill(&tokens).unwrap();
         assert_eq!((e.lease_bytes.get(),e.lease_rows.get()),(0,0),"the call returns its borrow");
         let groups=e.split.exchange.borrow().commands.borrow().iter().filter(|&&code|code==5).count();
+        let layers=c.admission.description().layers.len();
+        let phases=if rows>3072 {4*layers+crate::bounded_decoder::wide_cut_layers(&c.admission)} else {0};
+        assert_eq!(e.split.compute.phases.get(),phases,"{rows} rows: only a group above 3,072 rows drains, at each mixer run and each routed layer's end");
         (rows,groups,logits.iter().map(|v|v.to_bits()).collect::<Vec<_>>(),a.state.as_ref().unwrap().position)
     };
-    let three=read(4096,usize::MAX);let big=read(2048,usize::MAX);let mid=read(1024,usize::MAX);let small=read(4096,0);
-    assert_eq!((three.0,three.1),(3072,2));assert_eq!((big.0,big.1),(2048,2));assert_eq!((mid.0,mid.1),(1024,4));assert_eq!((small.0,small.1),(256,16));
-    assert_eq!((three.3,big.3),(4096,4096));assert_eq!(three.2,mid.2);assert_eq!(big.2,mid.2);assert_eq!(big.2,small.2);
+    let four=read(4096,usize::MAX);let three=read(3072,usize::MAX);let big=read(2048,usize::MAX);let mid=read(1024,usize::MAX);let small=read(4096,0);
+    assert_eq!((four.0,four.1),(4096,1));assert_eq!((three.0,three.1),(3072,2));assert_eq!((big.0,big.1),(2048,2));assert_eq!((mid.0,mid.1),(1024,4));assert_eq!((small.0,small.1),(256,16));
+    assert_eq!((four.3,three.3,big.3),(4096,4096,4096));assert_eq!(four.2,mid.2);assert_eq!(three.2,mid.2);assert_eq!(big.2,mid.2);assert_eq!(big.2,small.2);
 }
 #[test]
 fn exact_remainder_threshold_preserves_the_startup_workspace_charge() {

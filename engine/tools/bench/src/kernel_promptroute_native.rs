@@ -1,9 +1,9 @@
 //! Native descriptor, calibration, compact dispatch and complete output byte proof.
 //! PAIRED PARTS: every case of two or more sets also builds the merged work list (one interval an expert over all its
 //! sets' tokens) and runs the product with `merge` = sets; every output word must equal the rectangular launch's.
-//! `PROMPT_NATIVE TIME` lines time the old and the paired launch at the model's expert shape (288 experts, two and
-//! three sets of 1,024 rows, eight picks) in the order base, paired, paired, base, after checking that both store the
-//! same words. Three sets are the 3,072-row prompt lease (THREE RUNS).
+//! `PROMPT_NATIVE TIME` lines time the old and the paired launch at the model's expert shape (288 experts, two,
+//! three and four sets of 1,024 rows, eight picks) in the order base, paired, paired, base, after checking that both
+//! store the same words. Three sets are the 3,072-row prompt lease (THREE RUNS), four the 4,096-row one (FOUR RUNS).
 #![forbid(unsafe_code)]
 use super::{Gpu,H,Result,ptr,sha256,promptroute as meta};
 use std::time::Instant;
@@ -229,11 +229,11 @@ pub(crate) fn run(primary:&str,second:&str)->Result<()> {
     for m in [1u32,7,33,129] {for picks in [1u32,4] {for experts in [8u32,17] {for sets in [1u32,2,3,4,8] {for chains in [1u32,4] {for (rows,cols) in [(128u32,256u32),(256,512)] {for pattern in 0..2 {
         let product=g.function(b,if chains==1 {"fp4_cohort"} else {"fp4_cohort_t64"})?;bytes+=case(&mut g,[count,tables,emit,product],m,picks,experts,sets,chains,rows,cols,pattern)?;cases+=1;
     }}}}}}}
-    for sets in [2u32,3] {for chains in [1u32,4] {let product=g.function(b,if chains==1 {"fp4_cohort"} else {"fp4_cohort_t64"})?;bytes+=case(&mut g,[count,tables,emit,product],1024,8,257,sets,chains,1024,4096,0)?;cases+=1;}}
+    for sets in [2u32,3,4] {for chains in [1u32,4] {let product=g.function(b,if chains==1 {"fp4_cohort"} else {"fp4_cohort_t64"})?;bytes+=case(&mut g,[count,tables,emit,product],1024,8,257,sets,chains,1024,4096,0)?;cases+=1;}}
     for (m,picks,experts,sets,rows,cols) in [(1024u32,8u32,8u32,8u32,128u32,256u32),(1,1,1024,8,128,256),(33,4,8,4,128,8192)] {
         for chains in [1u32,4] {let product=g.function(b,if chains==1 {"fp4_cohort"} else {"fp4_cohort_t64"})?;bytes+=case(&mut g,[count,tables,emit,product],m,picks,experts,sets,chains,rows,cols,0)?;cases+=1;}
     }
-    for sets in [2u32,3] {for chains in [1u32,4] {for skew in [false,true] {
+    for sets in [2u32,3,4] {for chains in [1u32,4] {for skew in [false,true] {
         let product=g.function(b,if chains==1 {"fp4_cohort"} else {"fp4_cohort_t64"})?;let (rows,cols)=if chains==1 {(1024,4096)} else {(2048,2048)};
         timing(&mut g,[count,tables,emit,product],chains,rows,cols,skew,sets)?;
     }}}

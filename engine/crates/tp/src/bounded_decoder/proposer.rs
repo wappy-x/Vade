@@ -10,11 +10,15 @@ use engine_model::plan::TextDescription;
 /// Chosen by the measured kept rate (runner flag --propose). Only the kept rate depends on it.
 pub const PROPOSER_HIDDEN:usize=1;
 /// DRAFT CONFIDENCE: a served chain ends once the product of its tokens' probabilities falls under this. A token
-/// after that point is worth less than the row that would check it: a checked row costs about 9.5 ms of a 42 ms
-/// plain step (MEASURED 2026-11-16, two Sparks), so it pays only above a chance of about 0.23 to be kept; the head's
-/// probabilities run a little above the kept share in the middle (draft4-c1: 0.5 to 0.6 kept 0.32). Each step it
-/// saves is about 3.1 ms of predictor layer and head.
-pub const CHAIN_STOP:f32=0.3;
+/// after that point is worth less than the row that would check it and the step that drafts it: a checked row costs
+/// about 9.5 ms of a 42 ms plain step and a drafted token about 3.1 ms (MEASURED 2026-11-16, two Sparks). The head's
+/// probabilities run above the kept share in the middle (draft4-n2, depth 3, prose: 0.5 to 0.9 kept 0.45 to 0.65), so
+/// under a chain of 0.5 the check pass cuts the token in nearly every cycle (`confidence::width`), or makes the cycle
+/// a plain step, and the steps that drafted it are lost.
+pub const CHAIN_STOP:f32=0.5;
+/// The chain stop of a request that NAMES strict: the stop every strict request had before a lone chat's request that
+/// names no draft mode drafted. Such a request keeps the decisions its caller measured; CHAIN_STOP serves the other.
+pub const CHAIN_STOP_NAMED:f32=0.3;
 /// The predictor layer's own cache of the positions it has run, for one chat.
 pub struct PredictorState<V> {rows:u64,layers:BTreeMap<String,V>}
 impl<V> PredictorState<V> {
@@ -79,18 +83,18 @@ impl<'f,C:Compute> Decoder<'f,C> {
     /// (`Compute::greedy_projection`, the pick of the plain decode step), which is the first
     /// largest logit, the token `propose_scored` names.
     pub fn propose_after(&self,hidden:&C::Value,token:u32,depth:usize,seen:Option<&PredictorState<C::Value>>)->Result<(Vec<u32>,PredictorState<C::Value>)> {
-        self.propose_run(hidden,token,depth,seen,true,false,None,false).map(|(tokens,_,_,after)|(tokens,after))
+        self.propose_run(hidden,token,depth,seen,true,false,None,None).map(|(tokens,_,_,after)|(tokens,after))
     }
     /// DRAFT CONFIDENCE: `propose_after` with the probability of each proposal under the predictor's own row (None
     /// where the backend makes none). The same proposals: the head's pick reads its probability beside the ID.
-    /// `stop`: the chain ends early when its probability falls under CHAIN_STOP (see `propose_run`).
-    pub fn propose_after_mass(&self,hidden:&C::Value,token:u32,depth:usize,seen:Option<&PredictorState<C::Value>>,stop:bool)->Result<(Vec<u32>,Vec<Option<f32>>,PredictorState<C::Value>)> {
+    /// `stop`: the chain ends early when its probability falls under this (CHAIN_STOP or CHAIN_STOP_NAMED, see `propose_run`).
+    pub fn propose_after_mass(&self,hidden:&C::Value,token:u32,depth:usize,seen:Option<&PredictorState<C::Value>>,stop:Option<f32>)->Result<(Vec<u32>,Vec<Option<f32>>,PredictorState<C::Value>)> {
         self.propose_run(hidden,token,depth,seen,true,false,None,stop).map(|(tokens,_,mass,after)|(tokens,mass,after))
     }
     /// The same chain as `propose_after`, stopped at the first step whose pick differs from `expected` (a trial probe
     /// whose target steps have already run). Returns the matched prefix length and the cache after the first step.
     pub fn propose_until(&self,hidden:&C::Value,token:u32,expected:&[u32],seen:Option<&PredictorState<C::Value>>)->Result<(usize,PredictorState<C::Value>)> {
-        let (tokens,_,_,after)=self.propose_run(hidden,token,expected.len(),seen,true,false,Some(expected),false)?;
+        let (tokens,_,_,after)=self.propose_run(hidden,token,expected.len(),seen,true,false,Some(expected),None)?;
         Ok((tokens.iter().zip(expected).take_while(|(a,b)|a==b).count(),after))
     }
     /// The same, with two scores of each proposal: its logit minus the second largest logit,
@@ -103,16 +107,16 @@ impl<'f,C:Compute> Decoder<'f,C> {
     /// the target's hidden state after the final norm. Counted on four prompts (run s16): both
     /// proposals right 284 -> 295 of 436. The other form passes the output itself, for a count.
     pub fn propose_chain(&self,hidden:&C::Value,token:u32,depth:usize,seen:Option<&PredictorState<C::Value>>,normalized:bool)->Result<(Vec<u32>,Vec<[f32;2]>,PredictorState<C::Value>)> {
-        self.propose_run(hidden,token,depth,seen,normalized,true,None,false).map(|(tokens,scores,_,after)|(tokens,scores,after))
+        self.propose_run(hidden,token,depth,seen,normalized,true,None,None).map(|(tokens,scores,_,after)|(tokens,scores,after))
     }
     /// `scored`: read each proposal's logits for its two scores. Without it no logits leave the
     /// device and the scores are empty; the proposals are the same tokens.
     /// The third result: each proposal's probability from the head's pick (`greedy_projection_mass`), None where the
     /// backend makes none; with `scored`, the probability of the scores.
     /// `stop` (DRAFT CONFIDENCE, served drafting): the chain ends once the product of its probabilities falls under
-    /// CHAIN_STOP. Every rank reads the same probability from the same gathered words, so every rank stops at the same step.
+    /// it. Every rank reads the same probability from the same gathered words, so every rank stops at the same step.
     #[allow(clippy::type_complexity,clippy::too_many_arguments)] // the chain's four results, named in the line above.
-    fn propose_run(&self,hidden:&C::Value,token:u32,depth:usize,seen:Option<&PredictorState<C::Value>>,normalized:bool,scored:bool,expected:Option<&[u32]>,stop:bool)->Result<(Vec<u32>,Vec<[f32;2]>,Vec<Option<f32>>,PredictorState<C::Value>)> {
+    fn propose_run(&self,hidden:&C::Value,token:u32,depth:usize,seen:Option<&PredictorState<C::Value>>,normalized:bool,scored:bool,expected:Option<&[u32]>,stop:Option<f32>)->Result<(Vec<u32>,Vec<[f32;2]>,Vec<Option<f32>>,PredictorState<C::Value>)> {
         let draft=self.draft.as_ref().ok_or("predictor layer is not enabled")?;let c=self.checkpoint;let d=c.description();let b=&self.compute;
         let h=d.hidden as usize;let layer=d.layers.len();let prefix=format!("model.language_model.layers.{layer}");
         need(depth<=spark_engine::draft::PREDICTOR_DEPTH_MAX && u64::from(token)<d.vocab,"proposal depth or token differs")?;
@@ -147,7 +151,7 @@ impl<'f,C:Compute> Decoder<'f,C> {
             } else {let (best,probability)=b.greedy_projection_mass(c,"lm_head.weight",&headed)?;need(u64::from(best)<d.vocab,"proposal ID exceeds vocabulary")?;mass.push(probability);best};
             token=best;proposals.push(token);
             if expected.is_some_and(|exp|exp.get(step)!=Some(&token)) {break;}
-            if stop && let Some(Some(p))=mass.last() {chance*=p;if chance<CHAIN_STOP {break;}}
+            if let (Some(under),Some(Some(p)))=(stop,mass.last()) {chance*=p;if chance<under {break;}}
             hidden=if normalized {headed} else {output};
         }Ok((proposals,scores,mass,after.ok_or("proposal made no step")?))
     }
