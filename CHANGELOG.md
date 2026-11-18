@@ -7,6 +7,156 @@ A short revision such as `380d8e5` or a number such as PR 142 names a revision
 or pull request of the private development history. This repository does not
 hold them ([glossary](docs/GLOSSARY.md#ho), "Main `abc1234`").
 
+## v0.2.0-rc.23 - 2026-11-18
+
+GLM now drafts by default. A request that names no draft mode drafts when it
+qualifies, and two or three such chats can draft together. Check passes cost
+less. Answers stay the same token for token: drafted equals plain. The GLM
+token IDs did not change in this release (the golden file is still epoch 6).
+GLM remains a diagnostic text service.
+
+**Drafting on by default (train 27).**
+
+- **What changed.** When the server has the draft head loaded at depth 3, a
+  greedy request that names no draft mode and allows more than 64 output
+  tokens now drafts at depth 3 while its chat is the only one. Depth 3 is
+  what `vade up --diagnostic-unqualified-text` loads when no depth is named.
+  Before, such a request first ran a trial and drafted only if the trial
+  won. The server's start line now says `default_draft=alone` (it said
+  `default_draft=trial`). The first two passes are plain steps that time
+  the step; proposals start with the third. The check pass takes only the
+  proposed tokens that are likely to pay.
+- **Who does not draft by default.** A request with sampling, a request
+  with `max_tokens` of 64 or less, a server started with `--mtp 0`, `1` or
+  `2`, and every request while more than three chats are active or while a
+  chat that does not draft is active. These decode plain steps.
+- **How to turn it off.** Send `"draft":"plain"` or `"mtp_depth":0` in the
+  request. Or start the server with `vade up --mtp 0`: it loads no draft
+  head.
+- **How to name a mode.** Send `"draft":"strict"` with `"mtp_depth"` `1`,
+  `2` or `3` (not more than the loaded depth). The rules of the default
+  request do not change what a strict request does.
+- **Measured.** One pair of Sparks, one sitting, in the order main, change,
+  change, main (`d2-t27-lane-m1`, `-c1`, `-c2`, `-m2`). The client's tokens
+  a second over the whole answer of a request that names no draft mode, to
+  its own end, at most 2,048 tokens. Code: 23.703 / 33.684 / 33.547 /
+  23.698, so 23.70 to 33.62 on average (41.8 percent more). Structured:
+  36.470 / 41.070 / 41.131 / 36.338, so 36.40 to 41.10 (12.9 percent more).
+  Prose: 23.984 / 24.559 / 24.060 / 23.941 (1.4 percent more).
+- **Same answers.** All 240 saved ID lists of the four runs (83,296 token
+  IDs) equal plain decoding.
+- **What that test measured and what it did not.** It was the short
+  drafting test: one chat with drafting by default, the same requests
+  plain, and the named strict modes; the speed of a plain step (at most
+  0.41 percent slower); 2, 4 and 8 chats (not slower). Its 2, 4 and 8 chat
+  loads sent plain requests only, so it did not measure a default request
+  beside other chats (that is group drafting, below). It did not measure
+  the 8,192-token read, the long-context check or a first install. Those
+  ran in the full test of this release (train 29, below).
+
+**Group drafting (lane 28c: train 28's group drafting on train 29's head).**
+
+- **What changed.** While two or three chats that draft are active
+  together (requests that draft by default, or strict requests of depth 2
+  or 3), their drafted tokens share one check pass. The group estimates
+  the gain of each chat from the draft head's probabilities and the
+  group's own timed steps and passes, and drafts while every chat is
+  expected to gain. That is an estimate, not a guarantee: the group counts
+  each chat's tokens against its plain pace and stops drafting once any
+  chat falls more than one token behind that pace (a shared pass already
+  started may still finish).
+  With more than three chats, or beside a chat that does not draft, every
+  chat decodes plain steps, as before. In a group, the group's rules also
+  decide the proposals of a strict request; the tokens it keeps are its own.
+- **Measured.** One pair of Sparks, in the order main, change, change,
+  main (`d2-t28c-lane-m1`, `-c1`, `-c2`, `-m2`), the client's tokens a
+  second of all chats together, requests that name no draft mode:
+  - Two structured chats: 33.888 / 40.955 / 40.859 / 33.835, so 33.86 to
+    40.91 on average (20.8 percent more).
+  - Three structured chats: 41.774 / 44.773 / 44.805 / 41.673, so 41.72 to
+    44.79 (7.3 percent more).
+  - Two chats of code, two of prose, and a mixed pair: 0.996 to 0.998 of
+    the main, inside the 1 percent line.
+- **No harm elsewhere.** All 66 graded rows were clear, among them: one
+  chat with a request that names no draft mode (code 1.001, structured
+  1.000, prose 0.994 of the main), the plain step (0.9997 to 1.0001), the
+  named strict modes (0.9976 to 1.0052), 2, 4 and 8 chats with plain
+  requests (0.9985 to 1.0007), and four of these rows measured again in a
+  second order (0.998 to 1.002).
+- **Same answers.** All 620 saved ID lists of these runs (201,176 token
+  IDs) matched plain decoding.
+
+**Cheaper check passes (train 29: the rows bundle, stage eight, cut (c),
+the rows stack; same token IDs).**
+
+- **What changed.** A check pass of several rows (drafted tokens, or one
+  more chat in a step) does less work:
+  - The rows bundle: seven host-side pieces. The weight prefetch also covers
+    the hand-off waits of the rows path; a check pass folds its routed rows
+    before the exchange; two rows take the merged stage launch; an mHC
+    boundary of 3 rows takes three grouped launches; pool scores and
+    gathers of different chats run in one launch; a chat step's wait keeps
+    the device queue filled; a chat step keeps its place table.
+  - Stage eight: a step of 5 to 8 rows runs the MXFP8 matrices of a row
+    stage as one merged launch, as 2 to 4 rows already did.
+  - Cut (c): a check pass of at most 16 rows appends its latent caches in
+    place. Before, each pass made new joined buffers that grew with the
+    position.
+  - The rows stack: a check of 2 rows runs the mHC boundary as three phase
+    launches; in a check pass of 2 to 8 rows the shared expert runs on a
+    side lane; a rounded input is used in place, not copied again; a guard
+    drops a row stage that an error left open.
+- **Measured.** One pair of Sparks, in the order main, change, change,
+  main. Requests and passes (`draftr-t29-b1`, `-n1`, `-n2`, `-b2`), the
+  client's tokens a second:
+  - Strict depth 3, code: 30.332 / 33.399 / 32.799 / 30.967, so 30.65 to
+    33.10 on average (8.0 percent more). Strict depth 3, structured:
+    41.064 / 43.428 / 43.553 / 40.750, so 40.91 to 43.49 (6.3 percent
+    more).
+  - Two chats: 31.459 / 33.917 / 33.936 / 31.431, so 31.44 to 33.93 (7.9
+    percent more). Four chats: 49.249 / 50.414 / 50.490 / 49.151, so 49.20
+    to 50.45 (2.5 percent more).
+  - A request that names no draft mode, code: 32.497 / 37.619 / 37.676 /
+    33.347, so 32.92 to 37.65 (14.4 percent more).
+  - The check pass, in the engine: 2 rows 66.19 / 58.87 / 58.75 / 67.37
+    ms, so 66.78 to 58.81 ms (11.9 percent less); 4 rows 82.20 / 76.53 /
+    76.65 / 82.37 ms, so 82.29 to 76.59 ms (6.9 percent less).
+  - The plain one-row step stayed within the 1 percent bar: new over main
+    0.9999 (prose), 1.0004 (code) and 1.0009 (structured).
+  - The 8,192-token read (`d2-t29v3-read-m1`, `-c1`, `-c2`, `-m2`), the
+    engine's prefill sum: 9.675 / 9.523 / 9.527 / 9.722 seconds, so 9.699
+    to 9.525 (1.8 percent less). The long-context check (`d2-t29-k32-m1`,
+    `-c1`) passed on both; its first token came after 11.88 seconds on the
+    main and 10.93 seconds on the change.
+- **Same answers.** All 356 saved ID lists of these runs (100,872 token
+  IDs) matched the main.
+
+**A wider prompt group for a lone long prompt (train 20, same token IDs).**
+A lone chat's long prompt may now borrow groups of 4,096 rows. The
+engine's 8,192-token read measured 10.111079 / 9.738380 / 9.750771 /
+10.131966 seconds (`d2-t20-read-m1`, `-c1`, `-c2`, `-m2`): 0.38 seconds
+less on average (3.7 percent). All 90 saved ID lists (12,592 token IDs)
+matched the main.
+
+Every performance number above was measured with GLM FP4-Local on two DGX
+Sparks. Each compares one train with the main just before it. These numbers
+do not compare this release as a whole with v0.2.0-rc.22. The RigMark card
+of the released source is measured after the release and published at
+https://vade.lol/results/ with its exact source and settings.
+
+Known limits:
+
+- GLM is still a diagnostic text service. It is not qualified.
+- Drafting by default needs the draft head loaded at depth 3. A server
+  started with `--mtp 1` or `2` drafts only requests that name a mode.
+- With more than three chats, or beside a chat that does not draft, chats
+  decode plain steps.
+- The quality standing is unchanged from v0.2.0-rc.22: no token ID changed
+  in this release. Against the maker's engine the long-prompt count is
+  49,619 of 67,518 and the clear positions are 172 of 173.
+- The build still prints version `0.1.0` in `vade --version` and in the
+  bundle file name. The release tag is the version of record.
+
 ## v0.2.0-rc.22 - 2026-11-17
 
 The GLM prompt read is much shorter, and **the GLM token IDs changed**. Read
