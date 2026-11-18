@@ -20,6 +20,15 @@ pub(crate) const STATE_VIEW_ROWS:usize=256;
 #[cfg(any(target_os="linux",test))]
 pub(crate) fn copy_prompt_state(tokens:usize)->bool {tokens>STATE_VIEW_ROWS}
 fn need(ok:bool,why:&str)->Result<()> {if ok {Ok(())} else {Err(why.into())}}
+/// The residual add of a BF16 model on the host, `round_bf16(x + y)` a word: both read from `c`, the sum uploaded to it.
+fn host_bf16_sum<C:Compute+?Sized>(c:&C,x:&C::Value,y:&C::Value)->Result<C::Value> {
+    let (x,y)=(c.read(x)?,c.read(y)?);c.upload(&bf16_sums(&x,&y)?)
+}
+/// The host form's words, or its refusal: the error of the first word whose sum is not finite or rounds past BF16.
+fn bf16_sums(x:&[f32],y:&[f32])->Result<Vec<f32>> {
+    need(x.len()==y.len(),"residual sum extent differs")?;
+    x.iter().zip(y).map(|(a,b)|engine_model::plan::layer::cast::round_bf16(a+b).map_err(|e|e.to_string())).collect()
+}
 pub(crate) fn greedy_logits(logits:&[f32],words:usize)->Result<u32> {
     need(!logits.is_empty() && logits.len()==words && logits.iter().all(|value|value.is_finite()),"bounded logits extent or value differs")?;
     let mut best=(logits[0],0);for (id,&value) in logits.iter().enumerate().skip(1) {
@@ -107,6 +116,8 @@ pub(crate) fn selection_read(i:&engine_model::plan::description::PoolIndexerDesc
 /// One chat's Gather of an absorbed layer, as `gather_absorbed` takes it: its shape, its inputs, and the count that the
 /// selection rule gives for its context.
 pub type ChatGather<'a,V>=(Shape,[Option<&'a V>;4],f32);
+/// The recurrent layer outputs and the operands needed for prefix acceptance.
+pub struct RecurrentRows<V> {pub history:V,pub state:V,pub gated:V,pub saved:Option<(V,V)>}
 pub trait Compute {
     /// One ordered execution owns temporary buffers through state publication.
     fn work<T>(&self,run:impl FnOnce()->Result<T>)->Result<T> {run()}
@@ -258,9 +269,14 @@ pub trait Compute {
     fn finish(&self,p:Self::Pass,x:&Self::Value)->Result<Self::Value>;
     fn mx(&self,p:&Mxfp8Projection<'_>,x:&Self::Value)->Result<Self::Value>;
     fn round(&self,x:&Self::Value)->Result<Self::Value>;
+    /// The residual add of a BF16 model, `round_bf16(x + y)` a word (the drafting layer's Combine). This form reads both,
+    /// adds on the host and uploads the sum; a device may keep it on the device with the same words.
+    fn bf16_sum(&self,x:&Self::Value,y:&Self::Value)->Result<Self::Value> {host_bf16_sum(self,x,y)}
     fn mean(&self,x:&Self::Value,streams:u32,hidden:u32)->Result<Self::Value>;
     /// One operation over token-major prompt rows.
     fn prompt(&self,s:spark_gpu_probe::prompt_ops::Shape,x:[Option<&Self::Value>;5],w:&[f32])->Result<Self::Value>;
+    fn rows_recurrent(&self,_:spark_gpu_probe::recurrent_rows::Shape,_:[&Self::Value;7],_:&Self::Value,
+        _:[&[f32];3],_:bool)->Result<Option<RecurrentRows<Self::Value>>> {Ok(None)}
     fn rows_embedding(&self,_:&[u32],_:usize)->Result<Option<Self::Value>> {Ok(None)}
     /// Token-major `[m,rows]`, complete on every rank. None runs one row at a time.
     fn rows_project(&self,_:&CheckpointAdmission,_:&str,_:&Self::Value,_:usize,_:bool)->Result<Option<Self::Value>> {Ok(None)}

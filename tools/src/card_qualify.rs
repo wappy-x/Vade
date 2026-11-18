@@ -10,6 +10,13 @@
 //! `goldens/*.jsonl`, the drafting part (draft "strict" with an MTP depth, drafter "on", same comparison id)
 //! and `quality-vs-maker.result`.
 //!
+//! A folder may also hold a default part: the request names no drafting mode (no `draft`, no `mtp_depth` in the body),
+//! the drafter field starts with `served default`, and a `<part>.start.txt` beside it holds the rank-0 start line of its
+//! server, which must say `default_draft=alone default_depth=N predictor_depth=M` with 1 <= N <= M. Q09 checks it the
+//! way it checks the strict part (same body but the two drafting keys, same settings, all gates, every answer equal to
+//! plain). It is no thirteenth check: the site and the card kit read `CARD-QUALIFY PASS 12/12`. A folder without a
+//! default part is checked exactly as before.
+//!
 //! Quality (Q11) follows the owner's rule R5, "the same as Qwen" (ruling 2026-11-11 07:45): the measurement against
 //! the maker must exist for the card's engine build and be published with the card. It has no pass line, because
 //! Qwen has none. So the receipt is a measurement, not a verdict: one `RESULT-CARD` block with the keys
@@ -62,6 +69,8 @@ const WORKLOADS: [&str; 3] = ["prose", "code", "structured"];
 const FIXTURE_WORDS: [&str; 8] = ["fixture", "loopback", "resident-decode-check", "census", "servebench", "estimate", "projected", "one-box"];
 /// Keys of the request body that differ between the plain and the drafting part.
 const DRAFT_KEYS: [&str; 2] = ["draft", "mtp_depth"];
+/// The start of the drafter field of a default part (the card kit writes "served default; request omits drafting controls").
+const DEFAULT_DRAFTER: &str = "served default";
 /// Settings that must be equal on the plain and the drafting part.
 const SAME_SETTINGS: [&str; 5] = ["temperature", "seed", "top_p", "decode_tokens", "runs"];
 /// The quality receipt in the card folder.
@@ -75,7 +84,7 @@ pub const QUALITY_KEYS: [&str; 7] = ["MODEL", "ENGINE", "GOLDENS", "MEASURE", "P
 const QUALITY_PUBLIC: [&str; 2] = ["NUMBERS", "SOURCE"];
 
 #[derive(Clone, Copy, PartialEq)]
-enum Mode { Plain, Draft, Mixed }
+enum Mode { Plain, Draft, Default, Mixed }
 struct Part { name: String, value: Value, text: Option<String>, mode: Mode }
 #[derive(Default)]
 struct Read { files: BTreeMap<String, String> }
@@ -247,11 +256,36 @@ fn changed_build_inputs(repo: &Path, a: &str, b: &str) -> std::result::Result<Ve
 fn mode_of(value: &Value) -> Mode {
     let body = at(value, &["settings", "extra_body"]);
     let drafter = text(at(value, &["run", "appliance", "drafter"]));
+    // A default part names no drafting key at all: a key that is present, even as null, is not the default request.
+    let names_none = matches!(body, Value::Object(o) if DRAFT_KEYS.iter().all(|k| !o.contains_key(*k)));
     match (text(body.get("draft")), int(body.get("mtp_depth")), drafter) {
         (Some("plain"), Some(0), Some("off")) => Mode::Plain,
         (Some("strict"), Some(d), Some("on")) if d >= 1 => Mode::Draft,
+        (None, None, Some(d)) if names_none && d.starts_with(DEFAULT_DRAFTER) => Mode::Default,
         _ => Mode::Mixed,
     }
+}
+/// The default depth of the rank-0 server's own start record, the line the text service prints when it is ready
+/// (`flash-serve/text.rs`) and the card kit saves: its first word is `text_service`, then the word `ready`, then the
+/// one word `rank=0`, then `default_draft=alone default_depth=N predictor_depth=M` side by side, with 1 <= N <= M.
+/// A rank-1 record, a note or any other line counts for nothing. No rank-0 record, a rank-0 record without these
+/// fields, or rank-0 records that disagree give None.
+fn default_start(t: &str) -> Option<u64> {
+    // REVD 2026-11-18 01:27:12: every rank-0 start must agree on BOTH numbers (N, M), not on N alone.
+    let records: Vec<Option<(u64, u64)>> = t.lines().filter_map(|l| {
+        let words: Vec<&str> = l.split_whitespace().collect();
+        let ready = words.iter().position(|w| *w == "ready")?;
+        let ranks: Vec<usize> = words.iter().enumerate().filter(|(_, w)| w.starts_with("rank=")).map(|(i, _)| i).collect();
+        let rank = *ranks.first()?;
+        (words.first() == Some(&"text_service") && ranks.len() == 1 && words[rank] == "rank=0" && ready < rank).then(|| {
+            let at = rank + words[rank..].iter().position(|w| *w == "default_draft=alone")?;
+            let n = words.get(at + 1)?.strip_prefix("default_depth=")?.parse::<u64>().ok()?;
+            let m = words.get(at + 2)?.strip_prefix("predictor_depth=")?.parse::<u64>().ok()?;
+            (n >= 1 && n <= m).then_some((n, m))
+        })
+    }).collect();
+    let first = (*records.first()?)?;
+    records.iter().all(|r| *r == Some(first)).then_some(first.0)
 }
 fn mode_words(p: &Part) -> String {
     let body = at(&p.value, &["settings", "extra_body"]);
@@ -338,6 +372,7 @@ pub fn check(options: &Options) -> Result<Report> {
     let plain: Vec<&Part> = parts.iter().filter(|p| p.mode == Mode::Plain).collect();
     let draft: Vec<&Part> = parts.iter().filter(|p| p.mode == Mode::Draft).collect();
     let mixed: Vec<&Part> = parts.iter().filter(|p| p.mode == Mode::Mixed).collect();
+    let default: Vec<&Part> = parts.iter().filter(|p| p.mode == Mode::Default).collect();
     let mut checks = Vec::new();
     let mut info = Vec::new();
     let mut add = |i: usize, result: std::result::Result<String, String>, receipts: Vec<String>| {
@@ -548,48 +583,65 @@ pub fn check(options: &Options) -> Result<Report> {
     add(7, q08, read.tag(&q08_files));
 
     // Q09: the drafting row. Same comparison id = same prompts a run index, so exact drafting gives the same answers.
+    // A default part, when the folder has one, is checked the same way; its start line must show the default drafting.
+    let starts: Vec<String> = default.iter().map(|p| p.name.replace(".json", ".start.txt")).collect();
+    let start_texts: Vec<Option<String>> = starts.iter().map(|s| read.text(dir, s)).collect();
     let q09 = (|| {
         if let Some(p) = mixed.first() { return Err(mode_words(p)); }
         if draft.is_empty() { return Err("no drafting part (draft strict, mtp_depth 1 or more, drafter on, same comparison id)".to_string()); }
         let reference = plain.first().ok_or("no plain part to compare")?;
-        for d in &draft {
-            if body_but_draft(&d.value) != body_but_draft(&reference.value) { return Err(format!("{}: request body differs from plain beyond draft and mtp_depth", d.name)); }
-            for k in SAME_SETTINGS {
-                let (a, b) = (at(&d.value, &["settings", k]), at(&reference.value, &["settings", k]));
-                if matches!(a, Value::Null) || a.encode() != b.encode() { return Err(format!("{}: settings {k} is not the plain {k}", d.name)); }
-            }
-            match d.text.as_deref().and_then(gates_line) { Some((a, b)) if a == b && b > 0 => (), _ => return Err(format!("{}: card text does not show all gates passed", d.name)) }
-        }
-        let mut out = Vec::new();
-        for w in WORKLOADS {
-            let rows: Vec<&&Part> = draft.iter().filter(|p| !runs(at(&p.value, &["decode", w])).is_empty()).collect();
-            if rows.is_empty() { return Err(format!("{w}: no drafting row")); }
-            let p = best(w).ok_or(format!("{w}: no plain row to compare"))?;
-            let pr = runs(at(&p.value, &["decode", w]));
-            run_ids(pr).map_err(|e| format!("{w} plain: {e}"))?;
-            for (i, d) in rows.iter().enumerate() {
-                let row = at(&d.value, &["decode", w]);
-                let dr = runs(row);
-                if dr.len() < 5 { return Err(format!("{w}: drafting part {} has {} run(s), need 5", d.name, dr.len())); }
-                run_ids(dr).map_err(|e| format!("{w} drafting: {e}"))?;
-                natural_stops(w, dr)?;
-                full_gate(w, row)?;
-                for r in dr {
-                    let id = r.get("run").encode();
-                    let twin = pr.iter().find(|x| x.get("run") == r.get("run")).ok_or(format!("{w} run {id}: no plain run"))?;
-                    for key in ["output_sha256", "reasoning_sha256"] {
-                        if !hex64(r.get(key)) || !hex64(twin.get(key)) { return Err(format!("{w} run {id}: {key} is missing or not 64 hex digits")); }
-                        if r.get(key) != twin.get(key) { return Err(format!("{w} run {id}: drafting answer differs from plain ({key})")); }
-                    }
+        let same_as_plain = |parts: &[&Part], kind: &str| -> std::result::Result<Vec<String>, String> {
+            for d in parts {
+                if body_but_draft(&d.value) != body_but_draft(&reference.value) { return Err(format!("{}: request body differs from plain beyond draft and mtp_depth", d.name)); }
+                for k in SAME_SETTINGS {
+                    let (a, b) = (at(&d.value, &["settings", k]), at(&reference.value, &["settings", k]));
+                    if matches!(a, Value::Null) || a.encode() != b.encode() { return Err(format!("{}: settings {k} is not the plain {k}", d.name)); }
                 }
-                let rate = recomputes(row.get("decode_tokens_per_second"), dr, "decode_tokens_per_second").map_err(|e| format!("{w}: {e}"))?;
-                if i == 0 { out.push(format!("{w} {rate:.3} ({:+.1}% vs plain)", rates.get(w).map_or(0., |p| (rate / p - 1.) * 100.))); }
+                match d.text.as_deref().and_then(gates_line) { Some((a, b)) if a == b && b > 0 => (), _ => return Err(format!("{}: card text does not show all gates passed", d.name)) }
             }
+            let mut out = Vec::new();
+            for w in WORKLOADS {
+                let rows: Vec<&&Part> = parts.iter().filter(|p| !runs(at(&p.value, &["decode", w])).is_empty()).collect();
+                if rows.is_empty() { return Err(format!("{w}: no {kind} row")); }
+                let p = best(w).ok_or(format!("{w}: no plain row to compare"))?;
+                let pr = runs(at(&p.value, &["decode", w]));
+                run_ids(pr).map_err(|e| format!("{w} plain: {e}"))?;
+                for (i, d) in rows.iter().enumerate() {
+                    let row = at(&d.value, &["decode", w]);
+                    let dr = runs(row);
+                    if dr.len() < 5 { return Err(format!("{w}: {kind} part {} has {} run(s), need 5", d.name, dr.len())); }
+                    run_ids(dr).map_err(|e| format!("{w} {kind}: {e}"))?;
+                    natural_stops(w, dr)?;
+                    full_gate(w, row)?;
+                    for r in dr {
+                        let id = r.get("run").encode();
+                        let twin = pr.iter().find(|x| x.get("run") == r.get("run")).ok_or(format!("{w} run {id}: no plain run"))?;
+                        for key in ["output_sha256", "reasoning_sha256"] {
+                            if !hex64(r.get(key)) || !hex64(twin.get(key)) { return Err(format!("{w} run {id}: {key} is missing or not 64 hex digits")); }
+                            if r.get(key) != twin.get(key) { return Err(format!("{w} run {id}: {kind} answer differs from plain ({key})")); }
+                        }
+                    }
+                    let rate = recomputes(row.get("decode_tokens_per_second"), dr, "decode_tokens_per_second").map_err(|e| format!("{w}: {e}"))?;
+                    if i == 0 { out.push(format!("{w} {rate:.3} ({:+.1}% vs plain)", rates.get(w).map_or(0., |p| (rate / p - 1.) * 100.))); }
+                }
+            }
+            Ok(out)
+        };
+        let out = same_as_plain(&draft, "drafting")?;
+        if default.is_empty() { return Ok(out.join(", ") + "; every answer equal to plain"); }
+        let mut depths = BTreeSet::new();
+        for (p, (name, t)) in default.iter().zip(starts.iter().zip(&start_texts)) {
+            let t = t.as_deref().ok_or(format!("{}: no start line receipt {name}", p.name))?;
+            depths.insert(default_start(t).ok_or(format!("{name}: no rank-0 text_service ready record with default_draft=alone \
+                default_depth=N predictor_depth=M side by side, 1 <= N <= M, or rank-0 records that disagree"))?);
         }
-        Ok(out.join(", ") + "; every answer equal to plain")
+        let depths: Vec<String> = depths.iter().map(u64::to_string).collect();
+        let dflt = same_as_plain(&default, "default")?;
+        Ok(format!("{}; default request (depth {}): {}; every answer equal to plain", out.join(", "), depths.join(" and "), dflt.join(", ")))
     })();
-    let draft_texts: Vec<String> = draft.iter().map(|p| p.name.replace(".json", ".card.txt")).collect();
-    let mut q09_files: Vec<&str> = draft.iter().map(|p| p.name.as_str()).chain(draft_texts.iter().map(String::as_str)).collect();
+    let draft_texts: Vec<String> = draft.iter().chain(&default).map(|p| p.name.replace(".json", ".card.txt")).collect();
+    let mut q09_files: Vec<&str> = draft.iter().chain(&default).map(|p| p.name.as_str()).chain(draft_texts.iter().map(String::as_str)).collect();
+    q09_files.extend(starts.iter().map(String::as_str));
     q09_files.extend(WORKLOADS.iter().filter_map(|w| best(w).map(|p| p.name.as_str())));
     add(8, q09, read.tag(&q09_files));
 

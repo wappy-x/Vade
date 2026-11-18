@@ -80,4 +80,18 @@ impl Layout {
         assert!(Layout::new(&[Rows {start:0,count:usize::MAX,total:usize::MAX,split:false},Rows {start:0,count:1,total:1,split:false}]).is_err());
         assert!(Layout::new(&[Rows {start:0,count:usize::MAX/2+1,total:usize::MAX/2+1,split:false},Rows {start:0,count:1,total:2,split:true}]).is_err());
     }
+    /// PLACED GATHER (route_device::gather_placed): for `pairs` equal jobs of `local` rows a part, the scatter of every origin
+    /// writes each output word once, and word (p, c) is the word `prompt_place` reads through the identity table from the
+    /// rank-major exchange: part c / local, pair p, row c % local.
+    #[test] fn placed_gather_rows_are_the_identity_place_rows() {
+        for parts in [2usize,4] {for local in [16usize,48,1024] {for pairs in [1usize,2,7,16,32,64] {
+            let total=local*parts;let rows=vec![Rows {start:0,count:local,total,split:true};pairs];
+            let layout=Layout::new(&rows).unwrap();let packed=(0..parts*pairs*local).map(|i|i as u32^0x8000_0000).collect::<Vec<_>>();
+            let mut out=vec![u32::MAX;layout.output_words().unwrap()];let mut writes=vec![0u8;out.len()];
+            for origin in 0..parts {for [s,d,n] in layout.scatter(origin).unwrap() {out[d..d+n].copy_from_slice(&packed[origin*layout.stride+s..origin*layout.stride+s+n]);for w in &mut writes[d..d+n] {*w+=1;}}}
+            assert!(writes.iter().all(|&w|w==1),"parts={parts} local={local} pairs={pairs}");
+            let place=(0..pairs*total).map(|at|{let (p,c)=(at/total,at%total);packed[(c/local)*pairs*local+p*local+c%local]}).collect::<Vec<_>>();
+            assert_eq!(out,place,"parts={parts} local={local} pairs={pairs}");
+        }}}
+    }
 }

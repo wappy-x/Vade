@@ -104,6 +104,11 @@ pub const FAST_THREADS:u32=128;
 fn route_admitted(i:CausalShape)->bool {
     i.heads==1 && i.dim==1 && i.taps==1 && i.rows==288 && i.cols==ROUTED as u32 && i.bound.is_finite() && i.bound>0.0
 }
+/// ROUTE PLANES (RB4 2026-11-18, P8): a wrapped `Route` whose outer `first` is `prompt_ops::ROUTE_PLANES` writes its IDs and
+/// weights as two token-major planes at the start of its output (`prompt_ops::route_planes`), so a rows pass reads them as two
+/// views and copies nothing. Only `prompt_route` writes that form: the model's router, in one run (at most `GROUP_MAX` tokens,
+/// never split by `prompt_chunks`). Reads no `lengths` (that function asks this one).
+pub fn planes_admitted(s:Shape)->bool {s.op==Op::Wrapped && route_admitted(s.inner) && (1..=GROUP_MAX).contains(&(s.tokens as usize))}
 /// The rows one rank of a pair owns of the model's 4096: the width of a fold made before its exchange (ROWS FOLD).
 pub const FOLD_LOCAL:u32=2048;
 /// The middle rows one rank of a pair owns of a routed expert's 2048: the packed middle places them alone (`place_admitted`).

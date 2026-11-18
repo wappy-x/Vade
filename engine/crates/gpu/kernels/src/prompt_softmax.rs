@@ -1,7 +1,9 @@
 //! Same softmax body as the plain step, one block per (token,head).
 use crate::prompt_ops::Arguments;
-#[no_mangle]
-pub extern "ptx-kernel" fn prompt_softmax_rows(p:Arguments) {
+#[export_name="prompt_softmax_rows"]
+pub extern "ptx-kernel" fn entry_prompt_softmax_rows(p:Arguments) {prompt_softmax_rows(p)}
+#[inline(always)]
+pub(crate) fn prompt_softmax_rows(p:Arguments) {
     let s=p.shape;
     // Shape::lengths and softmax_rows::admitted bound all extents on the host.
     // No pointer is dereferenced here. The shared body checks every live count.

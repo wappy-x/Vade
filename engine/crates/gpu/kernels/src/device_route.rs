@@ -75,7 +75,13 @@ pub(crate) fn build_rows(arguments:crate::device_route_abi::BuildRows) {
     // jobs then read the same immutable weights and write their own outputs. One thread owns one job. Its projection
     // descriptor goes to slot phase * pairs + rank, rank < pairs, inside `projects`; a thread that stores has seen every
     // ID of the launch in range, and (expert, pair) is then a strict order of the pairs, so two threads of one phase never
-    // hold one rank and the stores are disjoint. A shared quantizer descriptor is stored by its token's first job alone. Quantize blocks of
+    // hold one rank and the stores are disjoint. THE IDS ONCE: every thread of a descriptor block stages pairs t, t + THREADS, ...
+    // of the launch (pairs = tokens * picks, at most MAX_TOKENS * MAX_PICKS by `extents_rows`) as checked expert numbers in a
+    // static shared region of 4 * MAX_TOKENS * MAX_PICKS bytes, the only shared allocation of the descriptor path (a quantize
+    // block returns before it). Each word has one writer and is read only after a bar.sync that every thread of the block
+    // executes once (no descriptor thread returns before it), and the words are those the loads below read before: a
+    // staged expert is `selected` of the ID word, and two IDs of one row are equal exactly when their experts are equal
+    // (+0.0 and -0.0 are the same ID and the same expert). A shared quantizer descriptor is stored by its token's first job alone. Quantize blocks of
     // different quantized rows write disjoint ranges, the contract of nv_quantize::lanes_job, and read nothing a
     // descriptor thread writes. The project launch runs behind this one on the same ordered stream. A trap makes
     // completion fail before any token or state can be published. `raw` and a shared down route trap.
@@ -102,22 +108,33 @@ pub(crate) fn build_rows(arguments:crate::device_route_abi::BuildRows) {
             if quantizer.shape.cols as usize!=cols {trap();}
             crate::nv_quantize::lanes_job(quantizer,local);return;
         }
+        // THE IDS ONCE (DRAFTR 2026-11-17, route bookkeeping): the block loads every ID of the launch once, its threads side
+        // by side, and checks each as before. The checks and the EXPERT ORDER below read the staged experts; before, every
+        // thread loaded each ID from global memory again, one load after the other, so the build grew with the rows.
+        let pairs=arguments.tokens as usize*picks;
+        let staged=crate::ptx::shared::<{4*(crate::device_route_abi::MAX_TOKENS*crate::device_route_abi::MAX_PICKS) as usize}>();
+        let mut at=_thread_idx_x() as usize;
+        while at<pairs {
+            let Some(id)=selected(*ids.add(at/picks*stride+at%picks),build.experts) else {trap();};
+            crate::ptx::store(staged+(4*at) as u32,f32::from_bits(id));at+=THREADS;
+        }
+        crate::ptx::sync();
+        let expert_of=|pair:usize| crate::ptx::load(staged+(4*pair) as u32).to_bits();
         let job=block*THREADS+_thread_idx_x() as usize;if job>=jobs {return;}
         let (phase,token,slot)=job_place(job as u32,build.picks,arguments.tokens);
-        let row=ids.add(token as usize*stride);
+        let row=token as usize*picks;
         for at in 0..picks {
-            let value=*row.add(at);if selected(value,build.experts).is_none() {trap();}
-            for prior in 0..at {if *row.add(prior)==value {trap();}}
+            let value=expert_of(row+at);
+            for prior in 0..at {if expert_of(row+prior)==value {trap();}}
         }
-        let Some(expert)=selected(*row.add(slot as usize),build.experts) else {trap();};
+        let expert=expert_of(row+slot as usize);
         let entry=(build.table as *const Arguments).add(phase as usize*build.experts as usize+expert as usize).read();
         let (quantizer,projection)=descriptors_rows(entry,arguments,job as u32);
         // EXPERT ORDER: the job's place in its phase's list is the rank of its pair by (expert, pair). Every ID of the
-        // launch is checked here before it is compared, so the ranks this thread can reach are those of a strict order.
-        let (pairs,pair)=(arguments.tokens as usize*picks,token as usize*picks+slot as usize);let mut rank=0usize;
+        // launch was checked when it was staged, so the ranks this thread can reach are those of a strict order.
+        let pair=row+slot as usize;let mut rank=0usize;
         for other in 0..pairs {
-            let Some(id)=selected(*ids.add(other/picks*stride+other%picks),build.experts) else {trap();};
-            if ranks_before(id,other as u32,expert,pair as u32) {rank+=1;}
+            if ranks_before(expert_of(other),other as u32,expert,pair as u32) {rank+=1;}
         }
         (build.projects as *mut Arguments).add(phase as usize*pairs+rank).write(projection);
         if build.shared==0 {(build.quantizers as *mut Arguments).add(job).write(quantizer);}

@@ -15,6 +15,19 @@ pub(crate) fn root(x:f32)->f32 {
 /// Largest prompt group one launch accepts. The checks below keep all address
 /// products inside the existing 32-bit element ABI.
 pub const MAX_ROWS:usize=1<<16;
+/// Outer `first` of a wrapped `Route` (ROUTE PLANES, `prompt_admission::planes_admitted`): the output of `tokens` rows of
+/// `words` holds the k IDs of every token at `token*k`, then the k weights of every token at `tokens*k + token*k`, then zeros
+/// (`route_planes`). Without it each token's row holds its IDs, its weights, then zeros.
+pub const ROUTE_PLANES:u32=1;
+/// The ROUTE PLANES form of `rows` (`tokens` route rows of `words`, k IDs then k weights first in each): the same IDs and
+/// weights as two token-major planes, every other word zero. Same length.
+#[cfg(not(target_arch="nvptx64"))]
+pub fn route_planes(rows:&[f32],tokens:usize,words:usize,k:usize)->Option<Vec<f32>> {
+    if rows.len()!=tokens.checked_mul(words)? || words<2*k {return None;}
+    let mut out=vec![0.0;rows.len()];
+    for token in 0..tokens {for slot in 0..k {out[token*k+slot]=rows[token*words+slot];out[(tokens+token)*k+slot]=rows[token*words+k+slot];}}
+    Some(out)
+}
 /// The count and causal-ID checks of absorbed prompt attention. Padding is not read.
 /// Status 2 is a bad count; 1 is a bad ID; zero means every live word is valid.
 pub fn selection_validation_status(row:&[f32],context:usize)->u32 {
@@ -145,6 +158,8 @@ impl Shape {
         let result=match self.op {
             Op::Wrapped=>{let (x,w,units,words)=self.inner.lengths()?;
                 if !matches!(self.inner.op,Causal::Prepare|Causal::GatedNorm|Causal::KeyNorm|Causal::Route|Causal::ExpertFold|Causal::StreamMean) {return None;}
+                // Outer `first` of a wrapped operation is 0, or ROUTE_PLANES on the router `planes_admitted` takes.
+                if self.first!=0 && !(self.first==ROUTE_PLANES && crate::prompt_admission::planes_admitted(self)) {return None;}
                 ([m.checked_mul(x[0])?,m.checked_mul(x[1])?,m.checked_mul(x[2])?,m.checked_mul(x[3])?,0],w,m.checked_mul(units)?,words)},
             Op::ProjectRows if r>0 && k>0=>([m.checked_mul(k)?,0,0,0,0],r.checked_mul(k)?,r.checked_mul(m)?,1),
             Op::ProjectRowsBf16 if r>0 && k>0 && k%2==0=>([m.checked_mul(k)?,0,0,0,0],r.checked_mul(k)?/2,r.checked_mul(m)?,1),
@@ -389,6 +404,8 @@ pub fn reference(s:Shape,x:[&[f32];5],w:&[f32])->Result<Vec<f32>,String> {
         for i in 0..units {let mut store=Host {out:&mut out,head:i/d,value:i%d,d,width,states:width*d};step_column(s,i,x,&mut store);}
         return Ok(out);
     }
+    // ROUTE PLANES: the rows of the plain form, then the same words as two planes.
+    if s.op==Op::Wrapped && s.first==ROUTE_PLANES {let rows=reference(Shape {first:0,..s},x,w)?;return route_planes(&rows,units,words,s.inner.cols as usize).ok_or_else(||"route planes extent differs".into());}
     for (i,row) in out.chunks_exact_mut(words).enumerate() {unit(s,i,x,w,row);}Ok(out)
 }
 /// The table of `ExpertPlaceTile`: the `[rows,3]` table of `ExpertPlace`, then for every slot (`earlier+at`) its output
@@ -501,6 +518,28 @@ mod tests {
         let (a,b)=((0..3*8).map(|i|value(i,0.25)).collect::<Vec<_>>(),(0..3*8).map(|i|value(i+2,0.125)).collect::<Vec<_>>());let w=[0.5,1.5,0.25,0.75];
         let got=reference(Shape::wrapped(gated,3).unwrap(),[&a,&b,&[],&[],&[]],&w).unwrap();
         for token in 0..3 {let one=causal(gated,[&a[token*8..(token+1)*8],&b[token*8..(token+1)*8],&[],&[]],&w).unwrap();assert_eq!(bits(&one),bits(&got[token*8..(token+1)*8]));}
+    }
+    /// ROUTE PLANES (P8): the reference of the marked router is the plain rows' IDs and weights as two token-major planes,
+    /// every other word zero; the mark is refused off the model's router, past GROUP_MAX tokens, and at any other value.
+    #[test]
+    fn route_planes_are_the_plain_rows_ids_and_weights() {
+        let inner=CausalShape {op:Causal::Route,heads:1,dim:1,taps:1,rows:288,cols:8,epsilon:0.0,bound:2.5};
+        let bias=(0..288).map(|i|value(i,0.0625)*0.1).collect::<Vec<_>>();
+        for m in [1usize,2,3,4,5,8,16,33,256] {
+            let x=(0..m*288).map(|i|value(i*7+m,0.25)).collect::<Vec<_>>();
+            let plain=reference(Shape::wrapped(inner,m).unwrap(),[&x,&[],&[],&[],&[]],&bias).unwrap();
+            let mut marked=Shape::wrapped(inner,m).unwrap();marked.first=ROUTE_PLANES;
+            let got=reference(marked,[&x,&[],&[],&[],&[]],&bias).unwrap();let words=2*8+2*288+2;assert_eq!(got.len(),m*words);
+            for token in 0..m {for slot in 0..8 {
+                assert_eq!(got[token*8+slot].to_bits(),plain[token*words+slot].to_bits(),"m={m} id {token} {slot}");
+                assert_eq!(got[(m+token)*8+slot].to_bits(),plain[token*words+8+slot].to_bits(),"m={m} weight {token} {slot}");
+            }}
+            assert!(got[2*m*8..].iter().all(|v|v.to_bits()==0),"m={m} tail");
+        }
+        let mut far=Shape::wrapped(inner,257).unwrap();far.first=ROUTE_PLANES;assert!(far.lengths().is_none());
+        let mut other=Shape::wrapped(inner,4).unwrap();other.first=2;assert!(other.lengths().is_none());
+        let mut fold=Shape::wrapped(CausalShape {op:Causal::StreamMean,heads:4,dim:8,taps:0,rows:0,cols:0,epsilon:0.0,bound:0.0},3).unwrap();fold.first=ROUTE_PLANES;assert!(fold.lengths().is_none());
+        let mut wide=Shape::wrapped(CausalShape {rows:256,..inner},4).unwrap();wide.first=ROUTE_PLANES;assert!(wide.lengths().is_none());
     }
     #[test]
     fn project_rows_bf16_equals_project_rows_on_widened_weights() {

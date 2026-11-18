@@ -185,21 +185,35 @@ fn served_pair(always:bool,default:bool) {
     let ids=|reply:&str|reply.split("\"token_id\":").skip(1).map(|part|part.chars().take_while(char::is_ascii_digit).collect::<String>().parse::<u32>().unwrap()).collect::<Vec<_>>();
     // `draft`: "strict" (depth 3), "plain", or "" for a request that names no draft mode. `cancel`: the client closes
     // its connection after that many tokens.
-    let ask=move|prompt:&'static str,tokens:usize,draft:&'static str,cancel:Option<usize>| {
+    let send=|prompt:&str,tokens:usize,draft:&str| {
         let draft=match draft {"strict"=>r#","draft":"strict","mtp_depth":3"#,"plain"=>r#","draft":"plain""#,_=>""};
         let body=format!(r#"{{"prompt_token_ids":{prompt},"stream":true,"max_tokens":{tokens},"ignore_eos":true,"cache":false{draft}}}"#);
         let mut stream=TcpStream::connect(address).unwrap();stream.set_read_timeout(Some(Duration::from_secs(120))).unwrap();
         write!(stream,"POST /v1/completions HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",body.len()).unwrap();
-        let mut reply=String::new();
-        match cancel {
-            None=>{stream.read_to_string(&mut reply).unwrap();},
-            Some(most)=>{let mut reader=BufReader::new(stream);let mut line=String::new();
-                while reply.matches("\"token_id\":").count()<most {line.clear();if reader.read_line(&mut line).unwrap()==0 {break;}reply.push_str(&line);}},
+        BufReader::new(stream)
+    };
+    fn read_tokens(reader:&mut BufReader<TcpStream>,reply:&mut String,want:usize) {
+        while reply.matches("\"token_id\":").count()<want {
+            assert!(reader.read_line(reply).unwrap()>0,"stream ended before token {want}");
         }
-        reply};
-    let together=|chats:Vec<(&'static str,usize,&'static str,Option<usize>,u64)>| {
-        let handles=chats.into_iter().map(|(prompt,tokens,draft,cancel,delay)|std::thread::spawn(move|| {std::thread::sleep(Duration::from_millis(delay));ask(prompt,tokens,draft,cancel)})).collect::<Vec<_>>();
-        handles.into_iter().map(|handle|ids(&handle.join().unwrap())).collect::<Vec<_>>()};
+    }
+    let finish=|mut reader:BufReader<TcpStream>,cancel:Option<usize>,mut reply:String| {
+        match cancel {
+            Some(most)=>read_tokens(&mut reader,&mut reply,most),
+            None=>{reader.read_to_string(&mut reply).unwrap();}
+        }
+        reply
+    };
+    let ask=|prompt,tokens,draft,cancel|finish(send(prompt,tokens,draft),cancel,String::new());
+    let together=|chats:Vec<(&str,usize,&str,Option<usize>,bool)>| {
+        // Send the whole cohort before waiting for any response. A late chat waits for a token from each earlier chat.
+        let mut pending=Vec::new();
+        for (prompt,tokens,draft,cancel,late) in chats {
+            if late {for (reader,_,reply) in &mut pending {read_tokens(reader,reply,1);}}
+            pending.push((send(prompt,tokens,draft),cancel,String::new()));
+        }
+        pending.into_iter().map(|(reader,cancel,reply)|ids(&finish(reader,cancel,reply))).collect::<Vec<_>>()
+    };
     let (p1,p2,p3)=("[3,5,1]","[2,6,4]","[4,4,2,1]");
     // `kind`: what the chats that draft name.
     let kind=if default {""} else {"strict"};
@@ -207,25 +221,25 @@ fn served_pair(always:bool,default:bool) {
     let (a1,a2,a3)=(ids(&ask(p1,long,"plain",None)),ids(&ask(p2,long,"plain",None)),ids(&ask(p3,third,"plain",None)));
     assert_eq!((a1.len(),a2.len(),a3.len()),(long,long,third));
     // Two different prompts.
-    let got=together(vec![(p1,long,kind,None,0),(p2,long,kind,None,0)]);assert_eq!(got,vec![a1.clone(),a2.clone()],"two chats");
+    let got=together(vec![(p1,long,kind,None,false),(p2,long,kind,None,false)]);assert_eq!(got,vec![a1.clone(),a2.clone()],"two chats");
     // The same prompt twice.
-    let got=together(vec![(p1,long,kind,None,0),(p1,long,kind,None,0)]);assert_eq!(got,vec![a1.clone(),a1.clone()],"the same prompt twice");
+    let got=together(vec![(p1,long,kind,None,false),(p1,long,kind,None,false)]);assert_eq!(got,vec![a1.clone(),a1.clone()],"the same prompt twice");
     // A second chat joins a chat that drafts already: the first keeps its draft state, both draft.
-    let got=together(vec![(p1,long,kind,None,0),(p2,long,kind,None,60)]);assert_eq!(got,vec![a1.clone(),a2.clone()],"a chat joins a drafting one");
+    let got=together(vec![(p1,long,kind,None,false),(p2,long,kind,None,true)]);assert_eq!(got,vec![a1.clone(),a2.clone()],"a chat joins a drafting one");
     // One chat ends early, inside the other's answer: the other goes on alone and drafts on.
-    let got=together(vec![(p1,long,kind,None,0),(p2,short,kind,None,0)]);assert_eq!(got,vec![a1.clone(),a2[..short].to_vec()],"one chat ends early");
+    let got=together(vec![(p1,long,kind,None,false),(p2,short,kind,None,false)]);assert_eq!(got,vec![a1.clone(),a2[..short].to_vec()],"one chat ends early");
     // A third chat arrives while two draft: the three are a new group, and all have their own answers.
-    let got=together(vec![(p1,long,kind,None,0),(p2,long,kind,None,0),(p3,third,kind,None,60)]);assert_eq!(got,vec![a1.clone(),a2.clone(),a3.clone()],"a third chat arrives");
+    let got=together(vec![(p1,long,kind,None,false),(p2,long,kind,None,false),(p3,third,kind,None,true)]);assert_eq!(got,vec![a1.clone(),a2.clone(),a3.clone()],"a third chat arrives");
     // Four chats together stay plain until one ends; the three survivors may share their check rows.
-    let got=together(vec![(p1,long,kind,None,0),(p2,long,kind,None,0),(p3,third,kind,None,0),(p1,long,kind,None,0)]);
+    let got=together(vec![(p1,long,kind,None,false),(p2,long,kind,None,false),(p3,third,kind,None,false),(p1,long,kind,None,false)]);
     assert_eq!(got,vec![a1.clone(),a2.clone(),a3.clone(),a1.clone()],"four chats");
     // A strict chat beside a request that names no draft mode. On a service that drafts by default the two are a
     // group. On one that does not, the request that names nothing is plain, and so both are, as before.
-    let got=together(vec![(p1,long,"strict",None,0),(p2,long,"",None,0)]);assert_eq!(got,vec![a1.clone(),a2.clone()],"a strict chat beside a default one");
+    let got=together(vec![(p1,long,"strict",None,false),(p2,long,"",None,false)]);assert_eq!(got,vec![a1.clone(),a2.clone()],"a strict chat beside a default one");
     // A chat that drafts by default beside a plain one: plain rows for both, as before.
-    if default {let got=together(vec![(p1,long,"",None,0),(p2,long,"plain",None,0)]);assert_eq!(got,vec![a1.clone(),a2.clone()],"a default chat beside a plain one");}
+    if default {let got=together(vec![(p1,long,"",None,false),(p2,long,"plain",None,false)]);assert_eq!(got,vec![a1.clone(),a2.clone()],"a default chat beside a plain one");}
     // One chat is cancelled in the middle: the other has its whole answer, and the service takes the next request.
-    let got=together(vec![(p1,long,kind,Some(7),0),(p2,long,kind,None,0)]);
+    let got=together(vec![(p1,long,kind,Some(7),false),(p2,long,kind,None,false)]);
     assert_eq!(got[0][..7],a1[..7],"the cancelled chat's tokens up to the cancel");assert_eq!(got[1],a2,"the chat beside a cancelled one");
     assert_eq!(ids(&ask(p1,long,kind,None)),a1,"a chat alone after the groups");
     let (counts,shared)=counts_rx.recv_timeout(Duration::from_secs(120)).unwrap();worker.join().unwrap();

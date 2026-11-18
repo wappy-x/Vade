@@ -132,6 +132,7 @@ fn kda_case(g: &mut Gpu, reference: H, cand: H, kind: Kda, tokens: usize, h: usi
     Ok((total * 4) as u64)
 }
 pub(crate) fn run(base_path: &str, candidate_path: &str, mode: &str) -> Result<()> {
+    if mode == "recurrent" { return recurrent::run(base_path, candidate_path); }
     let time = mode == "time";
     let (a, b) = (std::fs::read(base_path).map_err(|e| e.to_string())?, std::fs::read(candidate_path).map_err(|e| e.to_string())?);
     println!("ROWSMALL baseline_sha256={} candidate_sha256={} mode={mode}", sha256::digest(&a), sha256::digest(&b));
@@ -209,3 +210,5 @@ pub(crate) fn run(base_path: &str, candidate_path: &str, mode: &str) -> Result<(
 }
 
 #[path = "kernel_shared_plain_rows.rs"] pub(in super::super) mod shared_forms;
+
+#[path = "kernel_recurrent_rows.rs"] mod recurrent;

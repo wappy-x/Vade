@@ -32,6 +32,7 @@ fn run<const KIND:u32>(table:*const Command,index:u64) {
             k if k==Kind::PromptRows as u32=>crate::prompt_operation::prompt_rows(p.cast::<crate::prompt_ops::Arguments>().read()),
             k if k==Kind::RowPrepare as u32=>crate::prompt_fast::prompt_prepare(p.cast::<crate::prompt_ops::Arguments>().read()),
             k if k==Kind::RowGatedNorm as u32=>crate::prompt_fast::prompt_gated_norm(p.cast::<crate::prompt_ops::Arguments>().read()),
+            k if k==Kind::RowRecurrent as u32=>crate::recurrent_rows_kernel::body(p.cast::<crate::recurrent_rows::Arguments>().read()),
             k if k==Kind::RowRoute as u32=>crate::prompt_fast::prompt_route(p.cast::<crate::prompt_ops::Arguments>().read()),
             k if k==Kind::RowFold as u32=>crate::prompt_fast::prompt_fold(p.cast::<crate::prompt_ops::Arguments>().read()),
             k if k==Kind::RowPoolScores as u32=>crate::prompt_fast::prompt_pool_scores(p.cast::<crate::prompt_ops::Arguments>().read()),
@@ -63,6 +64,9 @@ fn run<const KIND:u32>(table:*const Command,index:u64) {
             k if k==Kind::Plain as u32=>crate::ordered_projection::resident_project_f32_ordered(*words as _,*words.add(1) as _,*words.add(2) as _,*words.add(3) as u32,*words.add(4) as u32),
             k if k==Kind::AbsorbDense as u32=>crate::latent_absorption::resident_latent_absorption(p.cast::<crate::causal_ops::Arguments>().read()),
             k if k==Kind::AbsorbAttention as u32=>crate::latent_absorption::resident_latent_absorption_attention(p.cast::<crate::causal_ops::Arguments>().read()),
+            // LATENT ROWS: the latent absorption of a check pass, each the direct entry's own body.
+            k if k==Kind::LatentRowsDense as u32=>crate::latent_rows::latent_rows_dense(p.cast::<crate::prompt_ops::Arguments>().read()),
+            k if k==Kind::LatentRowsAttention as u32=>crate::latent_rows::latent_rows_attention(p.cast::<crate::prompt_ops::Arguments>().read()),
             k if k==Kind::PlainBf16 as u32=>crate::plain_bf16::resident_project_bf16_ordered(*words as _,*words.add(1) as _,*words.add(2) as _,*words.add(3) as u32,*words.add(4) as u32),
             k if k==Kind::Mx as u32=>crate::mx_rows_small::decode::<2,false>(p.cast::<crate::next_params::MxLayer>()),
             k if k==Kind::Mixed as u32=>crate::next_decode::resident_flash_resident_projection_batch::<false>(p.cast::<crate::next_params::ResidentProjectionBatch>().read()),
@@ -131,6 +135,9 @@ entry!(resident_launch_shadow_side,30);
 
 entry!(resident_launch_absorb_dense,Kind::AbsorbDense as u32);
 entry!(resident_launch_absorb_attention,Kind::AbsorbAttention as u32);
+// LATENT ROWS (RB3): the rows form of a check pass, recorded.
+entry!(resident_launch_latent_rows_dense,Kind::LatentRowsDense as u32);
+entry!(resident_launch_latent_rows_attention,Kind::LatentRowsAttention as u32);
 
 // Each row entry uses the checked original ABI and geometry through run.
 entry!(resident_launch_mx_rows_small2,Kind::MxRows2 as u32);
@@ -149,6 +156,7 @@ entry!(resident_launch_plain_rows_small,Kind::PlainRowsSmall as u32);
 entry!(resident_launch_prompt_rows,Kind::PromptRows as u32);
 entry!(resident_launch_prompt_prepare,Kind::RowPrepare as u32);
 entry!(resident_launch_prompt_gated_norm,Kind::RowGatedNorm as u32);
+entry!(resident_launch_recurrent_rows,Kind::RowRecurrent as u32);
 entry!(resident_launch_prompt_route,Kind::RowRoute as u32);
 entry!(resident_launch_prompt_fold,Kind::RowFold as u32);
 entry!(resident_launch_prompt_pool_scores,Kind::RowPoolScores as u32);

@@ -136,6 +136,8 @@ impl<'b,'d> Weights<'b,'d> {
         self.cost.settle(b)?;self.cost.record(||"projection_2".into(),stamp,b,0);
         let (parts,words)=(rows.total/local,output.len());
         crate::exchange_trace::kind(||"routed rows".into());
+        // PLACED GATHER (`gather_placed`): the rows land in their places in the exchange itself, no place launch.
+        let (out,read)=if let Some(out)=self.gather_placed(b,&output,rows,pairs)? {drop(output);(out,false)} else {
         let gathered=self.gather_small(b,&output)?;if gathered.is_none() {self.gather_mapped(b,&output)?;}drop(output);let stamp=self.cost.start(b);
         // PLACE KEEP (seat DRAFTR, 2026-11-17): a batch step makes the identity place table of its pair count ONCE and keeps
         // it, as a verify pass keeps the tables warmed at startup. Before, a batch step whose pair count was not warmed (a
@@ -152,6 +154,7 @@ impl<'b,'d> Weights<'b,'d> {
         s.dim=u32::try_from(local).map_err(|_|"prompt expert rows exceed ABI")?;s.taps=parts as u32;s.slots=u32::try_from(words).map_err(|_|"prompt expert rows exceed ABI")?;s.first=1;
         let out=b.prompt_operation(s,[Some(exchange),Some(table),None,None,None],None)?;
         self.cost.settle(b)?;self.cost.record(||"exchange_upload".into(),stamp,b,0);
+        (out,gathered.is_none())};
         // A batch step waits every ROUTE_ROWS_WAIT layers so its multi-chat KDA state copies fit in spare room;
         // a single-session verify pass (`wait == false`) holds ~200 MiB across all 42 layers and drains once at step end.
         if down && wait {self.route_wait(b)?;}
@@ -160,8 +163,29 @@ impl<'b,'d> Weights<'b,'d> {
         let bit=1u64<<(m.min(31)+if down {32} else {0});
         if SEEN.fetch_or(bit,std::sync::atomic::Ordering::Relaxed)&bit==0 {eprintln!("ROUTE ROWS rank={} rows={m} picks={picks} down={down} local_rows={local} first use",self.topology.rank);}
         // RECEIVE FIRST: the place above was the one read of the mapped exchange buffer.
-        if gathered.is_none() {self.exchange_read(b)?;}
+        if read {self.exchange_read(b)?;}
         Ok(Some(out))
+    }
+    /// PLACED GATHER (seat RB4, 2026-11-17): the gate and up rows of every (token, pick) of `apply_routed_rows` gathered
+    /// straight into their final places, `[pair][rows.total]`, by one joined put and one scatter take a peer
+    /// (`gather_joined`, the exchange of the routed fold and of a decode step). Before, they went rank-major into one
+    /// vector (`gather_small`: a copy, a put, a take) and `prompt_place` moved them into these places through the
+    /// identity table: the same words, two launches more a routed layer (4-row pass, trace draftr-s8-t7: copy 5.6 us
+    /// and place 7.1 us a call). `batch_layout` lists, for `pairs` jobs of this rank's rows, job p's words as the words
+    /// of part 0 then part 1 of pair p: the rows the identity table names. None, before any work: where `gather_small`
+    /// would not run or the joined put does not take the shape (the path before then runs unchanged).
+    fn gather_placed(&mut self,b:&Backend<'d>,local:&DeviceVector<'d>,rows:Rows,pairs:usize)->Result<Option<DeviceVector<'d>>> {
+        const MOST:usize=spark_gpu_probe::tp_put_join::MOST_JOBS;
+        let words=local.len();
+        let Some(mailbox)=self.mailbox.filter(|m|self.small.get() && words>0 && words<=m.slot_bytes()/4) else {return Ok(None);};
+        // One part a rank: `gather_joined` refuses (an error, never other words) a row group whose part count is not the world.
+        if !(1..=MOST).contains(&pairs) || !rows.split || rows.count==0 || pairs.checked_mul(rows.count)!=Some(words)
+            || !spark_gpu_probe::tp_put_join::admitted(1,pairs,words,pairs.saturating_mul(rows.total)) {return Ok(None);}
+        self.none_ahead()?;
+        let stamp=self.cost.start(b);let list=[rows;MOST];
+        let out=gather_joined(b,mailbox,&mut self.sequence,self.topology,&[(local,false)],&list[..pairs])?;
+        crate::exchange_trace::device(words.saturating_mul(4));
+        self.cost.record(||"exchange_device".into(),stamp,b,0);Ok(Some(out))
     }
     /// ROWS FOLD, the shared row: this rank's rows of the row projection `name`, token-major `[m, local rows]`, and no
     /// exchange. They are the words `apply_matrix` makes before its gather (the same call, stopped where a projection of
@@ -224,7 +248,7 @@ impl<'b,'d> Weights<'b,'d> {
                 || !group.names.iter().map(String::as_str).eq(down.weights.iter().map(|weight|weight.name.as_str())) {return Ok(None);}
             (b.device_route_projection_rows(&group.table,ids,picks,input,m)?,rows)
         };
-        let local=rows.count;
+        let local=rows.count;b.resident_side_join(); // SIDE DOWN (P5): the fold below reads the shared rows a check pass made on the side lane.
         if output.len()!=m*picks*local {return Err("routed rows extent differs".into());}
         self.cost.settle(b)?;self.cost.record(||"projection_2".into(),stamp,b,0);let stamp=self.cost.start(b);
         let output=output.into_resident_shared()?;

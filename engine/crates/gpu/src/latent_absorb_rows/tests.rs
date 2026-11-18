@@ -38,8 +38,10 @@ fn the_grid_owns_every_output_unit_exactly_once() {
     for (m,h,k,v,c) in [(1u32,1u32,2u32,9u32,13u32),(3,5,34,9,1),(17,4,64,33,40),(33,32,512,256,70),(256,2,32,32,33),(2,33,130,131,300)] {
         for op in [Op::AbsorbQuery,Op::AbsorbScores,Op::AbsorbValues,Op::AbsorbProject] {
             let s=Shape {op,heads:h,dim:17,taps:v,rows:c.max(31),cols:k,first:c,slots:c+6,..Shape::new(op,m as usize).unwrap()};
-            let (name,blocks,threads)=launch(s).unwrap();assert_eq!((name,threads),("latent_absorption_tile",THREADS));
-            let f=Form::rows(s).unwrap();assert_eq!(blocks as usize,f.blocks());
+            let (name,blocks,threads)=launch(s).unwrap();let f=Form::rows(s).unwrap();
+            // A check pass takes the rows form; its grid and owners: rows_form_tests.rs.
+            if f.tokens<=crate::absorb_tc::SMALL_TOKENS {assert!(name.starts_with("latent_rows_"),"{op:?} m={m}");continue;}
+            assert_eq!((name,threads),("latent_absorption_tile",THREADS));assert_eq!(blocks as usize,f.blocks());
             let mut owners=vec![0u8;f.outer()*f.m()*f.n()];
             for block in 0..f.blocks() {let (outer,m0,n0)=f.block(block);assert!(outer<f.outer());
                 for warp in 0..WARPS {for tile in 0..TILES {for lane in 0..32 {for reg in 0..4 {let (mm,nn)=c_place(lane,reg);let (row,col)=(m0+warp*16+mm,n0+tile*8+nn);

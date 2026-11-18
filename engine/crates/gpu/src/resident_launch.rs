@@ -30,12 +30,18 @@ pub enum Kind {Causal=1,Expert,Plain,Mx,Round,Copy,Put,Take,Prepare,Collapse,Com
     FoldRows=65,FoldRowsF32=66,
     /// The indexer's pool scores of few tokens, a warp a (token, pool) (prompt_pool_scores; a row kernel with indirect arguments).
     RowPoolScores=67,
+    /// LATENT ROWS (seat RB3, P7): the latent absorption of a check pass of 1 to 8 rows on the one-row step's bodies
+    /// (latent_rows_dense: query and project; latent_rows_attention: scores and values), row kernels with indirect
+    /// arguments. Their grids and arithmetic stay fixed. 73 to 81 are other seats' kinds tonight.
+    LatentRowsDense=86,LatentRowsAttention=87,
     /// SHARE ROWS: block-FP8 rows with the same checked direct and recorded arguments.
     Fp8RowsShare=71,
     /// SHARE ROWS: the existing MXFP8 tile for 5 to 8 decode rows.
     MxRowsTile=68,
     /// Block FP8 decode tile on the tensor-core contract, distinct from main's row kinds.
-    Fp8Tile=72}
+    Fp8Tile=72,
+    /// A recurrent prompt layer of one chat's short row pass.
+    RowRecurrent=crate::recurrent_rows::RECORD_KIND}
 /// The payload word of an NvQuarters command that holds the quarters a row gets (4, 2 or 1). It is the first word
 /// past the command's LaunchArguments (112 bytes).
 pub const NV_QUARTERS_WORD:usize=14;
@@ -49,9 +55,10 @@ pub const NV_QUARTERS_WORD:usize=14;
 impl Kind {
     /// One more than the largest kind number: the length of a table indexed by kind.
     pub const COUNT:usize={let mut count=0;let mut at=0;while at<Self::ALL.len() {let next=Self::ALL[at] as usize+1;if next>count {count=next;}at+=1;}count};
-    pub const ALL:[Self;71]=[Self::Fp8Tile,Self::MxRowsTile,Self::Fp8RowsShare,Self::RowPoolScores,Self::FoldRows,Self::FoldRowsF32,Self::MhcPhaseRms,Self::MhcPhaseDots,Self::MhcPhaseFinish,Self::MxRows2,Self::MxRows4,Self::MxRows8,Self::MxRows8w,Self::MixedRows,Self::Fp8RowsSmall,Self::Fp8RowsMulti,Self::Fp8RowsFew,Self::PlainRowsSmall,Self::PromptRows,Self::RowPrepare,Self::RowGatedNorm,Self::RowRoute,Self::RowFold,Self::RowPlace,Self::RowPermute,Self::RowSelect,Self::TransposeSmem,Self::DeviceRouteRows,Self::NvQuarters,Self::QuarterFold,Self::ReduceTake,Self::MhcBoundaryFused,Self::AbsorbDense,Self::AbsorbAttention,Self::MixedBf16,Self::PlainBatch,Self::CausalChain,Self::NormTail,Self::Pointwise,Self::ShadowSide,Self::PutJoin,Self::PutPlain,Self::ShadowPrefetch,Self::PutWide,Self::Causal,Self::Expert,Self::Plain,Self::Mx,Self::Round,Self::Copy,Self::Put,Self::Take,Self::Prepare,Self::Collapse,Self::Combine,Self::RmsPartials,Self::RmsApply,Self::Elementwise,Self::CopyWords,Self::ZeroWords,Self::Mixed,Self::NvStream,Self::CausalFast,Self::NvTile,Self::DeviceRoute,Self::TakeScatter,Self::PlainBf16,Self::MhcBoundaryRms,Self::MhcBoundaryDots,Self::MhcBoundaryFinish,Self::CausalGroup];
-    pub const ROWS:[Self;24]=[Self::MxRowsTile,Self::Fp8RowsShare,Self::RowPoolScores,Self::FoldRows,Self::FoldRowsF32,Self::MxRows2,Self::MxRows4,Self::MxRows8,Self::MxRows8w,Self::MixedRows,Self::Fp8RowsSmall,Self::Fp8RowsMulti,Self::Fp8RowsFew,Self::PlainRowsSmall,Self::PromptRows,Self::RowPrepare,Self::RowGatedNorm,Self::RowRoute,Self::RowFold,Self::RowPlace,Self::RowPermute,Self::RowSelect,Self::TransposeSmem,Self::DeviceRouteRows,];
+    pub const ALL:[Self;74]=[Self::LatentRowsDense,Self::LatentRowsAttention,Self::RowRecurrent,Self::Fp8Tile,Self::MxRowsTile,Self::Fp8RowsShare,Self::RowPoolScores,Self::FoldRows,Self::FoldRowsF32,Self::MhcPhaseRms,Self::MhcPhaseDots,Self::MhcPhaseFinish,Self::MxRows2,Self::MxRows4,Self::MxRows8,Self::MxRows8w,Self::MixedRows,Self::Fp8RowsSmall,Self::Fp8RowsMulti,Self::Fp8RowsFew,Self::PlainRowsSmall,Self::PromptRows,Self::RowPrepare,Self::RowGatedNorm,Self::RowRoute,Self::RowFold,Self::RowPlace,Self::RowPermute,Self::RowSelect,Self::TransposeSmem,Self::DeviceRouteRows,Self::NvQuarters,Self::QuarterFold,Self::ReduceTake,Self::MhcBoundaryFused,Self::AbsorbDense,Self::AbsorbAttention,Self::MixedBf16,Self::PlainBatch,Self::CausalChain,Self::NormTail,Self::Pointwise,Self::ShadowSide,Self::PutJoin,Self::PutPlain,Self::ShadowPrefetch,Self::PutWide,Self::Causal,Self::Expert,Self::Plain,Self::Mx,Self::Round,Self::Copy,Self::Put,Self::Take,Self::Prepare,Self::Collapse,Self::Combine,Self::RmsPartials,Self::RmsApply,Self::Elementwise,Self::CopyWords,Self::ZeroWords,Self::Mixed,Self::NvStream,Self::CausalFast,Self::NvTile,Self::DeviceRoute,Self::TakeScatter,Self::PlainBf16,Self::MhcBoundaryRms,Self::MhcBoundaryDots,Self::MhcBoundaryFinish,Self::CausalGroup];
+    pub const ROWS:[Self;27]=[Self::LatentRowsDense,Self::LatentRowsAttention,Self::RowRecurrent,Self::MxRowsTile,Self::Fp8RowsShare,Self::RowPoolScores,Self::FoldRows,Self::FoldRowsF32,Self::MxRows2,Self::MxRows4,Self::MxRows8,Self::MxRows8w,Self::MixedRows,Self::Fp8RowsSmall,Self::Fp8RowsMulti,Self::Fp8RowsFew,Self::PlainRowsSmall,Self::PromptRows,Self::RowPrepare,Self::RowGatedNorm,Self::RowRoute,Self::RowFold,Self::RowPlace,Self::RowPermute,Self::RowSelect,Self::TransposeSmem,Self::DeviceRouteRows,];
     pub fn row(name:&str)->Option<Self> {match name {
+        "latent_rows_dense"=>Some(Self::LatentRowsDense),"latent_rows_attention"=>Some(Self::LatentRowsAttention),
         "mx_rows_small2"=>Some(Self::MxRows2),
         "mx_rows_small4"=>Some(Self::MxRows4),
         "mx_rows_small8"=>Some(Self::MxRows8),
@@ -68,6 +75,7 @@ impl Kind {
         "prompt_rows"=>Some(Self::PromptRows),
         "prompt_prepare"=>Some(Self::RowPrepare),
         "prompt_gated_norm"=>Some(Self::RowGatedNorm),
+        "recurrent_rows"=>Some(Self::RowRecurrent),
         "prompt_route"=>Some(Self::RowRoute),
         "prompt_fold"=>Some(Self::RowFold),
         "prompt_pool_scores"=>Some(Self::RowPoolScores),
@@ -78,6 +86,7 @@ impl Kind {
         "device_route_rows"=>Some(Self::DeviceRouteRows),
         _=>None}}
     pub fn kernel(self)->&'static str {match self {
+        Self::LatentRowsDense=>"resident_launch_latent_rows_dense",Self::LatentRowsAttention=>"resident_launch_latent_rows_attention",
         Self::MxRows2=>"resident_launch_mx_rows_small2",
         Self::MxRows4=>"resident_launch_mx_rows_small4",
         Self::MxRows8=>"resident_launch_mx_rows_small8",
@@ -94,6 +103,7 @@ impl Kind {
         Self::PromptRows=>"resident_launch_prompt_rows",
         Self::RowPrepare=>"resident_launch_prompt_prepare",
         Self::RowGatedNorm=>"resident_launch_prompt_gated_norm",
+        Self::RowRecurrent=>"resident_launch_recurrent_rows",
         Self::RowRoute=>"resident_launch_prompt_route",
         Self::RowFold=>"resident_launch_prompt_fold",
         Self::RowPoolScores=>"resident_launch_prompt_pool_scores",

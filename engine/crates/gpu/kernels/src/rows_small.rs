@@ -10,10 +10,12 @@
 //! The host launches this entry only for `rows_small::admitted(shape)`; the entry traps on any other shape.
 use crate::prompt_ops::{Arguments,Op};
 
-#[no_mangle]
-pub extern "ptx-kernel" fn prompt_rows_small(p:Arguments) {
+#[export_name="prompt_rows_small"]
+pub extern "ptx-kernel" fn entry_prompt_rows_small(p:Arguments) {prompt_rows_small(p)}
+#[inline(always)]
+pub(crate) fn prompt_rows_small(p:Arguments) {
     // SAFETY: The host validates Shape::lengths and passes those exact extents, with same-context contiguous owners that live through stream
-    // completion; inputs are immutable and the output is private, initialized (zeroed) earlier on the stream and overlaps no input. The entry traps unless
+    // completion; inputs are immutable and the output is private and overlaps no input. The entry traps unless
     // the shape is StepRows with dim 128, heads <= 64 and tokens <= 16, in a 32-thread block, and the block index is in range. A block owns head
     // `block / 4` and values `32 * (block % 4)..+32`: each lane reads its own value word of every state row and writes the same word, plus its own word of
     // each token's output, so every output word has one writer; a lane reads back only words its own thread wrote earlier in this launch. There is no shared

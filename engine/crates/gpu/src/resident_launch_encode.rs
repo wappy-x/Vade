@@ -62,6 +62,11 @@ pub(super) fn prompt_rows(p:crate::prompt_ops::Arguments,kind:Kind)->Command {
     s.put(core::mem::offset_of!(Shape,inner),&inner.payload[at..at+core::mem::size_of::<crate::causal_ops::Shape>()]);
     c.put(core::mem::offset_of!(Arguments,shape),&s.payload[..core::mem::size_of::<Shape>()]);c
 }
+pub(super) fn recurrent_rows(p:crate::recurrent_rows::Arguments)->Command {
+    let mut command=Command::new(Kind::RowRecurrent);
+    command.put(0,&p.payload());
+    command
+}
 pub(super) fn prepare(p:crate::mhc_params::Prepare)->Command {
     use crate::mhc_params::{Prepare,Shape};let mut c=Command::new(Kind::Prepare);fields!(c,Prepare,p,input,weights,base,scale,normalized,coefficients,collapsed);
     let mut s=Command::new(Kind::Prepare);fields!(s,Shape,p.shape,rows,streams,hidden,iterations,rms_eps,eps);

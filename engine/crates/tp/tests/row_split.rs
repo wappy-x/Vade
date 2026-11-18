@@ -885,6 +885,8 @@ fn a_greedy_strict_pass_of_one_row_answers_with_the_plain_token_on_two_ranks() {
             Factory::new(checkpoint,split,80,vec![0]).unwrap().with_predictor(3).unwrap().worker().unwrap();});
         let split=Split::new(Host,Wire {topology:Topology {rank:0,parts:2},controller:true,tx:a_tx,rx:a_rx}).unwrap();
         let engine=Factory::new(checkpoint,split,80,vec![0]).unwrap().with_predictor(3).unwrap();let count=34;
+        // Compare the hidden rows at the same draft depth in both sessions. Each session times its own passes.
+        engine.set_confidence(false);
         let best=|v:&[f32]|(0..v.len()).reduce(|a,b|if v[b]>v[a] {b} else {a}).unwrap() as u32;
         let bits=|v:&[f32]|v.iter().map(|v|v.to_bits()).collect::<Vec<_>>();
         let mut limits=spark_tp::row_split::limits(80,64).unwrap();limits.next_mtp_depth=Some(3);
@@ -925,7 +927,7 @@ fn a_greedy_strict_pass_of_one_row_answers_with_the_plain_token_on_two_ranks() {
                 }
                 cycle+=1;
             }
-            assert!(proposed.iter().any(|tokens|!tokens.is_empty()),"the predictor made proposals");proposals.push(proposed);
+            assert!(proposed.iter().any(|tokens|tokens.len()==3),"the predictor made a full-depth proposal");proposals.push(proposed);
             assert!(named.iter().any(|ids|ids.len()>=2),"a pass of 2 rows or more ran");passes.push(named);
             drop(session);assert_eq!(engine.fatal_error(),None);
         }

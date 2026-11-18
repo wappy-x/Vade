@@ -16,6 +16,10 @@ const SETTINGS: &str = r#""runs":5,"decode_tokens":8192,"temperature":0.0,"top_p
 const PLAIN: &str = r#"{"cache":false,"draft":"plain","mtp_depth":0,"reasoning_effort":"low"}"#;
 const STRICT: &str = r#"{"cache":false,"draft":"strict","mtp_depth":2,"reasoning_effort":"low"}"#;
 const QUALITY: &str = "quality-vs-maker.result";
+/// The default request: the plain body without the two drafting keys.
+const DEFAULT_BODY: &str = r#"{"cache":false,"reasoning_effort":"low"}"#;
+/// The rank-0 start line of a bare server that drafts by default at depth 3.
+const START: &str = "text_service qualification=unqualified ready bind=127.0.0.1:18080 rank=0 world=2 default_draft=alone default_depth=3 predictor_depth=3\n";
 /// The keys a quality receipt must hold (ruling 2026-11-11 07:45: a measurement, no pass line).
 const QUALITY_KEYS: [&str; 7] = ["MODEL", "ENGINE", "GOLDENS", "MEASURE", "PROMPTS", "NUMBERS", "SOURCE"];
 
@@ -121,6 +125,13 @@ impl Card {
         d.prefill = "{}".into(); d.concurrency = "{}".into();
         d
     }
+    /// The default request part: the request names no drafting mode, the server drafts by itself; same answers.
+    fn default_request(engine: &str) -> Self {
+        let mut d = Self::new(engine);
+        d.body = DEFAULT_BODY.into(); d.drafter = "served default; request omits drafting controls".into(); d.decode = scaled("stop", 2.0);
+        d.prefill = "{}".into(); d.concurrency = "{}".into();
+        d
+    }
     fn json(&self) -> String {
         let tool = r#"{"revision":"946394fa53db83a6865f6e3ae56594e1c299fb2a","dirty":false}"#;
         let appliance = format!(concat!(r#"{{"hardware":"2 NVIDIA DGX Spark GB10; a,b","serving_engine":"Vade {}","purpose":"benchmark","#,
@@ -192,6 +203,13 @@ fn failed_with(options: &Options) -> Vec<&'static str> {
 }
 fn card(f: &Folder, edit: impl FnOnce(&mut Card)) { let mut c = Card::new(&f.engine); edit(&mut c); f.put("card.json", &c.json()); }
 fn draft(f: &Folder, edit: impl FnOnce(&mut Card)) { let mut c = Card::draft(&f.engine); edit(&mut c); f.put("draft.json", &c.json()); }
+/// A default request part beside the card: its JSON, its card text and its server's start line.
+fn with_default(f: &Folder, edit: impl FnOnce(&mut Card)) {
+    let mut c = Card::default_request(&f.engine); edit(&mut c);
+    f.put("default.json", &c.json());
+    f.put("default.card.txt", "| 15/15 BASIC OUTPUT GATES PASSED |\n");
+    f.put("default.start.txt", START);
+}
 fn check_of(options: &Options, id: &str) -> card_qualify::Check {
     card_qualify::check(options).unwrap().checks.into_iter().find(|c| c.id == id).unwrap()
 }
@@ -231,6 +249,17 @@ fn a_complete_card_passes_every_check() {
     assert!(text.lines().last().unwrap().starts_with("CARD-QUALIFY PASS 12/12 engine="), "{text}");
     assert!(text.contains("read card.json sha256="), "every check names the receipts it read: {text}");
     assert!(text.contains("code 23.250 (+20.8% vs plain)"), "the drafting row prints its speed against plain: {text}");
+    // REVD 2026-11-18 00:07:01: a strict-only card keeps its Q09 text: "<workload> <rate> (<signed percent>% vs plain)"
+    // rows joined by ", ", then "; every answer equal to plain", and no default words.
+    let q09 = check_of(&f.options(), "Q09").detail;
+    let (rows, tail) = q09.split_once("; ").unwrap_or((q09.as_str(), ""));
+    assert_eq!(tail, "every answer equal to plain", "{q09}");
+    for row in rows.split(", ") {
+        let words: Vec<&str> = row.split(' ').collect();
+        let ok = words.len() == 5 && ["prose", "code", "structured"].contains(&words[0]) && words[1].parse::<f64>().is_ok()
+            && (words[2].starts_with("(+") || words[2].starts_with("(-"));
+        assert!(ok && words[3] == "vs" && words[4] == "plain)" && words[2].ends_with('%'), "{q09}");
+    }
 }
 
 #[test]
@@ -277,6 +306,85 @@ fn the_drafting_row_needs_real_drafting_real_hashes_and_distinct_runs() {
         ("five-copies-of-run-1", &["Q09"], Box::new(move |f| draft(f, |d| {
             d.decode = format!(r#"{{"prose":{},"code":{},"structured":{}}}"#, copies(100), copies(200), copies(300));
         }))),
+    ]);
+}
+
+/// A default request part (no drafting key, drafter "served default", a start line with the default drafting) is
+/// checked inside Q09 like the strict part. The card keeps twelve checks: the site and the card kit read "12/12".
+#[test]
+fn a_default_request_part_passes_inside_q09_and_the_card_keeps_twelve_checks() {
+    let f = Folder::new("default-pass");
+    let before = check_of(&f.options(), "Q09");
+    assert!(!before.detail.contains("default"), "a folder without a default part reads as before: {}", before.detail);
+    with_default(&f, |_| ());
+    let report = card_qualify::check(&f.options()).unwrap();
+    let text = report.render();
+    assert!(report.passed(), "{text}");
+    assert_eq!(report.checks.len(), 12);
+    assert!(text.lines().last().unwrap().starts_with("CARD-QUALIFY PASS 12/12 engine="), "{text}");
+    let q09 = check_of(&f.options(), "Q09");
+    assert!(q09.detail.starts_with(&before.detail.replace("; every answer equal to plain", "")), "the strict part reads as before: {}", q09.detail);
+    assert!(q09.detail.contains("default request (depth 3): prose"), "{}", q09.detail);
+    assert!(q09.detail.contains("code 21.250 (+10.4% vs plain)"), "{}", q09.detail);
+    assert!(text.contains("read default.start.txt sha256="), "Q09 names the start line it read: {text}");
+    assert!(text.contains("read default.json sha256="), "{text}");
+}
+
+/// REVD 2026-11-18 00:07:01: the start receipt may hold other lines (a rank-1 record, notes); only the rank-0 server's
+/// ready record is read. The real record, as the text service prints it, passes.
+#[test]
+fn the_default_start_is_read_from_the_rank_0_ready_record_only() {
+    const REAL: &str = "text_service qualification=unqualified diagnostic_option=--diagnostic-unqualified-text ready \
+        bind=127.0.0.1:18091 rank=0 world=2 path=tensor_split context=16384 resident_bytes=94786438664 session_bytes=2179452928 \
+        shared_workspace_bytes=7655256376 session_pool_bytes=9148154458 max_chats=8 default_draft=alone default_depth=3 \
+        predictor_depth=3 cache=true kept_cap_bytes=6968701530 largest_kept_prompt_tokens=16384\n";
+    const RANK1: &str = "text_service qualification=unqualified diagnostic_option=--diagnostic-unqualified-text ready \
+        bind=127.0.0.1:18091 rank=1 world=2 default_draft=alone default_depth=4 predictor_depth=5\n";
+    let beside = format!("note: default_draft=alone default_depth=5 predictor_depth=5\n{RANK1}{REAL}");
+    for (name, text) in [("real", REAL.to_string()), ("rank-1-beside", beside)] {
+        let f = Folder::new(&format!("default-start-{name}"));
+        with_default(&f, |_| ());
+        f.put("default.start.txt", &text);
+        let report = card_qualify::check(&f.options()).unwrap();
+        assert!(report.passed(), "{name}: {}", report.render());
+        assert!(check_of(&f.options(), "Q09").detail.contains("default request (depth 3)"), "{name}");
+    }
+}
+
+#[test]
+fn a_default_part_needs_no_drafting_key_its_start_line_and_the_plain_answers() {
+    let line = |words: &'static str| -> Break { Box::new(move |f| { with_default(f, |_| ()); f.put("default.start.txt", &format!("text_service ready rank=0 {words}\n")); }) };
+    let file = |text: &'static str| -> Break { Box::new(move |f| { with_default(f, |_| ()); f.put("default.start.txt", text); }) };
+    expect(vec![
+        // REVD 2026-11-18 00:07:01: only the rank-0 server's own ready record counts.
+        ("default-start-rank-1", &["Q09"], file("text_service qualification=unqualified ready bind=127.0.0.1:18080 rank=1 world=2 default_draft=alone default_depth=3 predictor_depth=3\n")),
+        ("default-start-note", &["Q09"], file("note: the start said default_draft=alone default_depth=3 predictor_depth=3 rank=0 ready\n")),
+        ("default-start-not-ready", &["Q09"], file("text_service qualification=unqualified bind=127.0.0.1:18080 rank=0 world=2 default_draft=alone default_depth=3 predictor_depth=3\n")),
+        ("default-start-not-first-word", &["Q09"], file("log: text_service ready rank=0 world=2 default_draft=alone default_depth=3 predictor_depth=3\n")),
+        ("default-start-fields-before-rank", &["Q09"], file("text_service ready default_draft=alone default_depth=3 predictor_depth=3 rank=0 world=2\n")),
+        ("default-start-rank-0-disagree", &["Q09"], file("text_service ready rank=0 default_draft=alone default_depth=3 predictor_depth=3\n\
+            text_service ready rank=0 default_draft=alone default_depth=2 predictor_depth=3\n")),
+        // REVD 2026-11-18 01:27:12: the same N at two predictor depths is two server configurations, not one.
+        ("default-start-rank-0-predictor-disagree", &["Q09"], file("text_service ready rank=0 default_draft=alone default_depth=3 predictor_depth=3\n\
+            text_service ready rank=0 default_draft=alone default_depth=3 predictor_depth=4\n")),
+        ("default-start-rank-0-plain-beside", &["Q09"], file("text_service ready rank=0 default_draft=alone default_depth=3 predictor_depth=3\n\
+            text_service ready rank=0 default_draft=plain predictor_depth=0\n")),
+        ("default-no-start", &["Q09"], Box::new(|f| { with_default(f, |_| ()); fs::remove_file(f.dir.join("default.start.txt")).unwrap(); })),
+        ("default-start-plain", &["Q09"], line("default_draft=plain predictor_depth=0")),
+        ("default-start-depth-0", &["Q09"], line("default_draft=alone default_depth=0 predictor_depth=3")),
+        ("default-start-over-loaded", &["Q09"], line("default_draft=alone default_depth=4 predictor_depth=3")),
+        ("default-start-words-apart", &["Q09"], line("default_draft=alone predictor_depth=3 default_depth=3")),
+        ("default-answer-differs", &["Q09"], Box::new(|f| with_default(f, |d| d.decode = d.decode.replace(&hash(201), &hash(999))))),
+        ("default-cut", &["Q09"], Box::new(|f| with_default(f, |d| d.decode = scaled("length", 2.0)))),
+        ("default-cached", &["Q09"], Box::new(|f| with_default(f, |d| d.body = d.body.replace("\"cache\":false", "\"cache\":true")))),
+        ("default-seed", &["Q09"], Box::new(|f| with_default(f, |d| d.settings = d.settings.replace("20260905", "7")))),
+        ("default-short-cap", &["Q09"], Box::new(|f| with_default(f, |d| d.settings = d.settings.replace("8192", "1024")))),
+        ("default-gates-text", &["Q09"], Box::new(|f| { with_default(f, |_| ()); f.put("default.card.txt", "| 14/15 BASIC OUTPUT GATES PASSED |\n"); })),
+        ("default-no-card-text", &["Q01", "Q09"], Box::new(|f| { with_default(f, |_| ()); fs::remove_file(f.dir.join("default.card.txt")).unwrap(); })),
+        ("default-null-draft", &["Q08", "Q09"], Box::new(|f| with_default(f, |d| d.body = r#"{"cache":false,"draft":null,"reasoning_effort":"low"}"#.into()))),
+        ("default-depth-only", &["Q08", "Q09"], Box::new(|f| with_default(f, |d| d.body = r#"{"cache":false,"mtp_depth":3,"reasoning_effort":"low"}"#.into()))),
+        ("default-drafter-on", &["Q08", "Q09"], Box::new(|f| with_default(f, |d| d.drafter = "on".into()))),
+        ("default-drafter-other", &["Q08", "Q09"], Box::new(|f| with_default(f, |d| d.drafter = "default of the day".into()))),
     ]);
 }
 

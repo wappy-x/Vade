@@ -116,13 +116,17 @@ pub(crate) fn prompt_route(p:Arguments) {
     // SAFETY: The host (prompt_admission::route_admitted) checked Shape::lengths for Op::Wrapped over causal Route with one
     // group and one kept group: per token x0 holds `rows` logits, the weight `rows` biases (shared), and the token owns
     // the disjoint 2*cols + 2*rows + 2 output words at token*(2*cols+2*rows+2); `rows` <= 32*PER_LANE and `cols` <= 64.
+    // ROUTE PLANES (s.first == prompt_ops::ROUTE_PLANES, admitted by prompt_admission::planes_admitted, never split into runs):
+    // the token writes its k IDs at token*k and its k weights at tokens*k + token*k, and clears the words of its own row at
+    // or above 2*tokens*k. Those plane words are the first 2*tokens*k of the tokens*words output (words >= 2*cols), so
+    // every output word is written by exactly one lane, as in the plain form.
     // Every lane takes the same trip counts and every shuffle is converged. A register array is only indexed by loop
     // counters that unroll (selects over i), never by a data value.
     unsafe {
         let s=p.shape;let inner=s.inner;
         if s.op!=Op::Wrapped || inner.op!=Causal::Route || core::arch::nvptx::_block_dim_x() as usize!=THREADS {core::arch::nvptx::trap();}
         let (r,k,tokens)=(inner.rows as usize,inner.cols as usize,s.tokens as usize);
-        let words=2*k+2*r+2*inner.heads as usize;
+        let words=2*k+2*r+2*inner.heads as usize;let planes=s.first==crate::prompt_ops::ROUTE_PLANES;
         let tid=core::arch::nvptx::_thread_idx_x() as usize;let lane=tid&31;
         let mut token=core::arch::nvptx::_block_idx_x() as usize*4+tid/32;
         let stride=core::arch::nvptx::_grid_dim_x() as usize*4;
@@ -166,11 +170,13 @@ pub(crate) fn prompt_route(p:Arguments) {
                     let mut v=held_score[part];
                     if inner.taps!=0 {v/=sum+1e-20;}
                     v*=inner.bound;
-                    *out.add(slot)=held_id[part];*out.add(k+slot)=v;
+                    let (id,weight)=if planes {let base=p.output as *mut f32;(base.add(token*k+slot),base.add((tokens+token)*k+slot))} else {(out.add(slot),out.add(k+slot))};
+                    *id=held_id[part];*weight=v;
                 }
                 part+=1;
             }
-            let mut j=2*k+lane;while j<words {*out.add(j)=0.0;j+=32;}
+            let clear=if planes {(2*tokens*k).saturating_sub(token*words).min(words)} else {2*k};
+            let mut j=clear+lane;while j<words {*out.add(j)=0.0;j+=32;}
             token+=stride;
         }
     }
@@ -298,8 +304,10 @@ fn conv_run<const TAPS:usize>(p:&Arguments,plane:usize,ch:usize,first:usize,last
         }
     }
 }
-#[no_mangle]
-pub extern "ptx-kernel" fn prompt_conv(p:Arguments) {
+#[export_name="prompt_conv"]
+pub extern "ptx-kernel" fn entry_prompt_conv(p:Arguments) {prompt_conv(p)}
+#[inline(always)]
+pub(crate) fn prompt_conv(p:Arguments) {
     // SAFETY: The host (prompt_admission::conv_admitted) checked Shape::lengths for Op::ConvRows with 1 <= taps <= 8: x0, x1, x2
     // hold tokens*width values, x3 holds 3*(taps-1)*width, the weight 3*width*taps, the output tokens*3*width. A thread owns the
     // output words (token, plane, ch) of one (plane, ch) and tokens [run*CONV_RUN, ..): disjoint across threads. Every read is

@@ -50,7 +50,7 @@ fn arithmetic(kind:Kind)->bool {
     matches!(kind,Kind::AbsorbDense|Kind::AbsorbAttention
         |Kind::Causal|Kind::Expert|Kind::Plain|Kind::PlainBf16|Kind::Mx|Kind::Mixed|Kind::MixedBf16|Kind::PlainBatch|Kind::NvStream|Kind::CausalFast|Kind::CausalChain|Kind::CausalGroup
         |Kind::NvTile|Kind::Fp8Tile|Kind::DeviceRoute|Kind::NvQuarters|Kind::MxRows2|Kind::MxRows4|Kind::MxRows8|Kind::MxRows8w|Kind::MxRowsTile
-        |Kind::MixedRows|Kind::FoldRows|Kind::FoldRowsF32|Kind::Fp8RowsSmall|Kind::Fp8RowsMulti|Kind::Fp8RowsFew|Kind::Fp8RowsShare|Kind::PlainRowsSmall|Kind::DeviceRouteRows)
+        |Kind::MixedRows|Kind::FoldRows|Kind::FoldRowsF32|Kind::Fp8RowsSmall|Kind::Fp8RowsMulti|Kind::Fp8RowsFew|Kind::Fp8RowsShare|Kind::PlainRowsSmall|Kind::DeviceRouteRows|Kind::RowRecurrent)
 }
 fn zero_grid(zeros:&[(usize,u64,u32,bool)])->Option<Grid> {
     let longest=zeros.iter().map(|z|z.2).max()?;Some(Grid {kind:Kind::Copy,blocks:longest.div_ceil(128),rows:zeros.len() as u32,planes:1,threads:128,shared:0,lane:MAIN})
@@ -357,6 +357,7 @@ impl<'a> Backend<'a> {
                 Kind::MxRows2|Kind::MxRows4|Kind::MxRows8|Kind::MxRows8w|Kind::MxRowsTile=>encode::mx_rows(args[0].cast::<crate::next_params::MxProjection>().read_unaligned(),kind),
                 Kind::MixedRows|Kind::FoldRows|Kind::FoldRowsF32=>encode::mixed(args[0].cast::<crate::next_params::ResidentProjectionBatch>().read_unaligned(),kind),
                 Kind::DeviceRouteRows=>encode::route_rows(args[0].cast::<crate::device_route::BuildRows>().read_unaligned()),
+                Kind::RowRecurrent=>encode::recurrent_rows(args[0].cast::<crate::recurrent_rows::Arguments>().read_unaligned()),
                 Kind::Fp8RowsSmall|Kind::Fp8RowsMulti|Kind::Fp8RowsFew|Kind::Fp8RowsShare=>encode::group_rows(args[0].cast::<crate::expert_ops::GroupArguments>().read_unaligned(),kind),
                 _=>encode::prompt_rows(args[0].cast::<crate::prompt_ops::Arguments>().read_unaligned(),kind),
             };Some((kind,command))},

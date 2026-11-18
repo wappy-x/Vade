@@ -26,8 +26,10 @@ macro_rules! close_one {($part:ident,$acc:ident,$p0:ident,$p2:ident)=>{
     $part+=1;
 };}
 /// The prompt form: `prompt_operation` validates `latent_absorb_rows::lengths` and launches `latent_absorb_rows::launch`.
-#[no_mangle]
-pub extern "ptx-kernel" fn latent_absorption_tile(p:crate::prompt_ops::Arguments) {
+#[export_name="latent_absorption_tile"]
+pub extern "ptx-kernel" fn entry_latent_absorption_tile(p:crate::prompt_ops::Arguments) {latent_absorption_tile(p)}
+#[inline(always)]
+pub(crate) fn latent_absorption_tile(p:crate::prompt_ops::Arguments) {
     // SAFETY: the backend validates every extent with the shape's `lengths` and launches `absorb_tc::THREADS` threads
     // a block (any other block size traps here, as a whole block). A block past `Form::blocks` names an outer index
     // past the last one and returns as a whole block before any read. A count is a finite integer at most the score

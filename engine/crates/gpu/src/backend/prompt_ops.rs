@@ -89,8 +89,10 @@ impl<'a> Backend<'a> {
             // Kernels that write every output word from any initial content (prompt_writes, device-swept from a poisoned output) run unzeroed.
             let fills=!permuting && !placing && !transposing && fast.is_none() && !crate::latent_absorb_rows::admitted(shape.op);
             // transpose_smem writes every output word (swept from a poisoned output in kernel-bench --transpose-smem): no fill, counted like the others.
+            let recurrent_writes=tokens>1 && (tile.is_some_and(|t|t.0=="prompt_rows_small")
+                || shape.op==Op::HistoryRows && units>0);
             if transposing {crate::prompt_launches::record("prompt_fill_skipped");}
-            else if fills && crate::prompt_writes::writes_every_word(shape.op==Op::Transpose,shape.rows,shape.cols,tile.map(|t|t.0)) {crate::prompt_launches::record("prompt_fill_skipped");}
+            else if fills && (recurrent_writes || crate::prompt_writes::writes_every_word(shape.op==Op::Transpose,shape.rows,shape.cols,tile.map(|t|t.0))) {crate::prompt_launches::record("prompt_fill_skipped");}
             else if fills && !filled {
                 // The fill clears the whole output, so it must come before the first run writes. Runs of one operation take one kernel
                 // family (all fill or none do); a later run that asked for a fill would clear the runs before it: refuse, never corrupt.
@@ -119,7 +121,7 @@ impl<'a> Backend<'a> {
             // selected input are data: the kernel checks each against its extent and traps,
             // and the launch then fails. check_vector_prefix checks owners and
             // contexts. Inputs are read-only. The private output is disjoint and contiguous. It is zeroed earlier on
-            // this ordered stream, except where prompt_writes::writes_every_word holds (a Transpose of a swept shape, and plain_rows_small): there the kernel
+            // this ordered stream, except where recurrent_writes or prompt_writes::writes_every_word holds: there the kernel
             // stores every output word through a raw pointer, never reads one and builds no reference over the output, so the fill is skipped. Buffer::drop drains the
             // stream, so all owners outlive the launch. The argument is copied at launch. The
             // Absorbed row kernels write every output word, validate selected counts and IDs, and keep
@@ -133,6 +135,34 @@ impl<'a> Backend<'a> {
             unsafe {self.launch_flash_rows(kernel,blocks,rows,group,0,&mut [parameter(&mut args)])}?;
         }
         Ok(output)
+    }
+    /// Run one recurrent layer over consecutive rows of one chat. All outputs
+    /// have private storage and are completely written on the ordered stream.
+    pub fn recurrent_rows(&self,shape:crate::recurrent_rows::Shape,input:[&DeviceVector<'_>;7],
+        gate:&DeviceVector<'_>,weight:[&DeviceVector<'_>;3],keep:bool)
+        ->Result<([DeviceVector<'a>;3],Option<[DeviceVector<'a>;2]>),String> {
+        use crate::recurrent_rows::{Arguments,THREADS};
+        self.require_resident_stream()?;
+        let (inputs,weights,[history,state,rows,prepared,decay])=shape.lengths(keep).ok_or("invalid recurrent row shape")?;
+        for (source,words) in input.into_iter().zip(inputs).chain(weight.into_iter().zip(weights)).chain([(gate,rows)]) {
+            self.check_vector(source,words)?;
+            if source.is_segmented() {return Err("recurrent row input must be contiguous".into());}
+        }
+        self.require_arm_kernels(&["recurrent_rows"])?;
+        let next=[self.vector(history)?,self.vector(state)?,self.vector(rows)?];
+        let saved=if keep {Some([self.vector(prepared)?,self.vector(decay)?])} else {None};
+        let [prepared,decay]=saved.as_ref().map_or([0;2],|pair|[pair[0].device_address(),pair[1].device_address()]);
+        let mut args=Arguments {shape,inputs:input.map(DeviceVector::device_address),gate:gate.device_address(),
+            weights:weight.map(DeviceVector::device_address),
+            outputs:[next[0].device_address(),next[1].device_address(),next[2].device_address(),prepared,decay]};
+        crate::prompt_launches::record("recurrent_rows");
+        // SAFETY: Exact input, gate and weight extents, context and contiguity
+        // were checked above. Fresh owners do not alias inputs or each other.
+        // The head count and block size give every output word one writer, and
+        // no thread reads uninitialized output. The argument is copied at
+        // launch. The queue keeps all owners through the ordered stream drain.
+        unsafe {self.launch_flash("recurrent_rows",shape.heads,THREADS,&mut [parameter(&mut args)])}?;
+        Ok((next,saved))
     }
     /// Busy-poll the stream instead of the driver's default wait, whose wake-up
     /// latency dominates short GPU segments between host collectives.

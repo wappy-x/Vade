@@ -1,7 +1,7 @@
 //! How many launches each prompt row kernel took in this process, for proof logs: a model
 //! proof must show that the model reached a new kernel, not only that a bench did.
 use std::sync::atomic::{AtomicU64,Ordering};
-const COUNT:usize=90;
+const COUNT:usize=93;
 const NAMES:[&str;COUNT]=["fp8_rows_tile","prompt_rows","plain_rows_tile","scores_rows_tile","scores_rows_tile_packed","step_rows_block","transpose_tiles","nv_rows_tile","expert_group","mx_rows_tile","mx_rows_groups","plain_rows_small","plain_rows_few","prompt_rows_small","nv_rows_small","fp8_rows_small","fp8_rows_multi","fp8_rows_few","mx_rows_small",
     // Lane P's reading entries: prompt_operation records the first seven; the mHC launcher records the last two.
     "prompt_permute","prompt_place","prompt_prepare","prompt_gated_norm","prompt_route","prompt_fold","prompt_conv","mhc_residual_rows","mhc_project_tile",
@@ -77,9 +77,13 @@ const NAMES:[&str;COUNT]=["fp8_rows_tile","prompt_rows","plain_rows_tile","score
     "mx_tc_quantize_pack",
     // WIDE PHASE: a prompt group above 3,072 rows drained the stream at the end of a mixer run or of a layer, so no
     // buffer it dropped before stays charged (tp bounded_decoder rows_phase_end; the charge rule `wide_phase_workspace`).
-    "wide_mixer_complete"];
+    "wide_mixer_complete",
+    // LATENT ROWS (RB3, P7): the launches of the rows form of a check pass (latent_absorb_rows::rows_form: the same bits).
+    // They count in latent_absorption_tile too, the form they replace (the served BF16 gate reads that count).
+    "latent_rows_dense","latent_rows_attention","recurrent_rows"];
 static COUNTS:[AtomicU64;COUNT]=[const {AtomicU64::new(0)};COUNT];
-pub fn record(kernel:&str) {if let Some(at)=NAMES.iter().position(|n|*n==kernel) {COUNTS[at].fetch_add(1,Ordering::Relaxed);}}
+pub fn record(kernel:&str) {if kernel.starts_with("latent_rows_") {record("latent_absorption_tile");}
+    if let Some(at)=NAMES.iter().position(|n|*n==kernel) {COUNTS[at].fetch_add(1,Ordering::Relaxed);}}
 /// One text line of all counts.
 pub fn line()->String {NAMES.iter().zip(&COUNTS).map(|(n,c)|format!("{n}={}",c.load(Ordering::Relaxed))).collect::<Vec<_>>().join(" ")}
 /// The MXFP8 word counters alone (`mx_tc_*` and `mx_scalar_layer`), for the served proof lines `SERVED MX COUNTS`.
@@ -90,12 +94,23 @@ pub const FP8_NAMES:[&str;5]=["fp8_tc_step","fp8_tc_rows","fp8_tc_tile","fp8_gen
 pub fn fp8_line()->String {NAMES.iter().zip(&COUNTS).filter(|(n,_)|FP8_NAMES.contains(n)).map(|(n,c)|format!("{n}={}",c.load(Ordering::Relaxed))).collect::<Vec<_>>().join(" ")}
 #[cfg(test)]
 mod tests {
+    fn count(line:&str,name:&str)->Option<u64> {
+        line.split_whitespace().find_map(|field| {
+            let (key,value)=field.split_once('=')?;
+            (key==name).then(||value.parse::<u64>().unwrap())
+        })
+    }
+    fn check_increment(name:&str) {
+        let before=count(&super::line(),name).unwrap();
+        super::record(name);
+        // Other tests can record the same kernel between these two snapshots.
+        assert!(count(&super::line(),name).unwrap()>before,"{name}");
+    }
     /// Every name has its own count, the last name too (a list longer than the counts would drop it from the line).
     #[test]
     fn every_name_counts_and_the_mx_line_holds_its_five() {
-        let count=|line:&str,name:&str|line.split(' ').find_map(|f|f.strip_prefix(&format!("{name}="))?.parse::<u64>().ok());
         assert_eq!(super::line().split(' ').count(),super::NAMES.len());
-        for name in super::NAMES {let before=count(&super::line(),name).unwrap();super::record(name);assert!(count(&super::line(),name).unwrap()>before,"{name}");}
+        for name in super::NAMES {check_increment(name);}
         let line=super::mx_line();assert_eq!(line.split(' ').count(),5);
         for name in super::MX_NAMES {assert!(count(&line,name).unwrap()>=1,"{name}");}
         let line=super::fp8_line();assert_eq!(line.split(' ').count(),5);
@@ -104,13 +119,13 @@ mod tests {
 
     #[test]
     fn counts_named_kernels_and_ignores_others() {
-        super::record("transpose_tiles");super::record("other");
-        assert!(super::line().contains("transpose_tiles=1") && !super::line().contains("other"));
+        check_increment("transpose_tiles");super::record("other");
+        assert_eq!(count(&super::line(),"other"),None);
     }
     #[test]
     fn counts_every_reading_entry_the_prompt_and_mhc_launchers_can_choose() {
         for name in ["prompt_permute","prompt_place","prompt_prepare","prompt_gated_norm","prompt_route","prompt_fold","prompt_conv","mhc_residual_rows","mhc_project_tile"] {
-            super::record(name);assert!(super::line().contains(&format!("{name}=1")),"{name}");
+            check_increment(name);
         }
     }
 }

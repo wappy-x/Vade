@@ -12,6 +12,7 @@ mod kept_charge;
 #[cfg(test)] mod absorbed_charges_tests;
 #[cfg(all(test,target_os="linux"))] mod kept_device_tests;
 #[cfg(all(test,target_os="linux"))] mod kept_device_cache;
+#[cfg(all(test,target_os="linux"))] mod sum_refusal_tests;
 /// In the row count of a prompt group command: this group ends its prompt (decode steps follow).
 const LAST_GROUP:u32=1<<31;
 /// In the row count of a verify pass command (6): a greedy pass, each row answers with the ID its head picks.
@@ -194,8 +195,11 @@ impl<C:Compute,E:Exchange> Compute for Split<C,E> {
     fn finish(&self,p:C::Pass,x:&C::Value)->Result<C::Value> {self.compute.finish(p,x)}
     fn mx(&self,p:&Mxfp8Projection<'_>,x:&C::Value)->Result<C::Value> {if self.compute.projects_complete_rows() {return self.compute.mx(p,x);}self.gathered(&self.compute.mx(&p.split(self.topology)?,x)?,p.shape().rows())}
     fn round(&self,x:&C::Value)->Result<C::Value> {self.compute.round(x)}
+    fn bf16_sum(&self,x:&C::Value,y:&C::Value)->Result<C::Value> {self.compute.bf16_sum(x,y)}
     fn mean(&self,x:&C::Value,s:u32,h:u32)->Result<C::Value> {self.compute.mean(x,s,h)}
     fn prompt(&self,s:spark_gpu_probe::prompt_ops::Shape,x:[Option<&C::Value>;5],w:&[f32])->Result<C::Value> {self.compute.prompt(s,x,w)}
+    fn rows_recurrent(&self,s:spark_gpu_probe::recurrent_rows::Shape,x:[&C::Value;7],gate:&C::Value,w:[&[f32];3],keep:bool)
+        ->Result<Option<crate::bounded_decoder::RecurrentRows<C::Value>>> {self.compute.rows_recurrent(s,x,gate,w,keep)}
     fn rows_embedding(&self,t:&[u32],n:usize)->Result<Option<C::Value>> {self.compute.rows_embedding(t,n)}
     fn rows_project(&self,c:&CheckpointAdmission,name:&str,x:&C::Value,m:usize,round:bool)->Result<Option<C::Value>> {self.compute.rows_project(c,name,x,m,round)}
     fn rows_stage(&self,c:&CheckpointAdmission,jobs:&[(&str,&C::Value,bool)],m:usize)->Result<Option<Vec<C::Value>>> {self.compute.rows_stage(c,jobs,m)}

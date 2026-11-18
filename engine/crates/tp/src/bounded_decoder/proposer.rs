@@ -67,12 +67,8 @@ impl<'f,C:Compute> Decoder<'f,C> {
     pub(super) fn parameter(&self,name:&str)->Result<&Vec<f32>> {
         self.parameters.get(name).or_else(||self.draft.as_ref().and_then(|draft|draft.parameters.get(name))).ok_or_else(||format!("missing bounded parameter {name}"))
     }
-    /// The residual add of a BF16 model: each sum is rounded to BF16.
-    pub(super) fn bf16_sum(&self,x:&C::Value,y:&C::Value)->Result<C::Value> {
-        let (x,y)=(self.compute.read(x)?,self.compute.read(y)?);need(x.len()==y.len(),"residual sum extent differs")?;
-        let sum=x.iter().zip(&y).map(|(a,b)|engine_model::plan::layer::cast::round_bf16(a+b).map_err(|e|e.to_string())).collect::<Result<Vec<_>>>()?;
-        self.compute.upload(&sum)
-    }
+    /// The residual add of a BF16 model: each sum is rounded to BF16 (`Compute::bf16_sum`, on the device when it can).
+    pub(super) fn bf16_sum(&self,x:&C::Value,y:&C::Value)->Result<C::Value> {self.compute.bf16_sum(x,y)}
     /// `depth` proposals for the tokens after `token`. `hidden` is the target's last hidden
     /// state of the row before `token`. The layer sees no earlier position (context 1).
     pub fn propose(&self,hidden:&C::Value,token:u32,depth:usize)->Result<Vec<u32>> {self.propose_after(hidden,token,depth,None).map(|(tokens,_)|tokens)}

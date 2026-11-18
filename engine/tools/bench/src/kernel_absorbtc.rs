@@ -8,6 +8,8 @@ const GUARD: [u8; 16] = [0x5a; 16];
 #[path = "kernel_latent3.rs"] pub(crate) mod latent3;
 /// The small form of query and project in the tile (seat CHATS4): bits of the new image against the old, and time.
 #[path = "kernel_latentsmall.rs"] pub(crate) mod latentsmall;
+/// The rows form of a check pass (seat RB3): bits of its two entries against the tile of the same image, and time.
+#[path = "kernel_latentrows.rs"] pub(crate) mod latentrows;
 /// Mirror of gpu/src/prompt_ops.rs `Shape` and `Arguments` (repr(C)). The op numbers follow the enum order there:
 /// AbsorbQuery 21, AbsorbScores 22, AbsorbValues 24, AbsorbProject 25. The kernel traps on any other op.
 #[repr(C)] #[derive(Clone, Copy)]

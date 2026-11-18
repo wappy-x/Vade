@@ -84,7 +84,7 @@ fn source_files(root: &Path) -> io::Result<Vec<PathBuf>> {
     let mut files = vec![root.join("kernels/Cargo.toml"), root.join("kernel_params.rs"), root.join("src/fp8_abi.rs"), root.join("src/fp4_abi.rs"),
         root.join("src/projection_params.rs"), root.join("src/gdn_params.rs"), root.join("src/next_params.rs"), root.join("src/router_abi.rs"), root.join("src/mhc_params.rs"),
         root.join("src/mhc_boundary.rs"), root.join("src/tp_payload.rs"), root.join("src/expert_ops.rs"), root.join("src/tc_contract.rs"), root.join("src/tc_f8.rs"), root.join("src/tc_abi.rs"), root.join("src/next_math.rs"),
-        root.join("src/causal_ops.rs"), root.join("src/latent_ops.rs"), root.join("src/latent_absorb.rs"), root.join("src/latent_absorb_rows.rs"), root.join("src/absorb_tc.rs"), root.join("src/prompt_ops.rs"), root.join("src/mxfp8_quantize.rs"),
+        root.join("src/causal_ops.rs"), root.join("src/recurrent_rows.rs"), root.join("src/latent_ops.rs"), root.join("src/latent_absorb.rs"), root.join("src/latent_absorb_rows.rs"), root.join("src/absorb_tc.rs"), root.join("src/prompt_ops.rs"), root.join("src/mxfp8_quantize.rs"),
         root.join("src/resident_launch.rs"), root.join("src/device_route.rs"), root.join("src/prompt_route.rs"), root.join("src/bus_shadow.rs"), root.join("src/tp_put_wide.rs"), root.join("src/tp_put_join.rs"), root.join("src/pair_split.rs"), root.join("src/plain_admission.rs"), root.join("src/prompt_admission.rs"), root.join("src/compact.rs"),
         root.join("src/ordered_projection_kernel.rs"), root.join("src/frontend_math.rs"), root.join("src/quantize_sweep.rs"), root.join("src/wide_weights.rs"), root.join("src/head_bound.rs"),
         root.join("build-kernels/src/main.rs"), root.join("ptx_stamp.rs")];
@@ -154,11 +154,15 @@ pub fn stamp(root: &Path, ptx: &Path, variant: Variant) -> io::Result<()> {
 /// A scalar one-job layer launch is slower above 40 (77.6 to 81.3 us cold): no layer matrix is on the scalar word.
 #[allow(dead_code)]
 // The project block can have 1024 threads; 64 registers allow that block to launch.
-const REGISTER_CAPS: [(&str, u32); 30] = [("mx_rows_tile", 160), ("resident_launch_mx_rows_tile", 160), ("resident_launch_mx", 64), ("mhc_boundary_project", 64), ("mhc_boundary_block", 128),
+const REGISTER_CAPS: [(&str, u32); 32] = [("mx_rows_tile", 160), ("resident_launch_mx_rows_tile", 160), ("resident_launch_mx", 64), ("mhc_boundary_project", 64), ("mhc_boundary_block", 128),
     // Absorbed attention on the tensor cores: 256-thread blocks, the prompt entry, the three step entries and the two
     // recorded entries. 128 registers keep two blocks (16 warps) an SM; a warp carries 48 accumulator registers.
     ("latent_absorption_tile", 128), ("latent_absorption", 128), ("latent_absorption_scores", 128),
     ("latent_absorption_values", 128), ("resident_launch_absorb_dense", 128), ("resident_launch_absorb_attention", 128),
+    // The rows form's scores and values of a check pass (RB3, P7), direct and recorded: 168 registers uncapped (one block an
+    // SM). Measured (kernel-bench --latent-rows, run rb3-k3, us a launch at cache 1,024): values of 4 rows 52.7 -> 37.1,
+    // of 8 rows 77.0 -> 67.9 with the cap; of 1 and 2 rows 29.8 -> 32.6 and 30.0 -> 33.4. Its dense entry takes 106, no cap.
+    ("latent_rows_attention", 128), ("resident_launch_latent_rows_attention", 128),
     // Recorded row selection uses the same 1024-thread bound.
     ("resident_launch_prompt_select_rows", 64),
     ("flash_bf16_mma_latency", 128), ("flash_bf16_mma_latency_group", 128), ("gemm_fp8_block128", 128), ("fp8_routed_gate", 128), ("fp8_routed_up", 128),

@@ -231,8 +231,9 @@ fn the_kernel_model_gives_every_word_of_the_prompt_form_its_word_function() {
         let s=Shape {op:Op::AbsorbQuery,heads:h as u32,dim:d as u32,taps:v as u32,rows:r as u32,cols:k as u32,first:c as u32,slots:n as u32,..Shape::new(Op::AbsorbQuery,m).unwrap()};
         let run=|op:Op,x:&[f32]|->Vec<f32> {
             let s=Shape {op,..s};let f=Form::rows(s).unwrap();let (_,_,units,words)=s.lengths().unwrap();
-            let (name,blocks,threads)=crate::latent_absorb_rows::launch(s).unwrap();assert_eq!((name,threads),("latent_absorption_tile",THREADS));
-            assert_eq!(blocks as usize,f.blocks());
+            // The tile's model on every shape; a check pass is served by the rows form (latent_absorb_rows/rows_form_tests.rs).
+            let (name,blocks,threads)=crate::latent_absorb_rows::launch(s).unwrap();assert_eq!(threads,THREADS);
+            if name=="latent_absorption_tile" {assert_eq!(blocks as usize,f.blocks());} else {assert!(m<=SMALL_TOKENS && name.starts_with("latent_rows_"));}
             let table=if op==Op::AbsorbQuery {&[][..]} else {&selected[..]};
             let have=model(f,x,&latent,table,&weight,f.blocks(),units*words);
             let inputs:[&[f32];5]=match op {Op::AbsorbQuery=>[x,&[],&[],&[],&[]],Op::AbsorbProject=>[x,&selected,&[],&[],&[]],_=>[x,&latent,&selected,&[],&[]]};

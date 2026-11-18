@@ -27,7 +27,7 @@ pub(crate) fn prompt_rows(p:Arguments) {
     // SAFETY: The host validates Shape::lengths and passes those exact extents
     // here, with same-context contiguous owners that live through stream
     // completion. Inputs are immutable. The private output overlaps no input. It is zeroed earlier on the stream for every op
-    // except a Transpose of a swept shape (prompt_writes), whose output may be unwritten: that branch makes its one word in a local and
+    // except a Transpose of a swept shape (prompt_writes) or HistoryRows, whose output may be unwritten: that branch makes its one word in a local and
     // stores it through the raw output pointer, and no reference over the output is built before the store. thread_unit is a bijection on units,
     // so this guarded thread creates only its own disjoint output unit. A StepRows
     // thread owns one value column of the state and of the outputs, by raw offsets
@@ -149,9 +149,9 @@ pub(crate) fn prompt_rows(p:Arguments) {
         if block!=0 || (p.shape.score_lines() && thread/(p.shape.tokens as usize*p.shape.heads as usize)!=0) {return;}
         let index=thread_unit(p.shape,unit_thread);
         let weight=core::slice::from_raw_parts(p.weight as *const f32,p.weights as usize);
-        // Transpose may run on an output nobody has written (prompt_writes): its one word a unit is made in a local and stored through the
+        // Transpose and HistoryRows may run on an output nobody has written: the one word a unit is made in a local and stored through the
         // raw pointer, so no reference over the output exists before the store. Every other op keeps the zeroed output and the slice.
-        if p.shape.op==crate::prompt_ops::Op::Transpose {
+        if matches!(p.shape.op,Op::Transpose|Op::HistoryRows) {
             let mut word=[0.0f32;1];unit(p.shape,index,x,weight,&mut word);
             *(p.output as *mut f32).add(index*words)=word[0];return;
         }

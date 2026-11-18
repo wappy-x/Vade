@@ -341,6 +341,8 @@ fn exchange_pipeline_identity(
 ) -> Result<()> {
     use std::io::{Read, Write};
     let io = |e| format!("pipeline artifact handshake: {e}; refusing startup");
+    #[cfg(test)]
+    identity_tests::wait_for_prepared_peer()?;
     stream.set_read_timeout(Some(limit)).map_err(io)?;
     stream.set_write_timeout(Some(limit)).map_err(io)?;
     // Fixed, versioned header; agree on the layout before exchanging bounded rows.
@@ -772,14 +774,50 @@ mod identity_tests {
         engine_model::flash::manifest::ReceiptPlan::open(root).unwrap().finish().unwrap();
     }
 
+    type ReadyPeer = (std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>);
+    std::thread_local! {
+        static READY_PEER: std::cell::RefCell<Option<ReadyPeer>> = const { std::cell::RefCell::new(None) };
+    }
+
+    // Only the paired checkpoint fixture installs these channels. Both ranks must have
+    // hashed their own executable, metadata, settings and manifest before either times I/O.
+    pub(super) fn wait_for_prepared_peer() -> super::Result<()> {
+        if let Some((send, receive)) = READY_PEER.take() {
+            send.send(()).map_err(|_| "test peer stopped during identity preparation")?;
+            receive.recv().map_err(|_| "test peer stopped during identity preparation")?;
+        }
+        Ok(())
+    }
+
+    fn start_rank(stream: &mut TcpStream, root: &Path, peer: ReadyPeer) -> super::Result<()> {
+        // Disconnect the peer if preparation returns early or panics before the exchange.
+        struct ClearPeer;
+        impl Drop for ClearPeer {
+            fn drop(&mut self) { READY_PEER.take(); }
+        }
+        let _clear = ClearPeer;
+        READY_PEER.set(Some(peer));
+        super::verify_pipeline_artifacts(stream, c"ptx", root, None, experiments(), true, Duration::from_secs(5))
+    }
+
     /// Both ranks run the identity step of a start, as next_batched_service.rs calls it.
-    fn start(rank0: &std::path::Path, rank1: &std::path::Path) -> (super::Result<()>, super::Result<()>) {
+    fn start(rank0: &Path, rank1: &Path) -> (super::Result<()>, super::Result<()>) {
         let (mut front, mut back) = pair();
+        let (front_ready, from_front) = std::sync::mpsc::channel();
+        let (back_ready, from_back) = std::sync::mpsc::channel();
         std::thread::scope(|scope| {
-            let peer = scope.spawn(|| super::verify_pipeline_artifacts(&mut back, c"ptx", rank1, None, experiments(), true, Duration::from_secs(5)));
-            let result = super::verify_pipeline_artifacts(&mut front, c"ptx", rank0, None, experiments(), true, Duration::from_secs(5));
+            let peer = scope.spawn(|| start_rank(&mut back, rank1, (back_ready, from_front)));
+            let result = start_rank(&mut front, rank0, (front_ready, from_back));
             (result, peer.join().unwrap())
         })
+    }
+
+    #[test]
+    fn a_peer_that_cannot_prepare_identity_releases_the_waiting_start() {
+        let good = checkpoint(MIXED_QUANTIZATION, b"fp4");
+        let (front, back) = start(&good, &good.join("absent"));
+        assert_eq!(front.unwrap_err(), "test peer stopped during identity preparation");
+        assert!(back.unwrap_err().contains("TP identity open"));
     }
 
     fn list(root: &std::path::Path) -> Option<Vec<u8>> { std::fs::read(root.join("manifest.sha256")).ok() }

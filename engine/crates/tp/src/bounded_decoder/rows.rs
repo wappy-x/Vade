@@ -5,7 +5,7 @@ use super::*;
 use spark_gpu_probe::prompt_ops::{Op as Row,Shape as RowShape};
 #[path="rows/pools.rs"] mod pools;
 #[path="rows/seed.rs"] mod seed;
-#[path="rows/shared.rs"] mod shared;
+#[path="rows/shared.rs"] mod shared; #[path="rows/recurrent.rs"] mod recurrent;
 #[path="rows/wide_charge.rs"] mod wide_charge;
 use wide_charge::{wide_phase_group,wide_phase_workspace};
 #[cfg(test)] pub(crate) use wide_charge::wide_cut_layers;
@@ -827,7 +827,7 @@ impl<'f,C:Compute> Decoder<'f,C> {
         let in_place=keep && first>0 && m<=VERIFY_ROWS;
         let room=|width:usize|->Result<usize> {(self.capacity.saturating_sub(last).min(HELD_ROOM as u64) as usize).checked_mul(width).ok_or_else(||"cache room overflow".to_owned())};
             match step.kind {
-                Kind::Conv=>{let TokenMixer::Kda(k)=d.layers[layer].mixer else {return Err("convolution requires a recurrent layer".into());};
+                Kind::Conv=>{if let Some(done)=self.rows_recurrent_span(layer,index,plan,chat,values)? {return Ok(done);}let TokenMixer::Kda(k)=d.layers[layer].mixer else {return Err("convolution requires a recurrent layer".into());};
                     let mut s=row_shape(Row::ConvRows,m)?;s.heads=number(self.kda_layout(layer)?.local_heads() as u64)?;s.dim=number(k.head_dim)?;s.taps=number(k.conv)?;
                     let x=[Some(&values[&step.inputs[0]]),Some(&values[&step.inputs[1]]),Some(&values[&step.inputs[2]]),state.get(&step.inputs[3]),None];
                     let mut weight=Vec::new();for w in &step.weights {weight.extend_from_slice(&self.parameters[&w.name]);}
@@ -1091,16 +1091,15 @@ impl<'f,C:Compute> Decoder<'f,C> {
                 s.cols=number(step.outputs[0].shape[0])?;s.taps=u32::from(d.routing.normalize_selected);s.bound=d.routing.scale as f32;s.epsilon=d.epsilon as f32;
                 let mut weight=Vec::new();for w in &step.weights {weight.extend_from_slice(&self.parameters[&w.name]);}
                 let (_,_,_,words)=s.lengths().ok_or("invalid prompt route shape")?;
-                let result=b.prompt(RowShape::wrapped(s,m).ok_or("prompt row count exceeds ABI")?,[Some(&values[&step.inputs[0]]),None,None,None,None],&weight)?;
-                let k=s.cols as usize;
+                let rows=RowShape::wrapped(s,m).map(|mut r|{r.first=u32::from(spark_gpu_probe::prompt_admission::planes_admitted(r));r}).ok_or("prompt row count exceeds ABI")?;
+                let result=b.prompt(rows,[Some(&values[&step.inputs[0]]),None,None,None,None],&weight)?;let k=s.cols as usize;
                 {
-                    // IDs and weights are the first 2k words of each route row.
-                    // Two ordered joins extract their planes without reading the
-                    // raw routing result or any selected ID on the host.
+                    // IDs and weights: the first 2k words of each route row, joined in order; or with ROUTE PLANES (P8) two
+                    // token-major planes the router wrote at the start, taken as two views. No host read either way.
                     need(b.words(&result)==m*words,"prompt route extent differs")?;
                     for (output,first) in [(0,0),(1,k)] {
-                        let parts=(0..m).map(|token|b.range(&result,token*words+first,k)).collect::<Result<Vec<_>>>()?;
-                        values.insert(step.outputs[output].name.clone(),b.join(&parts.iter().collect::<Vec<_>>())?);
+                        let parts=if rows.first!=0 {vec![b.range(&result,first*m,m*k)?]} else {(0..m).map(|token|b.range(&result,token*words+first,k)).collect::<Result<Vec<_>>>()?};
+                        values.insert(step.outputs[output].name.clone(),if rows.first!=0 {parts.into_iter().next().ok_or("route plane is absent")?} else {b.join(&parts.iter().collect::<Vec<_>>())?});
                     }
                 }},
             // ROWS FOLD: a routed down step that its fold can take (`rows_fold_waits`) runs at the fold step, below.

@@ -7,6 +7,9 @@ fn boundary(kind:Kind)->bool {
     matches!(kind,Kind::Expert|Kind::Fp8Tile|Kind::Plain|Kind::PlainBf16|Kind::Mx|Kind::Mixed|Kind::NvStream|Kind::NvTile|Kind::NvQuarters|Kind::DeviceRoute|Kind::Prepare|Kind::Collapse|Kind::Combine)
         || matches!(kind,Kind::MxRows2|Kind::MxRows4|Kind::MxRows8|Kind::MxRows8w|Kind::MxRowsTile|Kind::MixedRows|Kind::FoldRows|Kind::FoldRowsF32
             |Kind::Fp8RowsSmall|Kind::Fp8RowsMulti|Kind::Fp8RowsFew|Kind::Fp8RowsShare|Kind::PlainRowsSmall)
+        // LATENT ROWS: they replace latent_absorption_tile in a check pass, which ended the recorded piece, so no prefetch
+        // was ever placed across one. They stay boundaries: the prefetch placement of a row pass is what it was.
+        || matches!(kind,Kind::LatentRowsDense|Kind::LatentRowsAttention)
 }
 /// The BF16 forms of the mixed and plain batch launches read as the FP32 mixed launch does, so they are boundaries too.
 /// They are named apart so that a prefetch they stop is counted (`shadow[0]`, print only).

@@ -88,6 +88,7 @@ pub mod absorb_tc;
 pub mod latent_absorb_rows;
 #[allow(clippy::chunks_exact_to_as_chunks, clippy::eq_op, clippy::manual_is_multiple_of, clippy::manual_range_contains, clippy::manual_swap, clippy::mut_range_bound, clippy::needless_range_loop, clippy::suspicious_assignment_formatting)] // Shared with the NVPTX crate; fix it with the kernels.
 pub mod prompt_ops;
+pub mod recurrent_rows;
 #[allow(clippy::assertions_on_constants, clippy::chunks_exact_to_as_chunks, clippy::collapsible_if, clippy::manual_is_multiple_of, clippy::needless_range_loop, clippy::suspicious_assignment_formatting)] // Shared with the NVPTX crate; fix it with the kernels.
 pub mod expert_ops;
 pub use mhc_reference::reduction;

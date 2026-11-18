@@ -12,7 +12,7 @@ pub struct Device<'b,'d> {pub backend:&'b Backend<'d>,weights:Rc<RefCell<crate::
     blocks:Rc<RefCell<BTreeMap<(usize,usize),ResidentMhcBoundary<'b,'d>>>>,mhc_host:Option<MhcHostLink<'b,'d>>,
     /// D1: one-row decode boundaries as one GPU launch (with_mhc_fused).
     mhc_fused:bool,
-    stages:Rc<RefCell<[[u128;2];4]>>,cost:Rc<crate::resident_profile::Cost>,memo:RefCell<Memo<'d>>,copies:RefCell<Option<DeviceVector<'d>>>,selection_checks:RefCell<Vec<(Rc<DeviceVector<'d>>,f32)>>,selection_read:RefCell<Option<(std::rc::Weak<DeviceVector<'d>>,Vec<f32>)>>,gathered:RefCell<Option<Gathered<'d>>>,ahead:RefCell<Option<Ahead<'b,'d>>>,asked:RefCell<BTreeMap<String,super::asked::Asked<DeviceVector<'d>>>>,memo_epoch:Cell<u64>,ahead_counts:Cell<[u64;2]>,selection_counts:Cell<[u64;2]>,selection_shortcut:Cell<bool>,first_step:Cell<bool>,memo_share:Cell<bool>,asked_by_output:Cell<bool>,asked_counts:Cell<[u64;2]>,screen_nan:Cell<Option<u32>>,screen_keep:Cell<bool>,source:Rc<Cell<u64>>,programs:RefCell<BTreeMap<(Vec<u32>,u64),spark_gpu_probe::driver::ResidentProgram<'b,'d>>>,
+    stages:Rc<RefCell<[[u128;2];4]>>,cost:Rc<crate::resident_profile::Cost>,memo:RefCell<Memo<'d>>,copies:RefCell<Option<DeviceVector<'d>>>,selection_checks:RefCell<Vec<(Rc<DeviceVector<'d>>,f32)>>,sum_checks:RefCell<Vec<SumCheck<'d>>>,selection_read:RefCell<Option<(std::rc::Weak<DeviceVector<'d>>,Vec<f32>)>>,gathered:RefCell<Option<Gathered<'d>>>,ahead:RefCell<Option<Ahead<'b,'d>>>,asked:RefCell<BTreeMap<String,super::asked::Asked<DeviceVector<'d>>>>,memo_epoch:Cell<u64>,ahead_counts:Cell<[u64;2]>,selection_counts:Cell<[u64;2]>,selection_shortcut:Cell<bool>,first_step:Cell<bool>,memo_share:Cell<bool>,asked_by_output:Cell<bool>,asked_counts:Cell<[u64;2]>,screen_nan:Cell<Option<u32>>,screen_keep:Cell<bool>,source:Rc<Cell<u64>>,programs:RefCell<BTreeMap<(Vec<u32>,u64),spark_gpu_probe::driver::ResidentProgram<'b,'d>>>,
     row_workspace:RefCell<Option<DeviceVector<'d>>>,small_rows:Cell<bool>,
     serving:Option<RefCell<Option<(u64,std::time::Instant,BackendStats)>> >,state_copies:Cell<usize>,
     /// Bytes the next small-group trim keeps above its usual room: set by `batch_rows`, used once.
@@ -99,7 +99,7 @@ impl Clone for Device<'_,'_> {
         memo_bound:self.memo_bound.clone(),
         #[cfg(feature="kernel-bench")] probe:self.probe.clone(),
         #[cfg(feature="kernel-bench")] attention_calls:self.attention_calls.clone(),
-        blocks:self.blocks.clone(),mhc_host:self.mhc_host.clone(),mhc_fused:self.mhc_fused,stages:self.stages.clone(),cost:self.cost.clone(),memo:RefCell::new(Memo {limit:self.memo_bound.plan().map_or(0,|p|p.bytes()),..Memo::default()}),copies:RefCell::new(None),selection_checks:RefCell::new(Vec::new()),selection_read:RefCell::new(None),gathered:RefCell::new(None),ahead:RefCell::new(None),asked:RefCell::new(BTreeMap::new()),memo_epoch:Cell::new(0),ahead_counts:Cell::new([0;2]),selection_counts:Cell::new([0;2]),selection_shortcut:Cell::new(true),first_step:Cell::new(true),memo_share:Cell::new(true),asked_by_output:Cell::new(false),asked_counts:Cell::new([0;2]),screen_nan:Cell::new(None),screen_keep:Cell::new(false),row_workspace:RefCell::new(None),small_rows:Cell::new(false),source:self.source.clone(),programs:RefCell::new(BTreeMap::new()),serving:self.serving.as_ref().map(|_|RefCell::new(None)),state_copies:Cell::new(0),batch_keep:Cell::new(0),batch_route:Cell::new(0),group_charge:Cell::new(self.group_charge.get()),verify_route:Cell::new(false),group_follows:Cell::new(false),spares_kept:Cell::new(false),held_stage:RefCell::new(None)}}
+        blocks:self.blocks.clone(),mhc_host:self.mhc_host.clone(),mhc_fused:self.mhc_fused,stages:self.stages.clone(),cost:self.cost.clone(),memo:RefCell::new(Memo {limit:self.memo_bound.plan().map_or(0,|p|p.bytes()),..Memo::default()}),copies:RefCell::new(None),selection_checks:RefCell::new(Vec::new()),sum_checks:RefCell::new(Vec::new()),selection_read:RefCell::new(None),gathered:RefCell::new(None),ahead:RefCell::new(None),asked:RefCell::new(BTreeMap::new()),memo_epoch:Cell::new(0),ahead_counts:Cell::new([0;2]),selection_counts:Cell::new([0;2]),selection_shortcut:Cell::new(true),first_step:Cell::new(true),memo_share:Cell::new(true),asked_by_output:Cell::new(false),asked_counts:Cell::new([0;2]),screen_nan:Cell::new(None),screen_keep:Cell::new(false),row_workspace:RefCell::new(None),small_rows:Cell::new(false),source:self.source.clone(),programs:RefCell::new(BTreeMap::new()),serving:self.serving.as_ref().map(|_|RefCell::new(None)),state_copies:Cell::new(0),batch_keep:Cell::new(0),batch_route:Cell::new(0),group_charge:Cell::new(self.group_charge.get()),verify_route:Cell::new(false),group_follows:Cell::new(false),spares_kept:Cell::new(false),held_stage:RefCell::new(None)}}
 }
 /// The last Gather this device read: its output vector, the identity of the rows it gathered
 /// from, and the row ids the device returned. Row `slot` of the output is row `ids[slot]` of the source.
@@ -110,6 +110,9 @@ struct Gathered<'d> {output:std::rc::Weak<DeviceVector<'d>>,cache:std::rc::Weak<
 /// (`epoch`) and the rows are those the Gather read (`source`). Sorted by row id.
 struct Ahead<'b,'d> {name:String,round:bool,topology:(u32,u32),source:Lineage,width:usize,epoch:u64,rows:Vec<(u32,Option<Value<'b,'d>>,u64)>}
 struct Pending<'b,'d> {post:Option<(MhcBoundaryPass<'b,'d>,Rc<DeviceVector<'d>>)>,error:Option<String>,state_prefix:Option<usize>}
+/// A device residual sum not yet checked (`bf16_sum`): its argmax row (word 2 is 1.0 only when every word is finite), the
+/// partials that row was reduced from, and both operands, kept so a refusal gives the host form's own error.
+struct SumCheck<'d> {flag:DeviceVector<'d>,_partials:DeviceVector<'d>,x:Rc<DeviceVector<'d>>,y:Rc<DeviceVector<'d>>,words:usize}
 /// Held rows of one chat and layer: one allocation with room. Every view of it, whatever its
 /// start, is listed with the storage word where it ends, and is live as long as its device
 /// vector has a handle. An append may write only past the last live end; else it copies.
@@ -150,7 +153,7 @@ impl<'b,'d> Device<'b,'d> {
             memo_bound:Rc::new(crate::projection_memo::Bound::default()),
             #[cfg(feature="kernel-bench")] probe:Rc::new(RefCell::new(None)),
             #[cfg(feature="kernel-bench")] attention_calls:Rc::new(Cell::new(0)),
-            norms:Rc::new(RefCell::new(BTreeMap::new())),blocks:Rc::new(RefCell::new(BTreeMap::new())),mhc_host:None,mhc_fused:false,stages:Rc::new(RefCell::new([[0;2];4])),cost:Rc::new(crate::resident_profile::Cost::new(cost)),memo:RefCell::new(Memo::default()),copies:RefCell::new(None),selection_checks:RefCell::new(Vec::new()),selection_read:RefCell::new(None),gathered:RefCell::new(None),ahead:RefCell::new(None),asked:RefCell::new(BTreeMap::new()),memo_epoch:Cell::new(0),ahead_counts:Cell::new([0;2]),selection_counts:Cell::new([0;2]),selection_shortcut:Cell::new(true),first_step:Cell::new(true),memo_share:Cell::new(true),asked_by_output:Cell::new(false),asked_counts:Cell::new([0;2]),screen_nan:Cell::new(None),screen_keep:Cell::new(false),row_workspace:RefCell::new(None),small_rows:Cell::new(false),source:Rc::new(Cell::new(0)),programs:RefCell::new(BTreeMap::new()),serving:None,state_copies:Cell::new(0),batch_keep:Cell::new(0),batch_route:Cell::new(0),group_charge:Cell::new(usize::MAX),verify_route:Cell::new(false),group_follows:Cell::new(false),spares_kept:Cell::new(false),held_stage:RefCell::new(None)}
+            norms:Rc::new(RefCell::new(BTreeMap::new())),blocks:Rc::new(RefCell::new(BTreeMap::new())),mhc_host:None,mhc_fused:false,stages:Rc::new(RefCell::new([[0;2];4])),cost:Rc::new(crate::resident_profile::Cost::new(cost)),memo:RefCell::new(Memo::default()),copies:RefCell::new(None),selection_checks:RefCell::new(Vec::new()),sum_checks:RefCell::new(Vec::new()),selection_read:RefCell::new(None),gathered:RefCell::new(None),ahead:RefCell::new(None),asked:RefCell::new(BTreeMap::new()),memo_epoch:Cell::new(0),ahead_counts:Cell::new([0;2]),selection_counts:Cell::new([0;2]),selection_shortcut:Cell::new(true),first_step:Cell::new(true),memo_share:Cell::new(true),asked_by_output:Cell::new(false),asked_counts:Cell::new([0;2]),screen_nan:Cell::new(None),screen_keep:Cell::new(false),row_workspace:RefCell::new(None),small_rows:Cell::new(false),source:Rc::new(Cell::new(0)),programs:RefCell::new(BTreeMap::new()),serving:None,state_copies:Cell::new(0),batch_keep:Cell::new(0),batch_route:Cell::new(0),group_charge:Cell::new(usize::MAX),verify_route:Cell::new(false),group_follows:Cell::new(false),spares_kept:Cell::new(false),held_stage:RefCell::new(None)}
     }
     /// Wall counters only. This does not enable CUDA event profiling.
     pub fn with_serving_trace(mut self,enabled:bool)->Self {self.serving=enabled.then(||RefCell::new(None));self}
@@ -242,16 +245,23 @@ impl<'b,'d> Device<'b,'d> {
     /// Compare each known selection's count word with the host's value at this real read, so a
     /// NaN score still refuses the request before a result leaves. One join and one wait, shared
     /// with `with` when it can be read in the same wait. Returns `with`'s words if they were read.
+    /// The device residual sums since the last check (`sum_checks`) are read in the same wait. A sum
+    /// the host form refuses refuses first, with the host form's error, as its add did on the host.
     fn check_selection(&self,with:Option<&Value<'b,'d>>)->Result<Option<Vec<f32>>> {
-        let checks=std::mem::take(&mut *self.selection_checks.borrow_mut());if checks.is_empty() {return Ok(None);}
+        let checks=std::mem::take(&mut *self.selection_checks.borrow_mut());let sums=std::mem::take(&mut *self.sum_checks.borrow_mut());
+        if checks.is_empty() && sums.is_empty() {return Ok(None);}
         let verified=(|| {
-            let parts=checks.iter().map(|(count,_)|(&**count,1usize)).collect::<Vec<_>>();
+            let parts=checks.iter().map(|(count,_)|(&**count,1usize)).chain(sums.iter().map(|s|(&s.flag,3usize))).collect::<Vec<_>>();
             let joined=self.backend.resident_join(&parts,&mut self.copies.borrow_mut(),0)?;
             let (out,counts)=match with.filter(|v|v.words>0 && v.vector.len()==v.words) {
                 Some(v)=>{let (a,b)=self.backend.read_resident_pair(&v.vector,&joined)?;(Some(a),b)},
                 None=>(None,self.backend.read_vector_values(&joined)?),
             };
-            need(counts.len()==checks.len(),"known selection check extent differs")?;
+            need(counts.len()==checks.len()+3*sums.len(),"known selection check extent differs")?;
+            if let Some(s)=counts[checks.len()..].chunks(3).zip(&sums).find(|(row,_)|row[2]!=1.0).map(|(_,s)|s) {
+                let read=|v:&DeviceVector<'d>|self.backend.read_vector_values(v).map(|mut words|{words.truncate(s.words);words});
+                bf16_sums(&read(&s.x)?,&read(&s.y)?)?;return Err("device residual sum is not finite where the host sum is".into());
+            }
             for (got,(_,want)) in counts.iter().zip(&checks) {need(got.to_bits()==want.to_bits(),"selection score is not a number")?;}
             Ok(out)
         })();
@@ -318,8 +328,9 @@ impl<'b,'d> Compute for Device<'b,'d> {
         let queue=self.backend.resident_queue()?;self.backend.enable_resident_launches()?;
         self.backend.resident_row_pass(1);
         let result=run();
-        // A scope may end with no real read. Its known selections are still checked.
-        let checked=if result.is_ok() {self.check_selection(None).map(|_|())} else {self.selection_checks.borrow_mut().clear();self.discard_unverified();Ok(())};
+        // A scope may end with no real read. Its known selections are still checked. A failed scope still checks its residual
+        // sums, so a sum the host form refuses refuses first, with the host form's error, as its add did on the host.
+        let checked=if result.is_ok() {self.check_selection(None).map(|_|())} else {self.selection_checks.borrow_mut().clear();self.discard_unverified();self.check_selection(None).map(|_|())};
         drop(queue);
         if let Some(error)=self.backend.fatal_error() {return Err(error);}
         checked?;self.weights.borrow().check_exchange()?;
@@ -559,7 +570,7 @@ impl<'b,'d> Compute for Device<'b,'d> {
             memo.origins.insert(&group,x.lineage.clone(),(slot,id));keys.push((group.clone(),x.lineage.clone()));}
         self.memo_changed();
         // A known selection's count is compared later. Until then, these rows may come from a refused selection.
-        if !self.selection_checks.borrow().is_empty() {memo.unverified.push(id);}
+        if !self.selection_checks.borrow().is_empty() || !self.sum_checks.borrow().is_empty() {memo.unverified.push(id);}
         memo.batches.insert(id,Batch {keys,bytes:total,used:now});memo.bytes+=total;
         #[cfg(feature="kernel-bench")] {memo.peak_rows=memo.peak_rows.max(memo.bytes);
             eprintln!("MEMO INSERT projection={name} rows={} added_bytes={total} total_bytes={} slab_bytes={}",kept.len(),memo.bytes,memo.slab.bytes);}
@@ -860,6 +871,23 @@ if start==0 && v.pending.as_ref().and_then(|p|p.borrow().state_prefix)==Some(len
             let mut out=self.backend.vector(x.words)?;self.backend.copy_prefix(rounded.vector(),&mut out,x.words)?;out
         };
         let value=self.value(out,x.words)?;self.cost.record(||"round".into(),stamp,self.backend,0);Ok(value)}
+    /// The residual add on the device (RB4 2026-11-18): the sum's own owner takes x, `layer_residual` adds y (`add.rn.f32`,
+    /// the host's a+b) and `logits_bf16` rounds it in place (the host's `f32_to_bf16` formula), so the draft chain does not
+    /// wait here for two reads and an upload. Every finite sum whose BF16 round is finite gets the host form's word; a
+    /// word the host form refuses is not finite here (`logits_bf16` keeps inf and NaN, and a BF16 overflow becomes inf).
+    /// The refusal stays: `logits_argmax` flags a word that is not finite, and the next real read checks the flag with
+    /// the known selections (`check_selection`), before a result leaves, with the host form's own error. Outside a work
+    /// scope, past the argmax extent, or with storage longer than its words, the host form runs.
+    fn bf16_sum(&self,x:&Value<'b,'d>,y:&Value<'b,'d>)->Result<Value<'b,'d>> {
+        if !self.backend.resident_queue_active() || x.words!=y.words || x.words==0 || x.words>1<<24 || x.vector.len()<x.words || y.vector.len()!=y.words {return host_bf16_sum(self,x,y);}
+        self.ready(x)?;self.ready(y)?;let stamp=self.cost.start(self.backend);
+        let mut sum=self.backend.vector(x.words)?;self.backend.copy_prefix(&x.vector,&mut sum,x.words)?;
+        self.backend.residual_device(&mut sum,&y.vector)?;self.backend.round_logits_bf16(&mut sum)?;
+        let (mut partials,mut flag)=(self.backend.vector(x.words.div_ceil(1024)*3)?,self.backend.vector(3)?);
+        self.backend.enqueue_argmax_device(&sum,&mut partials,&mut flag,0)?;
+        self.sum_checks.borrow_mut().push(SumCheck {flag,_partials:partials,x:x.vector.clone(),y:y.vector.clone(),words:x.words});
+        let value=self.value(sum,x.words)?;self.cost.record(||"bf16_sum".into(),stamp,self.backend,0);Ok(value)
+    }
     fn mean(&self,x:&Value<'b,'d>,streams:u32,hidden:u32)->Result<Value<'b,'d>> {let mut s=shape(Op::StreamMean);s.heads=streams;s.dim=hidden;self.operation(s,[Some(x),None,None,None],&[])}
     fn prompt(&self,s:spark_gpu_probe::prompt_ops::Shape,x:[Option<&Value<'b,'d>>;5],w:&[f32])->Result<Value<'b,'d>> {
         let mut x=x;let poisoned;
@@ -876,6 +904,29 @@ if start==0 && v.pending.as_ref().and_then(|p|p.borrow().state_prefix)==Some(len
         let mut value=self.value(self.backend.prompt_operation(s,input,weight.as_deref())?,units*words)?;
         if s.op==spark_gpu_probe::prompt_ops::Op::StepRows && super::copy_prompt_state(s.tokens as usize) {let prefix=(s.heads as usize).checked_mul(s.dim as usize).and_then(|n|n.checked_mul(s.dim as usize)).ok_or("state prefix overflow")?;value.pending=Some(Rc::new(RefCell::new(Pending {post:None,error:None,state_prefix:Some(prefix)})));}self.cost.settle(self.backend)?;
         self.cost.record(||if s.op==spark_gpu_probe::prompt_ops::Op::Wrapped {format!("rows_{:?}",s.inner.op)} else {format!("rows_{:?}",s.op)},stamp,self.backend,w.len()*4);Ok(value)
+    }
+    fn rows_recurrent(&self,shape:spark_gpu_probe::recurrent_rows::Shape,input:[&Value<'b,'d>;7],gate:&Value<'b,'d>,
+        weights:[&[f32];3],keep:bool)->Result<Option<super::RecurrentRows<Value<'b,'d>>>> {
+        let Some((inputs,weight_words,[history,state,rows,prepared,decay]))=shape.lengths(keep) else {return Ok(None);};
+        for (value,words) in input.into_iter().zip(inputs).chain([(gate,rows)]) {
+            need(value.words==words,"recurrent row input extent differs")?;
+            self.ready(value)?;
+        }
+        let stamp=self.cost.start(self.backend);
+        let resolve=|values:&[f32],words:usize| -> Result<_> {
+            need(values.len()==words,"recurrent row weight extent differs")?;
+            self.parameters.borrow_mut().resolve(values,None,|x|self.backend.upload_vector(x))?.ok_or("recurrent row weight is absent".into())
+        };
+        let [conv,prepare,norm]=weights;
+        let [conv,prepare,norm]=[resolve(conv,weight_words[0])?,resolve(prepare,weight_words[1])?,resolve(norm,weight_words[2])?];
+        let ([next_history,next_state,gated],saved)=self.backend.recurrent_rows(shape,input.map(|v|&*v.vector),&gate.vector,
+            [&conv,&prepare,&norm],keep)?;
+        let saved=match saved {Some([p,d])=>Some((self.value(p,prepared)?,self.value(d,decay)?)),None=>None};
+        let result=super::RecurrentRows {history:self.value(next_history,history)?,state:self.value(next_state,state)?,
+            gated:self.value(gated,rows)?,saved};
+        self.cost.settle(self.backend)?;
+        self.cost.record(||"rows_recurrent".into(),stamp,self.backend,weight_words.iter().sum::<usize>()*4);
+        Ok(Some(result))
     }
     fn rows_embedding(&self,tokens:&[u32],streams:usize)->Result<Option<Value<'b,'d>>> {
         self.backend.resident_row_pass(tokens.len());
@@ -902,8 +953,9 @@ if start==0 && v.pending.as_ref().and_then(|p|p.borrow().state_prefix)==Some(len
         // of a batch step takes its new recurrent states out of the pool and returns its old ones after: 143 MB a chat for
         // this model, 1.14 GB at 8 chats. Measured on the real model: allocation time in the recurrent step is 20 ms a step
         // at 8 chats and 1.6 ms at 4. So this step's trim keeps the states of the chats after the first. The pool's cap and
-        // its pressure rule do not change.
-        self.batch_keep.set(chats.saturating_sub(1).saturating_mul(state_bytes));self.batch_route.set(1);Ok(())
+        // its pressure rule do not change. CHAT SIDE LANE: a held row stage that a failed step left is dropped here, as
+        // `rows_verify(false)` drops one after a check pass.
+        self.batch_keep.set(chats.saturating_sub(1).saturating_mul(state_bytes));self.batch_route.set(1);drop(self.held_stage.take());Ok(())
     }
     fn rows_stage(&self,c:&CheckpointAdmission,jobs:&[(&str,&Value<'b,'d>,bool)],m:usize)->Result<Option<Vec<Value<'b,'d>>>> {
         for (_,value,_) in jobs {self.ready(value)?;}
@@ -914,14 +966,16 @@ if start==0 && v.pending.as_ref().and_then(|p|p.borrow().state_prefix)==Some(len
         output.into_iter().map(|value|{let words=value.len();self.value(value,words)}).collect::<Result<Vec<_>>>().map(Some)
     }
     // ROWS OVERLAP: a check pass's row stage with its block-FP8 gather held (`Weights::apply_matrix_stage_open`). Only a
-    // check pass (`verify_route`), and one held stage at a time; otherwise None and the caller runs `rows_stage`.
+    // check pass (`verify_route`) or, CHAT SIDE LANE (seat RB1 2026-11-18), a chat step whose routed rows stay on the device
+    // (`batch_route` 3: the same routed calls and the same close), and one held stage at a time; otherwise None and the
+    // caller runs `rows_stage`.
     fn rows_stage_open(&self,c:&CheckpointAdmission,jobs:&[(&str,&Value<'b,'d>,bool)],m:usize)->Result<Option<Vec<Option<Value<'b,'d>>>>> {
-        if !self.verify_route.get() || self.held_stage.borrow().is_some() {return Ok(None);}
+        if !(self.verify_route.get() || self.batch_route.get()==3) || self.held_stage.borrow().is_some() {return Ok(None);}
         for (_,value,_) in jobs {self.ready(value)?;}
         let mapped=jobs.iter().map(|(name,value,round)|(*name,&*value.vector,*round)).collect::<Vec<_>>();
         let d=c.description();let widest=(d.hidden as usize).checked_mul(d.residual.streams as usize).ok_or("row stage width overflow")?;
         let Some((output,held))=self.weights.borrow_mut().apply_matrix_stage_open(self.backend,&mapped,m,widest)? else {return Ok(None);};
-        *self.held_stage.borrow_mut()=held;
+        *self.held_stage.borrow_mut()=held;if self.batch_route.get()==3 {chat_lane_seen(0,m);}
         output.into_iter().map(|value|value.map(|value|{let words=value.len();self.value(value,words)}).transpose()).collect::<Result<Vec<_>>>().map(Some)
     }
     fn rows_stage_close(&self)->Result<Vec<(usize,Value<'b,'d>)>> {
@@ -979,10 +1033,11 @@ if start==0 && v.pending.as_ref().and_then(|p|p.borrow().state_prefix)==Some(len
     // as `rows_routed` runs it. History: measured 2026-11-13 with the fold in the verify pass, its 4-row pass was 0.8
     // to 1.2 ms faster, and the fold stayed gated to batch steps until a gate with more loads decided it.
     fn rows_routed_fold(&self,down:&engine_model::plan::layer::Step,ids:&Value<'b,'d>,x:&Value<'b,'d>,weights:&Value<'b,'d>,shared:Option<&Value<'b,'d>>,fold:Shape,m:usize)->Result<Option<Value<'b,'d>>> {
-        if !self.folds_rows(m) {return Ok(None);}
+        // SIDE DOWN: a pass that does not fold here joins the side lane first, so its own fold waits for the shared rows.
+        if !self.folds_rows(m) {self.backend.resident_side_join();return Ok(None);}
         self.ready(ids)?;self.ready(x)?;self.ready(weights)?;if let Some(shared)=shared {self.ready(shared)?;}
         let wait=!self.verify_route.get();
-        let Some(out)=self.weights.borrow_mut().apply_routed_rows_fold(self.backend,down,&ids.vector,&x.vector,&weights.vector,shared.map(|shared|&*shared.vector),fold,m,wait)? else {return Ok(None);};
+        let Some(out)=self.weights.borrow_mut().apply_routed_rows_fold(self.backend,down,&ids.vector,&x.vector,&weights.vector,shared.map(|shared|&*shared.vector),fold,m,wait)? else {self.backend.resident_side_join();return Ok(None);};
         let words=out.len();Ok(Some(self.value(out,words)?))
     }
     fn folds_rows(&self,m:usize)->bool {m<=super::BATCH_ROWS && self.routes_rows(m) && self.weights.borrow().folds_routed()} // the fold takes at most `rows_fold::TOKENS` (= `BATCH_ROWS`) rows: a verify pass of more rows keeps its routed form, as on main (no waiting down step, no kept shared row)
@@ -1031,7 +1086,15 @@ if start==0 && v.pending.as_ref().and_then(|p|p.borrow().state_prefix)==Some(len
     fn rows_project_local(&self,_:&CheckpointAdmission,name:&str,x:&Value<'b,'d>,m:usize,round:bool)->Result<Option<Value<'b,'d>>> {
         if !self.folds_rows(m) && !self.folds_groups(m) {return Ok(None);}
         self.ready(x)?;
-        let Some(out)=self.weights.borrow_mut().apply_matrix_local(name,self.backend,&x.vector,m,round)? else {return Ok(None);};
+        // SIDE DOWN (P5, seat RB1 2026-11-18): in a check pass, and (CHAT SIDE LANE) in a chat step, that folds its routed
+        // rows here (`folds_rows`), the shared expert's own rows of its down (input round, block-FP8 rows, transpose) are
+        // recorded on the side lane (`Backend::resident_side`), beside the routed down that `rows_routed_fold` records next.
+        // The fold joins the lane before it reads them (`apply_routed_rows_fold`), and so does every way out of
+        // `rows_routed_fold` that does not fold. The launches, operands and words are those of the main lane; their output
+        // is fresh and their input is only read, and frees wait while recorded launches are unsubmitted.
+        let local=||self.weights.borrow_mut().apply_matrix_local(name,self.backend,&x.vector,m,round);
+        let side=self.folds_rows(m);if side && self.batch_route.get()==3 {chat_lane_seen(1,m);}
+        let Some(out)=(if side {self.backend.resident_side(local)?} else {local()?}) else {return Ok(None);};
         let words=out.len();Ok(Some(self.value(out,words)?))
     }
     // LOCAL QUERY: a prompt group's rows only (the decoder asks for no other pass), and only when this rank's rows of the
@@ -1217,6 +1280,11 @@ impl<'b,'d> Device<'b,'d> {
         }
         self.cost.record(||format!("operation_{:?}",s.op),stamp,self.backend,w.len()*4);self.record(3,started);Ok(value)
     }
+}
+/// CHAT SIDE LANE: one line a part (0 the held stage, 1 the shared down) and row count at its first use in a chat step.
+fn chat_lane_seen(part:usize,rows:usize) {
+    static SEEN:std::sync::atomic::AtomicU64=std::sync::atomic::AtomicU64::new(0);let bit=1u64<<(part*32+rows.min(31));
+    if SEEN.fetch_or(bit,std::sync::atomic::Ordering::Relaxed)&bit==0 {eprintln!("CHAT SIDE LANE part={} rows={rows} first use",["stage","down"][part]);}
 }
 /// GATHERED ROWS: one line a rank, at first use: a served log then shows that a group read its gate rows through the table.
 fn gathered_seen(rows:usize,source_words:usize) {

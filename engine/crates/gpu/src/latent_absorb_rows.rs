@@ -2,6 +2,7 @@
 //! does. One kernel runs the four fold steps.
 use crate::prompt_ops::{Op,Shape};
 #[cfg(test)] mod tests;
+#[cfg(test)] mod rows_form_tests;
 pub fn admitted(op:Op)->bool {matches!(op,Op::AbsorbQuery|Op::AbsorbScores|Op::AbsorbSoftmax|Op::AbsorbValues|Op::AbsorbProject|Op::AbsorbScoresPacked|Op::AbsorbValuesPacked)}
 pub fn packed(op:Op)->bool {matches!(op,Op::AbsorbScoresPacked|Op::AbsorbValuesPacked)}
 /// `cols` is latent width; `rows` is cache length; `first` is score capacity;
@@ -21,15 +22,33 @@ pub fn lengths(s:Shape)->Option<([usize;5],usize,usize,usize)> {
     }
 }
 /// The grouped kernel's launch: `absorb_tc::Form::blocks` blocks of 256 threads (one outer index, 128 M rows and 32 N
-/// columns a block). The kernel finds its words from the block index and the shape alone.
+/// columns a block). The kernel finds its words from the block index and the shape alone. A check pass (1 to
+/// `SMALL_TOKENS` tokens) takes the ROWS FORM (`rows_form`) when its shape fits it.
 pub fn launch(s:Shape)->Option<(&'static str,u32,u32)> {
     if packed(s.op) {return None;}
     if s.op==Op::AbsorbSoftmax {return Some(("prompt_softmax_rows",s.tokens.checked_mul(s.heads)?,128));}
     let f=crate::absorb_tc::Form::rows(s)?;
     // A selected row is addressed by a 32-bit word offset in the kernel's staged chunk.
     if f.rows.checked_mul(f.k)?>=crate::absorb_tc::NO_ROW as usize {return None;}
+    if let Some(rows)=rows_form(f) {return Some(rows);}
     let blocks=f.outer().checked_mul(f.m().div_ceil(crate::absorb_tc::M_BLOCK))?.checked_mul(f.n().div_ceil(crate::absorb_tc::N_BLOCK))?;
     Some(("latent_absorption_tile",u32::try_from(blocks).ok()?,crate::absorb_tc::THREADS))
+}
+/// THE ROWS FORM of the grouped kernel (`kernels/src/latent_rows.rs`): the word of `latent_absorption_tile`, bit for bit
+/// (device proof: `kernel-bench --latent-rows`, every output word of the four operations against the tile of the same
+/// image), on the bodies of the one-row step. Scores and values of each token run the step form's attention body (the four
+/// ranges of a sum side by side, `Form::step_blocks` blocks); query and project run the tile's small body in an entry that
+/// holds only the `ROWS_DENSE_STAGE` shared bytes it stages. Shared bytes of the rows form's query and project: every
+/// step of B at once (`SMALL_STEP_BYTES` a step), 32 steps (512 terms).
+pub const ROWS_DENSE_STAGE:usize=32*crate::absorb_tc::SMALL_STEP_BYTES;
+/// (kernel, blocks, threads) of the rows form for this launch, or None: keep the tile. `f` is an unpacked operation of
+/// 1 to `SMALL_TOKENS` tokens whose selected rows fit 32-bit word offsets (checked by `launch`).
+pub fn rows_form(f:crate::absorb_tc::Form)->Option<(&'static str,u32,u32)> {
+    use crate::absorb_tc::{SMALL_STEP_BYTES,SMALL_TOKENS,THREADS,steps};
+    if f.packed || f.tokens==0 || f.tokens>SMALL_TOKENS || f.table==0 {return None;}
+    if f.attention() {return Some(("latent_rows_attention",u32::try_from(f.step_blocks()).ok()?,THREADS));}
+    if steps(f.terms(0)).checked_mul(SMALL_STEP_BYTES)?>ROWS_DENSE_STAGE {return None;}
+    Some(("latent_rows_dense",u32::try_from(f.blocks()).ok()?,THREADS))
 }
 /// THE THIRD FORM of the grouped kernel (`kernels/src/latent_tile3.rs`): the word of `latent_absorption_tile`, bit for
 /// bit (device proof: `kernel-bench --latent3`, every output word of the four operations against the first form of the

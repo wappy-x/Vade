@@ -438,9 +438,9 @@ engine/crates/gpu	src/backend/mhc.rs	impl:Backend::fn:round_bf16_lanes	block:1	r
 engine/crates/gpu	src/backend/mxfp8_projection.rs	impl:Backend::fn:resident_projection_batch	block:1	ruling 2026-11-05 07:35
 engine/crates/gpu	src/backend/mxfp8_projection.rs	impl:ResidentMxfp8Projection::fn:apply	block:1	ruling 2026-11-05 07:35
 engine/crates/gpu	src/backend/mxfp8_projection.rs	impl:ResidentMxfp8Projection::fn:apply_rows	block:1	ruling 2026-11-17 01:00
-engine/crates/gpu	src/backend/prompt_ops.rs	impl:Backend::fn:prompt_operation_output	block:1	ruling 2026-11-05 07:35
+engine/crates/gpu	src/backend/prompt_ops.rs	impl:Backend::fn:prompt_operation_output	block:1	ruling 2026-11-17 23:13
 engine/crates/gpu	src/backend/resident_launch.rs	impl:Backend::fn:flush_resident_launches	block:1	ruling 2026-11-05 07:35
-engine/crates/gpu	src/backend/resident_launch.rs	impl:Backend::fn:record_resident_launch	block:1	ruling 2026-11-05 07:35
+engine/crates/gpu	src/backend/resident_launch.rs	impl:Backend::fn:record_resident_launch	block:1	ruling 2026-11-17 23:13
 engine/crates/gpu	src/backend/resident_launch.rs	impl:Backend::fn:record_resident_launch	fn:1	ruling 2026-11-05 07:35
 engine/crates/gpu	src/backend/resident_program.rs	impl:Backend::fn:resident_program	block:1	ruling 2026-11-05 07:35
 engine/crates/gpu	src/backend/resident_program.rs	impl:ResidentProgram::fn:run_inner	block:1	ruling 2026-11-05 07:35
@@ -1707,7 +1707,7 @@ engine/crates/gpu/kernels	src/next_pool.rs	fn:flash_next_slot_position	fn:1	froz
 engine/crates/gpu/kernels	src/next_pool.rs	fn:prepare_hist	fn:1	ruling 2026-11-02 16:36
 engine/crates/gpu/kernels	src/next_pool.rs	fn:selected	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/next_verify.rs	fn:flash_next_gdn_verify_scan	fn:1	frozen ruling 2026-11-02 11:54
-engine/crates/gpu/kernels	src/prompt_ops.rs	fn:prompt_rows	block:1	ruling 2026-11-05 07:35
+engine/crates/gpu/kernels	src/prompt_ops.rs	fn:prompt_rows	block:1	ruling 2026-11-17 23:13
 engine/crates/gpu/kernels	src/prompt_ops.rs	impl:StepStore for Column::fn:get	block:1	ruling 2026-11-05 07:35
 engine/crates/gpu/kernels	src/prompt_ops.rs	impl:StepStore for Column::fn:output	block:1	ruling 2026-11-05 07:35
 engine/crates/gpu/kernels	src/prompt_ops.rs	impl:StepStore for Column::fn:set	block:1	ruling 2026-11-05 07:35
@@ -1782,7 +1782,7 @@ engine/crates/gpu/kernels	src/qsa_tc.rs	fn:values_k	fn:1	frozen ruling 2026-11-0
 engine/crates/gpu/kernels	src/qsa_tc.rs	fn:values_kr	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/qsa_tc.rs	fn:values_m	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/qsa_tc.rs	fn:zero16	fn:1	frozen ruling 2026-11-02 11:54
-engine/crates/gpu/kernels	src/resident_launch.rs	fn:run	block:1	ruling 2026-11-05 07:35
+engine/crates/gpu/kernels	src/resident_launch.rs	fn:run	block:1	ruling 2026-11-17 23:13
 engine/crates/gpu/kernels	src/tp_mailbox.rs	fn:load_acquire	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/tp_mailbox.rs	fn:now_ns	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/tp_mailbox.rs	fn:resident_tp_mailbox_put_finite	block:1	ruling 2026-11-05 07:35
@@ -2318,7 +2318,8 @@ engine/crates/gpu/kernels	src/nv_tile.rs	fn:project	block:1
 # orchestrator ruling 2026-11-06 05:16, ROUTE-DEVICE-1
 engine/crates/gpu/kernels	src/device_route.rs	fn:build	block:1	ruling 2026-11-06 05:16
 # ROUTE ROWS (STEP2-PATHS, 2026-11-12): the route build above for the m rows of one step (a batch of chats) in one launch: one job a (phase, token, slot) with a phase's descriptors listed by (expert, pair) and addresses in pair order, IDs read in place at a stride, every ID of a row checked (range, no repeat inside the row) before the table is indexed, one thread a job descriptor, quantize blocks of disjoint rows (nv_quantize::lanes_job); the one-token body `build` is not changed. Host contract: Backend::device_route_projection_rows. Device sweep: kernel-bench --route-rows (2,016 cases against the one-token kernel run once a token, 0 bytes differ; six bad rows refused). chief of staff ruling 2026-11-12 15:08: ALLOW after the Muse reviewer's read (hour folder REVIEW-83-muse.md item 5, read at c2bc69b62a; request UNSAFE-ROWS-route-rows.md).
-engine/crates/gpu/kernels	src/device_route.rs	fn:build_rows	block:1	ruling 2026-11-12 15:08
+# U-RB4 (lead ruling 2026-11-17 23:13:32): build_rows stages each ID of the launch once in shared memory (P3a) and reads them from there; same checks, same words (kernel-bench --route-rows build=BASE, 0 bytes differ). REVD SOUND static pre-read 23:08:39 on 159793d536.
+engine/crates/gpu/kernels	src/device_route.rs	fn:build_rows	block:1	ruling 2026-11-17 23:13
 engine/crates/gpu/kernels	src/nv_quantize.rs	fn:lanes	block:1
 engine/crates/gpu/kernels	src/attention_table.rs	fn:scores	block:1
 engine/crates/gpu/kernels	src/attention_table.rs	fn:values	block:1
@@ -2329,14 +2330,14 @@ engine/crates/gpu/kernels	src/prompt_fast.rs	fn:prompt_fold	block:1
 engine/crates/gpu/kernels	src/prompt_fast.rs	fn:prompt_gated_norm	block:1
 engine/crates/gpu/kernels	src/prompt_fast.rs	fn:prompt_pool_scores	block:1
 engine/crates/gpu/kernels	src/prompt_fast.rs	fn:prompt_prepare	block:1
-engine/crates/gpu/kernels	src/prompt_fast.rs	fn:prompt_route	block:1
+engine/crates/gpu/kernels	src/prompt_fast.rs	fn:prompt_route	block:1	ruling 2026-11-18 02:01
 engine/crates/gpu/kernels	src/prompt_move.rs	fn:prompt_permute	block:1
 engine/crates/gpu/kernels	src/prompt_move.rs	fn:prompt_place	block:1
 engine/crates/gpu/kernels	src/prompt_wire_bf16.rs	fn:entry	block:1	ruling 2026-11-16 13:42
 engine/crates/gpu/kernels	src/mhc_project_tile.rs	fn:mhc_residual_rows	block:1
 engine/crates/gpu/kernels	src/plain_rows_few.rs	fn:plain_rows_few	block:1
 engine/crates/gpu/kernels	src/plain_rows_small.rs	fn:plain_rows_small	block:1
-engine/crates/gpu/kernels	src/rows_small.rs	fn:prompt_rows_small	block:1
+engine/crates/gpu/kernels	src/rows_small.rs	fn:prompt_rows_small	block:1	ruling 2026-11-17 23:13
 engine/crates/gpu/kernels	src/nv_rows_small.rs	fn:project	block:1
 engine/crates/gpu/kernels	src/fp8_rows_small.rs	fn:project	block:1
 # orchestrator ruling 2026-11-06 09:57, FP8-FEW-b 04a78c41e: allowed pending receipts; conditions: the host provides one valid aligned GroupEntry and live contiguous immutable input, weight and scale owners in the right context with the rows, cols and block shape admitted by few_admitted, which equals the swept set; the device sweep on 04a78c41e prints PASS with its comparison count before any train; the paired measure for a train is short-chat ms a step and the FP8 row
@@ -2448,3 +2449,9 @@ engine/crates/gpu/kernels	src/latent_tile3.rs	fn:values3	block:1	ruling 2026-11-
 engine/crates/gpu/kernels	src/mx_tc.rs	fn:mx_tc_quantize_pack	block:1	ruling 2026-11-17 01:00
 engine/crates/gpu	src/backend/mxfp8_projection.rs	impl:ResidentMxfp8Projection::fn:pack_rows	block:1	ruling 2026-11-17 01:00
 engine/crates/gpu	src/backend/mxfp8_projection.rs	impl:ResidentMxfp8Projection::fn:apply_packed_rows	block:1	ruling 2026-11-17 01:00
+# RB3 (P7) rows form of the latent prompt tile for a check pass of 1 to 8 rows: the same word as latent_absorption_tile on the step form's bodies; one unsafe block an entry with a SAFETY note. REVD SOUND 2026-11-17 22:15:16; LEAD RULING U-RB3 2026-11-17 22:34.
+engine/crates/gpu/kernels	src/latent_rows.rs	fn:latent_rows_dense	block:1	ruling 2026-11-17 22:34
+engine/crates/gpu/kernels	src/latent_rows.rs	fn:latent_rows_attention	block:1	ruling 2026-11-17 22:34
+# Recurrent short rows and their deferred launch, approved after the byte and owner proofs.
+engine/crates/gpu	src/backend/prompt_ops.rs	impl:Backend::fn:recurrent_rows	block:1	ruling 2026-11-17 23:13
+engine/crates/gpu/kernels	src/recurrent_rows.rs	fn:body	block:1	ruling 2026-11-17 23:13

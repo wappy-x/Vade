@@ -1043,6 +1043,13 @@ fn run() -> Result<()> {
             #[cfg(not(target_os = "linux"))]
             { let _=(image,mode,only);return Err("--latent3 requires Linux and CUDA".into()); }
         }
+        if flag == "--latent-rows" {
+            let image=args.next().ok_or("--latent-rows needs an image")?;let mode=args.next().unwrap_or_else(|| "all".to_string());
+            #[cfg(target_os = "linux")]
+            return cuda::absorbtc::latentrows::run(&image,&mode);
+            #[cfg(not(target_os = "linux"))]
+            { let _=(image,mode);return Err("--latent-rows requires Linux and CUDA".into()); }
+        }
         if flag == "--latent-small" {
             let old=args.next().ok_or("--latent-small needs the old image")?;
             let new=args.next().ok_or("--latent-small needs the new image")?;
