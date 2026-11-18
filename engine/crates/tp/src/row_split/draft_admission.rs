@@ -11,6 +11,14 @@ pub(super) fn request_can_draft(r:&spark_serve::protocol::Request)->bool {
         && r.max_tokens>trial::TRIAL_START as usize;
     (r.draft==Some(DraftMode::Strict) || trial) && spark_engine::draft::plain_greedy(r.sampling)
 }
+/// GROUP DRAFTING (pair.rs): whether a request keeps its draft state beside another chat. A strict request of depth
+/// 2 or more, and a request that drafts by default (no draft mode or "auto", the trial's depth, an output cap above
+/// TRIAL_START) while DRAFT CONFIDENCE is on (`confident`). Greedy sampling only.
+pub(super) fn drafts_beside(r:&spark_serve::protocol::Request,confident:bool)->bool {
+    use spark_serve::protocol::DraftMode;
+    let default=confident && matches!(r.draft,None|Some(DraftMode::Auto)) && r.mtp_depth.is_some_and(|depth|depth>=trial::TRIAL_DEPTH) && r.max_tokens>trial::TRIAL_START as usize;
+    (r.draft==Some(DraftMode::Strict) && r.mtp_depth.is_some_and(|depth|depth>=2) || default) && spark_engine::draft::plain_greedy(r.sampling)
+}
 pub(super) fn set_mode<'f,C:Compute>(decoder:&mut Decoder<'f,C>,state:&mut Option<State<C::Value>>,open:&mut Option<Verify<C::Value>>,prepared:&crate::bounded_decoder::Prepared<'f>,word:u32)->Result<()> {
     let enabled=word==1;
     if !enabled {

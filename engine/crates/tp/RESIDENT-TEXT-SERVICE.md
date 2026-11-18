@@ -28,16 +28,47 @@ and 32 while they still do not pay
 `"draft":"strict"` proposes its whole depth in every cycle, and its proposal ends
 early under a probability of `0.3`. It reads a table of kept shares that no
 request without a named draft mode writes, so such a request cannot change its
-decisions. When another chat becomes
-active, the request decodes plain steps from then on. With `--mtp 1` or `2`, without a predictor, with
+decisions. While two or three chats
+that draft are active together (requests that draft by default, or strict
+requests of depth `2` or `3`), they draft together
+([`pair.rs`](src/row_split/pair.rs)). Their check rows run in one shared pass.
+A set of rows is admitted only when every chat of the group is expected to
+keep enough words to cover the time the step takes longer than a plain step of
+the same chats, by the draft head's probabilities and the group's own timed
+steps and passes. That is a prediction, not a guarantee: the group counts each
+chat's tokens against its plain pace on the wall clock and ends a drafting
+after a chat has lost 1 token to it, so a drafting that goes wrong can cost a
+chat a token or two before it ends. Chats whose text the draft head predicts
+well draft together, and a chat beside one that it predicts badly decodes plain
+steps (measured, not graded: the lowest chat of any load 0.56 percent under its
+plain rate, run `draftm-pre10`). While a group does not draft, one
+chat at a time makes a proposal that no row checks (a look). A chat is looked
+at only in its answer text, 16 tokens or more after its think block ended.
+A look passes when its words would pay and the tokens the chat then decodes
+are those words; a look with no probability checks no word either and passes
+only when its words come. A chat whose look failed waits for its next look as long
+again as it has been in its answer text without one that passed; no other
+chat looks while it waits, and it must then be right twice in a row. The
+group drafts when every chat has passed, and it stops with the step in which
+a chat's words do not pay, or when a chat has lost 1 token to it. The first
+two passes of a drafting are slow and are not taken as its price; a row count
+timed once is no price yet, and when its first two timed passes disagree by
+more than a quarter the lower one is its price. No look is made and no drafting
+starts while a chat has fewer than 64 tokens left. Looks are made only while no chat is more than 0.4 percent of its tokens
+behind its plain pace, measured on the wall clock, so a group that never
+drafts pays about that much (measured: 0.2 to 0.43 percent in requests of
+256 tokens; a chat's first look costs more than the later ones). When a chat that does not draft is
+active too, or more than three chats, every request
+decodes plain steps from then on. With `--mtp 1` or `2`, without a predictor, with
 `max_tokens` of `64` or less, or with sampling, such a request decodes plain
 steps. `"draft":"plain"` or `"mtp_depth":0` turns drafting off. A request
 also drafts when it sets `"draft":"strict"`, or when it sends `"mtp_depth"`
 `1`, `2` or `3` without `"draft"`. Strict drafting requires greedy sampling,
 and its `mtp_depth` must not exceed the loaded depth (`0` by default when
-omitted). Proposed tokens are verified only while one chat runs; when more
-chats are active, or on a request that does not draft, decoding uses plain
-steps. Every kept token equals the token of plain decoding.
+omitted). Proposed tokens are verified for one chat, or for two or three
+drafting chats in one shared pass; with more chats, or on a request that does
+not draft, decoding uses plain steps. Every kept token equals the token of
+plain decoding.
 
 `vade up` records the option. A later bare `vade up` cannot silently keep it.
 The diagnostic option must be repeated, or the diagnostic engine must be

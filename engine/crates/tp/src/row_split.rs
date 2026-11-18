@@ -313,7 +313,7 @@ pub struct Factory<'f,C:Compute,E> {checkpoint:&'f CheckpointAdmission,split:Spl
     trial_always:Cell<bool>,trial_counts:Cell<[u32;3]>,answer_marker:Cell<Option<u32>>,
     /// Test control: a request above TRIAL_DEPTH proposes its whole depth in every cycle (`set_deep_always`).
     deep_always:Cell<bool>,
-    /// PAIR DRAFTING: the strict chats that can draft beside another chat, and the record of the pair (pair.rs). `pair_counts`: pairs that ended after a tick in turns or a step of two, their ticks in turns, their steps of two.
+    /// GROUP DRAFTING: the chats that can draft beside another chat, and the record of those that are a group (pair.rs). `pair_counts`: pairs that ended after a tick in turns or a step of two, their ticks in turns, their steps of two.
     pair:RefCell<pair::Pair>,pair_counts:Cell<[u32;3]>,
     /// SHARED PASS (shared.rs): shared passes since start, and their rows.
     shared_counts:Cell<[u64;3]>,
@@ -814,10 +814,12 @@ pub struct Session<'a,C:Compute,E:Exchange> {factory:&'a Factory<'a,C,E>,decoder
     /// HANDOFF stopped the predictor under a drafting invoice. Explicit plain retirement must still reach both ranks.
     draft_handoff:bool,
     /// DEFAULT DRAFTING: where a request that named no draft mode stands, and its trial (trial.rs).
-    phase:Phase,trial:Trial,depth:usize,
+    phase:Phase,trial:Trial,text:pair::Text,depth:usize,
     /// This request's own timed ms: a plain step that follows a plain step, and a pass of each
     /// row count it has run. The chooser gets no other cost: nothing here is measured elsewhere.
     step_ms:Option<f64>,pass_ms:[Option<f64>;17],after_step:bool,gate:Gate,
+    /// GROUP DRAFTING (pair.rs `Held`): this request's own records while a cycle of a shared pass is open.
+    held:pair::Held,
     /// DEFAULT DRAFTING: the shortest steady plain step this request timed. One slow step cannot move it.
     step_low:Option<f64>,
     /// The depth the Speculator's chooser set for the next proposal.
@@ -842,7 +844,7 @@ impl<C:Compute,E:Exchange> spark_serve::Engine for Factory<'_,C,E> {
         let result=(|| {let started=std::time::Instant::now();self.split.command_for(1,0,id)?;
             // The other sessions that are open now: the worker counts the same ones.
             let decoder=Decoder::from_prepared(&self.prepared,&self.split,self.context as u64,self.active.get()-1)?;
-            let state=decoder.zero_state()?;self.split.exchange.borrow_mut().complete()?;eprintln!("SERVED SESSION rank={} session={id} active={} setup_seconds={:.9}",self.split.topology.rank,self.active.get(),started.elapsed().as_secs_f64());self.split.cost_report("setup");self.split.trace_start();Ok(Session {factory:self,decoder,state:Some(state),id,open:None,strict:false,draft_handoff:false,phase:Phase::Off,trial:Trial::default(),depth:0,step_low:None,step_ms:None,pass_ms:[None;17],after_step:false,gate:Gate::default(),limit:0,kept:None,checked:Vec::new(),chooser:Default::default(),alone:false})})();
+            let state=decoder.zero_state()?;self.split.exchange.borrow_mut().complete()?;eprintln!("SERVED SESSION rank={} session={id} active={} setup_seconds={:.9}",self.split.topology.rank,self.active.get(),started.elapsed().as_secs_f64());self.split.cost_report("setup");self.split.trace_start();Ok(Session {factory:self,decoder,state:Some(state),id,open:None,strict:false,draft_handoff:false,phase:Phase::Off,trial:Trial::default(),text:pair::Text::default(),depth:0,step_low:None,step_ms:None,pass_ms:[None;17],after_step:false,gate:Gate::default(),held:pair::Held::default(),limit:0,kept:None,checked:Vec::new(),chooser:Default::default(),alone:false})})();
         if result.is_err() {self.active.set(self.active.get()-1);}self.finish(result)
     }
     fn fatal_error(&self)->Option<String> {self.failure_reason()}
@@ -868,15 +870,15 @@ impl<C:Compute,E:Exchange> spark_serve::Engine for Factory<'_,C,E> {
     // step_batch runs these independent prompts sequentially. Each pass fits the
     // funded group; the row sum bounds scheduler work, not simultaneous scratch.
     fn shared_prefill_rows(&self)->usize {crate::bounded_decoder::BATCH_ROWS*crate::bounded_decoder::PROMPT_GROUP}
-    /// Proposed tokens are verified for one chat, or for two to three strict chats in one shared pass (pair.rs). More chats decode plain rows.
+    /// Proposed tokens are verified for one chat, or for two to three drafting chats in one shared pass (pair.rs). More chats decode plain rows.
     fn single_chat_draft(&self)->bool {true}
     fn draft_chat_limit(&self)->usize {pair::PAIR_CHATS}
     fn discard_contended_draft(&self)->bool {true}
-    /// PAIR DRAFTING (pair.rs): two to three strict requests of depth 2 or more retain their draft state if all can reach the trial. Other requests and short outputs decode plain beside another chat.
+    /// GROUP DRAFTING (pair.rs): two to three requests that draft (strict of depth 2 or more, or by default) retain their draft state beside each other. Other requests and short outputs decode plain beside another chat.
     fn contended_draft_chats(&self)->usize {pair::PAIR_CHATS}
-    fn drafts_contended(&self,request:&spark_serve::protocol::Request)->bool {self.predictor>=2 && request.draft==Some(spark_serve::protocol::DraftMode::Strict) && request.mtp_depth.is_some_and(|depth|depth>=2) && spark_engine::draft::plain_greedy(request.sampling) && self.pair.borrow().can_trial(request.max_tokens)}
+    fn drafts_contended(&self,request:&spark_serve::protocol::Request)->bool {self.predictor>=2 && draft_admission::drafts_beside(request,self.confidence_on.get()) && self.pair.borrow().has_room(request.max_tokens)}
     fn lone_chat_rows(&self)->usize {crate::bounded_decoder::VERIFY_ROWS}
-    /// One row per plain chat; three strict chats in pair.rs use a whole shared pass per tick.
+    /// One row per plain chat; three drafting chats in pair.rs use a whole shared pass per tick.
     fn shared_decode_rows(&self)->usize {if self.pair.borrow().wide() {crate::bounded_decoder::VERIFY_ROWS} else {crate::bounded_decoder::BATCH_ROWS}}
     /// Fewer chats in decode than a batch step takes run their own plain steps, one a tick as on an engine with no batch step.
     /// Two chats alone on the server (two live sessions) ride one batch step; with any other count the floor is BATCH_MIN_ROWS.
@@ -885,9 +887,10 @@ impl<C:Compute,E:Exchange> spark_serve::Engine for Factory<'_,C,E> {
     fn step_batch<'s>(&'s self,rows:&mut [spark_serve::BatchRows<'_,Self::Session<'s>>])->std::result::Result<Vec<spark_serve::Predictions>,spark_serve::BatchError> {
         use spark_serve::{BatchOutput,Session as _};
         // Check every row's operation and limits before any chat changes state or sends a command.
-        // PAIR DRAFTING (pair.rs): in a tick in which the pair is in turns each of its chats keeps its own pass, of one row too. A step of two chats would settle their open rows and drop what their proposers have seen.
-        let turns=self.pair.borrow_mut().step_begins();
         for row in rows.iter() {row.session.validate_row(row.tokens,row.output).map_err(|message|spark_serve::BatchError {request:None,message})?;}
+        // GROUP DRAFTING (pair.rs): a tick in which a chat of the group brings a checked row is a pass of the group, and a chat that brings none rides it with its one row. Any other tick of the group is a batch step that keeps what its proposers have seen (`tracked`). The group's tick begins only when every row is accepted: a refused call leaves the group's record as it was.
+        let live=self.active.get();
+        let turns={let mut pair=self.pair.borrow_mut();let wide=rows.iter().any(|row|row.tokens.len()>1 && matches!(row.output,BatchOutput::All) && pair.member(row.session.id,live));pair.step_begins(wide,pair::clock_ms())};
         // Chats in plain decode ride one batch step when there are enough of them to gain (`shared_decode_min`).
         // Each gets the ID (greedy) or the logits of its own plain step.
         // A request for one row with no row carried is such a step whatever the request asked. When a batch step
@@ -903,12 +906,14 @@ impl<C:Compute,E:Exchange> spark_serve::Engine for Factory<'_,C,E> {
             // Every riding chat greedy: none needs its logits, so each ID is picked where the logits are.
             let greedy=rows.iter().zip(&plain).filter(|(_,ride)|**ride).all(|(row,_)|row.greedy);
             let mut sessions=rows.iter_mut().zip(&plain).filter(|(_,ride)|**ride).map(|(row,_)|&mut *row.session).collect::<Vec<_>>();
-            for session in sessions.iter_mut() {session.end_trial();}
-            let tracked=greedy && self.pair.borrow().tracking(&sessions.iter().map(|s|s.id).collect::<Vec<_>>()); shared=self.batch_tokens(&mut sessions,&tokens,greedy,tracked).map_err(|message|spark_serve::BatchError {request:None,message})?; if tracked {for (session,(_,best)) in sessions.iter_mut().zip(&shared) { session.pair_probe(*best).map_err(|message|spark_serve::BatchError {request:None,message})?; }}
+            let tracked=greedy && self.pair.borrow().tracking(&sessions.iter().map(|s|s.id).collect::<Vec<_>>());
+            // A trial ends in a batch step. The chats of a group that drafts keep their drafting through it.
+            if !tracked {for session in sessions.iter_mut() {session.end_trial();}}
+            shared=self.batch_tokens(&mut sessions,&tokens,greedy,tracked).map_err(|message|spark_serve::BatchError {request:None,message})?;
         }
-        // SHARED PASS (shared.rs): in a tick in turns the passes of the pair's chats are ONE pass. Each chat gets the logits of its own rows, with the bits of its own pass, and takes its own verdict afterwards. A chat that has no timed plain step of its own yet takes its pass of one row alone: that step is its price.
-        let joins=rows.iter().zip(&plain).map(|(row,&ride)|turns && !ride && matches!(row.output,BatchOutput::All) && row.session.strict && row.session.phase!=Phase::Over
-            && (row.tokens.len()>1 || row.session.step_ms.is_some())).collect::<Vec<_>>();
+        // SHARED PASS (shared.rs): in a pass of the group the rows of all its chats are ONE pass. Each chat gets the logits of its own rows, with the bits of its own pass, and takes its own verdict afterwards. The group's timed step is the price of every chat's row (pair.rs), so a chat needs no timed step of its own to ride.
+        let joins={let pair=self.pair.borrow();rows.iter().zip(&plain).map(|(row,&ride)|turns && !ride && matches!(row.output,BatchOutput::All) && row.session.strict && row.session.phase!=Phase::Over
+            && (row.tokens.len()>1 || row.session.step_ms.is_some() || pair.member(row.session.id,live))).collect::<Vec<_>>()};
         let mut passed=Vec::new();
         if joins.iter().filter(|&&join|join).count()>=2 {
             let tokens=rows.iter().zip(&joins).filter(|(_,join)|**join).map(|(row,_)|row.tokens).collect::<Vec<_>>();
@@ -996,7 +1001,8 @@ impl<C:Compute,E:Exchange> Session<'_,C,E> {
         // DEFAULT DRAFTING: a trial runs only while its chat is alone (only then are shadows made). Beside another chat it
         // ends before the pass: a pass of one row on open verify rows costs more than a plain step, and chats that
         // form no batch step would pay that for their whole answers (8 chats, pair three 2026-11-11: 1 percent).
-        if matches!(self.phase,Phase::Trial|Phase::Alone) && factory.active.get()!=1 {self.end_trial();}
+        // GROUP DRAFTING (pair.rs): a request that drafts by default goes on beside the other chats of its group.
+        if matches!(self.phase,Phase::Trial|Phase::Alone) && factory.active.get()!=1 && !(self.phase==Phase::Alone && self.grouped()) {self.end_trial();}
         // A request that drafts no more decodes by plain steps: the bits of its pass of one row.
         if self.phase==Phase::Over && tokens.len()==1 && self.open.as_ref().is_none_or(|open|open.carried()==0) {return self.token_prediction(tokens[0],false,greedy);}
         let output=factory.finish(factory.split.work(||self.rows_inner(tokens,greedy)))?;
@@ -1076,8 +1082,6 @@ impl<C:Compute,E:Exchange> Session<'_,C,E> {
         factory.split.exchange.borrow_mut().complete()?;factory.failed.set(false);
         {let ms=started.elapsed().as_secs_f64()*1000.0;let mix=|old:Option<f64>,new:f64|Some(old.map_or(new,|old|0.75*old+0.25*new));
             self.gate.pass(tokens.len(),ms,picked);
-            // PAIR DRAFTING (pair.rs): a turn that proposed nothing is a pass of one row that kept its row.
-            if tokens.len()==1 {factory.pair.borrow_mut().turned(self.id,factory.active.get(),0,1,ms);}
             // A step is timed when the call before it was a step too: the first step after a
             // prompt or a pass is slower, and the chooser compares a pass with steady plain steps.
             let one=tokens.len()==1 && carried==0;
@@ -1119,8 +1123,10 @@ impl<C:Compute,E:Exchange> Session<'_,C,E> {
         let started=std::time::Instant::now();let kept_to=position as u64;let partial=kept_to<now;self.after_step=false;
         let result=factory.finish((|| -> Result<()> {let position=u32::try_from(position).map_err(|_|"row split truncation exceeds its bound")?;factory.failed.set(true);factory.split.command_for(7,position,id)?;
             factory.split.work(||open.truncate(decoder,u64::from(position)))?;factory.split.exchange.borrow_mut().complete()?;factory.failed.set(false);Ok(())})());
-        // PAIR DRAFTING (pair.rs): the cycle is this chat's turn of the tick.
+        // GROUP DRAFTING (pair.rs): the tokens this chat kept in the tick count against its plain pace.
         if let Some((drafted,kept,ms))=self.gate.verdict(kept_to,started.elapsed().as_secs_f64()*1000.0,partial) {factory.pair.borrow_mut().turned(id,factory.active.get(),drafted,kept,ms);self.calibrate(drafted,kept);}
+        // A cycle of a shared pass gives its Pay and Deeper feedback to the group only (pair.rs `Held`).
+        self.held.back(&mut self.gate);
         self.checked.clear();
         result
     }
@@ -1139,7 +1145,7 @@ impl<'a,C:Compute,E:Exchange> Session<'a,C,E> {
     pub fn kept_expanded_rows(&self)->Option<usize> {self.kept.as_deref().map(crate::bounded_decoder::Parked::held_rows)}
     #[cold] #[inline(never)]
     fn fresh_session(factory:&'a Factory<'a,C,E>,decoder:Decoder<'a,&'a Split<C,E>>,state:Option<State<C::Value>>,id:u64,kept:Option<KeptSlot<C::Value>>)->Self {
-        Session {factory,decoder,state,id,open:None,strict:false,draft_handoff:false,phase:Phase::Off,trial:Trial::default(),depth:0,step_low:None,step_ms:None,pass_ms:[None;17],after_step:false,gate:Gate::default(),limit:0,kept,checked:Vec::new(),chooser:Default::default(),alone:false}
+        Session {factory,decoder,state,id,open:None,strict:false,draft_handoff:false,phase:Phase::Off,trial:Trial::default(),text:pair::Text::default(),depth:0,step_low:None,step_ms:None,pass_ms:[None;17],after_step:false,gate:Gate::default(),held:pair::Held::default(),limit:0,kept,checked:Vec::new(),chooser:Default::default(),alone:false}
     }
     #[cold] #[inline(never)]
     fn send_keep(&self,id:u64,state:&State<C::Value>)->Result<std::result::Result<crate::bounded_decoder::Parked<C::Value>,String>> {
@@ -1259,7 +1265,7 @@ impl<C:Compute,E:Exchange> spark_engine::draft::Target for Session<'_,C,E> {
     // for it the caller asks for the whole depth only with the request's own depth, not with the depth of this cycle.
     fn limit_model_depth(&mut self,depth:usize) {
         let most=self.depth.min(self.factory.predictor);let whole=self.cycle_depth();
-        // PAIR DRAFTING (pair.rs): beside another chat the pair decides, for both chats at once (`propose_model`). This request's own record is neither asked nor moved.
+        // GROUP DRAFTING (pair.rs): beside another chat the group decides (`propose_model`). This request's own record is neither asked nor moved.
         if self.factory.active.get()>1 {self.limit=whole;return;}
         let pick=if most>trial::TRIAL_DEPTH && depth<most {depth.min(whole.saturating_sub(1))} else {depth};
         self.limit=match self.step_ms {Some(step)=>self.gate.pay.depth(whole,self.gate.begun(),pick,step),None=>pick};
@@ -1270,13 +1276,14 @@ impl<C:Compute,E:Exchange> spark_engine::draft::Target for Session<'_,C,E> {
         Some(if rows==1 {cost} else {cost+self.gate.beside_ms()})
     }
     fn model_draft_costs(&self)->Option<spark_engine::draft::CostCurve> {self.measured_costs()}
-    fn propose_model(&mut self,_history:&[u32],next:u32,limit:usize)->Result<Option<spark_engine::draft::ModelProposal>> {
+    fn propose_model(&mut self,history:&[u32],next:u32,limit:usize)->Result<Option<spark_engine::draft::ModelProposal>> {
         // The rows that waited for the layer are catch-up: the chooser prices a proposal without them.
-        self.gate.begin();
-        // PAIR DRAFTING (pair.rs): beside another chat a request proposes only in a tick in which its pair is in turns. Then both chats of the pair propose their whole depth. Any other chat beside another proposes nothing.
-        if self.factory.active.get()>1 && !self.factory.pair.borrow_mut().ask(self.id,self.factory.active.get(),self.depth.min(self.factory.predictor),self.step_ms) {
-            return Ok(Some(spark_engine::draft::ModelProposal {tokens:Vec::new(),proposal_ms:0.0,catchup_ms:0.0}));
-        }
+        self.gate.begin();self.held.back(&mut self.gate);
+        // GROUP DRAFTING (pair.rs): beside another chat a request proposes when its group does, its whole depth (a look, or drafting). Any other chat beside another proposes nothing. The chat's own clock says whether its answer text is under way (`pair::Text`).
+        let live=self.factory.active.get();
+        let (reads,left)=(self.text.reads(next,self.factory.answer_marker.get()),self.text.left(history.len()));
+        let limit=if live>1 {let mut pair=self.factory.pair.borrow_mut();pair.left(self.id,live,left);limit.min(pair.ask(self.id,live,self.depth.min(self.factory.predictor),next,reads))} else {limit};
+        if limit==0 {return Ok(Some(spark_engine::draft::ModelProposal {tokens:Vec::new(),proposal_ms:0.0,catchup_ms:0.0}));}
         // DEFAULT DRAFTING: real drafting that a trial started is steady. It does not use the chooser's depth, whose
         // price moves with one slow pass (the same request drafted with 229 or with under 100 proposals, 2026-11-11):
         // it proposes its full depth in every cycle, and it stops for good when its own cycles lose (Gate::losing:
@@ -1286,12 +1293,16 @@ impl<C:Compute,E:Exchange> spark_engine::draft::Target for Session<'_,C,E> {
         if self.phase==Phase::Drafting && self.gate.losing() {self.phase=Phase::Over;self.factory.trial_counted(1);let step=self.step_low.unwrap_or(0.0);
             eprintln!("SERVED DRAFT STOP rank={} session={} cycles={} score={} net_ms={:.1} step_ms={step:.1}",self.factory.split.topology.rank,self.id,self.gate.cycles(),self.gate.score(),self.gate.net_ms(step));}
         if self.phase==Phase::Over {return Ok(Some(spark_engine::draft::ModelProposal {tokens:Vec::new(),proposal_ms:0.0,catchup_ms:0.0}));}
-        if !self.gate.allows(self.step_ms) {return Ok(Some(spark_engine::draft::ModelProposal {tokens:Vec::new(),proposal_ms:0.0,catchup_ms:0.0}));}
+        // A chat alone times a plain step of its own before its first proposal. A chat of a group has the group's timed step.
+        if live==1 && !self.gate.allows(self.step_ms) {return Ok(Some(spark_engine::draft::ModelProposal {tokens:Vec::new(),proposal_ms:0.0,catchup_ms:0.0}));}
         let limit=limit.min(if self.phase==Phase::Drafting {self.cycle_depth()} else {self.limit});let limit=self.chosen_depth(limit);if limit==0 {return Ok(Some(spark_engine::draft::ModelProposal {tokens:Vec::new(),proposal_ms:0.0,catchup_ms:0.0}));}
         let entry=spark_engine::draft::Target::checkpoint(self) as u64;let waiting=self.open.as_ref().map_or(0,Verify::waiting)+self.factory.tail_rows(self.id);
         let started=std::time::Instant::now();let (mut tokens,mass,waited)=self.propose(next,limit)?;let total=started.elapsed().as_secs_f64();
         if !tokens.is_empty() {self.gate.proposed((total-waited).max(0.0)*1000.0,waited*1000.0,entry,started,tokens.len(),waiting.saturating_sub(1));}
-        self.checked.clear();if !tokens.is_empty() {let width=self.checked_width(&mass,(total-waited).max(0.0)*1000.0);tokens.truncate(width);self.checked.extend(mass.iter().take(width).map(|p|p.unwrap_or(f32::NAN)));}
+        self.checked.clear();if !tokens.is_empty() {let width=self.checked_width(&mass,(total-waited).max(0.0)*1000.0);
+            // GROUP DRAFTING (pair.rs): no row checks a look's words. They wait for the tokens this chat decodes next.
+            if width==0 && live>1 {self.factory.pair.borrow_mut().shadow(self.id,live,&tokens);}
+            tokens.truncate(width);self.checked.extend(mass.iter().take(width).map(|p|p.unwrap_or(f32::NAN)));}
         Ok(Some(spark_engine::draft::ModelProposal {tokens,proposal_ms:(total-waited).max(0.0)*1000.0,catchup_ms:waited*1000.0}))
     }
     fn verify_costs(&self,_context:usize)->Option<spark_engine::draft::CostCurve> {self.measured_costs()}
@@ -1309,14 +1320,14 @@ impl<C:Compute,E:Exchange> spark_serve::Session for Session<'_,C,E> {
         // "plain", a smaller depth, caps at or under TRIAL_START, and sampled requests decode by plain steps.
         let default=matches!(r.draft,None|Some(DraftMode::Auto)) && r.mtp_depth.is_some_and(|depth|depth>=trial::TRIAL_DEPTH) && r.max_tokens>trial::TRIAL_START as usize && spark_engine::draft::plain_greedy(r.sampling);
         let (named,alone)=(r.draft==Some(DraftMode::Strict),default && self.factory.confidence_on.get());self.chooser=Default::default();
-        self.strict=named || alone;self.phase=if alone {Phase::Alone} else if default {Phase::Trial} else {Phase::Off};self.alone=confidence::default_rules(self.phase);self.trial=Trial::default();
+        self.strict=named || alone;self.phase=if alone {Phase::Alone} else if default {Phase::Trial} else {Phase::Off};self.alone=confidence::default_rules(self.phase);self.trial=Trial::default();self.text=pair::Text::new(r.max_tokens);
         // The whole depth of a request: the most proposals one of its cycles makes. A strict request and a request that
         // names "auto" have their own mtp_depth. A request that omits both draft mode and depth (its mtp_depth is then the
         // service's default, TRIAL_DEPTH) leaves the depth to the service: its trial probes at TRIAL_DEPTH, its real
         // drafting starts there, and goes as deep as the loaded predictor while its deeper proposals are kept
         // (deeper.rs). With a predictor of TRIAL_DEPTH that is TRIAL_DEPTH, as before.
         self.depth=if named {r.mtp_depth.unwrap_or(0)} else if !default {0} else if r.draft.is_none() && !r.mtp_depth_explicit {self.factory.predictor} else {r.mtp_depth.unwrap_or(trial::TRIAL_DEPTH)};
-        // PAIR DRAFTING (pair.rs): a strict request that the service keeps drafting beside another one is a chat of a pair.
+        // GROUP DRAFTING (pair.rs): a request that the service keeps drafting beside another one is a chat of a group.
         self.factory.pair_leave(self.id);if spark_serve::Engine::drafts_contended(self.factory,r) {self.factory.pair.borrow_mut().join(self.id);}
         if self.strict && !spark_engine::draft::plain_greedy(r.sampling) {return Err("strict drafting on the row split service requires greedy sampling".into());}
         self.predictor_mode(draft_admission::request_can_draft(r))
@@ -1327,9 +1338,8 @@ impl<C:Compute,E:Exchange> spark_serve::Session for Session<'_,C,E> {
         if let Err(error)=self.predictor_mode(false) {self.factory.remember(error);}
     }
     fn draft_target(&mut self)->Option<&mut dyn spark_engine::draft::Target> {if self.strict {Some(self)} else {None}}
-    // A single-chat trial or a pair has stopped: return the pending canonical token and drop the speculator.
+    // A request's drafting is over (a trial that gave up, or a default chat beside a chat it cannot draft with): return the pending canonical token and drop the speculator.
     fn draft_over(&mut self)->bool {
-        if self.factory.pair.borrow().stopped(self.id) {self.phase=Phase::Over;}
         if self.phase!=Phase::Over || !self.strict {return false;}
         self.strict=false;
         // A final handoff uses the ordinary schedule and releases predictor state on both ranks. Merely clearing strict leaves the predictor schedule active during subsequent shared steps. MEASURED 2026-11-16 (two Sparks, run duox-b-c1-1): two chats whose pair trial gave up stepped in 64.78 ms with the predictor's schedule, against 64.30 ms on main, where their predictor is off. The request keeps its drafting invoice, so the rows its prompt expanded stay for its plain steps (HANDOFF).

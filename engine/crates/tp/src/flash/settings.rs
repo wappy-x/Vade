@@ -959,7 +959,8 @@ fn text_options_list_both_prompt_keep_names_and_refuse_two_of_them_with_the_list
 /// The drafting words of the text service start line. `default_depth` is the service's default for a request that names
 /// no draft mode: TRIAL_DEPTH when a predictor of at least that depth is loaded, else 0. With it, a greedy request longer
 /// than TRIAL_START tokens drafts as a strict request while its chat is alone, checking only the proposed tokens that pay
-/// (row_split/confidence.rs), and decodes plain from its first pass beside another chat (default_draft=alone); without it,
+/// (row_split/confidence.rs), and goes on beside one or two other chats that draft (row_split/pair.rs); beside any other
+/// chat it decodes plain from its first pass. The word stays `default_draft=alone` for the tools that read it; without it,
 /// such a request decodes plain. `predictor` is the loaded predictor depth; 0 means that no predictor layer is loaded.
 pub fn text_drafting_words(default_depth:usize,predictor:usize)->String {
     if default_depth>0 {format!("default_draft=alone default_depth={default_depth} predictor_depth={predictor}")} else {format!("default_draft=plain predictor_depth={predictor}")}

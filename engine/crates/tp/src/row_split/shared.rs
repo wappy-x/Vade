@@ -1,23 +1,22 @@
 //! SHARED PASS on two ranks (command 32): the check rows of the drafts of several chats in ONE pass
 //! (`bounded_decoder::shared_pass`), on the controller (`Factory::shared_pass`) and on the worker (`worker_shared`).
 //!
-//! Until now two chats that draft did so in turns: each chat's check rows ran in a pass of their own (pair.rs), and
-//! every weight was read once a chat. In a shared pass every step that reads a weight runs once for the rows of all
-//! chats, and only the steps that read a chat's own history run once a chat. Each chat's rows have the bits of its own
-//! pass, each chat keeps its own open rows, and each takes its own verdict afterwards (command 7): one chat may keep
-//! its whole pass while the other keeps one row.
+//! In a shared pass every step that reads a weight runs once for the rows of all chats, and only the steps that read
+//! a chat's own history run once a chat. Each chat's rows have the bits of its own pass, each chat keeps its own open
+//! rows, and each takes its own verdict afterwards (command 7): one chat may keep its whole pass while the other keeps
+//! one row, and a chat of the group that drafts nothing rides with its one row (pair.rs).
 use super::*;
 /// Command 32: one shared pass. `token` is the number of chats; byte `i` of the session field is the number of new
 /// rows of chat `i`. The payload: each chat's session ID, then every new token, chat after chat.
 pub(super) const SHARED_PASS:u32=32;
 impl<C:Compute,E:Exchange> Factory<'_,C,E> {
-    /// Whether the passes these chats ask for in one tick can be ONE shared pass: two chats or more, each a strict
-    /// chat that drafts with its predictor on, and no more rows in all (rows they carry included) than one check
-    /// pass takes. Else each chat keeps its own pass, as before.
+    /// Whether the passes these chats ask for in one tick can be ONE shared pass: two chats or more, each a chat
+    /// that drafts (named strict, or by default: Phase::Alone) with its predictor on, and no more rows in all (rows
+    /// they carry included) than one check pass takes. Else each chat keeps its own pass, as before.
     pub(super) fn shares_pass(&self,sessions:&[&Session<'_,C,E>],tokens:&[&[u32]])->bool {
         let rows=sessions.iter().zip(tokens).map(|(session,rows)|session.open.as_ref().map_or(rows.len(),|open|open.shared_count(rows.len()))).sum::<usize>();
         (2..=LIVE_SESSIONS).contains(&sessions.len()) && rows<=crate::bounded_decoder::VERIFY_ROWS
-            && sessions.iter().all(|session|session.strict && !matches!(session.phase,Phase::Over|Phase::Trial|Phase::Alone) && session.kept.is_none() && session.decoder.predictor_enabled())
+            && sessions.iter().all(|session|session.strict && !matches!(session.phase,Phase::Over|Phase::Trial) && session.kept.is_none() && session.decoder.predictor_enabled())
     }
     /// One shared pass on both ranks: `tokens[i]` are the new rows of `sessions[i]`. Each chat gets the logits of its
     /// own rows, with the bits of its own pass (`Session::pass`). The caller validated every row (`validate_row`).
@@ -48,13 +47,19 @@ impl<C:Compute,E:Exchange> Factory<'_,C,E> {
                 crate::bounded_decoder::shared_pass(decoder.ok_or("row split shared pass has no chat")?,&mut chats)?};
             let peak=self.split.rows_peak_end(whole);
             self.split.exchange.borrow_mut().complete()?;self.failed.set(false);
-            let seconds=started.elapsed().as_secs_f64();let total=tokens.iter().map(|rows|rows.len()).sum::<usize>();let live=self.active.get();
+            let seconds=started.elapsed().as_secs_f64();let total=tokens.iter().map(|rows|rows.len()).sum::<usize>();
+            // GROUP DRAFTING (pair.rs): the pass is the price of its row count.
+            self.pair.borrow_mut().passed(n,total,seconds*1000.0);
             {let mut counts=self.shared_counts.get();counts[0]+=1;counts[1]+=total as u64;counts[2]=counts[2].max(n as u64);self.shared_counts.set(counts);}
             for ((session,rows),&(position,carried)) in sessions.iter_mut().zip(tokens).zip(&places) {
-                // Each chat's part of the pass, by its rows: the parts add up to the pass, and a pair counts both (pair.rs).
+                // Each chat's part of the pass, by its rows: the parts add up to the pass.
                 let share=seconds*rows.len() as f64/total as f64;
+                // Every chat of the pass holds its Pay and Deeper records (pair.rs `Held`): a chat whose proposed rows ran
+                // here until that cycle ends; a chat with its own row only (no proposal, or one cut to none) gets them back
+                // at once, so riding the pass is no plain step and no unused proposal of its own.
+                session.held.hold(&session.gate);
                 session.gate.pass(rows.len(),share*1000.0,false);
-                if rows.len()==1 {self.pair.borrow_mut().turned(session.id,live,0,1,share*1000.0);}
+                if rows.len()==1 {session.held.back(&mut session.gate);}
                 // Not a steady step, and not a pass of this chat alone: its own step and pass prices do not learn from it.
                 session.after_step=false;
                 eprintln!("SERVED VERIFY rank={} session={} phase=decode position={position} rows={} carried={carried} picked=0 peak_bytes={peak} seconds={share:.9}",self.split.topology.rank,session.id,rows.len());

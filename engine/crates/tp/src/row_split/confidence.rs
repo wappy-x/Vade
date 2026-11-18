@@ -166,6 +166,9 @@ impl<C:Compute,E:Exchange> Session<'_,C,E> {
     #[allow(clippy::type_complexity)]
     pub(super) fn propose(&mut self,next:u32,limit:usize)->Result<(Vec<u32>,Vec<Option<f32>>,f64)> {let factory=self.factory;if let Some(error)=factory.failure_reason() {return Err(error);}
         let depth=limit.min(self.depth).min(factory.predictor);let flags=stop_flags(self.confident(),self.alone);
+        // GROUP DRAFTING (pair.rs): the chain of a chat of a group ends by its probability too, under the stop its
+        // request has alone (named strict or not).
+        let flags=if factory.confidence_on.get() && factory.pair.borrow().chooses(self.id,factory.active.get()) {stop_flags(true,self.alone)} else {flags};
         let Some(open)=self.open.as_mut().filter(|open|open.can_propose()) else {return Ok((Vec::new(),Vec::new(),0.0));};
         // A proposal names rows after the open ones: it is cut to the rows the context still has. The predictor layer
         // refuses a chain past its capacity, and that refusal would come after the command is on the wire.
@@ -194,8 +197,8 @@ impl<C:Compute,E:Exchange> Session<'_,C,E> {
     }
     /// DRAFT CONFIDENCE: whether this request's chains may end early and its passes check only the tokens that pay.
     /// A strict request of a lone chat only, named strict or drafting by default (Phase::Alone): beside another chat
-    /// a pair decides (pair.rs), and a trial's real drafting scores its own full cycles to stop (gate.rs), which
-    /// shortened cycles would never reach.
+    /// the group's prices and the chat's record of the group decide (pair.rs `group_width`), and a trial's real
+    /// drafting scores its own full cycles to stop (gate.rs), which shortened cycles would never reach.
     pub(super) fn confident(&self)->bool {self.factory.confidence_on.get() && self.factory.active.get()==1 && self.strict && matches!(self.phase,Phase::Off|Phase::Alone)}
     /// THE DEEPEST WORD: the depth of this cycle's proposal (`Chooser::depth`), for a lone chat's request that names no
     /// draft mode (Phase::Alone). A request that NAMES strict proposes its whole depth in every cycle, as it did before
@@ -205,6 +208,8 @@ impl<C:Compute,E:Exchange> Session<'_,C,E> {
     pub(super) fn chosen_depth(&mut self,limit:usize)->usize {if self.confident() && self.alone {self.chooser.depth(limit)} else {limit}}
     /// The width of the pass (`confident_width`); the chooser learns which words it drafted and left out.
     pub(super) fn checked_width(&mut self,mass:&[Option<f32>],proposal_ms:f64)->usize {
+        // GROUP DRAFTING (pair.rs): beside another chat the group's prices choose the rows; the lone chooser learns nothing.
+        if self.factory.active.get()>1 {if self.alone {self.chooser.offered(0,0,0.0);}return self.group_width(mass,proposal_ms);}
         let width=self.confident_width(mass);if self.confident() && self.alone {self.chooser.offered(mass.len(),width,proposal_ms);}width
     }
     /// DRAFT CONFIDENCE (confidence.rs): how many of a proposal's tokens its pass checks, by the draft head's

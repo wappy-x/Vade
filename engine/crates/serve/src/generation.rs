@@ -209,7 +209,14 @@ impl<S: Session> Generation<S> {
         // cycle is saved. Between cycles nothing is open. The speculator's next token is chosen but not shown yet
         // (a draft cycle shows a token when it is kept); plain decode shows a token when it is chosen, so it is
         // shown now, and it is the next decode input unless it ends the answer.
-        if let Some(token) = self.draft.as_ref().and_then(|spec| spec.canonical_next()) && self.state.session.draft_over() {
+        // The LAST token of a request is shown when it is chosen too, with no handoff: a pass for its row would
+        // only show it. (Only once a cycle has run: before it the speculator's next token is the one already shown.)
+        // MEASURED 2026-11-17 (two Sparks, run draftm-look-g-1): two chats that kept their draft state to the end
+        // took 128 steps for 128 tokens each, where plain decode takes 127 (63 to 75 ms a request).
+        let last = self.usage.completion_tokens + 1 >= max_tokens
+            && self.draft.as_ref().is_some_and(|spec| spec.tokens().len() == self.usage.completion_tokens);
+        if let Some(token) = self.draft.as_ref().and_then(|spec| spec.canonical_next())
+            && (last || self.state.session.draft_over()) {
             self.draft_done = self.draft.take().map(|spec| spec.stats);
             let event = self.accept(engine, token, max_tokens);
             return Ok((self.pending.map(|token| Work::Decode([token])), vec![event]));

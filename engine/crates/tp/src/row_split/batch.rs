@@ -1,7 +1,7 @@
 //! The served batch step: one decode step for several chats in plain decode, on the controller
 //! (`batch_tokens`) and on the worker (`worker_batch`, command 13).
 use super::*;
-/// Command 13 flag: retain predictor inputs for both rows of an admitted drafting pair.
+/// Command 13 flag: retain predictor inputs for the rows of the chats of a drafting group (pair.rs).
 pub(super) const TRACK_BATCH:u32=1<<31;
 /// A worker's live chats: the decoder, the state (absent while a step holds it) and open verify rows.
 pub(super) type WorkerSessions<'a,C,E>=BTreeMap<u64,(Decoder<'a,&'a Split<C,E>>,Option<State<<C as Compute>::Value>>,Option<Verify<<C as Compute>::Value>>)>;
@@ -38,7 +38,7 @@ impl<C:Compute,E:Exchange> Factory<'_,C,E> {
             self.failed.set(false);
             let ids=sessions.iter().map(|session|session.id).collect::<Vec<_>>();
             eprintln!("SERVED BATCH rank={} rows={} sessions={ids:?} seconds={:.9} since_last_seconds={since:.9} mhc_fused_row_launches={} chat_attention_layers={}",self.split.topology.rank,rows.len(),started.elapsed().as_secs_f64(),self.split.mhc_row_launches(),crate::bounded_decoder::chat_attention_layers());
-            // PAIR DRAFTING (pair.rs): a step of the two chats of a pair is the pair's plain price.
+            // GROUP DRAFTING (pair.rs): a step of all the chats of a group is the group's price of a token.
             self.pair.borrow_mut().stepped(&ids,started.elapsed().as_secs_f64()*1000.0);
             self.batch_ended.set(Some(std::time::Instant::now()));
             self.split.cost_report("decode");Ok(rows)
@@ -76,17 +76,5 @@ impl<C:Compute,E:Exchange> Factory<'_,C,E> {
             for (&(id,_),(_,_,next)) in chats.iter().zip(results) {sessions.get_mut(&id).ok_or("worker batch step has no session")?.1=Some(next);}
             Ok(())
         })
-    }
-}
-
-impl<C:Compute,E:Exchange> Session<'_,C,E> {
-    /// A lookback probe reads only rows already decoded by the shared plain step.
-    pub(super) fn pair_probe(&mut self,best:u32)->Result<()> {
-        let factory=self.factory;let marker=factory.answer_marker.get();
-        if !factory.pair.borrow_mut().probe_due(self.id,best,marker) {return Ok(());}
-        let started=std::time::Instant::now();
-        let (matched,waiting)=self.probe(best,trial::TRIAL_DEPTH)?.unwrap_or((0,0.0));
-        eprintln!("SERVED PAIR PROBE session={} seconds={:.9}",self.id,started.elapsed().as_secs_f64());
-        factory.pair.borrow_mut().probed(self.id,matched,(started.elapsed().as_secs_f64()-waiting).max(0.0)*1000.0,waiting*1000.0);Ok(())
     }
 }
