@@ -24,8 +24,10 @@ pub(super) struct RowsFold<V> {
     /// LOOKAHEAD: this rank's own rows of the shared projection, made behind the routed gate and up of a prompt group
     /// (`rows_ahead`). The shared projection's step hands them to the fold (`rows_fold_shared`).
     ahead:Option<V>,
+    /// ROWS OVERLAP: the outputs of a stage whose gather is held (`rows_project_open`), as (job index, value name).
+    held:Vec<(usize,String)>,
 }
-impl<V> Default for RowsFold<V> {fn default()->Self {Self {waits:false,shared:None,group:false,grouped:false,ahead:None}}}
+impl<V> Default for RowsFold<V> {fn default()->Self {Self {waits:false,shared:None,group:false,grouped:false,ahead:None,held:Vec::new()}}}
 impl<V> RowsFold<V> {
     /// The fold state of one layer of a prompt group.
     fn of_group()->Self {Self {group:true,..Self::default()}}
@@ -98,13 +100,16 @@ pub const PROMPT_GROUP_CHECK:usize=4096;
 /// Group size while other chats wait: about six seconds of their time.
 pub const PROMPT_SHARED:usize=64;
 /// Most rows of a group whose MXFP8 projections of one input run as one merged row launch (ROW STAGE). The entry
-/// `flash_resident_projection_bf16_rows` takes 2 to 4 rows and the stage sends it all of them. Until ROWS-MX
+/// `flash_resident_projection_bf16_rows` takes 2 to 8 rows and the stage sends it all of them. Until ROWS-MX
 /// (2026-11-12) the stage stopped at 3: the 4-row merged launch read q, k and v of a layer in 404 us where the one-row
 /// launch takes 260 (one Spark, kernel-bench --rows-p1), and lost to one small launch a matrix. With the row body on the
 /// one-token load schedule (`mx_rows_small::wave`) the same 4-row launch takes 287 us, and on a pair the 4-chat step read
 /// 102.97 ms with the stage at 4 rows against 104.81 with it at 3 (main: 106.60). A larger group keeps one launch chain a
 /// matrix.
-pub const ROW_STAGE_ROWS:usize=4;
+/// STAGE EIGHT (seat DRAFTR, 2026-11-17): 8, was 4. The entry takes 2 to 8 rows. Measured on a served 8-chat step (run
+/// draftr-c3-ct1): the single calls of the stage's matrices cost 15.5 ms a step (145 + 45 + 143 launches) where the merged
+/// form of a 4-chat step cost 12.5 ms; from 5 rows a pass paid that difference.
+pub const ROW_STAGE_ROWS:usize=8;
 /// Expanded latent rows each chat holds, all charged at admission. Past this context
 /// a group expands only the rows its tokens selected, in memory that lasts for one layer.
 pub const RESERVED_ROWS:usize=1152;
@@ -818,6 +823,9 @@ impl<'f,C:Compute> Decoder<'f,C> {
     fn rows_history(&self,layer:usize,index:usize,plan:&LayerPlan,chat:&mut RowsChat<'_,C::Value>,values:&mut BTreeMap<String,C::Value>)->Result<usize> {
         let d=self.checkpoint.description();let b=&self.compute;let step=&plan.steps[index];
         let (first,m,state,expanded,keep,persist)=(chat.first,chat.m,chat.state,chat.expanded,chat.keep,chat.persist);let last=first+m as u64;
+        // A check pass (it keeps what a prefix needs) of few rows behind earlier rows appends to its caches in place, with the plain step's room behind them (see CacheAppend below).
+        let in_place=keep && first>0 && m<=VERIFY_ROWS;
+        let room=|width:usize|->Result<usize> {(self.capacity.saturating_sub(last).min(HELD_ROOM as u64) as usize).checked_mul(width).ok_or_else(||"cache room overflow".to_owned())};
             match step.kind {
                 Kind::Conv=>{let TokenMixer::Kda(k)=d.layers[layer].mixer else {return Err("convolution requires a recurrent layer".into());};
                     let mut s=row_shape(Row::ConvRows,m)?;s.heads=number(self.kda_layout(layer)?.local_heads() as u64)?;s.dim=number(k.head_dim)?;s.taps=number(k.conv)?;
@@ -836,8 +844,14 @@ impl<'f,C:Compute> Decoder<'f,C> {
                         chat.kept_step=Some((b.range(&values[&step.inputs[0]],0,lengths[0])?,b.range(&decay,0,lengths[2])?,step.inputs[1].clone()));}
                     let (h,d)=(self.kda_layout(layer)?.local_heads(),k.head_dim as usize);let output=b.range(&columns,h*d*d,m*h*d)?;let next=b.range(&columns,0,h*d*d)?;
                     values.insert(step.outputs[0].name.clone(),output);values.insert(step.outputs[1].name.clone(),next);},
-                Kind::CacheAppend=>{let old=state.get(&step.inputs[0]).ok_or("prompt cache state is absent")?;
-                    let value=b.join(&[old,&values[&step.inputs[1]]])?;values.insert(step.outputs[0].name.clone(),value);},
+                Kind::CacheAppend=>{let old=state.get(&step.inputs[0]).ok_or("prompt cache state is absent")?;let new=&values[&step.inputs[1]];
+                    // A CHECK PASS APPENDS WHERE THE CACHE IS, as the plain step does (`Compute::cache_append`). A join buys a buffer that grows with the position in every pass and copies the whole cache into it,
+                    // and the next plain step then copies the cache once more into storage with room. A refused row leaves nothing to undo: the state before the pass keeps its own shorter view, the kept prefix is a
+                    // view of the first rows of the same storage (`prefix_state`), and an append writes only past the end of every live view (`held::append_in_place`), so the next pass writes over the refused rows;
+                    // while anyone still reads them, the append copies as before. The words are those of the join. A prompt group joins as before.
+                    let value=if in_place {let TokenMixer::LatentAttention(a)=d.layers[layer].mixer else {return Err("cache append requires a latent layer".into());};
+                        b.cache_append(old,new,first as usize,a.kv_rank as usize,room(a.kv_rank as usize)?)?} else {b.join(&[old,new])?};
+                    values.insert(step.outputs[0].name.clone(),value);},
                 Kind::Pool=>{let TokenMixer::LatentAttention(a)=d.layers[layer].mixer else {return Err("pooling requires a latent layer".into());};
                     // A pool depends only on its own complete rows, so the last
                     // token's pools hold each earlier token's pools as a prefix.
@@ -855,7 +869,9 @@ impl<'f,C:Compute> Decoder<'f,C> {
                             let old_gates=state.get(&step.inputs[1]).ok_or("prompt index gates are absent")?;
                             let mut weight=Vec::new();for w in &step.weights {weight.extend_from_slice(&self.parameters[&w.name]);}
                             let x=[old_keys,old_gates,&values[&step.inputs[2]],&values[&step.inputs[3]]];
-                            let result=if m<=VERIFY_ROWS {pools::append(b,s,first as usize,m,x,prior,&weight)?} else {pools::append_window(b,s,first as usize,m,x,prior,&weight)?};
+                            // A check pass appends its key and gate rows where they are too (see CacheAppend above).
+                            let result=if in_place {let room=room(width)?;pools::folds(b,s,first as usize,m,[b.cache_append(x[0],x[2],first as usize,width,room)?,b.cache_append(x[1],x[3],first as usize,width,room)?],prior,&weight)?}
+                                else if m<=VERIFY_ROWS {pools::append(b,s,first as usize,m,x,prior,&weight)?} else {pools::append_window(b,s,first as usize,m,x,prior,&weight)?};
                             for (spec,value) in step.outputs.iter().zip(result) {values.insert(spec.name.clone(),value);}
                             return Ok(0);
                         }
@@ -1041,6 +1057,8 @@ impl<'f,C:Compute> Decoder<'f,C> {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn rows_stateless(&self,layer:usize,index:usize,plan:&LayerPlan,m:usize,values:&mut BTreeMap<String,C::Value>,passes:&mut BTreeMap<String,C::Pass>,fold:&mut RowsFold<C::Value>)->Result<Option<usize>> {
         let c=self.checkpoint;let d=c.description();let b=&self.compute;let step=&plan.steps[index];let mut skip=0;
+        // ROWS OVERLAP: a step that reads a held output records the held gather first.
+        if step.inputs.iter().any(|name|fold.held.iter().any(|(_,held)|held==name)) {self.rows_close(values,fold)?;}
         match step.kind {
             Kind::MhcPrepare=>{let key=(layer,index);let p=self.blocks.get(&key).ok_or("resident residual parameters are absent")?;
                 let (pass,norm)=b.rows_begin(key,p,&values[&step.inputs[0]],m)?;
@@ -1052,8 +1070,8 @@ impl<'f,C:Compute> Decoder<'f,C> {
             // pays the one flag `fold.waits` here).
             // LOCAL QUERY: the query rows of a prompt group's latent layer stay on their rank (`rows_query_local`; a pass
             // that is not a prompt group pays the one flag `fold.group` here).
-            Kind::Project=>{if !values.contains_key(&step.outputs[0].name) && !(fold.waits && self.rows_fold_shared(layer,index,plan,m,values,fold)?)
-                && !(fold.group && self.rows_query_local(layer,index,plan,m,values)?) {self.rows_project_stage(index,plan,m,values)?;}},
+            Kind::Project=>{if !values.contains_key(&step.outputs[0].name) && !fold.held.iter().any(|(_,held)|*held==step.outputs[0].name) && !(fold.waits && self.rows_fold_shared(layer,index,plan,m,values,fold)?)
+                && !(fold.group && self.rows_query_local(layer,index,plan,m,values)?) && !self.rows_project_open(index,plan,m,values,fold)? {self.rows_project_stage(index,plan,m,values)?;}},
             Kind::Norm=>{let name=&step.weights[0].name;let width=step.outputs[0].elements().map_err(|e|e.to_string())?;
                 let value=b.rows_norm(name,norm_shape(c,name,width)?,&values[&step.inputs[0]],m,&self.parameters[name])?;values.insert(step.outputs[0].name.clone(),value);},
             // LOOKAHEAD: a SwiGLU that `rows_ahead` made behind the routed gate and up is done.
@@ -1090,7 +1108,7 @@ impl<'f,C:Compute> Decoder<'f,C> {
             // GROUP FOLD: the grouped down step of a prompt group that its fold can take (`rows_group_fold_waits`) runs at
             // the fold step, below, with the fold before the exchange.
             Kind::ExpertDown if fold.group && self.rows_group_fold_waits(layer,index,plan,m,values)=>{fold.waits=true;fold.grouped=true;fold.shared=None;},
-            Kind::ExpertProject|Kind::ExpertDown=>{skip=self.experts_group(index,plan,m,values,None,Some((layer,&mut *fold)))?;},
+            Kind::ExpertProject|Kind::ExpertDown=>{skip=self.experts_group(index,plan,m,values,None,Some((layer,&mut *fold)))?;if step.kind==Kind::ExpertProject && !fold.held.is_empty() {self.rows_close(values,fold)?;}},
             Kind::ExpertSum=>{let route=plan.steps.iter().find(|s|s.kind==Kind::Route).ok_or("prompt expert fold has no route")?;
                 let mut s=shape(Op::ExpertFold);s.rows=number(route.outputs[0].shape[0])?;s.cols=number(d.hidden)?;s.taps=u32::from(step.inputs.len()==4);
                 // ROWS FOLD: the down step of this layer waited (`fold.waits`; a pass that does not fold pays that one flag).
@@ -1169,6 +1187,28 @@ impl<'f,C:Compute> Decoder<'f,C> {
             }};
         need(outputs.len()==ready.len(),"row stage output count differs")?;
         for (at,value) in ready.into_iter().zip(outputs) {values.insert(plan.steps[at].outputs[0].name.clone(),value);}
+        Ok(())
+    }
+    /// ROWS OVERLAP: in a check pass, the stage that holds the router gate opens with the shared expert's block-FP8 gather
+    /// held (`Compute::rows_stage_open`): the router's output is here at once, and the held outputs wait in `fold.held` until
+    /// the routed gate and up step (or their first reader) records the gather (`rows_close`). Between them the router chain
+    /// and the routed gate and up are recorded, beside the block-FP8 launches. False, before any work: not offered.
+    fn rows_project_open(&self,index:usize,plan:&LayerPlan,m:usize,values:&mut BTreeMap<String,C::Value>,fold:&mut RowsFold<C::Value>)->Result<bool> {
+        let ready=plan.steps.iter().enumerate().skip(index).filter(|(_,step)|step.kind==Kind::Project && step.weights.len()==1 && step.inputs.len()==1 && step.outputs.len()==1
+            && values.contains_key(&step.inputs[0]) && !values.contains_key(&step.outputs[0].name)).map(|(at,_)|at).collect::<Vec<_>>();
+        let router=|at:usize|plan.steps.iter().any(|s|s.kind==Kind::Route && s.inputs.contains(&plan.steps[at].outputs[0].name));
+        if ready.len()<2 || ready.first()!=Some(&index) || !fold.held.is_empty() || !ready.iter().any(|&at|router(at)) {return Ok(false);}
+        let jobs=ready.iter().map(|&at|(plan.steps[at].weights[0].name.as_str(),&values[&plan.steps[at].inputs[0]],!router(at))).collect::<Vec<_>>();
+        let Some(outputs)=self.compute.rows_stage_open(self.checkpoint,&jobs,m)? else {return Ok(false);};
+        need(outputs.len()==ready.len(),"row stage output count differs")?;
+        for (job,(at,value)) in ready.into_iter().zip(outputs).enumerate() {
+            let name=plan.steps[at].outputs[0].name.clone();match value {Some(value)=>{values.insert(name,value);},None=>fold.held.push((job,name))}
+        }Ok(true)
+    }
+    /// ROWS OVERLAP: the held gather (`Compute::rows_stage_close`); each held output takes its step's name.
+    fn rows_close(&self,values:&mut BTreeMap<String,C::Value>,fold:&mut RowsFold<C::Value>)->Result<()> {
+        let held=std::mem::take(&mut fold.held);let made=self.compute.rows_stage_close()?;need(made.len()==held.len(),"held row stage output count differs")?;
+        for (job,value) in made {let (_,name)=held.iter().find(|(at,_)|*at==job).ok_or("held row stage output is unknown")?;values.insert(name.clone(),value);}
         Ok(())
     }
     /// LOCAL QUERY. A latent layer's query projection is split by heads, and every reader of the query on a rank takes
@@ -1255,7 +1295,7 @@ impl<'f,C:Compute> Decoder<'f,C> {
     /// reader of the down rows (`FoldLinks`), and the middle is here in (token, pick) order (the routed gate and up made
     /// it; a middle the grouped pass kept in its own order stays with that pass). Nothing between the two steps reads
     /// the down rows or the fold's output, so running the down step later changes no value. A pass that does not fold
-    /// (a prompt group, a verify pass, a batch step in the grouped form) pays the one flag `folds_rows` here.
+    /// (a prompt group, a batch step in the grouped form) pays the one flag `folds_rows` here.
     fn rows_fold_waits(&self,layer:usize,index:usize,plan:&LayerPlan,m:usize,values:&BTreeMap<String,C::Value>)->bool {
         self.compute.folds_rows(m) && self.fold_links(layer,plan).is_some_and(|links|links.down==index) && values.contains_key(&plan.steps[index].inputs[0])
     }

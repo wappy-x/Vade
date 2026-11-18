@@ -13,11 +13,15 @@ fn boundary(kind:Kind)->bool {
 fn batch_bf16(kind:Kind)->bool {matches!(kind,Kind::MixedBf16|Kind::PlainBatch)}
 /// The take that gets the prefetch for a target recorded after the calls of `range`: the last take with no boundary
 /// behind it. None: there is none, or a BF16 batch launch lies between (counted).
-fn take_for(recorder:&mut Recorder<'_>,range:std::ops::Range<usize>)->Option<usize> {
+/// WAIT COVER (seat DRAFTR): with `plain`, a take of kind Take counts too. The rows path (2 to 8 token rows: the row
+/// groups of several chats and the check rows of a drafting pass) receives most of its hand-offs with that kind, and
+/// those waits ran with an idle memory bus. Only a row window (`bus_shadow::rows`) asks for it, so a one-row step
+/// records what it recorded before.
+fn take_for(recorder:&mut Recorder<'_>,range:std::ops::Range<usize>,plain:bool)->Option<usize> {
     let mut crossed=false;
     for index in range.rev() {
         let kind=recorder.calls[index].grid.kind;
-        if kind==Kind::TakeScatter {if crossed {recorder.shadow[0]+=1;return None;}return Some(index);}
+        if kind==Kind::TakeScatter || plain && kind==Kind::Take {if crossed {recorder.shadow[0]+=1;return None;}return Some(index);}
         if boundary(kind) {return None;}
         crossed|=batch_bf16(kind);
     }None
@@ -32,7 +36,9 @@ fn install(recorder:&mut Recorder<'_>,index:usize,window:crate::bus_shadow::Wind
         if recorder.calls.len()+2>=crate::GraphAllowance::FLASH_MAX_NODES {recorder.shadow[1]+=1;return false;}
         if index>0 && recorder.calls[index-1].grid.kind==Kind::ShadowSide {recorder.shadow[2]+=1;return false;}
         let g=recorder.calls[index].grid;
-        if let Some(command)=crate::bus_shadow::side(&recorder.calls[index].command,[g.blocks,g.rows,g.planes,g.threads,g.shared],window,stage_base,&recorder.staged) {
+        let side=if g.kind==Kind::Take {crate::bus_shadow::side_plain(&recorder.calls[index].command,window)}
+            else {crate::bus_shadow::side(&recorder.calls[index].command,[g.blocks,g.rows,g.planes,g.threads,g.shared],window,stage_base,&recorder.staged)};
+        if let Some(command)=side {
             recorder.calls.insert(index,Call {grid:Grid {kind:Kind::ShadowSide,blocks:crate::bus_shadow::SIDE_BLOCKS,rows:1,planes:1,threads:256,shared:0,lane:MAIN},command,copy_bytes:0});
             for bell in &mut recorder.bells {if bell.0>=index {bell.0+=1;}}
             for zero in &mut recorder.zeros {if zero.0>=index {zero.0+=1;}}
@@ -48,11 +54,14 @@ fn install(recorder:&mut Recorder<'_>,index:usize,window:crate::bus_shadow::Wind
 }
 pub(super) fn static_target(recorder:&mut Recorder<'_>,target:&Command) {
     let stage_base=recorder.stage.as_ref().map_or(0,|stage|stage.device_address()+STAGE_BASE as u64);
-    let Some(window)=crate::bus_shadow::mx(target).or_else(||if recorder.side_off {None} else {crate::bus_shadow::more(target).or_else(||crate::bus_shadow::batch(target))
-        .or_else(||crate::bus_shadow::rows(target,stage_base,&recorder.staged))}) else {return;};
-    let all=0..recorder.calls.len();if let Some(index)=take_for(recorder,all) {install(recorder,index,window);}
+    let one=crate::bus_shadow::mx(target).or_else(||if recorder.side_off {None} else {crate::bus_shadow::more(target).or_else(||crate::bus_shadow::batch(target))});
+    // A row window may sit beside a plain take (WAIT COVER); a one-row window keeps the scatter take.
+    let (window,plain)=match one {Some(window)=>(window,false),None=>{
+        if recorder.side_off {return;}
+        let Some(window)=crate::bus_shadow::rows(target,stage_base,&recorder.staged) else {return;};(window,true)}};
+    let all=0..recorder.calls.len();if let Some(index)=take_for(recorder,all,plain) {install(recorder,index,window);}
 }
 pub(super) fn routed_target(recorder:&mut Recorder<'_>,window:crate::bus_shadow::Window) {
     let Some(ready)=recorder.calls.iter().rposition(|call|crate::bus_shadow::prior_route(&call.command,window)) else {return;};
-    let after=ready+1..recorder.calls.len();if let Some(index)=take_for(recorder,after) {install(recorder,index,window);}
+    let after=ready+1..recorder.calls.len();if let Some(index)=take_for(recorder,after,false) {install(recorder,index,window);}
 }

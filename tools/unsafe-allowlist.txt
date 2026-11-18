@@ -2398,7 +2398,7 @@ engine/crates/gpu/kernels	src/pair_split.rs	fn:resident_tp_reduce_take	block:1	r
 # runner ruling 2026-11-11 07:08 (night block STATE.md: the two new unsafe rows of ROW STAGE MX are allowed after a reviewer read, one commit, before merge): the N-row twin of the merged projection launch. One unsafe block each, with a SAFETY contract directly above the block.
 engine/crates/gpu	src/backend/mxfp8_projection.rs	impl:Backend::fn:resident_projection_batch_rows	block:1
 engine/crates/gpu	src/backend/mxfp8_projection.rs	impl:Backend::fn:resident_projection_fold_rows	block:1
-engine/crates/gpu/kernels	src/next_decode.rs	fn:resident_projection_bf16_rows	block:1
+engine/crates/gpu/kernels	src/next_decode.rs	fn:resident_projection_bf16_rows	block:1	ruling 2026-11-17 15:18
 engine/crates/gpu/kernels	src/next_decode.rs	fn:resident_projection_fold_rows	block:1
 # EXPERT GLUE (HOUR-PROMPT-L, 2026-11-11): the device version of the fold of the routed experts that rounds its rows as it reads them (the round launch inside; `dim` = FOLD_ROUNDS). One kernel body, one unsafe block, SAFETY contract above the block. Rule: night block STATE.md line 157, allowed after a reviewer read (UNSAFE-ROWS-hour-glue.md in the hour folder).
 engine/crates/gpu/kernels	src/causal_fast.rs	fn:expert_fold	block:1

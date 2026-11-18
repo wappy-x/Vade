@@ -169,8 +169,18 @@ pub const FUSED_ROWS_MAX:usize=8;
 /// The exact (streams, hidden) set of `kernel-bench --mhc-phased`. Other fused shapes keep row entries.
 pub const PHASE_SHAPES:&[(u32,u32)]=&[(1,1),(1,2),(2,17),(3,129),(4,1025),(4,4095),(4,4096),(4,4097)];
 pub fn phases_admitted(s:Shape)->bool {fused_admitted(Shape {rows:1,..s}) && (1..=8).contains(&s.rows) && PHASE_SHAPES.contains(&(s.streams,s.hidden))}
-/// Kernel nodes per boundary. Only swept shapes with wider cohorts use phases.
-pub fn boundary_launches(s:Shape,rows:usize)->usize {if rows>3 && phases_admitted(Shape {rows:rows as u32,..s}) {3} else {rows}}
+/// The fewest rows of one boundary that run as the three phase launches. PHASE THREE (seat DRAFTR, 2026-11-17): 3, was 4.
+/// Measured on served check passes (run draftr-c2-t1): a boundary of 3 rows as three fused row entries cost 4.70 ms a
+/// pass (270 launches) where a boundary of 4 rows as three phase launches cost 3.05 ms (270 launches). The phase
+/// kernels keep private row planes and the per-row arithmetic, so no value changes with this number.
+/// PHASE TWO (seat DRAFTR, 2026-11-17): 2, was 3. Traced check passes (runs draftr-s8-t4, draftr-s8-t7): a boundary of 2 rows
+/// as two fused row entries cost 3.37 ms a pass, of 3 rows as the three phase launches 2.92 ms. `kernel-bench --mhc-phased`
+/// already compares the phases with the fused entry byte for byte at 1 to 8 rows.
+pub const PHASE_ROWS_MIN:usize=2;
+/// True when a boundary of `rows` rows runs as the three phase launches: a swept shape with a wide enough cohort.
+pub fn boundary_phased(s:Shape,rows:usize)->bool {rows>=PHASE_ROWS_MIN && phases_admitted(Shape {rows:rows as u32,..s})}
+/// Kernel nodes per boundary: three phases, or one fused entry a row.
+pub fn boundary_launches(s:Shape,rows:usize)->usize {if boundary_phased(s,rows) {3} else {rows}}
 /// Retained scratch of one prepared fused owner, including all private row planes.
 #[cfg(not(target_arch="nvptx64"))]
 pub const FUSED_SCRATCH_BYTES:usize=4*FUSED_SCRATCH_WORDS*FUSED_ROWS_MAX;
@@ -199,7 +209,8 @@ mod fused_row_tests {
             let s=Shape {rows,streams,hidden,iterations:20,rms_eps:1e-6,eps:1e-6};
             let swept=rows<=8 && PHASE_SHAPES.contains(&(streams,hidden));
             assert_eq!(phases_admitted(s),swept);
-            assert_eq!(boundary_launches(s,rows as usize),if swept && rows>3 {3} else {rows as usize});
+            assert_eq!(boundary_launches(s,rows as usize),if swept && rows as usize>=PHASE_ROWS_MIN {3} else {rows as usize});
+            assert_eq!(boundary_phased(s,rows as usize),swept && rows as usize>=PHASE_ROWS_MIN);
         }}}
         assert_eq!(FUSED_SCRATCH_BYTES,50_304);
     }

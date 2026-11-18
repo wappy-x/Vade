@@ -25,7 +25,9 @@ pub struct Device<'b,'d> {pub backend:&'b Backend<'d>,weights:Rc<RefCell<crate::
     /// Device bytes admission charged for the live sessions (`rows_charge`); usize::MAX until a service tells it.
     group_charge:Cell<usize>,verify_route:Cell<bool>,
     /// GROUP SPARES: the prompt of the group that runs now goes on after it (`rows_follow`); spares are held for its next group.
-    group_follows:Cell<bool>,spares_kept:Cell<bool>}
+    group_follows:Cell<bool>,spares_kept:Cell<bool>,
+    /// ROWS OVERLAP: the gather a check pass's row stage holds until the routed gate and up are recorded (`rows_stage_open`).
+    held_stage:RefCell<Option<crate::resident_weights::HeldStage<'d>>>}
 /// A projection's rows in the memo: its name, its rounding, and the topology (rank, parts).
 type Group=(String,bool,(u32,u32));
 type OriginKey=(Group,Lineage);
@@ -97,7 +99,7 @@ impl Clone for Device<'_,'_> {
         memo_bound:self.memo_bound.clone(),
         #[cfg(feature="kernel-bench")] probe:self.probe.clone(),
         #[cfg(feature="kernel-bench")] attention_calls:self.attention_calls.clone(),
-        blocks:self.blocks.clone(),mhc_host:self.mhc_host.clone(),mhc_fused:self.mhc_fused,stages:self.stages.clone(),cost:self.cost.clone(),memo:RefCell::new(Memo {limit:self.memo_bound.plan().map_or(0,|p|p.bytes()),..Memo::default()}),copies:RefCell::new(None),selection_checks:RefCell::new(Vec::new()),selection_read:RefCell::new(None),gathered:RefCell::new(None),ahead:RefCell::new(None),asked:RefCell::new(BTreeMap::new()),memo_epoch:Cell::new(0),ahead_counts:Cell::new([0;2]),selection_counts:Cell::new([0;2]),selection_shortcut:Cell::new(true),first_step:Cell::new(true),memo_share:Cell::new(true),asked_by_output:Cell::new(false),asked_counts:Cell::new([0;2]),screen_nan:Cell::new(None),screen_keep:Cell::new(false),row_workspace:RefCell::new(None),small_rows:Cell::new(false),source:self.source.clone(),programs:RefCell::new(BTreeMap::new()),serving:self.serving.as_ref().map(|_|RefCell::new(None)),state_copies:Cell::new(0),batch_keep:Cell::new(0),batch_route:Cell::new(0),group_charge:Cell::new(self.group_charge.get()),verify_route:Cell::new(false),group_follows:Cell::new(false),spares_kept:Cell::new(false)}}
+        blocks:self.blocks.clone(),mhc_host:self.mhc_host.clone(),mhc_fused:self.mhc_fused,stages:self.stages.clone(),cost:self.cost.clone(),memo:RefCell::new(Memo {limit:self.memo_bound.plan().map_or(0,|p|p.bytes()),..Memo::default()}),copies:RefCell::new(None),selection_checks:RefCell::new(Vec::new()),selection_read:RefCell::new(None),gathered:RefCell::new(None),ahead:RefCell::new(None),asked:RefCell::new(BTreeMap::new()),memo_epoch:Cell::new(0),ahead_counts:Cell::new([0;2]),selection_counts:Cell::new([0;2]),selection_shortcut:Cell::new(true),first_step:Cell::new(true),memo_share:Cell::new(true),asked_by_output:Cell::new(false),asked_counts:Cell::new([0;2]),screen_nan:Cell::new(None),screen_keep:Cell::new(false),row_workspace:RefCell::new(None),small_rows:Cell::new(false),source:self.source.clone(),programs:RefCell::new(BTreeMap::new()),serving:self.serving.as_ref().map(|_|RefCell::new(None)),state_copies:Cell::new(0),batch_keep:Cell::new(0),batch_route:Cell::new(0),group_charge:Cell::new(self.group_charge.get()),verify_route:Cell::new(false),group_follows:Cell::new(false),spares_kept:Cell::new(false),held_stage:RefCell::new(None)}}
 }
 /// The last Gather this device read: its output vector, the identity of the rows it gathered
 /// from, and the row ids the device returned. Row `slot` of the output is row `ids[slot]` of the source.
@@ -148,7 +150,7 @@ impl<'b,'d> Device<'b,'d> {
             memo_bound:Rc::new(crate::projection_memo::Bound::default()),
             #[cfg(feature="kernel-bench")] probe:Rc::new(RefCell::new(None)),
             #[cfg(feature="kernel-bench")] attention_calls:Rc::new(Cell::new(0)),
-            norms:Rc::new(RefCell::new(BTreeMap::new())),blocks:Rc::new(RefCell::new(BTreeMap::new())),mhc_host:None,mhc_fused:false,stages:Rc::new(RefCell::new([[0;2];4])),cost:Rc::new(crate::resident_profile::Cost::new(cost)),memo:RefCell::new(Memo::default()),copies:RefCell::new(None),selection_checks:RefCell::new(Vec::new()),selection_read:RefCell::new(None),gathered:RefCell::new(None),ahead:RefCell::new(None),asked:RefCell::new(BTreeMap::new()),memo_epoch:Cell::new(0),ahead_counts:Cell::new([0;2]),selection_counts:Cell::new([0;2]),selection_shortcut:Cell::new(true),first_step:Cell::new(true),memo_share:Cell::new(true),asked_by_output:Cell::new(false),asked_counts:Cell::new([0;2]),screen_nan:Cell::new(None),screen_keep:Cell::new(false),row_workspace:RefCell::new(None),small_rows:Cell::new(false),source:Rc::new(Cell::new(0)),programs:RefCell::new(BTreeMap::new()),serving:None,state_copies:Cell::new(0),batch_keep:Cell::new(0),batch_route:Cell::new(0),group_charge:Cell::new(usize::MAX),verify_route:Cell::new(false),group_follows:Cell::new(false),spares_kept:Cell::new(false)}
+            norms:Rc::new(RefCell::new(BTreeMap::new())),blocks:Rc::new(RefCell::new(BTreeMap::new())),mhc_host:None,mhc_fused:false,stages:Rc::new(RefCell::new([[0;2];4])),cost:Rc::new(crate::resident_profile::Cost::new(cost)),memo:RefCell::new(Memo::default()),copies:RefCell::new(None),selection_checks:RefCell::new(Vec::new()),selection_read:RefCell::new(None),gathered:RefCell::new(None),ahead:RefCell::new(None),asked:RefCell::new(BTreeMap::new()),memo_epoch:Cell::new(0),ahead_counts:Cell::new([0;2]),selection_counts:Cell::new([0;2]),selection_shortcut:Cell::new(true),first_step:Cell::new(true),memo_share:Cell::new(true),asked_by_output:Cell::new(false),asked_counts:Cell::new([0;2]),screen_nan:Cell::new(None),screen_keep:Cell::new(false),row_workspace:RefCell::new(None),small_rows:Cell::new(false),source:Rc::new(Cell::new(0)),programs:RefCell::new(BTreeMap::new()),serving:None,state_copies:Cell::new(0),batch_keep:Cell::new(0),batch_route:Cell::new(0),group_charge:Cell::new(usize::MAX),verify_route:Cell::new(false),group_follows:Cell::new(false),spares_kept:Cell::new(false),held_stage:RefCell::new(None)}
     }
     /// Wall counters only. This does not enable CUDA event profiling.
     pub fn with_serving_trace(mut self,enabled:bool)->Self {self.serving=enabled.then(||RefCell::new(None));self}
@@ -741,7 +743,8 @@ if start==0 && v.pending.as_ref().and_then(|p|p.borrow().state_prefix)==Some(len
     }
     fn cache_append(&self,old:&Value<'b,'d>,new:&Value<'b,'d>,rows:usize,width:usize,room:usize)->Result<Value<'b,'d>> {
         if room==0 {return self.join(&[old,new]);}self.ready(old)?;self.ready(new)?;
-        need(rows.checked_mul(width)==Some(old.words) && new.words==width,"latent cache append extent differs")?;
+        // One row from a plain step, or the rows of a check pass (whole rows).
+        need(width>0 && rows.checked_mul(width)==Some(old.words) && new.words>=width && new.words.is_multiple_of(width),"latent cache append extent differs")?;
         // Only a tail beyond every live view can be written. A retained future
         // view or an exhausted arena copies to a new owner through rows_extend.
         let stamp=self.cost.start(self.backend);
@@ -910,6 +913,22 @@ if start==0 && v.pending.as_ref().and_then(|p|p.borrow().state_prefix)==Some(len
         let Some(output)=self.weights.borrow_mut().apply_matrix_stage(self.backend,&mapped,m,widest)? else {return Ok(None);};
         output.into_iter().map(|value|{let words=value.len();self.value(value,words)}).collect::<Result<Vec<_>>>().map(Some)
     }
+    // ROWS OVERLAP: a check pass's row stage with its block-FP8 gather held (`Weights::apply_matrix_stage_open`). Only a
+    // check pass (`verify_route`), and one held stage at a time; otherwise None and the caller runs `rows_stage`.
+    fn rows_stage_open(&self,c:&CheckpointAdmission,jobs:&[(&str,&Value<'b,'d>,bool)],m:usize)->Result<Option<Vec<Option<Value<'b,'d>>>>> {
+        if !self.verify_route.get() || self.held_stage.borrow().is_some() {return Ok(None);}
+        for (_,value,_) in jobs {self.ready(value)?;}
+        let mapped=jobs.iter().map(|(name,value,round)|(*name,&*value.vector,*round)).collect::<Vec<_>>();
+        let d=c.description();let widest=(d.hidden as usize).checked_mul(d.residual.streams as usize).ok_or("row stage width overflow")?;
+        let Some((output,held))=self.weights.borrow_mut().apply_matrix_stage_open(self.backend,&mapped,m,widest)? else {return Ok(None);};
+        *self.held_stage.borrow_mut()=held;
+        output.into_iter().map(|value|value.map(|value|{let words=value.len();self.value(value,words)}).transpose()).collect::<Result<Vec<_>>>().map(Some)
+    }
+    fn rows_stage_close(&self)->Result<Vec<(usize,Value<'b,'d>)>> {
+        let held=self.held_stage.borrow_mut().take().ok_or("no row stage is held")?;
+        let out=self.weights.borrow_mut().apply_matrix_stage_close(self.backend,held)?;
+        out.into_iter().map(|(job,value)|{let words=value.len();Ok((job,self.value(value,words)?))}).collect()
+    }
     fn rows_experts(&self,first:&[(&str,usize)],second:Option<(&[(&str,usize)],f32)>,x:&Value<'b,'d>,places:&[f32])->Result<Option<Value<'b,'d>>> {
         self.ready(x)?;
         let Some(out)=self.weights.borrow_mut().apply_experts(self.backend,first,second,&x.vector,places)? else {return Ok(None);};let words=out.len();Ok(Some(self.value(out,words)?))
@@ -953,20 +972,20 @@ if start==0 && v.pending.as_ref().and_then(|p|p.borrow().state_prefix)==Some(len
     fn note_batch_experts(&self,picks:usize,distinct:usize) {
         if self.batch_route.get()==2 {self.batch_route.set(if picks<2*distinct {3} else {0});}
     }
-    // ROWS FOLD: a chat batch step whose picks stay on the device (`rows_routed`: the same admission, the same waits), with
-    // the down rows folded on this rank before the one exchange of the layer's folded rows. A drafting verify pass keeps
-    // the two steps apart: the fold is gated for chat batch steps only. Measured on the real model (two Sparks, served,
-    // 2026-11-13) with the fold in the verify pass too: its 4-row pass was 0.8 to 1.2 ms faster and structured strict
-    // depth 3 gained 0.7 percent, but strict depth 3 on code has two modes on main itself (89 cycles at 27.0 tokens a
-    // second, 95 cycles at 26.2), and two loads a side could not show which way the fold moves it. A gate with more
-    // loads decides that before a verify pass takes the fold.
+    // ROWS FOLD: a row pass whose picks stay on the device (`rows_routed`: the same admission, the same waits), with
+    // the down rows folded on this rank before the one exchange of the layer's folded rows: a chat batch step, and
+    // (VERIFY FOLD, seat DRAFTR 2026-11-17) the check rows of a drafting verify pass. The verify pass takes it with
+    // its own admission (`routes_verify_rows`: the row counts warmed at predictor startup) and with no mid-step wait,
+    // as `rows_routed` runs it. History: measured 2026-11-13 with the fold in the verify pass, its 4-row pass was 0.8
+    // to 1.2 ms faster, and the fold stayed gated to batch steps until a gate with more loads decided it.
     fn rows_routed_fold(&self,down:&engine_model::plan::layer::Step,ids:&Value<'b,'d>,x:&Value<'b,'d>,weights:&Value<'b,'d>,shared:Option<&Value<'b,'d>>,fold:Shape,m:usize)->Result<Option<Value<'b,'d>>> {
         if !self.folds_rows(m) {return Ok(None);}
         self.ready(ids)?;self.ready(x)?;self.ready(weights)?;if let Some(shared)=shared {self.ready(shared)?;}
-        let Some(out)=self.weights.borrow_mut().apply_routed_rows_fold(self.backend,down,&ids.vector,&x.vector,&weights.vector,shared.map(|shared|&*shared.vector),fold,m)? else {return Ok(None);};
+        let wait=!self.verify_route.get();
+        let Some(out)=self.weights.borrow_mut().apply_routed_rows_fold(self.backend,down,&ids.vector,&x.vector,&weights.vector,shared.map(|shared|&*shared.vector),fold,m,wait)? else {return Ok(None);};
         let words=out.len();Ok(Some(self.value(out,words)?))
     }
-    fn folds_rows(&self,m:usize)->bool {!self.verify_route.get() && self.routes_rows(m) && self.weights.borrow().folds_routed()}
+    fn folds_rows(&self,m:usize)->bool {m<=super::BATCH_ROWS && self.routes_rows(m) && self.weights.borrow().folds_routed()} // the fold takes at most `rows_fold::TOKENS` (= `BATCH_ROWS`) rows: a verify pass of more rows keeps its routed form, as on main (no waiting down step, no kept shared row)
     // GROUP FOLD: a prompt group's rows (the decoder asks for no other pass). A verify pass keeps its routed form.
     fn folds_groups(&self,m:usize)->bool {m>0 && !self.verify_route.get() && self.weights.borrow().folds_groups()}
     fn rows_experts_fold(&self,first:&[(&str,usize)],x:&Value<'b,'d>,places:&[f32],ids:&Value<'b,'d>,weights:&Value<'b,'d>,shared:Option<&Value<'b,'d>>,fold:Shape,m:usize)->Result<Option<Value<'b,'d>>> {
@@ -1025,7 +1044,10 @@ if start==0 && v.pending.as_ref().and_then(|p|p.borrow().state_prefix)==Some(len
         spark_gpu_probe::prompt_launches::record("prompt_query_local");
         Ok(Some(self.value(out,words)?))
     }
-    fn rows_verify(&self,on:bool) {self.verify_route.set(on);}
+    // ROWS OVERLAP GUARD: both pass wrappers call rows_verify(false) after the pass body returns, Ok or Err, so a row
+    // stage still held here was left by an error return between open and close: drop it (its queued operands stay
+    // retained through the queue's drain). A later pass can then open its own hold again.
+    fn rows_verify(&self,on:bool) {self.verify_route.set(on);if !on {drop(self.held_stage.take());}}
     fn warm_routed_rows(&self,steps:&[engine_model::plan::layer::Step],picks:usize,max_rows:usize)->Result<()> {
         self.weights.borrow_mut().warm_routed_rows(self.backend,steps,picks,max_rows)
     }

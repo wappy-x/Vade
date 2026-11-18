@@ -1,5 +1,6 @@
-//! One launch for 2 to 8 same-shape recurrent calls. The recorder asks `plan` after chain fusion.
-//! A block row runs one member command through that command's own one-chat body.
+//! One launch for 2 to 8 same-shape recurrent calls, or 2 to 8 same-shape latent pool scores or gathers of different
+//! chats (seat CHATS4: the batch step records the chats' PoolScores and Gathers back to back). The recorder asks `plan`
+//! after chain fusion. A block row runs one member command through that command's own one-chat body.
 use crate::causal_ops::{Arguments,Op,Shape};
 use crate::resident_launch::{Command,Kind};
 const COMMAND_SIZE:usize=1040;
@@ -19,7 +20,7 @@ pub(crate) struct Launch<'a> {pub command:&'a Command,pub blocks:u32,pub rows:u3
 pub(crate) struct Plan {pub offset:u32,pub append:Vec<u8>,pub n:u32,pub member_kind:u32,pub blocks:u32,pub threads:u32,pub shared:u32,pub lane:u8,pub replace:u8}
 fn u32_at(bytes:&[u8],at:usize)->Option<u32> {Some(u32::from_ne_bytes(bytes.get(at..at+4)?.try_into().ok()?))}
 fn u64_at(bytes:&[u8],at:usize)->Option<u64> {Some(u64::from_ne_bytes(bytes.get(at..at+8)?.try_into().ok()?))}
-fn op_of(n:u32)->Option<Op> {[Op::Conv,Op::ConvParts,Op::Step,Op::StepPlanar,Op::Prepare,Op::GatedNorm].into_iter().find(|op|*op as u32==n)}
+fn op_of(n:u32)->Option<Op> {[Op::Conv,Op::ConvParts,Op::Step,Op::StepPlanar,Op::Prepare,Op::GatedNorm,Op::PoolScores,Op::Gather].into_iter().find(|op|*op as u32==n)}
 fn op_at(payload:&[u8],arguments:usize)->Option<Op> {op_of(u32_at(payload,arguments+core::mem::offset_of!(Arguments,shape))?) }
 fn arguments_at(payload:&[u8],at:usize)->Option<Arguments> {
     let shape_at=at+core::mem::offset_of!(Arguments,shape);
@@ -53,10 +54,13 @@ pub(crate) fn independent(members:&[Command],incoming:&Command)->bool {
     let Some((incoming_reads,incoming_writes))=spans(incoming) else {return false;};
     members.iter().all(|member| spans(member).is_some_and(|(reads,writes)| !clashes(&incoming_writes,&reads,&writes) && !clashes(&writes,&incoming_reads,&incoming_writes)))
 }
+/// The member kind of a call that may join a group. PoolScores and Gather (seat CHATS4): their fast bodies read only their
+/// own block index and `_grid_dim_x` (a member's own grid x), and `latent_ops::lengths` names every word they read and
+/// write, so `independent` sees exactly the planes of each chat.
 fn recurrent(command:&Command)->Option<u32> {
     if command.kind==Kind::CausalChain as u32 {return Some(command.kind);}
     if command.kind!=Kind::CausalFast as u32 {return None;}
-    matches!(op_at(&command.payload,0),Some(Op::Conv|Op::ConvParts|Op::Step|Op::StepPlanar)).then_some(command.kind)
+    matches!(op_at(&command.payload,0),Some(Op::Conv|Op::ConvParts|Op::Step|Op::StepPlanar|Op::PoolScores|Op::Gather)).then_some(command.kind)
 }
 fn same_body(left:&Command,right:&Command)->bool {left.kind==right.kind && (left.kind!=Kind::CausalFast as u32 || op_at(&left.payload,0)==op_at(&right.payload,0))}
 fn command_bytes(command:&Command)->[u8;COMMAND_SIZE] {
@@ -176,6 +180,35 @@ mod tests {
     fn conv(chat:u32,weight:u64)->Command {
         let base=0x2_0000_0000u64+u64::from(chat)*0x10_0000;
         crate::resident_launch_encode::causal_fast(Arguments {input:[base,base+0x100,base+0x200,base+0x300],weight,output:base+0x1_000,shape:Shape {op:Op::ConvParts,heads:2,dim:1,taps:2,rows:0,cols:0,epsilon:0.0,bound:0.0}})
+    }
+    /// A chat's PoolScores (query, pool keys, head weights -> scores) and its Gather (latent rows, selection, count -> its
+    /// own rows of the joined value), each chat on its own planes.
+    fn pool_scores(chat:u32)->Command {
+        let base=0x3_0000_0000u64+u64::from(chat)*0x10_0000;
+        crate::resident_launch_encode::causal_fast(Arguments {input:[base,base+0x1_0000,base+0x8_0000,0],weight:0,output:base+0x9_0000,shape:Shape {op:Op::PoolScores,heads:32,dim:128,taps:0,rows:260,cols:0,epsilon:0.0,bound:0.0}})
+    }
+    fn gather(chat:u32,joined:u64)->Command {
+        let base=0x4_0000_0000u64+u64::from(chat)*0x10_0000;
+        crate::resident_launch_encode::causal_fast(Arguments {input:[base,base+0x8_0000,base+0x9_0000,0],weight:0,output:joined+u64::from(chat)*256*512*4,shape:Shape {op:Op::Gather,heads:32,dim:512,taps:4,rows:300,cols:256,epsilon:1e-6,bound:0.0}})
+    }
+    #[test]
+    fn pool_scores_and_gathers_of_different_chats_group_and_overlapping_ones_do_not() {
+        for (ops,name) in [((0..8u32).map(pool_scores).collect::<Vec<_>>(),"pool scores"),((0..8u32).map(|chat|gather(chat,0x9_0000_0000)).collect(),"gathers")] {
+            let (mut calls,mut staged,mut heavy)=(Vec::new(),Vec::new(),0usize);
+            for command in &ops {record(&mut calls,&mut staged,&mut heavy,*command,64,MAIN,true);}
+            assert_eq!((calls.len(),calls[0].rows,calls[0].blocks),(1,8,64),"eight {name} of eight chats are one launch of 64 x 8 blocks");
+            let grouped=members(&staged,&calls[0].command);
+            for (member,command) in grouped.iter().zip(&ops) {assert_eq!(member.payload,command.payload,"each {name} member keeps its own command");}
+        }
+        // A gather that writes over another chat's rows, or reads them, stays its own launch.
+        let left=gather(0,0x9_0000_0000);let mut over=gather(1,0x9_0000_0000);over.word(5,left.payload[40..48].try_into().map(u64::from_ne_bytes).unwrap());
+        assert!(!independent(std::slice::from_ref(&left),&over));
+        let mut reads=gather(1,0x9_0000_0000);reads.word(0,left.payload[40..48].try_into().map(u64::from_ne_bytes).unwrap());
+        assert!(!independent(std::slice::from_ref(&left),&reads));
+        // A pool score and a gather never share a group, and other fast ops still never group.
+        assert!(plan(Launch {command:&pool_scores(0),blocks:64,rows:1,planes:1,threads:128,shared:0,lane:MAIN},Launch {command:&gather(1,0x9_0000_0000),blocks:64,rows:1,planes:1,threads:128,shared:0,lane:MAIN},&[]).is_none());
+        let mut softmax=pool_scores(1);softmax.payload[48..52].copy_from_slice(&(Op::Softmax as u32).to_ne_bytes());
+        assert!(plan(Launch {command:&pool_scores(0),blocks:64,rows:1,planes:1,threads:128,shared:0,lane:MAIN},Launch {command:&softmax,blocks:64,rows:1,planes:1,threads:128,shared:0,lane:MAIN},&[]).is_none());
     }
     #[test]
     fn shared_weight_is_independent_and_a_shared_scratch_is_not() {

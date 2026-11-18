@@ -27,6 +27,13 @@ pub fn gather_stage_selected<'d>(b:&Backend<'d>,mailbox:&spark_gpu_probe::driver
 }
 struct Defer(std::rc::Rc<std::cell::Cell<bool>>);
 impl Drop for Defer {fn drop(&mut self) {self.0.set(false);}}
+/// ROWS OVERLAP: the gather `Weights::apply_matrix_stage_open` held: the row count, and each mailbox gather's jobs as
+/// (job index, the matrix's rows, this rank's rows of the job). Given to `Weights::apply_matrix_stage_close`.
+pub struct HeldStage<'d> {m:usize,gathers:Vec<Vec<(usize,Rows,DeviceVector<'d>)>>}
+/// ROWS OVERLAP: the held form has run in this process (one line in the served log).
+static HELD_SEEN:std::sync::atomic::AtomicBool=std::sync::atomic::AtomicBool::new(false);
+/// What a row stage made (None: held) and what it holds.
+type Opened<'d>=(Vec<Option<DeviceVector<'d>>>,Option<HeldStage<'d>>);
 impl<'b,'d> Weights<'b,'d> {
     pub fn prepare_kda(&mut self,c:&CheckpointAdmission)->Result<()> {
         let owner=std::ptr::from_ref(c) as usize;
@@ -92,6 +99,46 @@ impl<'b,'d> Weights<'b,'d> {
     /// None, before any work: the caller makes the calls one by one (no exchange owner, or no two
     /// split outputs that fit one gather).
     pub fn apply_matrix_stage(&mut self,b:&Backend<'d>,jobs:&[(&str,&DeviceVector<'_>,bool)],m:usize,widest:usize)->Result<Option<Vec<DeviceVector<'d>>>> {
+        let Some((outputs,_))=self.stage_core(b,jobs,m,widest,false)? else {return Ok(None);};
+        outputs.into_iter().map(|output|output.ok_or_else(||"row stage lost an output".into())).collect::<Result<Vec<_>>>().map(Some)
+    }
+    /// ROWS OVERLAP: `apply_matrix_stage` for a check pass of 2 to 8 rows, with its block-FP8 work beside the main lane.
+    /// When every split output of the stage is a block-FP8 output (the shared expert's gate and up beside the router
+    /// gate), those launches (input round, `fp8_rows`, transposes) are recorded on the SIDE lane (`Backend::resident_side`)
+    /// and their gather is HELD: the outputs come back None, and `apply_matrix_stage_close` records the join and the
+    /// gather later, on the main lane. The caller records the router chain and the routed gate and up in between, so the
+    /// block-FP8 work runs beside them. Nothing between reads or writes what the side launches write: their outputs are
+    /// fresh and only the held gather reads them; their input and the decode table are only read. Kernels, operands,
+    /// add order and the gather's words are those of `apply_matrix_stage`; only the recorded order and the lane differ.
+    /// With no such stage the outputs are all Some and nothing is held, as `apply_matrix_stage` makes them.
+    pub fn apply_matrix_stage_open(&mut self,b:&Backend<'d>,jobs:&[(&str,&DeviceVector<'_>,bool)],m:usize,widest:usize)->Result<Option<Opened<'d>>> {
+        self.stage_core(b,jobs,m,widest,true)
+    }
+    /// ROWS OVERLAP: the held gather of `apply_matrix_stage_open`, after a join of the side lane: each held job's
+    /// gathered rows, by its job index.
+    pub fn apply_matrix_stage_close(&mut self,b:&Backend<'d>,held:HeldStage<'d>)->Result<Vec<(usize,DeviceVector<'d>)>> {
+        b.resident_side_join();
+        let mailbox=self.mailbox.ok_or("held row stage has no mailbox")?;
+        let stamp=self.cost.start(b);let mut out=Vec::new();
+        for group in &held.gathers {out.extend(self.stage_gather(b,mailbox,held.m,&group.iter().map(|(job,rows,local)|(*job,*rows,local)).collect::<Vec<_>>())?);}
+        self.cost.record(||"exchange_stage_rows".into(),stamp,b,0);
+        Ok(out)
+    }
+    /// One mailbox gather of a stage: each token of each job is one part; a job's tokens come back as one range,
+    /// [m, total rows], by its job index.
+    fn stage_gather(&mut self,b:&Backend<'d>,mailbox:&'b spark_gpu_probe::driver::TpMailbox<'d>,m:usize,held:&[(usize,Rows,&DeviceVector<'d>)])->Result<Vec<(usize,DeviceVector<'d>)>> {
+        let mut parts=Vec::with_capacity(held.len()*m);let mut rows=Vec::with_capacity(held.len()*m);
+        for (_,matrix_rows,whole) in held {
+            for token in 0..m {parts.push(whole.resident_range(token*matrix_rows.count..(token+1)*matrix_rows.count)?);rows.push(*matrix_rows);}
+        }
+        projection_stage::checked_rows(&rows)?;
+        let joined=gather_joined(b,mailbox,&mut self.sequence,self.topology,&parts.iter().map(|part|(part,false)).collect::<Vec<_>>(),&rows)?;
+        // The tokens of one projection are consecutive parts: [m,total rows] is one range of the gather.
+        let mut start=0;let mut out=Vec::with_capacity(held.len());
+        for (job,matrix_rows,_) in held {let total=matrix_rows.total*m;out.push((*job,joined.resident_range(start..start+total)?));start+=total;}
+        Ok(out)
+    }
+    fn stage_core(&mut self,b:&Backend<'d>,jobs:&[(&str,&DeviceVector<'_>,bool)],m:usize,widest:usize,hold:bool)->Result<Option<Opened<'d>>> {
         /// Most parts of one mailbox stage gather (the bound its device test proves).
         const PARTS:usize=32;
         if self.collecting.get() || jobs.len()<2 || m==0 {return Ok(None);}
@@ -168,6 +215,12 @@ impl<'b,'d> Weights<'b,'d> {
         let pairs=(0..jobs.len()).any(|a|(a+1..jobs.len()).any(|b|fp8(a) && fp8(b)
             && jobs[a].1.device_address()==jobs[b].1.device_address() && jobs[a].1.len()==jobs[b].1.len() && self.matrices[jobs[a].0].cols==self.matrices[jobs[b].0].cols));
         if (split<2 || gathers.len()==split) && merged.iter().all(|(_,_,list)|list.is_empty()) && !pairs && mx.is_empty() && shared.is_empty() {return Ok(None);}
+        // ROWS OVERLAP: hold the gather of the block-FP8 outputs (the shared expert's gate and up) when each of them is split,
+        // on the mailbox, at 2 to 8 rows. A split output of another job (the router gate) is gathered at once, alone, as the
+        // route reads it next; that is one exchange more a stage. Any other stage runs as before.
+        let fp8_jobs=(0..jobs.len()).map(fp8).collect::<Vec<_>>();
+        let hold=hold && mailbox.is_some() && (2..=8).contains(&m) && fp8_jobs.iter().any(|&f|f)
+            && jobs.iter().zip(&fp8_jobs).all(|((name,_,_),&f)|!f || (self.matrices[*name].rows.split && !self.kda_local.contains(*name)));
         // Proof for logs: this stage shares at least one exchange (PROMPT KERNEL COUNTS, SERVED PROMPT COUNTS).
         if split>=2 && gathers.len()!=split {spark_gpu_probe::prompt_launches::record("row_stage");}
         // What a merged launch made for a job: its local rows, and whether they are [local rows,m].
@@ -196,6 +249,8 @@ impl<'b,'d> Weights<'b,'d> {
             riders=if ride_round {rounded} else {raw};riders.sort_unstable();riders.truncate(9usize.saturating_sub(mx[at].len()));
             for (_,_,list) in merged.iter_mut() {list.retain(|job|!riders.contains(job));}
         }
+        // ROWS OVERLAP: the block-FP8 launches go first, on the side lane, so that they run beside the router and what follows.
+        if hold {b.resident_side(||self.stage_fp8(b,jobs,m,&mut made))?;}
         for (round,form,list) in &merged {
             // A form with no job sends nothing; every selected row form has a nonzero part.
             if list.is_empty() {continue;}
@@ -230,6 +285,74 @@ impl<'b,'d> Weights<'b,'d> {
                     Form::FoldRowsF32|Form::FoldRows=>"projection_fold_rows"}),stamp,b,bytes);
             }
         }
+        if !hold {self.stage_fp8(b,jobs,m,&mut made)?;}
+        for (at,group) in mx.iter().enumerate() {self.mx_rows_launch(b,jobs,group,if ride==Some(at) {&riders} else {&[]},ride_round,m,&mut made)?;}
+        for group in &shared {self.mx_rows_shared(b,jobs,group,m,&mut made)?;}
+        // Each job's local rows. A whole (not split) output is done. A split one waits for its
+        // gather: token-major for the mailbox; the host link keeps each producer's order.
+        let mut outputs:Vec<Option<DeviceVector<'d>>>=Vec::with_capacity(jobs.len());let mut local:Vec<Option<DeviceVector<'d>>>=Vec::with_capacity(jobs.len());
+        let mut row_orders=Vec::with_capacity(jobs.len());
+        for (job,(name,input,round)) in jobs.iter().enumerate() {
+            let split=self.matrices[*name].rows.split && !self.kda_local.contains(*name);
+            // ROWS OVERLAP: a held job's last launches (its own call, its transpose) stay on the side lane.
+            let mut make=||->Result<(DeviceVector<'d>,bool)> {
+                let (output,row_major)=match made[job].take() {Some(local)=>local,None=>self.matrix_rows(name,b,input,m,*round)?};let rows=self.matrices[*name].rows;
+                let value=if row_major && m>1 && (!split || mailbox.is_some()) {Self::transpose(b,&output,rows.count,m,false)?} else {output};
+                Ok((if split {value.into_resident_shared()?} else {value},row_major))
+            };
+            let (value,row_major)=if hold && fp8_jobs[job] {b.resident_side(&mut make)?} else {make()?};
+            row_orders.push(row_major);
+            if !split {local.push(None);outputs.push(Some(value));continue;}
+            local.push(Some(value));outputs.push(None);
+        }
+        let stamp=self.cost.start(b);
+        let mut kept=Vec::new();
+        for (held,words,_) in &gathers {
+            // ROWS OVERLAP: the gather waits for `apply_matrix_stage_close`; this rank's rows wait with it.
+            if hold {
+                let mailbox=mailbox.ok_or("held row stage has no mailbox")?;
+                let now=held.iter().filter(|&&job|!fp8_jobs[job]).map(|&job|Ok((job,self.matrices[jobs[job].0].rows,local[job].as_ref().ok_or("row stage lost a local part")?))).collect::<Result<Vec<_>>>()?;
+                if !now.is_empty() {for (job,value) in self.stage_gather(b,mailbox,m,&now)? {outputs[job]=Some(value);}}
+                let later=held.iter().filter(|&&job|fp8_jobs[job]).map(|&job|Ok((job,self.matrices[jobs[job].0].rows,local[job].take().ok_or("row stage lost a local part")?))).collect::<Result<Vec<_>>>()?;
+                if !later.is_empty() {kept.push(later);}
+                continue;
+            }
+            if let Some(mailbox)=mailbox {
+                let parts=held.iter().map(|&job|Ok((job,self.matrices[jobs[job].0].rows,local[job].as_ref().ok_or("row stage lost a local part")?))).collect::<Result<Vec<_>>>()?;
+                for (job,value) in self.stage_gather(b,mailbox,m,&parts)? {outputs[job]=Some(value);}
+            } else {
+                let blocks=held.iter().map(|&job|local[job].as_ref().ok_or("row stage lost a local part")).collect::<std::result::Result<Vec<_>,_>>()?;
+                crate::exchange_trace::kind(||format!("stage {}",held.iter().map(|&job|jobs[job].0).collect::<Vec<_>>().join("+")));
+                self.gather_mapped_parts(b,&blocks)?;
+                // Each projection's rank blocks side by side, in their producer's layout, out of the exchange buffer
+                // (the next gather writes it again).
+                let ranks=self.topology.parts as usize;let mut placed=Vec::with_capacity(held.len()*ranks);let (mut from,mut to)=(0usize,0usize);
+                for &job in held {
+                    // A projection's gathered rows are one block of `block` words a part of the exchange.
+                    let rows=self.matrices[jobs[job].0].rows;let block=rows.count*m;let whole=block*ranks;
+                    if rows.total*m!=whole {return Err("row stage rank blocks differ".into());}
+                    for rank in 0..ranks {placed.push([rank**words+from,to+rank*block,block]);}
+                    from+=block;to+=rows.total*m;
+                }
+                let mut joined=b.vector(to)?;
+                b.resident_scatter_copy(self.exchange.as_ref().ok_or("prompt exchange is absent")?,&mut joined,&placed)?;
+                crate::exchange_trace::reader();self.exchange_read(b)?;
+                let joined=joined.into_resident_shared()?;let mut start=0;
+                for &job in held {
+                    let rows=self.matrices[jobs[job].0].rows;let extent=rows.total*m;
+                    let packet=joined.resident_range(start..start+extent)?;
+                    outputs[job]=Some(if row_orders[job] {Self::transpose(b,&packet,rows.total,m,true)?}
+                        else {Self::rank_rows(b,&packet,m,rows.count,ranks,true)?});start+=extent;
+                }
+            }
+        }
+        self.cost.record(||"exchange_stage_rows".into(),stamp,b,0);
+        // Proof for the served log, once a process: the held form ran (ROWS OVERLAP).
+        if hold && !kept.is_empty() && !HELD_SEEN.swap(true,std::sync::atomic::Ordering::Relaxed) {eprintln!("ROWS OVERLAP held a row stage: {} rows, {} held gathers of {} jobs",m,kept.len(),kept.iter().map(Vec::len).sum::<usize>());}
+        Ok(Some((outputs,(hold && !kept.is_empty()).then_some(HeldStage {m,gathers:kept}))))
+    }
+    /// The block-FP8 launches of a row stage (`apply_matrix_stage`): `made` takes each job they make.
+    fn stage_fp8(&mut self,b:&Backend<'d>,jobs:&[(&str,&DeviceVector<'_>,bool)],m:usize,made:&mut [Option<(DeviceVector<'d>,bool)>])->Result<()> {
         // Block-FP8 projections that read the same rows share ONE input round (two launches less for
         // each further matrix).
         //
@@ -240,6 +363,7 @@ impl<'b,'d> Weights<'b,'d> {
         // 2 x 46 at 8 rows), and a launch is saved. Each word is the word of the matrix's own launch: its own
         // ascending chain; only the block that computes it differs. Chosen by shape, storage and addresses alone;
         // a matrix with no partner, or a table the predicate refuses, keeps its own launch.
+        let fp8=|job:usize|matches!(&self.matrices[jobs[job].0].storage,Storage::Packed {shape,..} if shape.op!=Op::NvProject);
         let mut rounded:Vec<(usize,DeviceVector<'d>)>=Vec::new();
         for job in 0..jobs.len() {
             if !fp8(job) || made[job].is_some() {continue;}
@@ -249,7 +373,8 @@ impl<'b,'d> Weights<'b,'d> {
             let stamp=self.cost.start(b);
             if self.lut.is_none() {self.lut=Some(b.upload_vector(&spark_gpu_probe::expert_ops::decode_lut())?);}
             if !rounded.iter().any(|(owner,_)|*owner==first) {
-                let lanes=b.round_bf16_lanes(jobs[job].1)?;let mut source=b.vector(lanes.len())?;b.copy_prefix(lanes.vector(),&mut source,lanes.len())?;rounded.push((first,source));
+                // The rounded lanes are the source: their own storage, no second copy of it (the round's words are the same).
+                rounded.push((first,b.round_bf16_lanes(jobs[job].1)?.into_vector()));
             }
             let source=&rounded.iter().find(|(owner,_)|*owner==first).ok_or("row stage lost a rounded input")?.1;
             let matrix=&self.matrices[jobs[job].0];let Storage::Packed {shape,..}=&matrix.storage else {return Err("row stage FP8 storage differs".into());};
@@ -278,60 +403,7 @@ impl<'b,'d> Weights<'b,'d> {
             }
             self.cost.settle(b)?;self.cost.record(||"projection_3".into(),stamp,b,bytes);
         }
-        for (at,group) in mx.iter().enumerate() {self.mx_rows_launch(b,jobs,group,if ride==Some(at) {&riders} else {&[]},ride_round,m,&mut made)?;}
-        for group in &shared {self.mx_rows_shared(b,jobs,group,m,&mut made)?;}
-        // Each job's local rows. A whole (not split) output is done. A split one waits for its
-        // gather: token-major for the mailbox; the host link keeps each producer's order.
-        let mut outputs:Vec<Option<DeviceVector<'d>>>=Vec::with_capacity(jobs.len());let mut local:Vec<Option<DeviceVector<'d>>>=Vec::with_capacity(jobs.len());
-        let mut row_orders=Vec::with_capacity(jobs.len());
-        for (job,(name,input,round)) in jobs.iter().enumerate() {
-            let (output,row_major)=match made[job].take() {Some(local)=>local,None=>self.matrix_rows(name,b,input,m,*round)?};let rows=self.matrices[*name].rows;
-            row_orders.push(row_major);
-            if !rows.split || self.kda_local.contains(*name) {local.push(None);outputs.push(Some(if row_major && m>1 {Self::transpose(b,&output,rows.count,m,false)?} else {output}));continue;}
-            let block=if m>1 && row_major && mailbox.is_some() {Self::transpose(b,&output,rows.count,m,false)?} else {output};
-            local.push(Some(block.into_resident_shared()?));outputs.push(None);
-        }
-        let stamp=self.cost.start(b);
-        for (held,words,_) in &gathers {
-            if let Some(mailbox)=mailbox {
-                let mut parts=Vec::with_capacity(held.len()*m);let mut rows=Vec::with_capacity(held.len()*m);
-                for &job in held {
-                    let matrix_rows=self.matrices[jobs[job].0].rows;let whole=local[job].as_ref().ok_or("row stage lost a local part")?;
-                    for token in 0..m {parts.push(whole.resident_range(token*matrix_rows.count..(token+1)*matrix_rows.count)?);rows.push(matrix_rows);}
-                }
-                projection_stage::checked_rows(&rows)?;
-                let joined=gather_joined(b,mailbox,&mut self.sequence,self.topology,&parts.iter().map(|part|(part,false)).collect::<Vec<_>>(),&rows)?;
-                // The tokens of one projection are consecutive parts: [m,total rows] is one range of the gather.
-                let mut start=0;
-                for &job in held {let total=self.matrices[jobs[job].0].rows.total*m;outputs[job]=Some(joined.resident_range(start..start+total)?);start+=total;}
-            } else {
-                let blocks=held.iter().map(|&job|local[job].as_ref().ok_or("row stage lost a local part")).collect::<std::result::Result<Vec<_>,_>>()?;
-                crate::exchange_trace::kind(||format!("stage {}",held.iter().map(|&job|jobs[job].0).collect::<Vec<_>>().join("+")));
-                self.gather_mapped_parts(b,&blocks)?;
-                // Each projection's rank blocks side by side, in their producer's layout, out of the exchange buffer
-                // (the next gather writes it again).
-                let ranks=self.topology.parts as usize;let mut placed=Vec::with_capacity(held.len()*ranks);let (mut from,mut to)=(0usize,0usize);
-                for &job in held {
-                    // A projection's gathered rows are one block of `block` words a part of the exchange.
-                    let rows=self.matrices[jobs[job].0].rows;let block=rows.count*m;let whole=block*ranks;
-                    if rows.total*m!=whole {return Err("row stage rank blocks differ".into());}
-                    for rank in 0..ranks {placed.push([rank**words+from,to+rank*block,block]);}
-                    from+=block;to+=rows.total*m;
-                }
-                let mut joined=b.vector(to)?;
-                b.resident_scatter_copy(self.exchange.as_ref().ok_or("prompt exchange is absent")?,&mut joined,&placed)?;
-                crate::exchange_trace::reader();self.exchange_read(b)?;
-                let joined=joined.into_resident_shared()?;let mut start=0;
-                for &job in held {
-                    let rows=self.matrices[jobs[job].0].rows;let extent=rows.total*m;
-                    let packet=joined.resident_range(start..start+extent)?;
-                    outputs[job]=Some(if row_orders[job] {Self::transpose(b,&packet,rows.total,m,true)?}
-                        else {Self::rank_rows(b,&packet,m,rows.count,ranks,true)?});start+=extent;
-                }
-            }
-        }
-        self.cost.record(||"exchange_stage_rows".into(),stamp,b,0);
-        outputs.into_iter().map(|output|output.ok_or_else(||"row stage lost an output".into())).collect::<Result<Vec<_>>>().map(Some)
+        Ok(())
     }
     fn stage_rows(&self,jobs:&[Job<'_,DeviceVector<'d>>])->Result<Option<(Vec<Rows>,Vec<usize>)>> {
         if self.collecting.get() {return Err("nested projection stage".into());}

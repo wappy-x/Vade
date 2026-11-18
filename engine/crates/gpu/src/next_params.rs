@@ -126,12 +126,12 @@ impl ResidentProjectionBatch {
         self.layer.push(projection)?;self.layer.ends[index+1]=end;
         if plain {self.plain|=1<<index;}Ok(())
     }
-    /// ROW STAGE (`flash_resident_projection_bf16_rows`): a descriptor of 2 to 4 FP32 source rows. An MXFP8 descriptor keeps its
+    /// ROW STAGE (`flash_resident_projection_bf16_rows`): a descriptor of 2 to 8 FP32 source rows (STAGE EIGHT: was 2 to 4). An MXFP8 descriptor keeps its
     /// one-row blocks (scalar word: a warp owns one weight row and all its source rows; tensor-core word: a block owns 16
     /// weight rows and all its source rows); a plain descriptor takes `tokens` times its one-row blocks, source row major (one
     /// thread a (weight row, source row)).
     pub fn push_rows(&mut self,projection:MxProjection,plain:bool)->Result<(),&'static str> {
-        if !(2..=4).contains(&projection.tokens) || projection.round!=0 || projection.input_bf16!=0 || (plain && projection.mode!=MX_SCALAR) {return Err("resident projection row batch requires 2 to 4 FP32 source rows");}
+        if !(2..=8).contains(&projection.tokens) || projection.round!=0 || projection.input_bf16!=0 || (plain && projection.mode!=MX_SCALAR) {return Err("resident projection row batch requires 2 to 8 FP32 source rows");}
         let index=self.layer.count as usize;if index>=9 {return Err("resident projection row batch is full");}let start=self.layer.ends[index];
         let blocks=if plain {projection.rows.div_ceil(128).checked_mul(projection.tokens).ok_or("resident projection row batch grid overflow")?}
             else if projection.mode==MX_TC {projection.rows.div_ceil(MX_TC_ROWS)} else {projection.rows.div_ceil(4)};
@@ -167,7 +167,7 @@ mod resident_batch_tests {
         for job in [0,2] {let p=batch.layer.projections[job];let mut visits=vec![0;p.rows as usize];
             for local in 0..batch.layer.ends[job+1]-batch.layer.ends[job] {for row in local*MX_TC_ROWS..(local+1)*MX_TC_ROWS {if row<p.rows {visits[row as usize]+=1;}}}
             assert!(visits.iter().all(|&count|count==1));}
-        for tokens in 2..=4 {let mut rows=ResidentProjectionBatch::default();
+        for tokens in 2..=8 {let mut rows=ResidentProjectionBatch::default();
             rows.push_rows(tc(4096,tokens),false).unwrap();rows.push_rows(MxProjection {tokens,..projection(4096)},false).unwrap();
             assert_eq!(&rows.layer.ends[..3],&[0,256,1280]);}
         assert!(ResidentProjectionBatch::default().push(tc(32,1),true).is_err());
@@ -196,7 +196,7 @@ mod resident_batch_tests {
     }
     #[test]
     fn row_batches_give_plain_rows_one_block_group_a_source_row_and_refuse_other_row_counts() {
-        for tokens in 2..=4u32 {
+        for tokens in 2..=8u32 {
             let mut batch=ResidentProjectionBatch::default();
             for (rows,plain) in [(17,false),(129,true),(4096,false),(32,true)] {let mut p=projection(rows);p.tokens=tokens;batch.push_rows(p,plain).unwrap();}
             // MXFP8: one warp a weight row for all source rows. Plain: one thread a (weight row, source row), source row major.
@@ -204,7 +204,7 @@ mod resident_batch_tests {
             assert!(batch.layer.projections[..4].iter().all(|p|p.tokens==tokens));
             let (job,rest)=crate::plain_admission::batch_block(batch.layer.ends,batch.plain,4,2*tokens);assert_eq!((job,rest),(3,0));
         }
-        for tokens in [0,1,5,16] {let mut batch=ResidentProjectionBatch::default();let mut p=projection(4);p.tokens=tokens;
+        for tokens in [0,1,9,16] {let mut batch=ResidentProjectionBatch::default();let mut p=projection(4);p.tokens=tokens;
             assert!(batch.push_rows(p,false).is_err());assert_eq!((batch.layer.count,batch.plain),(0,0));}
         let mut batch=ResidentProjectionBatch::default();let mut p=projection(4);p.tokens=2;p.cols=48;assert!(batch.push_rows(p,true).is_err());assert_eq!(batch.layer.count,0);
         let mut p=projection(4);p.tokens=2;for _ in 0..9 {batch.push_rows(p,false).unwrap();}assert!(batch.push_rows(p,true).is_err());assert_eq!((batch.layer.count,batch.plain),(9,0));

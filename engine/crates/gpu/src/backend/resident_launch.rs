@@ -688,13 +688,13 @@ impl<'a> Backend<'a> {
     #[test] fn boundary_cohort_keys_keep_the_phase_grids_and_row_switch_distinct() {
         use super::{Grid,Kind,MAIN,same_kernels};
         let key=|rows:u32| {
-            let kinds=if rows>3 {vec![Kind::MhcPhaseRms,Kind::MhcPhaseDots,Kind::MhcPhaseFinish]} else {vec![Kind::MhcBoundaryFused;rows as usize]};
+            let kinds=if rows as usize>=crate::mhc_params::PHASE_ROWS_MIN {vec![Kind::MhcPhaseRms,Kind::MhcPhaseDots,Kind::MhcPhaseFinish]} else {vec![Kind::MhcBoundaryFused;rows as usize]};
             kinds.into_iter().map(|kind|Grid {kind,blocks:if kind==Kind::MhcPhaseFinish {rows} else if kind==Kind::MhcBoundaryFused {32} else {32*rows},rows:1,planes:1,threads:256,shared:0,lane:MAIN}).collect::<Vec<_>>()
         };
         let mut seen=std::collections::BTreeSet::new();
-        let hits=[8,5,4,3,4,5,8].map(|rows|!seen.insert(key(rows)));
+        let hits=[8,5,4,2,4,5,8].map(|rows|!seen.insert(key(rows)));
         assert_eq!(hits,[false,false,false,false,true,true,true]);
-        assert!(!same_kernels(&key(3),&key(4)));assert!(same_kernels(&key(4),&key(8)));
+        assert!(!same_kernels(&key(1),&key(2)));assert!(same_kernels(&key(2),&key(4)));assert!(same_kernels(&key(4),&key(8)));assert!(same_kernels(&key(3),&key(8)));
     }
     /// An executable is updated in place only for a piece of the same kernels, block sizes and lanes; grids may differ.
     #[test] fn a_donor_piece_has_the_same_kernels_block_sizes_and_lanes() {

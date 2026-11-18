@@ -212,10 +212,15 @@ impl<'f,C:Compute> Decoder<'f,C> {
         // Complete query rows on every rank (as the one-chat path reads them): any other form keeps the chats apart.
         if b.words(whole_query)!=n*layout.total_heads()*layout.key_dim() {return Ok(false);}
         let queries=self.local_query(whole_query,n,layout)?;
-        // Each chat's own steps before the Gather: its pool scores and its selection.
-        for (chat,own) in chats.iter_mut().enumerate() {
-            self.chat_inputs((chat,n),&plan.steps[span.start..at],values,own)?;
-            self.layer_steps(layer,contexts[chat],&[],states[chat],held[chat],false,false,Some((span.start..at,own)))?;
+        // Each chat's own steps before the Gather: its pool scores and its selection. STEP MAJOR: one step for every chat,
+        // then the next step, so the same step of the chats is recorded back to back and the recorder may run it as one
+        // group launch (`resident_causal_group`: 2 to 8 same-shape independent recurrent calls). Each chat runs its own
+        // steps in its own order on its own values, so its bits are those of its own step.
+        for (chat,own) in chats.iter_mut().enumerate() {self.chat_inputs((chat,n),&plan.steps[span.start..at],values,own)?;}
+        for index in span.start..at {
+            for (chat,own) in chats.iter_mut().enumerate() {
+                self.layer_steps(layer,contexts[chat],&[],states[chat],held[chat],false,false,Some((index..index+1,own)))?;
+            }
         }
         // The layer's row bound, as the decode step's Gather reserves it: one size at every context.
         let stride=gather.outputs[0].shape[0].min(self.capacity) as usize;

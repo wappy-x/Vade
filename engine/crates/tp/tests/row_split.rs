@@ -600,8 +600,8 @@ fn shared_phase_cohorts_match_one_chat_bits_on_the_retained_scratch() {
         let (streams,hidden)=BOUNDARY_SHAPE.with(|seen|seen.get());
         assert_eq!((streams,hidden),(4,4096),"step={step} width={width}");
         assert!(spark_gpu_probe::mhc_params::PHASE_SHAPES.contains(&(streams,hidden)));
-        // Wider than 3: three shared phase nodes. Three chats: one fused entry a row.
-        let per_boundary=if width>3 {3} else {width};
+        // From the phase floor (`PHASE_ROWS_MIN`): three shared phase nodes. Fewer chats: one fused entry a row.
+        let per_boundary=if width>=spark_gpu_probe::mhc_params::PHASE_ROWS_MIN {3} else {width};
         assert!(width<=3 || per_boundary<width,"step={step} stayed on one entry a row");
         BOUNDARY_NODES.with(|n|assert_eq!(n.get(),2*layers*per_boundary,"step={step} width={width}"));
         assert_eq!(batch.prepared().fused_boundary_scratch().unwrap(),scratch,"step={step} scratch charge moved");

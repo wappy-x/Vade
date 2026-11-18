@@ -60,12 +60,12 @@ fn wide_tail_words(c:&CheckpointAdmission)->Result<usize> {
 }
 /// WIDE PHASE (rule 2 of 2026-11-17, `truth/WIDE4-CHARGE.md`): the charge of a prompt group of `group` rows that
 /// passes each layer as runs of R = `PROMPT_GROUP_MAX` rows (`Decoder::layer_wide`):
-///
+/// ```text
 ///     A = whole(R) + 4 (group - R) T + E(group) - E(R)      the mixer phase
 ///     B = 4 group T + E(group)                              the routed half
 ///     X = one full session at this context (`service_memory::session`)
 ///     W = max(A, B) + X
-///
+/// ```
 /// The mixer phase: ONE run is in a mixer half, charged as a whole group of R rows (`whole`: `whole_group_workspace`,
 /// the charge every group pays); every other row holds its residual or its carry (at most T, `wide_tail_words`);
 /// the route metadata of all sets of all routed layers is E(group), of which `whole(R)` holds E(R). The routed

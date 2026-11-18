@@ -237,7 +237,7 @@ mod check {
                         medians.push(us(ns.len() / 2));
                     }
                     // Only the fused row entry clears unused stamp slots. Separate phases do not give a whole-pass span.
-                    if spark_gpu_probe::mhc_params::boundary_launches(shape,rows)==rows {
+                    if !spark_gpu_probe::mhc_params::boundary_phased(shape,rows) {
                         let stamps = fused[(boundaries - 1) % sets].fused_stamps()?;
                         let (start, end) = ((0..FUSED_BLOCKS).map(|block| stamps[block * FUSED_STAMP_SLOTS]).filter(|&t| t != 0).min(), stamps[FUSED_BLOCKS * FUSED_STAMP_SLOTS]);
                         if let Some(start) = start.filter(|&start| end > start) { println!("TIME fused_in_stream rows={rows} last_launch_span_us={:.3}", (end - start) as f64 / 1000.0); }
@@ -263,7 +263,7 @@ mod check {
                 let base=input(&mut rng,shape.coefficients(),0);let norm_weight=(0..hidden).map(|_| {let w=rng.next();if ty==WeightType::Bf16 {spark_gpu_probe::bf16::rounded(w)} else {w}}).collect::<Vec<_>>();
                 let owner=b.resident_mhc_boundary(shape,NormShape::new(hidden as usize,1e-6,ty)?,&weights,&base,&[0.01,0.02,0.03],&norm_weight)?.with_fused(&weights)?;
                 let queue=b.resident_queue()?;b.enable_resident_launches()?;
-                for rows in [8usize,5,4,3,4,5,8] {
+                for rows in [8usize,5,4,3,2,3,4,5,8] {
                     b.pause_resident_launches(true)?;
                     let source=upload(b,&input(&mut rng,rows*shape.wide(),0))?;let block=upload(b,&input(&mut rng,rows*hidden as usize,0))?;
                     let mut answers=Vec::new();
@@ -276,15 +276,18 @@ mod check {
                         if spark_gpu_probe::driver::mhc_fused_launches()-before!=want {return Err("boundary sequence launch count differs".into());}
                         if recorded {
                             use spark_gpu_probe::resident_launch::Kind;
-                            let now=b.stats();let count=[Kind::MhcBoundaryFused,Kind::MhcPhaseRms,Kind::MhcPhaseDots,Kind::MhcPhaseFinish].into_iter().map(|k|now.recorded_kinds[k as usize]-stats.recorded_kinds[k as usize]).sum::<u128>();
-                            if count!=u128::from(want) {return Err("boundary sequence did not record every boundary node".into());}
+                            let now=b.stats();let count=[Kind::MhcBoundaryFused,Kind::MhcPhaseRms,Kind::MhcPhaseDots,Kind::MhcPhaseFinish].map(|k|now.recorded_kinds[k as usize]-stats.recorded_kinds[k as usize]);
+                            // Each kernel by itself: the sum cannot tell three fused entries from one launch of each of the three phases.
+                            let passes:u128=if after {2} else {1};
+                            let expected=if spark_gpu_probe::mhc_params::boundary_phased(shape,rows) {[0,passes,passes,passes]} else {[passes*rows as u128,0,0,0]};
+                            if count!=expected {return Err(format!("boundary sequence recorded other kernels rows={rows} fused,rms,dots,finish={count:?} want={expected:?}"));}
                         }
                     }
                     if answers[0]!=answers[1] {return Err(format!("boundary eager and recorded words differ rows={rows} streams={streams} hidden={hidden}"));}cases+=1;
                 }
                 drop(queue);
             }}}}
-            println!("BOUNDARY RECORDER SEQUENCE PASS cases={cases} rows=8,5,4,3,4,5,8 eager=recorded launch_counts=pass");Ok(())
+            println!("BOUNDARY RECORDER SEQUENCE PASS cases={cases} rows=8,5,4,3,4,5,8 eager=recorded launch_counts=pass kernel_kinds=pass");Ok(())
         })
     }
     pub fn run() -> Result<(), String> {

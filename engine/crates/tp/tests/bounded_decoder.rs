@@ -380,8 +380,12 @@ fn recurrent_schedule_geometry_is_position_invariant_for_dense_and_expert_layers
 /// A host compute that keeps expansions by the bits of their latent row, as the
 /// device keeps them by origin. It records what decode found and what it added.
 #[derive(Default)]
-struct Kept {unrecorded:std::cell::RefCell<Vec<bool>>,paused:std::cell::Cell<bool>,released:std::cell::Cell<usize>,keeps:std::cell::Cell<usize>,pool_folds:std::cell::RefCell<Vec<u32>>,refuse_rows:std::cell::Cell<bool>,rows:std::cell::RefCell<std::collections::BTreeMap<(String,Vec<u32>,bool),Vec<f32>>>,found:std::cell::Cell<usize>,largest:std::cell::Cell<usize>,projected:std::cell::Cell<usize>,indirect:std::cell::Cell<usize>,reserved:std::cell::RefCell<Vec<(usize,usize)>>}
+struct Kept {
+    /// Every cache append: the rows the appender holds, the row width, the words of the new rows, the room asked behind them.
+    appends:std::cell::RefCell<Vec<[usize;4]>>,
+    unrecorded:std::cell::RefCell<Vec<bool>>,paused:std::cell::Cell<bool>,released:std::cell::Cell<usize>,keeps:std::cell::Cell<usize>,pool_folds:std::cell::RefCell<Vec<u32>>,refuse_rows:std::cell::Cell<bool>,rows:std::cell::RefCell<std::collections::BTreeMap<(String,Vec<u32>,bool),Vec<f32>>>,found:std::cell::Cell<usize>,largest:std::cell::Cell<usize>,projected:std::cell::Cell<usize>,indirect:std::cell::Cell<usize>,reserved:std::cell::RefCell<Vec<(usize,usize)>>}
 impl spark_tp::bounded_decoder::Compute for Kept {
+    fn cache_append(&self,old:&Vec<f32>,new:&Vec<f32>,rows:usize,width:usize,room:usize)->spark_tp::Result<Vec<f32>> {self.appends.borrow_mut().push([rows,width,new.len(),room]);Host.cache_append(old,new,rows,width,room)}
     fn mhc_row_launches(&self)->u64 {0}
     fn rows_greedy(&self,_:&Self::Value,_:usize)->spark_tp::Result<Option<Vec<u32>>> {Ok(None)}
     fn has_latent_absorption(&self,_:&str)->bool {false}
@@ -531,6 +535,37 @@ fn verify_passes_keep_only_exact_rows_and_end_in_the_plain_state() {
     // One row is not a greedy pass of rows (it is `row_greedy`, or `rows` behind carried rows), and it changes nothing.
     let mut open=Verify::new(decoder.zero_state().unwrap());assert!(open.rows_greedy(&decoder,&tokens[..1]).is_err());assert!(open.rows_greedy(&decoder,&[]).is_err());
     assert_eq!((open.position(),open.carried()),(0,0));assert_eq!(open.row_greedy(&decoder,tokens[0]).unwrap(),Some(best(&plain[0])));
+}
+#[test]
+fn a_check_pass_appends_its_latent_caches_where_they_are_and_a_prompt_group_joins() {
+    use spark_tp::bounded_decoder::{Verify,HeadRows,HELD_ROOM};use engine_model::plan::description::TokenMixer;
+    let c=fixture::Checkpoint::new_with_head(Dtype::Bf16,true);let (capacity,tokens)=(8u64,[1,7,2,5,3,6,4]);
+    // The widths a latent layer appends: its cache row, then its key row and its gate row.
+    let widths=c.admission.description().layers.iter().filter_map(|layer|match layer.mixer {TokenMixer::LatentAttention(a)=>Some([a.kv_rank as usize,a.indexer.dim as usize,a.indexer.dim as usize]),_=>None}).flatten().collect::<Vec<_>>();
+    assert!(!widths.is_empty());
+    let bits=|v:&[f32]|v.iter().map(|v|v.to_bits()).collect::<Vec<_>>();
+    let plain=Decoder::new(&c.admission,Host,capacity).unwrap();let mut scalar=plain.zero_state().unwrap();
+    for &token in &tokens {scalar=plain.step(token,&scalar,|_,_|Ok(())).unwrap().2;}
+    let compute=Kept::default();let decoder=Decoder::new(&c.admission,&compute,capacity).unwrap();
+    let mut open=Verify::new(decoder.zero_state().unwrap());let mut at=0usize;
+    // Each pass: its rows, and how many of them the verdict keeps. Refused rows are behind the kept ones.
+    for (rows,kept) in [(vec![1,7,9],2),(vec![2,9,9],1),(vec![5,9],1),(vec![3,6,4],3)] {
+        compute.appends.borrow_mut().clear();open.rows(&decoder,&rows).unwrap();let appends=compute.appends.borrow().clone();
+        if at==0 {assert!(appends.is_empty(),"a pass with no earlier rows joins: it has nothing to append to");}
+        else {
+            // One append a cache, of all the pass's rows, behind exactly the rows kept so far, with the plain step's room.
+            let room=(capacity as usize-(at+rows.len())).min(HELD_ROOM);
+            let mut want=widths.iter().map(|&width|[at,width,rows.len()*width,room*width]).collect::<Vec<_>>();let mut got=appends;want.sort();got.sort();
+            assert_eq!(got,want,"pass from row {at}");
+        }
+        at+=kept;open.truncate(&decoder,at as u64).unwrap();assert_eq!((open.position(),open.carried()),(at as u64,0));
+    }
+    // Refused rows left no trace: the state is the plain state.
+    let state=open.settle(&decoder).unwrap();assert_eq!(state.position,scalar.position);
+    for (a,b) in state.layers.iter().zip(&scalar.layers) {for (name,value) in a {assert_eq!(bits(value),bits(&b[name]),"{name}");}}
+    // A prompt group behind earlier rows joins as before.
+    compute.appends.borrow_mut().clear();let first=decoder.prefill_rows(&tokens[..2],&decoder.zero_state().unwrap(),HeadRows::Last).unwrap().1;
+    decoder.prefill_rows(&tokens[2..5],&first,HeadRows::Last).unwrap();assert!(compute.appends.borrow().is_empty());
 }
 #[test]
 fn predictor_layer_proposes_without_touching_plain_decoding() {

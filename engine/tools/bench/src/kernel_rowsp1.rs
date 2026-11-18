@@ -78,7 +78,7 @@ pub(crate) fn rows_p1(base_path: &str, candidate_path: &str, mode: &str) -> Resu
         }
         let (mut comparisons, mut bytes, mut one_row_checks) = (0u64, 0u64, 0u64);
         for (index, jobs) in cases.iter().enumerate() {
-            for tokens in [2usize, 3, 4] {
+            for tokens in [2usize, 3, 4, 5, 6, 7, 8] {
                 for round in [false, true] {
                     for &kinds in &[(0u32, 0u32), (5, 5), (2, 2), (4, 0), (6, 7)] {
                         if index >= 4 && (kinds != (0, 0) && kinds != (5, 5) && kinds != (2, 2)) { continue; }
@@ -135,12 +135,12 @@ pub(crate) fn rows_p1(base_path: &str, candidate_path: &str, mode: &str) -> Resu
         // 2 rows (plain rows spread), 4 a loop of one-row launches.
         let (copies, calls, repeats) = (8usize, 16usize, 11usize);
         let mut arms: Vec<(String, usize, u32)> = vec![("one_row_base".into(), 1, 0), ("one_row_candidate_image".into(), 1, 1)];
-        for (name, kind) in [("rows", 2u32), ("loop", 4)] { for n in [2usize, 3, 4] { arms.push((format!("{name}{n}"), n, kind)); } }
+        for (name, kind) in [("rows", 2u32), ("loop", 4)] { for n in [2usize, 3, 4, 5, 8] { arms.push((format!("{name}{n}"), n, kind)); } }
         for (label, jobs) in [("real: mx3 4096x4096 + plain 384x4096", real.clone()),
             ("mx only: mx3 4096x4096", vec![job(m, 4096, 4096), job(m, 4096, 4096), job(m, 4096, 4096)]),
             ("plain only: 384x4096", vec![job(p, 384, 4096)])] {
             let mut fixtures = vec![];
-            for c in 0..copies { fixtures.push(p1_build(g, &jobs, 4, true, 7 + c as u64, (0, 0))?); }
+            for c in 0..copies { fixtures.push(p1_build(g, &jobs, 8, true, 7 + c as u64, (0, 0))?); }
             let mut built: Vec<Vec<Vec<Built>>> = vec![];
             for (_, tokens, kind) in &arms {
                 let mut per_copy = vec![];
@@ -168,7 +168,7 @@ pub(crate) fn rows_p1(base_path: &str, candidate_path: &str, mode: &str) -> Resu
             let one = median(times[0].clone());
             println!("ROWSP1 TIME batch=\"{label}\" weight_mib={:.2} floor_us_at_230={:.1} copies={copies} calls={calls} repeats={repeats}",
                 weight_bytes as f64 / 1048576.0, weight_bytes as f64 / 230e9 * 1e6);
-            let mut ratio = [[0.0f64; 5]; 5];
+            let mut ratio = [[0.0f64; 9]; 5];
             for (k, (name, tokens, kind)) in arms.iter().enumerate() {
                 let t = median(times[k].clone());
                 let (lo, hi) = (times[k].iter().cloned().fold(f64::MAX, f64::min), times[k].iter().cloned().fold(0.0, f64::max));
@@ -179,7 +179,7 @@ pub(crate) fn rows_p1(base_path: &str, candidate_path: &str, mode: &str) -> Resu
                 for (name, kind) in [("rows", 2usize)] {
                     let r = ratio[kind];
                     let verdict = if r[2] >= 1.5 { "KILL (2 rows at or above 1.5x)" } else if r[2] <= 1.15 && r[4] <= 1.35 { "PASS" } else { "BETWEEN THE LINES" };
-                    println!("ROWSP1 LINES entry={name} rows2={:.3} (pass <= 1.15, kill >= 1.5) rows3={:.3} rows4={:.3} (pass <= 1.35) verdict={verdict}", r[2], r[3], r[4]);
+                    println!("ROWSP1 LINES entry={name} rows2={:.3} (pass <= 1.15, kill >= 1.5) rows3={:.3} rows4={:.3} (pass <= 1.35) rows5={:.3} rows8={:.3} verdict={verdict}", r[2], r[3], r[4], r[5], r[8]);
                 }
             }
             g.clear()?;

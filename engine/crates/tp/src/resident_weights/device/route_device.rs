@@ -39,6 +39,19 @@ pub(super) struct Group<'d> {names:Vec<String>,rows:Rows,table:spark_gpu_probe::
 /// and read 0.4 to 1.5 ms above it. A wait changes no value.
 const ROUTE_ROWS_WAIT:usize=4;
 impl<'b,'d> Weights<'b,'d> {
+    /// WAIT LAG: the wait of a batch step every ROUTE_ROWS_WAIT routed layers. It marks the queue here and waits for the
+    /// mark of the wait before (`Backend::fence_frees`, `wait_fence_frees`), not for the queue's end: the device keeps the
+    /// last ROUTE_ROWS_WAIT layers' work queued and never drains, and the buffers dropped before the earlier mark return to
+    /// the pool as a drain there returned them. A buffer is held at most two periods instead of one; a step whose buffers
+    /// then exceed the budget drains as before (`funded_buffer`). Traces of 2 to 8 chats (chats4-main-trace-1, diag-decode-t1):
+    /// 14.5 drains and 2.8 to 3.0 ms of device idle a step, against 4 drains and 0.66 ms for one row. A wait changes no value.
+    fn route_wait(&mut self,b:&Backend<'d>)->Result<()> {
+        self.routed_layers+=1;if self.routed_layers<ROUTE_ROWS_WAIT {return Ok(());}
+        self.routed_layers=0;
+        let next=b.fence_frees()?;
+        if let Some((fence,frees))=self.routed_mark.replace(next) {b.wait_fence_frees(fence,frees)?;}
+        Ok(())
+    }
     /// The route table of one routed group, made at its first use (the key is the first weight's name). A group this
     /// path does not admit is remembered as absent. Both routed paths (apply_routed, apply_routed_fold) call it, so a
     /// layer's first step takes the same path as every later step.
@@ -124,15 +137,14 @@ impl<'b,'d> Weights<'b,'d> {
         let (parts,words)=(rows.total/local,output.len());
         crate::exchange_trace::kind(||"routed rows".into());
         let gathered=self.gather_small(b,&output)?;if gathered.is_none() {self.gather_mapped(b,&output)?;}drop(output);let stamp=self.cost.start(b);
-        let temporary=if self.place_tables.contains_key(&pairs) {None} else if wait {
-            let places=(0..pairs).flat_map(|pair|[pair as f32,1.0,0.0]).collect::<Vec<_>>();
-            let tiled=spark_gpu_probe::prompt_ops::place_table(&places);
-            Some((tiled.is_some(),b.upload_vector(tiled.as_deref().unwrap_or(&places))?))
-        } else {return Err("routed rows place table is absent".into());};
-        let (tiled,table)=match &temporary {
-            Some((tiled,table))=>(*tiled,table),
-            None=>{let &(tiled,ref table)=self.place_tables.get(&pairs).ok_or("routed rows place table is absent")?;(tiled,table)},
-        };
+        // PLACE KEEP (seat DRAFTR, 2026-11-17): a batch step makes the identity place table of its pair count ONCE and keeps
+        // it, as a verify pass keeps the tables warmed at startup. Before, a batch step whose pair count was not warmed (a
+        // server with drafting off; 5 to 8 chats on any server) uploaded a temporary table at every routed layer: 42 host
+        // uploads a step, each ending the recorded piece, and the device sat idle 18.7 us after each gate and up hand-off
+        // (0.79 ms a 4-chat step, trace draftr-c3-ct1). A table is 3 words a pair (at most 64 pairs). Same table words,
+        // same placement kernel: no value changes.
+        if wait {self.ensure_place_table(b,pairs)?;}
+        let &(tiled,ref table)=self.place_tables.get(&pairs).ok_or("routed rows place table is absent")?;
         let exchange=match &gathered {Some(blocks)=>blocks,None=>self.exchange.as_ref().ok_or("prompt exchange is absent")?};
         // Row p of the result is the one row of part p: no earlier rows of its part, one row in it.
         let mut s=RowShape::new(if tiled {Row::ExpertPlaceTile} else {Row::ExpertPlace},1).ok_or("prompt expert place shape")?;
@@ -142,7 +154,7 @@ impl<'b,'d> Weights<'b,'d> {
         self.cost.settle(b)?;self.cost.record(||"exchange_upload".into(),stamp,b,0);
         // A batch step waits every ROUTE_ROWS_WAIT layers so its multi-chat KDA state copies fit in spare room;
         // a single-session verify pass (`wait == false`) holds ~200 MiB across all 42 layers and drains once at step end.
-        if down && wait {self.routed_layers+=1;if self.routed_layers>=ROUTE_ROWS_WAIT {self.routed_layers=0;b.synchronize()?;}}
+        if down && wait {self.route_wait(b)?;}
         // One line a row count and kind, at first use: a served log then shows that the route stayed on the device.
         static SEEN:std::sync::atomic::AtomicU64=std::sync::atomic::AtomicU64::new(0);
         let bit=1u64<<(m.min(31)+if down {32} else {0});
@@ -182,29 +194,31 @@ impl<'b,'d> Weights<'b,'d> {
     /// `apply_routed_rows` sent `m * picks * rows.count` and placed them (measured on the real model, two Sparks, 8 chats:
     /// 524 KB a layer and rank against 66 KB). The result is the fold's whole output, token-major. `ids` and `weights`:
     /// `m * picks` words, row-major; `input`: one row a (token, pick); `shared`: one row a token, gathered or this rank's
-    /// own. For a chat batch step: the admission and the waits of `apply_routed_rows` there (a drafting verify pass keeps
-    /// the two steps apart, see `Device::rows_routed_fold`). None, before any work: a shape this path does not take.
+    /// own. `wait` is `apply_routed_rows`'s: true for a chat batch step (its admission, its table made at first use, a
+    /// wait every `ROUTE_ROWS_WAIT` layers); false for a drafting verify pass (VERIFY FOLD: the admission of the row
+    /// counts warmed at predictor startup, a warmed table, no wait). None, before any work: a shape this path does not take.
     ///
     /// NO HOST ALLOCATION of its own: the weight name is borrowed, a token's planes are ranges (`rows_fold::planes`), the
     /// folded handles, the message parts and their rows lie in place (`rows_fold::Folded`, at most `rows_fold::TOKENS`).
     /// The gather it calls builds its layout as on main (`gather_joined`).
     #[allow(clippy::too_many_arguments)]
     pub fn apply_routed_rows_fold(&mut self,b:&Backend<'d>,down:&engine_model::plan::layer::Step,ids:&DeviceVector<'_>,input:&DeviceVector<'_>,weights:&DeviceVector<'_>,
-        shared:Option<&DeviceVector<'d>>,fold:spark_gpu_probe::causal_ops::Shape,m:usize)->Result<Option<DeviceVector<'d>>> {
+        shared:Option<&DeviceVector<'d>>,fold:spark_gpu_probe::causal_ops::Shape,m:usize,wait:bool)->Result<Option<DeviceVector<'d>>> {
         use spark_gpu_probe::causal_ops::{Op as CausalOp,Shape as CausalShape,FAST_THREADS,FOLD_ROUNDS,fast_admitted};
         use crate::resident_weights::rows_fold;
         let steps=std::slice::from_ref(down);
         let Some(first)=down.weights.first() else {return Ok(None);};
         let Some(mailbox)=self.mailbox else {return Ok(None);};
-        if !self.routes_rows(m) || m>rows_fold::TOKENS || down.kind!=Kind::ExpertDown || ids.is_empty() || !ids.len().is_multiple_of(m) || weights.len()!=ids.len() || self.collecting.get() || self.deferring.get() {return Ok(None);}
+        let admitted=if wait {self.routes_rows(m)} else {self.routes_verify_rows(m)};
+        if !admitted || m>rows_fold::TOKENS || down.kind!=Kind::ExpertDown || ids.is_empty() || !ids.len().is_multiple_of(m) || weights.len()!=ids.len() || self.collecting.get() || self.deferring.get() {return Ok(None);}
         let picks=ids.len()/m;
         if !routed_shape(steps,picks) || fold.op!=CausalOp::ExpertFold || fold.rows as usize!=picks || (fold.taps!=0)!=shared.is_some() {return Ok(None);}
-        self.route_group(b,steps,picks)?;
+        if wait {self.route_group(b,steps,picks)?;}
         let stamp=self.cost.start(b);
         let (output,rows)={
             let Some(group)=self.routes.get(&first.name).and_then(Option::as_ref) else {return Ok(None);};
             let rows=group.rows;
-            if !group.down || group.phases!=1 || group.picks!=picks || !rows.split || rows.count==0 || !rows.total.is_multiple_of(rows.count)
+            if (!wait && !group.table.rows_warmed(m)) || !group.down || group.phases!=1 || group.picks!=picks || !rows.split || rows.count==0 || !rows.total.is_multiple_of(rows.count)
                 || rows.total!=fold.cols as usize || rows.start.checked_add(rows.count).is_none_or(|end|end>rows.total)
                 || shared.is_some_and(|shared|shared.len()!=m*rows.total && shared.len()!=m*rows.count)
                 || !group.names.iter().map(String::as_str).eq(down.weights.iter().map(|weight|weight.name.as_str())) {return Ok(None);}
@@ -242,12 +256,12 @@ impl<'b,'d> Weights<'b,'d> {
         };
         if gathered.len()!=m*rows.total {return Err("routed rows fold gather extent differs".into());}
         self.cost.settle(b)?;self.cost.record(||"exchange_fold_rows".into(),stamp,b,0);
-        // The wait of `apply_routed_rows` for a batch step: every ROUTE_ROWS_WAIT layers.
-        self.routed_layers+=1;if self.routed_layers>=ROUTE_ROWS_WAIT {self.routed_layers=0;b.synchronize()?;}
+        // The wait of `apply_routed_rows` for a batch step: every ROUTE_ROWS_WAIT layers. A verify pass has none.
+        if wait {self.route_wait(b)?;}
         // One line a row count, at first use: a served log then shows that the rows were folded before the exchange.
         static SEEN:std::sync::atomic::AtomicU64=std::sync::atomic::AtomicU64::new(0);
-        let bit=1u64<<m.min(63);
-        if SEEN.fetch_or(bit,std::sync::atomic::Ordering::Relaxed)&bit==0 {eprintln!("ROWS FOLD rank={} rows={m} picks={picks} local_rows={local} fused={fast} fold_launches={} first use",self.topology.rank,rows_fold::launches(one.is_some(),m));}
+        let bit=1u64<<(m.min(31)+if wait {0} else {32});
+        if SEEN.fetch_or(bit,std::sync::atomic::Ordering::Relaxed)&bit==0 {eprintln!("ROWS FOLD rank={} rows={m} picks={picks} local_rows={local} fused={fast} fold_launches={} verify={} first use",self.topology.rank,rows_fold::launches(one.is_some(),m),!wait);}
         Ok(Some(gathered))
     }
     pub fn apply_routed(&mut self,b:&Backend<'d>,steps:&[engine_model::plan::layer::Step],ids:&DeviceVector<'_>,input:&DeviceVector<'_>)->Result<Option<Vec<DeviceVector<'d>>>> {

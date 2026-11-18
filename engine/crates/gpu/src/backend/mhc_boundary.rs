@@ -243,7 +243,7 @@ impl<'b,'a> ResidentMhcBoundary<'b,'a> {
         let whole=FusedBoundary {boundary,strips:fused.strips.device_address(),scratch:fused.scratch.device_address(),bf16:u32::from(fused.bf16),reserved:0};
         let launches=crate::mhc_params::boundary_launches(one,rows);
         let launch=||->Result<(),String> {
-            if rows>launches {
+            if crate::mhc_params::boundary_phased(one,rows) {
                 let mut args=whole;args.boundary.shape=shape;
                 for name in ["mhc_boundary_phase_rms","mhc_boundary_phase_dots","mhc_boundary_phase_finish"] {backend.mhc_launch(name,shape,0,&mut args)?;}
             } else {

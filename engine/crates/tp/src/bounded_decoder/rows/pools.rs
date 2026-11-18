@@ -9,9 +9,13 @@ fn completed(first:usize,rows:usize,pool:usize)->Result<std::ops::Range<usize>> 
 }
 
 pub(super) fn append<C:Compute>(b:&C,s:Shape,first:usize,m:usize,x:[&C::Value;4],prior:&C::Value,w:&[f32])->Result<[C::Value;3]> {
-    let (dim,pool)=(s.dim as usize,s.taps as usize);
+    let keys=b.join(&[x[0],x[2]])?;let gates=b.join(&[x[1],x[3]])?;folds(b,s,first,m,[keys,gates],prior,w)
+}
+/// The pools that `m` rows from row `first` complete, folded from keys and gates that hold those rows already:
+/// `append` joins them, and a check pass appends them where they are (`Decoder::layer_rows`).
+pub(super) fn folds<C:Compute>(b:&C,s:Shape,first:usize,m:usize,held:[C::Value;2],prior:&C::Value,w:&[f32])->Result<[C::Value;3]> {
+    let (dim,pool)=(s.dim as usize,s.taps as usize);let [keys,gates]=held;
     let groups=completed(first,m,pool)?;
-    let keys=b.join(&[x[0],x[2]])?;let gates=b.join(&[x[1],x[3]])?;
     let earlier=b.range(prior,0,groups.start.checked_mul(dim).ok_or("prompt pool prefix overflow")?)?;
     let mut parts=vec![earlier];
     for group in groups {

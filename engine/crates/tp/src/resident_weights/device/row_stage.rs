@@ -1,5 +1,5 @@
 //! ROW STAGE: the MXFP8 projections of a row stage that read the same rows (q, k and v of a recurrent layer), for a group
-//! of 2 to 4 rows (`ROW_STAGE_ROWS`: a verify pass, a batch of chats, the short tail group of a prompt), as ONE merged launch: one
+//! of 2 to 8 rows (`ROW_STAGE_ROWS`: a verify pass, a batch of chats, the short tail group of a prompt), as ONE merged launch: one
 //! quantize of the rows and one launch that reads every weight once for all rows. The plain decode step runs the same
 //! matrices this way for its one row (`apply_mixed_batch`); the row path ran quantize, launch, round and copy for each
 //! matrix. Every output word keeps its one-row arithmetic and order (`flash_resident_projection_bf16_rows`;
@@ -7,8 +7,8 @@
 //! gives for it.
 use super::*;
 use crate::bounded_decoder::ROW_STAGE_ROWS;
-// The stage's bound stays inside the entry's contract (2 to 4 source rows).
-const _:()=assert!(ROW_STAGE_ROWS>=2 && ROW_STAGE_ROWS<=4);
+// The stage's bound stays inside the entry's contract (2 to 8 source rows).
+const _:()=assert!(ROW_STAGE_ROWS>=2 && ROW_STAGE_ROWS<=8);
 /// MIXED ROWS: the longest row of a plain job that joins an MXFP8 row launch (its chain of this many adds must end inside the
 /// launch's MXFP8 read), and the fewest MXFP8 weights of that launch (q, k and v of a recurrent layer hold 50 million).
 pub(super) const RIDE_COLS:usize=4096;
@@ -72,10 +72,13 @@ impl<'b,'d> Weights<'b,'d> {
     /// One group of `mx_row_groups`: this rank's rows of each job, `[m,local rows]`, rounded, as `matrix_rows` returns
     /// them for an MXFP8 matrix. The quantizer owns complete 32-lane groups, so concatenated rows quantize independently
     /// (the same call as `project_rows`).
-    /// True when `mx_rows_launch` makes this group in ONE merged row launch (false: two rows over wide output planes, which
-    /// run faster as the existing small2 calls and share the quantized input as the prompt-row path already does).
-    pub(super) fn mx_rows_merged(&self,jobs:&[(&str,&DeviceVector<'_>,bool)],group:&[usize],m:usize)->bool {
-        !(m==2 && !group.is_empty() && group.iter().all(|&job|matches!(self.matrices[jobs[job].0].rows.count,4096|6144) && self.matrices[jobs[job].0].cols==4096))
+    /// True when `mx_rows_launch` makes this group in ONE merged row launch: every group of the stage's 2 to 8 rows.
+    /// TWO-ROW STAGE (seat DRAFTR, 2026-11-17): two rows over wide output planes (q, k, v and the dense gate and up) ran
+    /// as single small calls on a shared quantized input, 145 launches a pass; measured on the served check passes
+    /// (run draftr-c2-t1) that form cost 15.1 ms a 2-row pass where the merged form of a 3-row pass cost 13.0 ms.
+    /// The merged entry takes 2 to 8 source rows and keeps every word's one-row arithmetic, so no value changes.
+    pub(super) fn mx_rows_merged(&self,_jobs:&[(&str,&DeviceVector<'_>,bool)],group:&[usize],m:usize)->bool {
+        (2..=ROW_STAGE_ROWS).contains(&m) && !group.is_empty()
     }
     /// `riders`: MIXED ROWS, the stage's small plain BF16 jobs that join the launch as plain descriptors (`round`: their flag).
     #[allow(clippy::too_many_arguments)]

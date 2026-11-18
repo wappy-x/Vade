@@ -78,6 +78,8 @@ impl<C:Compute> Compute for &C {
     fn rows_embedding(&self,t:&[u32],n:usize)->Result<Option<C::Value>> {(**self).rows_embedding(t,n)}
     fn rows_project(&self,c:&CheckpointAdmission,name:&str,x:&C::Value,m:usize,round:bool)->Result<Option<C::Value>> {(**self).rows_project(c,name,x,m,round)}
     fn rows_stage(&self,c:&CheckpointAdmission,jobs:&[(&str,&C::Value,bool)],m:usize)->Result<Option<Vec<C::Value>>> {(**self).rows_stage(c,jobs,m)}
+    fn rows_stage_open(&self,c:&CheckpointAdmission,jobs:&[(&str,&C::Value,bool)],m:usize)->Result<Option<Vec<Option<C::Value>>>> {(**self).rows_stage_open(c,jobs,m)}
+    fn rows_stage_close(&self)->Result<Vec<(usize,C::Value)>> {(**self).rows_stage_close()}
     fn batch_rows(&self,chats:usize,state_bytes:usize)->Result<()> {(**self).batch_rows(chats,state_bytes)}
     fn rows_experts(&self,a:&[(&str,usize)],b:Option<(&[(&str,usize)],f32)>,x:&C::Value,p:&[f32])->Result<Option<C::Value>> {(**self).rows_experts(a,b,x,p)}
     fn rows_experts_gathered(&self,a:&[(&str,usize)],b:Option<(&[(&str,usize)],f32)>,x:&C::Value,o:&[f32],p:&[f32])->Result<Option<C::Value>> {(**self).rows_experts_gathered(a,b,x,o,p)}

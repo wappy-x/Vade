@@ -412,9 +412,12 @@ macro_rules! four {
     }};
 }
 /// N-row twin of `flash_resident_projection_bf16` (lane multi-row, premise P1; bench only until a ruling). The same
-/// descriptors, each with `tokens` = N source rows, N = 2..4: input `[token][cols]` FP32, output `[token][rows]`.
+/// descriptors, each with `tokens` = N source rows, N = 2..8: input `[token][cols]` FP32, output `[token][rows]`.
+/// STAGE EIGHT (seat DRAFTR, 2026-11-17): N was 2..4. The three bodies below already took 8 source rows (`wave` T at most 8,
+/// `mx_tc::block` 1 to 8 tokens a block, `row_deep` once a weight row and source row); the entry held the limit.
 /// Every output keeps the one-row arithmetic and order:
-/// - MXFP8 descriptors: `row::<2>` or `row::<4>` of this file, the body `row::<1>` runs for one row (lane L owns columns
+/// - MXFP8 descriptors: `row::<2>` or `row::<4>` of this file (today `mx_rows_small::wave` with T = 2, 4 or 8, the same
+///   words), the body `row::<1>` runs for one row (lane L owns columns
 ///   `tile * 256 + L * 8 + J`, one `fma` chain a lane a token in tile order and J order, the same `shfl` tree, then
 ///   the same BF16 round of the stored word). One decoded weight is multiplied into N accumulators: one weight read.
 /// - plain descriptors (BF16 weight patterns): `plain_warp::row_deep::<true>`, the one-row body, once a (weight row,
@@ -428,16 +431,16 @@ macro_rules! four {
 /// Grid: `ends[count]` blocks of 128 threads; MXFP8 descriptors as in the one-row entry.
 #[inline(always)]
 pub(crate) fn resident_projection_bf16_rows<const SPREAD:bool>(batch:crate::next_params::ResidentProjectionBatch) {
-    // SAFETY: The caller passes descriptors that satisfy the one-row entry's contract with `tokens` in 2..=4 on
+    // SAFETY: The caller passes descriptors that satisfy the one-row entry's contract with `tokens` in 2..=8 on
     // every descriptor: weights (and scales) as there; `tokens * cols` initialized FP32 input words and
     // `tokens * rows` output words a descriptor, 16-byte aligned input and plain weights, cols a multiple of 32,
     // owners retained through stream completion, outputs aliasing no input and no other output. `ends` gives an
-    // MXFP8 descriptor `rows.div_ceil(4)` blocks and a plain descriptor `rows.div_ceil(128)` blocks (times `tokens`
-    // when SPREAD), so each block owns one descriptor's rows exactly once a source row (`batch_block` is a bijection
-    // on the grid). A warp (MXFP8) owns one weight row and stores its `tokens` output words; a plain thread owns one
-    // weight row and stores one output word (SPREAD) or its `tokens` words. `row_deep` and `row` read only inside
-    // the declared extents, as in the one-row entry; prefetch addresses never fault. All 32 lanes of an MXFP8 warp
-    // reach the `shfl` tree together.
+    // MXFP8 descriptor `rows.div_ceil(4)` blocks on the scalar word or `rows.div_ceil(16)` on the tensor-core word
+    // (`MX_TC_ROWS`) and a plain descriptor `rows.div_ceil(128)` blocks (times `tokens` when SPREAD), so each block owns
+    // one descriptor's rows exactly once a source row (`batch_block` is a bijection on the grid). A scalar warp owns one
+    // weight row and stores its `tokens` output words; a tensor-core block owns 16 weight rows and stores under its row and
+    // token masks (`mx_tc::layer_block`, the body the one-row entry runs for that word); a plain thread owns one weight row and stores one output word (SPREAD) or its `tokens` words.
+    // `row_deep` and `row` read only inside the declared extents, as in the one-row entry; prefetch addresses never fault. All 32 lanes of a scalar MXFP8 warp reach the `shfl` tree together.
     unsafe {
         let layer=batch.layer;let block=_block_idx_x() as u32;
         let (job,rest)=crate::plain_admission::batch_block(layer.ends,batch.plain,layer.count as usize,block);
@@ -446,25 +449,25 @@ pub(crate) fn resident_projection_bf16_rows<const SPREAD:bool>(batch:crate::next
         nine!(I,{if job==I {p=layer.projections[I];}});
         let thread=_thread_idx_x() as usize;
         let (rows,cols,tokens)=(p.rows as usize,p.cols as usize,p.tokens as usize);
-        if tokens<2 || tokens>4 {core::arch::nvptx::trap();}
+        if tokens<2 || tokens>8 {core::arch::nvptx::trap();}
         if plain_first {
             let per=rows.div_ceil(128);
             let (first,row)=if SPREAD {(rest as usize/per,(rest as usize%per)*128+thread)} else {(0,rest as usize*128+thread)};
             if row>=rows || first>=tokens {return;}
             let weights=(p.weights as *const u16).add(row*cols).cast::<f32>();
-            four!(T,{if (SPREAD && T==0) || (!SPREAD && T<tokens) {
+            eight!(T,{if (SPREAD && T==0) || (!SPREAD && T<tokens) {
                 let token=first+T;
                 let sum=crate::plain_warp::row_deep::<true>(weights,(p.input as *const f32).add(token*cols),cols);
                 *(p.output as *mut f32).add(token*rows+row)=if batch.round!=0 {rb(sum)} else {sum};
             }});
         } else if p.mode==crate::next_params::MX_TC {
-            // The tensor-core word for the 2 to 4 source rows of the block's one token tile, rounded as below.
+            // The tensor-core word for the 2 to 8 source rows of the block's one token tile, rounded as below.
             crate::mx_tc::layer_block(p,rest,true);
         } else {
             let index=rest as usize*4+thread/32;if index>=rows {return;}
             // ROWS-MX: the row's chains on the one-token load schedule (`mx_rows_small::wave`, one weight row a warp); the same words as `row`.
-            if tokens==2 {crate::mx_rows_small::wave::<2,2,1>(p,index,0);} else {crate::mx_rows_small::wave::<4,2,1>(p,index,0);}
-            if thread%32==0 {four!(T,{if T<tokens {let output=(p.output as *mut f32).add(T*rows+index);*output=rb(*output);}});}
+            if tokens==2 {crate::mx_rows_small::wave::<2,2,1>(p,index,0);} else if tokens<=4 {crate::mx_rows_small::wave::<4,2,1>(p,index,0);} else {crate::mx_rows_small::wave::<8,2,1>(p,index,0);}
+            if thread%32==0 {eight!(T,{if T<tokens {let output=(p.output as *mut f32).add(T*rows+index);*output=rb(*output);}});}
         }
     }
 }

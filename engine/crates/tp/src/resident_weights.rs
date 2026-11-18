@@ -119,7 +119,7 @@ mod device {
     mod row_stage;
     mod wire_bf16;
     mod mass_gather;
-    pub use projection_stage::{gather_stage,gather_stage_rounds,gather_stage_selected};
+    pub use projection_stage::{HeldStage,gather_stage,gather_stage_rounds,gather_stage_selected};
     pub use route_device::fold_then_gather;
     enum Storage<'b,'d> {Mx(ResidentDynamicProjection<'b,'d>),Plain {shape:spark_gpu_probe::causal_ops::Shape,weight:DeviceVector<'d>,bf16:Option<DeviceVector<'d>>},
         Packed {shape:Shape,weight:DeviceVector<'d>,scales:DeviceVector<'d>}}
@@ -160,7 +160,7 @@ mod device {
         read:Option<spark_gpu_probe::driver::Fence<'d>>,
         /// LOOKAHEAD: the one exchange whose link step waits while the caller queues work that does not read it
         /// (`apply_experts_open`). While it is Some, no other exchange may start (`gather_mapped_open`, `gather_small`).
-        ahead:Option<OpenExperts<'d>>,small:std::cell::Cell<bool>,deferring:std::rc::Rc<std::cell::Cell<bool>>,rounds:Vec<bool>,routes:BTreeMap<String,Option<route_device::Group<'d>>>,place_tables:BTreeMap<usize,(bool,DeviceVector<'d>)>,verify_rows:usize,collecting:std::rc::Rc<std::cell::Cell<bool>>,routed_layers:usize,
+        ahead:Option<OpenExperts<'d>>,small:std::cell::Cell<bool>,deferring:std::rc::Rc<std::cell::Cell<bool>>,rounds:Vec<bool>,routes:BTreeMap<String,Option<route_device::Group<'d>>>,place_tables:BTreeMap<usize,(bool,DeviceVector<'d>)>,verify_rows:usize,collecting:std::rc::Rc<std::cell::Cell<bool>>,routed_layers:usize,routed_mark:Option<(spark_gpu_probe::driver::Fence<'d>,usize)>,
         prompt_tables:BTreeMap<String,Option<prompt_native::Inventory<'d>>>,
         /// PROJ-DELIVERY: plain projection stages may fork (off for a decode step that reads a selection back); stages forked
         /// and stages kept whole on the main stream by that rule, for the check tool's COUNTS.
@@ -229,7 +229,7 @@ mod device {
     impl<'b,'d> Weights<'b,'d> {
         pub fn new(ring:Option<Ring>,cost:bool)->Self {
             let topology=ring.as_ref().map_or(Topology {rank:0,parts:1},|r|Topology {rank:r.rank() as u32,parts:r.world() as u32});
-            Self {kda_local:BTreeSet::new(),kda_plans:kda_plan::Plans::default(),matrices:BTreeMap::new(),embedding:None,ring,mailbox:None,mhc_host:None,sequence:0,topology,identity:None,cost:crate::resident_profile::Cost::new(cost),timings:[[0;3];5],lut:None,exchange:None,read:None,ahead:None,small:std::cell::Cell::new(false),deferring:std::rc::Rc::new(std::cell::Cell::new(false)),rounds:Vec::new(),routes:BTreeMap::new(),place_tables:BTreeMap::new(),verify_rows:0,collecting:std::rc::Rc::new(std::cell::Cell::new(false)),routed_layers:0,prompt_tables:BTreeMap::new(),side_on:true,side_stages:[0;2]}
+            Self {kda_local:BTreeSet::new(),kda_plans:kda_plan::Plans::default(),matrices:BTreeMap::new(),embedding:None,ring,mailbox:None,mhc_host:None,sequence:0,topology,identity:None,cost:crate::resident_profile::Cost::new(cost),timings:[[0;3];5],lut:None,exchange:None,read:None,ahead:None,small:std::cell::Cell::new(false),deferring:std::rc::Rc::new(std::cell::Cell::new(false)),rounds:Vec::new(),routes:BTreeMap::new(),place_tables:BTreeMap::new(),verify_rows:0,collecting:std::rc::Rc::new(std::cell::Cell::new(false)),routed_layers:0,prompt_tables:BTreeMap::new(),side_on:true,side_stages:[0;2],routed_mark:None}
         }
         pub fn attach_mailbox(&mut self,mailbox:&'b spark_gpu_probe::driver::TpMailbox<'d>)->Result<()> {
             let physical=Topology {rank:self.topology.rank,parts:mailbox.layout().world.try_into().map_err(|_|"mailbox topology exceeds ABI")?};
@@ -853,7 +853,7 @@ let mut bytes=vec![0;rows.total*4];
                     let s=Shape {op:if nv {Op::NvRows} else {Op::Fp8Rows},tokens:m as u32,..*shape};
                     let lut=self.lut.as_ref().ok_or("expert decode table is absent")?;
                     // FP8 reads BF16-rounded lanes. Round once for all weight rows.
-                    let source=if nv {b.expert_group(&[(Shape {op:Op::QuantizeRows,..s},None,0)],input,cols,lut)?} else {let r=b.round_bf16_lanes(input)?;let mut copy=b.vector(r.len())?;b.copy_prefix(r.vector(),&mut copy,r.len())?;copy};
+                    let source=if nv {b.expert_group(&[(Shape {op:Op::QuantizeRows,..s},None,0)],input,cols,lut)?} else {b.round_bf16_lanes(input)?.into_vector()};
                     (b.expert_group(&[(s,Some((weight,scales)),0)],&source,if nv {cols/16*17} else {cols},lut)?,true,if nv {2} else {3})
                 },
             };
@@ -1401,7 +1401,7 @@ let mut bytes=vec![0;rows.total*4];
     }
 }
 #[cfg(target_os="linux")]
-pub use device::{Weights,PromptMiddle,gather_stage,gather_stage_rounds,gather_stage_selected,gather_argmax,fold_then_gather};
+pub use device::{Weights,PromptMiddle,HeldStage,gather_stage,gather_stage_rounds,gather_stage_selected,gather_argmax,fold_then_gather};
 
 #[cfg(test)]
 mod tests {

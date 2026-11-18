@@ -271,6 +271,11 @@ pub trait Compute {
     /// Several `rows_project` calls of one row group, as (matrix, rows, round), with one exchange
     /// for all of them. The same words as the single calls. None, before any work: make the calls singly.
     fn rows_stage(&self,_:&CheckpointAdmission,_:&[(&str,&Self::Value,bool)],_:usize)->Result<Option<Vec<Self::Value>>> {Ok(None)}
+    /// ROWS OVERLAP: as `rows_stage`, but the gather of block-FP8 outputs may wait for `rows_stage_close`; those outputs
+    /// are None until then. None: not offered, and the caller runs `rows_stage`.
+    fn rows_stage_open(&self,_:&CheckpointAdmission,_:&[(&str,&Self::Value,bool)],_:usize)->Result<Option<Vec<Option<Self::Value>>>> {Ok(None)}
+    /// ROWS OVERLAP: the outputs `rows_stage_open` left None, by their job index.
+    fn rows_stage_close(&self)->Result<Vec<(usize,Self::Value)>> {Err("no row stage is held".into())}
     /// One layer's selected experts in one pass. `first` and `second` list
     /// (matrix, token rows) over contiguous `source` rows. With `second`, the
     /// two local outputs meet in SwiGLU before the gather. `places` has three

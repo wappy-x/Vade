@@ -1189,7 +1189,7 @@ a token tile of 8 (`mx_tc_blocks`), so it fits the merged grids.
   the one row body (`mx_tc::layer_block`): `flash_next_mxfp8_m1`, `_pair`,
   `_bits` (`next_decode::project`), the merged batches
   `flash_resident_projection_batch` and `_bf16`, the row stage
-  `flash_resident_projection_bf16_rows` (2 to 4 rows), the row group
+  `flash_resident_projection_bf16_rows` (2 to 8 rows), the row group
   entries `mx_rows_small2/4/8/8w`, and the recorded forms of all of them
   (`resident_launch_mx`, `_mixed`, `_mixed_bf16`, the row stage and row
   group replays; `mx_rows_small::decode`). All four warps of a block take

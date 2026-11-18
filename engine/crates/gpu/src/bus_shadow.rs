@@ -150,6 +150,18 @@ pub fn side(take:&Command,grid:[u32;5],window:Window,stage_base:u64,staged:&[u8]
     for (index,value) in [window.weight,window.bytes,window.ids].into_iter().enumerate() {command.put(OFFSET+index*8,&value.to_ne_bytes());}
     command.put(OFFSET+24,&window.experts.to_ne_bytes());command.put(OFFSET+28,&window.picks.to_ne_bytes());Some(command)
 }
+/// WAIT COVER (seat DRAFTR): a static window as a side launch beside a PLAIN take (recorder kind Take), the hand-off of
+/// the rows path that has no scatter table and so no tail rows. The window's checks are `arm`'s for a window with no
+/// route IDs: an aligned weight, 1 to `BUDGET` bytes. A window with route IDs gets none here: its ID plane is not
+/// checked against this take's rows. Prefetch only: the side launch writes nothing and no value can change.
+#[cfg(not(target_arch="nvptx64"))]
+pub fn side_plain(take:&Command,window:Window)->Option<Command> {
+    if take.kind!=Kind::Take as u32 || window.ids!=0 || window.experts!=0 || window.picks!=0
+        || window.weight==0 || !window.weight.is_multiple_of(8) || window.bytes==0 || window.bytes>BUDGET {return None;}
+    let mut command=Command::new(Kind::ShadowSide);
+    for (index,value) in [window.weight,window.bytes,0].into_iter().enumerate() {command.put(OFFSET+index*8,&value.to_ne_bytes());}
+    command.put(OFFSET+24,&0u32.to_ne_bytes());command.put(OFFSET+28,&0u32.to_ne_bytes());Some(command)
+}
 #[cfg(not(target_arch="nvptx64"))]
 static ARMED:[std::sync::atomic::AtomicU64;2]=[const {std::sync::atomic::AtomicU64::new(0)};2];
 #[cfg(not(target_arch="nvptx64"))]
@@ -215,6 +227,19 @@ const _:()={assert!(OFFSET.is_multiple_of(16));assert!(OFFSET+core::mem::size_of
             for thread in 0..tails*256 {let mut line=thread;while line<lines*picks {assert!((line%lines)*128<bytes);visits[line as usize]+=1;line+=tails*256;}}
             assert!(visits.iter().all(|&visits|visits==1));
         }}}
+    }
+    #[test] fn a_plain_take_gets_a_static_side_window_and_never_a_routed_one() {
+        let take=Command::new(Kind::Take);let w=window();
+        let made=side_plain(&take,w).unwrap();assert_eq!(made.kind,Kind::ShadowSide as u32);
+        // The side command carries the same window words as the scatter take's side command.
+        let scatter=side(&command(),[6,1,1,256,0],w,0,&[]).unwrap();assert_eq!(made.payload[OFFSET..OFFSET+32],scatter.payload[OFFSET..OFFSET+32]);
+        assert_eq!(made.payload[..OFFSET],Command::new(Kind::ShadowSide).payload[..OFFSET]);
+        // Refused: another take kind, a routed window, a bad weight or size.
+        assert!(side_plain(&command(),w).is_none(),"a scatter take keeps `side`");
+        for bad in [Window {ids:0x2000,experts:16,picks:8,..w},Window {experts:16,..w},Window {picks:8,..w},Window {weight:0,..w},Window {weight:0x8004,..w},Window {bytes:0,..w},Window {bytes:BUDGET+1,..w}] {
+            assert!(side_plain(&take,bad).is_none());
+        }
+        assert!(side_plain(&take,Window {bytes:BUDGET,..w}).is_some());
     }
     #[test] fn route_readiness_matches_the_same_initialized_id_owner() {
         use crate::device_route::Build;

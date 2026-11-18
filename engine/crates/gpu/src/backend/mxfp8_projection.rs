@@ -111,7 +111,8 @@ impl<'a> Backend<'a> {
         if scalar_fold && launched.is_ok() {crate::prompt_launches::record("shared_plain_fold");}
         let completed=self.resident_completion();launched.and(completed)
     }
-    /// ROW STAGE: the merged launch of `resident_projection_batch` for `tokens` = 2 to 4 source rows (a verify pass). Each job
+    /// ROW STAGE: the merged launch of `resident_projection_batch` for `tokens` = 2 to 8 source rows (a verify pass, a batch
+    /// of chats; STAGE EIGHT, 2026-11-17: was 2 to 4). Each job
     /// reads `[tokens][cols]` FP32 words and writes `[tokens][rows]` words at its place in `output`, jobs in order. One launch
     /// reads every weight once for all source rows; every output word keeps the one-row entry's arithmetic and order
     /// (`flash_resident_projection_bf16_rows`; kernel-bench --rows-p1 compares every byte with the one-row entry).
@@ -120,7 +121,7 @@ impl<'a> Backend<'a> {
     pub fn resident_projection_batch_rows(&self,jobs:&[ResidentProjection<'_,'_,'a>],output:&mut DeviceVector<'_>,round:bool,tokens:usize)->Result<(),String> {
         use crate::next_params::{MxProjection,ResidentProjectionBatch};
         self.require_resident_stream()?;
-        if jobs.is_empty() || jobs.len()>9 || !(2..=4).contains(&tokens) {return Err("resident projection row batch count differs".into());}
+        if jobs.is_empty() || jobs.len()>9 || !(2..=8).contains(&tokens) {return Err("resident projection row batch count differs".into());}
         let mut batch=ResidentProjectionBatch {round:u32::from(round),..Default::default()};let mut offset=0usize;let mut borrowed=Vec::new();
         for job in jobs {
             let mode=if let ResidentProjection::Mxfp8 {matrix,..}=job {matrix.mode} else {crate::next_params::MX_SCALAR};
@@ -162,10 +163,10 @@ impl<'a> Backend<'a> {
         // words, a plain thread its one word; the grid covers every (weight row, source row) once).
         self.skip_fill(output)?;self.resident_completion()?;crate::prompt_launches::record("mixed_rows_stage");
         // SAFETY: Every descriptor comes from a checked immutable resident MXFP8 view or an exact same-context contiguous BF16
-        // owner inside the ordered reader's envelope, with `tokens` in 2..=4, `tokens * cols` initialized input words and
+        // owner inside the ordered reader's envelope, with `tokens` in 2..=8, `tokens * cols` initialized input words and
         // `tokens * rows` output words, 16-byte aligned inputs and weights and cols a multiple of 32 (`push_rows` and
-        // `MxLayer::push` refuse anything else). `push_rows` gives an MXFP8 descriptor rows.div_ceil(4) blocks and a plain
-        // one tokens * rows.div_ceil(128) blocks: the entry's grid contract. Exact output length, checked address sums and
+        // `MxLayer::push` refuse anything else). `push_rows` gives an MXFP8 descriptor rows.div_ceil(4) blocks on the scalar word
+        // or rows.div_ceil(16) on the tensor-core word (`MX_TC_ROWS`) and a plain one tokens * rows.div_ceil(128) blocks: the entry's grid contract. Exact output length, checked address sums and
         // retained private storage fund disjoint output spans, each fully written before any read. All borrowed owners and
         // the by-value descriptor batch live through stream completion (the owned queue defers dropped allocations;
         // ordinary callers complete here).

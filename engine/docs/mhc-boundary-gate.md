@@ -35,7 +35,7 @@ The chief supplies the existing private pair settings. In the commands below, `K
    "$CANDIDATE_KIT/mhc-host-check" phased-rows > "$OUT/recorder.log"
    ```
 
-   Required line: `BOUNDARY RECORDER SEQUENCE PASS`. This retains boundary owners through `8,5,4,3,4,5,8` rows. It checks both first and deferred boundaries, both weight forms, both norm forms, all admitted phase tuples, every exposed output plane, and the actual recorded boundary-node counts. The byte check in the first command also checks norm partial words.
+   Required line: `BOUNDARY RECORDER SEQUENCE PASS`. This retains boundary owners through `8,5,4,3,4,5,8` rows. It checks both first and deferred boundaries, both weight forms, both norm forms, all admitted phase tuples, every exposed output plane, and the actual recorded boundary-node counts, each kernel kind by itself (a fused entry a row, or one launch of each of the three phases). The byte check in the first command also checks norm partial words.
 
 3. Run the pair loads in this order: **M1 C1 M2 C2 M3 C3**. M is the base plus only the diagnostic harness overlay. C is the frozen candidate. For each load, make a fresh `RUN` on the controller and copy the same eight prepared ID files into it. In the two booked rank terminals, run the matching kit command below, with the rank's existing private arguments. Start the worker first, then the controller. Wait for both to exit successfully before the next load. No process-by-name termination is needed.
 

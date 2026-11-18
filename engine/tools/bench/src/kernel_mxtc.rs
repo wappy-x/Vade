@@ -1,6 +1,6 @@
 //! MX-TC: the MXFP8 rows on the tensor cores (`mx_tc_rows`, `mx_tc_tile`; `engine/docs/tc-dense-contract.md`, section
 //! MXFP8) against their CPU twin (`gpu/src/tc_twin_mx.rs`) and against today's MXFP8 kernels of the base image.
-//! Run: kernel-bench --mx-tc <base ptx> <candidate ptx> [probe|gates|wired|step|time|tile|var|all], or a list of
+//! Run: kernel-bench --mx-tc <base ptx> <candidate ptx> [probe|gates|wired|step|stage|time|tile|var|all], or a list of
 //! modes with commas (probe,gates,tile). The mode `code` alone loads nothing: it compiles both images with the box's
 //! offline compiler and lists the kernels whose machine code differs (`kernel_codepair.rs`).
 //! The modes `feed-pair` and `expert-pair` alone are the device checks of two kernels the code list can name as drifted
@@ -9,6 +9,7 @@
 //! wired: the SERVED entries of the candidate image (the one-row layer entry, the merged batches, the row stage, the row
 //!        group entries) on descriptors with the tensor-core mode: every word = the twin; a scalar job in the same launch
 //!        keeps the base image's words; two controls.
+//! stage: the row stage (q, k, v in one launch) at 2 to 8 source rows against the one-row launch, recorded, cold weights.
 //! var:   the bench entries of the row body (`mx_tc_rows_*`) against `mx_tc_rows`, every word, then the cold pass of all.
 //!
 //! probe: one raw step a warp (`mx_tc_probe`: the block-scaled step with an old sum) on eight classes of codes times
@@ -836,7 +837,9 @@ fn against_twin_rounded(f: &Fixture, x: &[f32], device: &[u32], rounded: bool) -
 }
 /// WIRED: every entry of the candidate image that takes an MXFP8 descriptor, given a descriptor with `mode` = tensor-core,
 /// must store the twin's word (raw, or BF16-rounded in the merged launches), for every row and token row, also with a
-/// scalar job between two tensor-core jobs of one launch. The scalar job must keep the words the BASE image gives it.
+/// scalar job between two tensor-core jobs of one launch. The scalar job must keep the words the BASE image gives it
+/// (at 5 to 8 rows of the row stage, where the base image's stage entry traps: the words the base image's one-row entry
+/// gives each source row alone).
 /// Each served entry is launched directly AND as a recorded command through its replay entry (the served decode path).
 /// Controls: the two word functions differ on these fixtures (so the mode is what decides), and a twin fed a changed
 /// input row is caught.
@@ -862,7 +865,7 @@ fn wired(g: &mut Gpu, ma: H, mb: H) -> Result<bool> {
     // A and C take the tensor-core word, B (between them in a launch) the scalar word. Rows off and on 16 and 4.
     let sets: [[(usize, usize); 3]; 4] = [[(130, 4096), (67, 512), (33, 96)], [(17, 32), (5, 64), (16, 160)], [(512, 8192), (100, 4096), (1, 32)], [(49, 12288), (130, 4096), (15, 128)]];
     for (si, set) in sets.iter().enumerate() {
-        for tokens in [1usize, 2, 3, 4, 5, 8, 9, 16] {
+        for tokens in [1usize, 2, 3, 4, 5, 6, 7, 8, 9, 16] {
             let f: Vec<Fixture> = set.iter().enumerate().map(|(i, &(rows, cols))| fixture(rows, cols, tokens, 7000 + (si * 100 + tokens * 3 + i) as u64, i == 2)).collect();
             let d: Vec<Device> = f.iter().map(|f| upload(g, f)).collect::<Result<_>>()?;
             let out: Vec<Buf> = f.iter().map(|f| Buf::poisoned(g, f.rows * f.tokens)).collect::<Result<_>>()?;
@@ -884,11 +887,26 @@ fn wired(g: &mut Gpu, ma: H, mb: H) -> Result<bool> {
                 let mut scalar = (0, 0);
                 if let Some(old) = old {
                     let have = out[1].words(g)?;
-                    let alone = Buf::poisoned(g, f[1].rows * tokens)?;
-                    let (mut bytes, grid) = layer_bytes(&[(proj(1, alone.address), 0, quads(1))], is_batch);
-                    g.launch(old, [grid, 1, 1], 128, 0, &mut [bytes.as_mut_ptr().cast()])?;
-                    g.sync()?;
-                    let want = alone.words(g)?;
+                    let want = if tokens > 4 {
+                        // `old` is the base image's ONE-ROW entry: a source row a launch, each into its own poisoned words.
+                        let mut want = vec![];
+                        for t in 0..tokens {
+                            let alone = Buf::poisoned(g, f[1].rows)?;
+                            let one = Proj { input: d[1].x.address + (t * f[1].cols * 4) as u64, tokens: 1, ..proj(1, alone.address) };
+                            let (mut bytes, grid) = layer_bytes(&[(one, 0, quads(1))], is_batch);
+                            g.launch(old, [grid, 1, 1], 128, 0, &mut [bytes.as_mut_ptr().cast()])?;
+                            g.sync()?;
+                            want.extend(alone.words(g)?);
+                        }
+                        if want.contains(&u32::MAX) { return Err(format!("MXTC WIRED the one-row reference left a word unwritten: entry={name} tokens={tokens}")); }
+                        want
+                    } else {
+                        let alone = Buf::poisoned(g, f[1].rows * tokens)?;
+                        let (mut bytes, grid) = layer_bytes(&[(proj(1, alone.address), 0, quads(1))], is_batch);
+                        g.launch(old, [grid, 1, 1], 128, 0, &mut [bytes.as_mut_ptr().cast()])?;
+                        g.sync()?;
+                        alone.words(g)?
+                    };
                     scalar = (have.len(), have.iter().zip(&want).filter(|(x, y)| !same(**x, **y)).count());
                 }
                 add(name, (ra.0 + rc.0, ra.1 + rc.1), scalar);
@@ -901,7 +919,10 @@ fn wired(g: &mut Gpu, ma: H, mb: H) -> Result<bool> {
                     for e in [batch16, batch16_replay] { merged(g, e, Some(old_batch16), true, true)?; }
                 }
                 2..=4 => { for e in [stage, stage_replay] { merged(g, e, Some(old_stage), true, true)?; } merged(g, pair, None, false, false)?; }
-                5..=8 => merged(g, pair, None, false, false)?,
+                // STAGE EIGHT: the row stage at 5 to 8 rows, also with the scalar job between the two tensor-core jobs. The base
+                // image's stage entry traps above 4 rows, so the scalar job's reference is the base image's one-row entry
+                // (`flash_resident_projection_bf16`), a source row a launch; `--rows-p1` compares the scalar word alone the same way.
+                5..=8 => { for e in [stage, stage_replay] { merged(g, e, Some(old_batch16), true, true)?; } merged(g, pair, None, false, false)?; }
                 _ => merged(g, bits, None, false, false)?,
             }
             if tokens <= 8 {
@@ -1031,6 +1052,85 @@ fn step(g: &mut Gpu, ma: H, mb: H) -> Result<()> {
     Ok(())
 }
 
+/// STAGE: the merged row stage on the tensor-core word in the form the engine serves (a recorded command through its
+/// replay entry). q, k and v (three 4096 x 4096 matrices, `MX_TC`) as ONE launch: the one-row launch
+/// (`resident_launch_mixed_bf16`) against the row stage launch (`resident_launch_flash_resident_projection_bf16_rows`)
+/// at 2, 3, 4, 5 and 8 source rows, and, for information, what the engine does from 5 rows without the stage: three
+/// single calls of `resident_launch_mx_rows_small8`. 8 weight copies, so every call streams from memory (the method of
+/// `--rows-p1`'s "mx only" arm, which times the scalar word). us a step (a step = the launches of q, k and v).
+/// The line of STAGE EIGHT, written before the run: the row stage at 8 rows at or under 1.25 times the one-row launch.
+/// The answer is the line's: false (a HIT) fails the run, so a missed line never ends in the run's `MXTC PASS`.
+fn stage(g: &mut Gpu, mb: H) -> Result<bool> {
+    let (one, rows, single) = (g.function(mb, "resident_launch_mixed_bf16")?, g.function(mb, "resident_launch_flash_resident_projection_bf16_rows")?, g.function(mb, "resident_launch_mx_rows_small8")?);
+    let (n, k, copies, calls, repeats) = (4096usize, 4096usize, 8usize, 16usize, 11usize);
+    let table = |g: &mut Gpu, kind: u32, payload: &[u8]| -> Result<u64> {
+        let mut command = vec![0u8; 1040];
+        command[..4].copy_from_slice(&kind.to_le_bytes());
+        command[16..16 + payload.len()].copy_from_slice(payload);
+        g.upload(&command)
+    };
+    // (name, source rows, form): form 0 the one-row launch, 1 the row stage, 2 three single calls
+    let mut arms: Vec<(String, usize, u8)> = vec![("one_row".into(), 1, 0)];
+    for t in [2usize, 3, 4, 5, 8] { arms.push((format!("stage{t}"), t, 1)); }
+    for t in [5usize, 8] { arms.push((format!("singles{t}"), t, 2)); }
+    // built[arm][copy]: the launches of a step (entry, table, grid)
+    let mut built: Vec<Vec<Vec<(H, u64, u32)>>> = vec![vec![]; arms.len()];
+    let blocks = (n as u32).div_ceil(16);
+    for copy in 0..copies {
+        let mut device = vec![];
+        for job in 0..3 {
+            let f = fixture(n, k, 8, 900 + (copy * 4 + job) as u64, false);
+            device.push((g.upload(&f.w)?, g.upload(&f.s)?, g.upload(&le(&f.x))?));
+        }
+        for (arm, (_, tokens, form)) in arms.iter().enumerate() {
+            let mut list = vec![];
+            for &(weights, scales, input) in &device {
+                list.push((Proj { weights, scales, input, output: g.alloc(n * tokens * 4)?, rows: n as u32, cols: k as u32, tokens: *tokens as u32 }, MX_TC, blocks));
+            }
+            let launches = if *form == 2 {
+                let mut v = vec![];
+                for (p, _, _) in &list { v.push((single, table(g, 44, &proj_mode(p, MX_TC))?, blocks)); }
+                v
+            } else {
+                let (payload, grid) = layer_bytes(&list, true);
+                vec![(if *form == 0 { one } else { rows }, table(g, if *form == 0 { 34 } else { 46 }, &payload)?, grid)]
+            };
+            built[arm].push(launches);
+        }
+    }
+    let launch = |g: &Gpu, (h, table, grid): (H, u64, u32)| -> Result<()> {
+        let (mut table, mut index) = (table, 0u64);
+        g.launch(h, [grid, 1, 1], 128, 0, &mut [(&mut table as *mut u64).cast(), (&mut index as *mut u64).cast()])
+    };
+    let mut times: Vec<Vec<f64>> = vec![vec![]; arms.len()];
+    for repeat in 0..repeats {
+        for i in 0..arms.len() {
+            let arm = (i + repeat) % arms.len();
+            for &l in &built[arm][0] { launch(g, l)?; }
+            g.sync()?;
+            let t0 = Instant::now();
+            for call in 0..calls { for &l in &built[arm][(repeat + call) % copies] { launch(g, l)?; } }
+            g.sync()?;
+            times[arm].push(t0.elapsed().as_secs_f64() * 1e6 / calls as f64);
+        }
+    }
+    let weight_bytes = 3 * (n * k + n * k / 32);
+    println!("MXTC STAGE batch=\"q k v: mx3 4096x4096, tensor-core word, recorded\" weight_mib={:.2} floor_us_at_230={:.1} copies={copies} calls={calls} repeats={repeats}",
+        weight_bytes as f64 / 1048576.0, weight_bytes as f64 / 230e9 * 1e6);
+    let one_us = median(times[0].clone());
+    let mut eight = 0.0;
+    for (arm, (name, tokens, _)) in arms.iter().enumerate() {
+        let t = median(times[arm].clone());
+        let (lo, hi) = (times[arm].iter().cloned().fold(f64::MAX, f64::min), times[arm].iter().cloned().fold(0.0, f64::max));
+        if name == "stage8" { eight = t / one_us; }
+        println!("MXTC STAGE arm={name} rows={tokens} us_per_step={t:.1} min={lo:.1} max={hi:.1} against_one_row={:.3}", t / one_us);
+    }
+    let met = eight <= 1.25;
+    println!("MXTC STAGE LINE {} rows8={eight:.3} (the line: at or under 1.250 times the one-row launch)", if met { "PASS" } else { "HIT" });
+    g.clear()?;
+    Ok(met)
+}
+
 pub(crate) fn run(base_path: &str, candidate_path: &str, mode: &str) -> Result<()> {
     if mode == "code" || mode == "code-strict" { return super::codepair::run(base_path, candidate_path, mode == "code-strict"); }
     if mode == "feed-pair" { return super::feedpair::run(base_path, candidate_path); }
@@ -1043,13 +1143,14 @@ pub(crate) fn run(base_path: &str, candidate_path: &str, mode: &str) -> Result<(
     println!("MXTC entries rows=mx_tc_rows tile={} packed={}", if new.tile.is_some() { "mx_tc_tile" } else { "absent (every call takes mx_tc_rows)" }, if new.packed.is_some() { "mx_tc_pack, mx_tc_tile_packed" } else { "absent" });
     let mut pass = true;
     let modes: Vec<&str> = mode.split(',').collect();
-    if let Some(unknown) = modes.iter().find(|m| !["probe", "gates", "wired", "step", "time", "tile", "var", "all"].contains(m)) { return Err(format!("MXTC: no mode {unknown}").into()); }
-    // `all` leaves out `tile` and `var`.
-    let on = |name: &str| modes.contains(&name) || modes.contains(&"all") && !matches!(name, "tile" | "var");
+    if let Some(unknown) = modes.iter().find(|m| !["probe", "gates", "wired", "step", "stage", "time", "tile", "var", "all"].contains(m)) { return Err(format!("MXTC: no mode {unknown}").into()); }
+    // `all` leaves out `tile`, `var` and `stage`.
+    let on = |name: &str| modes.contains(&name) || modes.contains(&"all") && !matches!(name, "tile" | "var" | "stage");
     if on("probe") { pass &= probe(&mut g, mb)?; }
     if on("gates") { pass &= gates(&mut g, &new)?; }
     if on("wired") { pass &= wired(&mut g, ma, mb)?; }
     if on("step") { step(&mut g, ma, mb)?; }
+    if on("stage") { pass &= stage(&mut g, mb)?; }
     // The bench entries `mx_tc_rows_*` existed for the prefetch study (runs `onerow-v1-1`, `onerow-v2b-1`, `onerow-full-1`);
     // an image without them has nothing to compare, so `all` leaves this mode out.
     if on("var") {
