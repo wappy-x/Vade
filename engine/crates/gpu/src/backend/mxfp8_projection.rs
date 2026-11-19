@@ -173,9 +173,9 @@ impl<'a> Backend<'a> {
         let launched=unsafe {self.launch_flash(entry,batch.layer.ends[batch.layer.count as usize],128,&mut [parameter(&mut batch)])};
         let completed=self.resident_completion();launched.and(completed)
     }
-    /// FOLD ROWS: one fold launch for `tokens` = 2 to 8 source rows of plain matrices with few rows and long rows (the router gate,
+    /// FOLD ROWS: one fold launch for `tokens` = 2 to 16 source rows of plain matrices with few rows and long rows (the router gate,
     /// the narrow BF16 groups). Each job is ONE matrix: it reads `[tokens][cols]` FP32 words and writes `[tokens][rows]` words at
-    /// its place in `output`, jobs in order. A block reads a weight vector once for all source rows; every output word keeps the
+    /// its place in `output`, jobs in order. A block reads a weight vector once for up to eight source rows; every output word keeps the
     /// one-row fold's arithmetic and order for its own source row (`plain_warp::rows_fold_rows`; kernel-bench --fold-rows compares
     /// every byte with the one-row forms, a source row alone). All jobs hold FP32 weights or all hold BF16 patterns. The caller
     /// admits by shape, storage and alignment (`plain_admission::fold_rows_admitted`); a job outside the envelope here is an
@@ -218,13 +218,13 @@ impl<'a> Backend<'a> {
         }
         let entry=if bf16 {"flash_resident_projection_fold_rows"} else {"flash_resident_projection_fold_rows_f32"};self.require_arm_kernels(&[entry])?;
         // No fill: every word of the region is written by the entry before any read (the live folding lane of each
-        // (source row, weight row) stores its one word; the grid covers every weight row once and a block runs every source row).
+        // (source row, weight row) stores its one word; the grid covers every (weight row, token tile) once).
         self.skip_fill(output)?;self.resident_completion()?;crate::prompt_launches::record("fold_rows");
         // SAFETY: Every descriptor is an exact same-context contiguous FP32 or BF16 owner inside the fold-rows envelope
         // (`fold_rows_admitted`: 1 to 512 rows, 1,024 to 8,192 columns in whole 32-column groups, 16-byte aligned weights and
-        // source rows), with `tokens` in 2..=8, `tokens * cols` initialized input words and `tokens * rows` output words;
+        // source rows), with `tokens` in 2..=16, `tokens * cols` initialized input words and `tokens * rows` output words;
         // one weight precision a batch, matching the entry (`push_fold_rows` and `MxLayer::push` refuse anything else).
-        // `push_fold_rows` gives a descriptor rows.div_ceil(4) blocks of FOLD_THREADS threads: the entry's grid contract.
+        // `push_fold_rows` gives a descriptor rows.div_ceil(4) * tokens.div_ceil(8) blocks of FOLD_THREADS threads: the entry's grid contract.
         // Exact output length, checked address sums and retained private storage fund disjoint output spans, each fully
         // written before any read. All borrowed owners and the by-value descriptor batch live through stream completion
         // (the owned queue defers dropped allocations; ordinary callers complete here).
@@ -462,7 +462,8 @@ impl<'a> ResidentMxfp8Projection<'_,'a> {
         let (rows,cols,tokens)=(s.rows(),s.cols(),packed.tokens);let line=crate::mx_rows::tc_packed_line(cols);
         if s.input()!=WeightType::F32 || packed.cols!=cols || !self.packs_rows(tokens) {return Err("MXFP8 packed rows differ from this matrix".into());}
         b.check_vector(&packed.plane,tokens*line/4)?;
-        b.require_arm_kernels(&["mx_tc_tile_packed"])?;
+        let (entry, tile_tokens) = crate::small_choice::packed_mx_tile(tokens);
+        b.require_arm_kernels(&[entry])?;
         let output=b.vector(tokens.checked_mul(rows).ok_or("MXFP8 token rows overflow")?)?;
         if self.weights.address&15!=0 || packed.plane.device_address()&15!=0 || output.device_address()&3!=0 {return Err("tensor-core MXFP8 rows need 16-byte aligned weights and packed rows".into());}
         let abi=|n:usize|u32::try_from(n).map_err(|_|"tensor-core MXFP8 rows exceed ABI".to_string());
@@ -470,15 +471,21 @@ impl<'a> ResidentMxfp8Projection<'_,'a> {
         // SAFETY: Shape bounds complete E4M3 rows and UE8M0 groups in the retained arena views; the weights are 16-byte aligned and
         // the scale plane 4-byte aligned (`packs_rows`). check_vector checks the context and the whole plane, which `pack_rows` made
         // as `tokens` lines of `line` bytes; each piece reads the whole lines of its tokens `token .. token + count` and writes
-        // their `count * rows` words of the new disjoint output (4-byte aligned), so the pieces' spans are disjoint. The grid is
-        // `mx_tc_tile_packed`'s: 128 weight rows and 64 tokens a block of 256 threads, token tiles on x. `round` 1 changes the
+        // their `count * rows` words of the new disjoint output (4-byte aligned), so the pieces' spans are disjoint. The grid covers
+        // 16 weight rows and up to 16 tokens on 128 threads for the short entry (row tiles on x), or
+        // 128 weight rows and 64 tokens on 256 threads for the wide entry (token tiles on x). `round` 1 changes the
         // stored value only. The argument is copied at launch. Buffer::drop drains the stream, so all owners outlive the launches.
         unsafe {
             while token<tokens {let count=(tokens-token).min(crate::mx_rows::TC_PACKED_TOKENS);
                 let mut p=crate::next_params::MxProjection {weights:self.weights.address,scales:self.scales.address,input:packed.plane.device_address()+(token*line) as u64,
                     output:output.device_address()+(token*rows*4) as u64,rows:abi(rows)?,cols:abi(cols)?,tokens:abi(count)?,input_bf16:0,round:1,mode:self.mode};
                 crate::prompt_launches::record("mx_tc_tile");
-                b.launch_flash_grid("mx_tc_tile_packed",abi(count.div_ceil(crate::mx_rows::TC_TOKENS_PER_BLOCK))?,abi(rows.div_ceil(crate::mx_rows::TC_ROWS_PER_BLOCK))?,1,crate::mx_rows::TC_THREADS,0,&mut [parameter(&mut p)])?;
+                let (gx,gy,threads)=if tile_tokens==16 {
+                    (rows.div_ceil(crate::next_params::MX_TC_ROWS as usize),1,crate::mx_small::THREADS)
+                } else {
+                    (count.div_ceil(tile_tokens),rows.div_ceil(crate::mx_rows::TC_ROWS_PER_BLOCK),crate::mx_rows::TC_THREADS)
+                };
+                b.launch_flash_grid(entry,abi(gx)?,abi(gy)?,1,threads,0,&mut [parameter(&mut p)])?;
                 token+=count;
             }
         }

@@ -203,7 +203,7 @@ impl<'b,'d> Weights<'b,'d> {
             if part!=0 && admitted(part) {Form::Rows}
             else if spark_gpu_probe::plain_admission::plain_geometry(matrix.rows.count,matrix.cols).1 as usize==spark_gpu_probe::plain_admission::FOLD_THREADS && admitted(1) {Form::Fold}
             else {Form::Fp32}};
-        let small=|round:bool,want:Form|jobs.iter().enumerate().filter(|(_,(name,input,flag))|m<=FEW && *flag==round && self.matrices[*name].cols.is_multiple_of(32)
+        let small=|round:bool,want:Form|jobs.iter().enumerate().filter(|(_,(name,input,flag))|(m<=FEW || (m<=16 && matches!(want,Form::FoldRowsF32|Form::FoldRows))) && *flag==round && self.matrices[*name].cols.is_multiple_of(32)
             && matches!(&self.matrices[*name].storage,Storage::Plain {weight,..} if weight.len()*4<=SMALL) && form(name,input)==want).map(|(job,_)|job).collect::<Vec<_>>();
         let mut merged=[false,true].into_iter().flat_map(|round|[Form::Fp32,Form::Fold,Form::Rows,Form::FoldRowsF32,Form::FoldRows].into_iter().map(move |form|(round,form))).map(|(round,form)|(round,form,small(round,form))).collect::<Vec<_>>();
         // ROW STAGE: MXFP8 projections that read the same rows take one merged row launch (`row_stage.rs`).

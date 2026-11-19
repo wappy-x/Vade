@@ -134,7 +134,13 @@ macro_rules! encode {($x:expr,$maximum:expr)=>{{
 /// Grid (ceil(rows / 16), ceil(tokens / 8)), 128 threads, no dynamic shared memory. Output word (token, row) is
 /// `output[token * rows + row]`, FP32, not rounded: the layout of the other MXFP8 row kernels.
 #[no_mangle]
-pub extern "ptx-kernel" fn mx_tc_rows(p: MxProjection) { block::<AHEAD, EVERY>(p, None, false) }
+pub extern "ptx-kernel" fn mx_tc_rows(p: MxProjection) { block::<AHEAD, EVERY, false>(p, None, false) }
+
+/// Two eight-token fragments share each weight load. Each warp owns one quarter of the columns.
+#[no_mangle]
+pub extern "ptx-kernel" fn mx_tc_tile_packed16(p: MxProjection) {
+    block::<AHEAD, EVERY, true>(p, None, p.round == 1)
+}
 
 /// One block of four warps: the 16 weight rows `first .. first + 16` for the tokens `token0 .. token0 + 8`. `origin` is
 /// `(first, token0)`, or None for the block's own place in the grid (ceil(rows / 16), ceil(tokens / 8)). Every thread of
@@ -152,12 +158,12 @@ pub extern "ptx-kernel" fn mx_tc_rows(p: MxProjection) { block::<AHEAD, EVERY>(p
 ///   One token: one input load pass in 8 steps.
 /// - The weight scale codes come 4 groups a load when the scale rows are 4-byte aligned.
 #[inline(always)]
-pub(crate) fn block<const PF: usize, const PS: usize>(p: MxProjection, origin: Option<(usize, usize)>, round: bool) {
+pub(crate) fn block<const PF: usize, const PS: usize, const PACKED: bool>(p: MxProjection, origin: Option<(usize, usize)>, round: bool) {
     // SAFETY: The host checks the descriptor as `MxLayer::push` does (complete E4M3 rows and UE8M0 groups in the retained
     // arena, FP32 input rows for all tokens, a disjoint output of tokens x rows words) and keeps every owner alive through
     // stream completion. Weights, scales and input are immutable (the non-coherent loads need that); each (token, row) output
-    // word has exactly one writer (the lane of warp 0 whose fragment holds it). The body traps unless round and input_bf16
-    // are zero, cols is a multiple of 32 and weights and input are 16-byte aligned. A lane reads weight bytes only of its rows
+    // word has exactly one writer (the lane of warp 0 whose fragment holds it). The raw input descriptor requires round=0.
+    // Both forms require input_bf16=0, cols a multiple of 32 and 16-byte aligned weights and input. A lane reads weight bytes only of its rows
     // below `rows`, at row * cols + group * 32 + 8 * (lane % 4) .. +8 with group below the warp's range end, so inside the
     // row. A prefetch names an address inside a live row of this lane at a group below the range end and reads nothing.
     // Scale codes: one byte at row * (cols / 32) + group, or, only when `p.scales`, `groups` and the range start are
@@ -167,13 +173,18 @@ pub(crate) fn block<const PF: usize, const PS: usize>(p: MxProjection, origin: O
     // one barrier, and a lane of warp 0 reads the four slots of its lane index after it. All four warps reach the barrier
     // (the caller's contract: one call a block with equal arguments; the loop bounds and the pass position depend only on
     // the descriptor and the warp), and all 32 lanes of a warp reach every shuffle and `mma`.
+    // PACKED: the host gives 9 through 16 token lines, each cols + cols/32 bytes, with cols a multiple
+    // of 1024. The grid has one block per 16 weight rows and one token tile. Quad g reads the two
+    // lines g and g+8 only if live. A lane reads eight aligned code bytes inside its 32-byte group,
+    // and one scale byte inside the scale plane. Each fragment has its own JOIN_BYTES of shared storage.
     unsafe {
         use core::arch::asm;
         let tid = core::arch::nvptx::_thread_idx_x() as usize;
         let (warp, lane) = (tid / 32, tid % 32);
         let (g, t) = (lane / 4, lane % 4);
         let (n, k, m) = (p.rows as usize, p.cols as usize, p.tokens as usize);
-        if p.round != 0 || p.input_bf16 != 0 || k % 32 != 0 || k == 0 || (p.weights | p.input) & 15 != 0 || core::arch::nvptx::_block_dim_x() as usize != ROWS_WARPS * 32 || PS == 0 { asm!("trap;"); }
+        if (if PACKED { p.round > 1 || m < 9 || m > 16 || k % 1024 != 0 } else { p.round != 0 })
+            || p.input_bf16 != 0 || k % 32 != 0 || k == 0 || (p.weights | p.input) & 15 != 0 || core::arch::nvptx::_block_dim_x() as usize != ROWS_WARPS * 32 || PS == 0 { asm!("trap;"); }
         // Only indices are read before this return: a block past the rows or the tokens leaves as a whole.
         let (first, token0) = match origin {
             Some(origin) => origin,
@@ -211,12 +222,12 @@ pub(crate) fn block<const PF: usize, const PS: usize>(p: MxProjection, origin: O
         let (mut codes, mut code_scale) = ([0u32; 2], 0u32);
         let mut scale_word = 0u32;
         // `cur`: the open sub-chain. `total`: the range's sum of the closed sub-chains.
-        let (mut cur, mut total) = (ZERO, ZERO);
+        let (mut cur, mut total) = ([ZERO; 2], [ZERO; 2]);
         let mut s = start;
         while s < end {
             let at = s - start;
             let j = at % per;
-            if j == 0 {
+            if !PACKED && j == 0 {
                 // The largest magnitude of a group: the four lanes of the quad hold its 32 values.
                 let group = s + pass_group;
                 let on = pass_live && group < end;
@@ -246,44 +257,62 @@ pub(crate) fn block<const PF: usize, const PS: usize>(p: MxProjection, origin: O
                 }
                 i += 1;
             }
-            // Operand B: token g of the block, group s, from the quad of the pass that encoded it.
-            let source = (((j * span + g) * 4 + t) & 31) as u32;
-            let (b0, b1) = (shfl_idx!(codes[0], source), shfl_idx!(codes[1], source));
-            let b = if g < span { [b0, b1] } else { [0, 0] };
-            // The scale codes of the step: this lane's weight row, and token g of the block from the quad of the pass that
-            // encoded it. A row or a token that is not there has zero codes: its products are zero and leave the sum as it is,
-            // whatever the scale code below 255; 127 stands for it.
             let sa = if !scale_live { 127 } else if scale_words { (scale_word >> (8 * (at % 4))) & 255 } else { *scales.add(scale_row * groups + s) as u32 };
-            let token_scale = shfl_idx!(code_scale, (((j * span + g) * 4) & 31) as u32);
-            let sb = if g < span { token_scale } else { 127 };
-            cur = mma!([words[0][0], words[1][0], words[0][1], words[1][1]], b, cur, sa, sb);
-            if at % SUB == SUB - 1 { total = add_acc!(total, cur); cur = ZERO; }
+            let a = [words[0][0], words[1][0], words[0][1], words[1][1]];
+            rep2!(F, { if PACKED || F == 0 {
+                let (b, sb) = if PACKED {
+                    let token = 8 * F + g;
+                    if token < m {
+                        let line = (p.input as *const u8).add(token * (k + groups));
+                        let pointer = line.add(s * 32 + t * 8);
+                        let (lo, hi): (u32, u32);
+                        asm!("ld.global.nc.v2.u32 {{{lo},{hi}}}, [{pointer}];", lo=out(reg32)lo, hi=out(reg32)hi,
+                            pointer=in(reg64)pointer, options(nostack, readonly));
+                        ([lo, hi], *line.add(k + s) as u32)
+                    } else { ([0, 0], 127) }
+                } else {
+                    let source = (((j * span + g) * 4 + t) & 31) as u32;
+                    let b = [shfl_idx!(codes[0], source), shfl_idx!(codes[1], source)];
+                    let sb = shfl_idx!(code_scale, (((j * span + g) * 4) & 31) as u32);
+                    if g < span { (b, sb) } else { ([0, 0], 127) }
+                };
+                cur[F] = mma!(a, b, cur[F], sa, sb);
+                if at % SUB == SUB - 1 { total[F] = add_acc!(total[F], cur[F]); cur[F] = ZERO; }
+            } });
             s += 1;
         }
         // The last sub-chain of the range (after a whole one `cur` is +0.0, and x + +0.0 is x: no sum here is -0.0).
-        total = add_acc!(total, cur);
-        // The join: every warp parks its range, warp 0 adds the four in the contract's order.
-        let smem = crate::ptx::shared::<JOIN_BYTES>();
-        asm!("st.shared.v4.b32 [{p}], {{{a},{b},{c},{d}}};", p = in(reg32) smem + (tid * 16) as u32,
-            a = in(reg32) total.a, b = in(reg32) total.b, c = in(reg32) total.c, d = in(reg32) total.d, options(nostack));
+        let smem = if PACKED { crate::ptx::shared::<{2 * JOIN_BYTES}>() } else { crate::ptx::shared::<JOIN_BYTES>() };
+        rep2!(F, { if PACKED || F == 0 {
+            let value = add_acc!(total[F], cur[F]);
+            asm!("st.shared.v4.b32 [{p}], {{{a},{b},{c},{d}}};", p = in(reg32) smem + (F * JOIN_BYTES + tid * 16) as u32,
+                a = in(reg32) value.a, b = in(reg32) value.b, c = in(reg32) value.c, d = in(reg32) value.d, options(nostack));
+        } });
         crate::ptx::sync();
         if warp != 0 { return; }
-        let part = |w: usize| -> Acc {
-            let v = crate::ptx::load4(smem + ((w * 32 + lane) * 16) as u32);
-            Acc { a: f32::from_bits(v[0]), b: f32::from_bits(v[1]), c: f32::from_bits(v[2]), d: f32::from_bits(v[3]) }
-        };
-        let mut word = add_acc!(add_acc!(part(0), part(1)), add_acc!(part(2), part(3)));
-        // The caller's BF16 epilogue, in place (the merged decode launches store rounded words).
-        if round { word = Acc { a: crate::flash_gdn::rounded(word.a), b: crate::flash_gdn::rounded(word.b), c: crate::flash_gdn::rounded(word.c), d: crate::flash_gdn::rounded(word.d) }; }
-        let output = p.output as *mut f32;
-        if out_live[0] {
-            if row_live[0] { *output.add((token0 + 2 * t) * n + rows[0]) = word.a; }
-            if row_live[1] { *output.add((token0 + 2 * t) * n + rows[1]) = word.c; }
-        }
-        if out_live[1] {
-            if row_live[0] { *output.add((token0 + 2 * t + 1) * n + rows[0]) = word.b; }
-            if row_live[1] { *output.add((token0 + 2 * t + 1) * n + rows[1]) = word.d; }
-        }
+        rep2!(F, { if PACKED || F == 0 {
+            let token0 = token0 + 8 * F;
+            let write_live = if PACKED { [token0 + 2 * t < m, token0 + 2 * t + 1 < m] } else { out_live };
+            let part = |w: usize| -> Acc {
+                let v = crate::ptx::load4(smem + (F * JOIN_BYTES + (w * 32 + lane) * 16) as u32);
+                Acc { a: f32::from_bits(v[0]), b: f32::from_bits(v[1]), c: f32::from_bits(v[2]), d: f32::from_bits(v[3]) }
+            };
+            let mut word = add_acc!(add_acc!(part(0), part(1)), add_acc!(part(2), part(3)));
+            // The caller's BF16 epilogue, in place (the merged decode launches store rounded words).
+            if round {
+                let round_word = |x| if PACKED { crate::bf16::rounded(x) } else { crate::flash_gdn::rounded(x) };
+                word = Acc { a: round_word(word.a), b: round_word(word.b), c: round_word(word.c), d: round_word(word.d) };
+            }
+            let output = p.output as *mut f32;
+            if write_live[0] {
+                if row_live[0] { *output.add((token0 + 2 * t) * n + rows[0]) = word.a; }
+                if row_live[1] { *output.add((token0 + 2 * t) * n + rows[1]) = word.c; }
+            }
+            if write_live[1] {
+                if row_live[0] { *output.add((token0 + 2 * t + 1) * n + rows[0]) = word.b; }
+                if row_live[1] { *output.add((token0 + 2 * t + 1) * n + rows[1]) = word.d; }
+            }
+        } });
     }
 }
 /// Block `local` of a tensor-core descriptor's grid (`next_params::mx_tc_blocks`: row tile fastest, then token tile): the
@@ -294,7 +323,7 @@ pub(crate) fn block<const PF: usize, const PS: usize>(p: MxProjection, origin: O
 pub(crate) fn layer_block(p: MxProjection, local: u32, round: bool) {
     let tiles = p.rows.div_ceil(crate::next_params::MX_TC_ROWS);
     if tiles == 0 { return; }
-    block::<AHEAD, EVERY>(p, Some(((local % tiles) as usize * ROWS_BLOCK, (local / tiles) as usize * 8)), round);
+    block::<AHEAD, EVERY, false>(p, Some(((local % tiles) as usize * ROWS_BLOCK, (local / tiles) as usize * 8)), round);
 }
 /// Warps, tokens and staged groups of a `mx_tc_tile` block: 128 weight rows, 64 tokens, 256 columns a stage.
 pub(crate) const TILE_WARPS: usize = 8;

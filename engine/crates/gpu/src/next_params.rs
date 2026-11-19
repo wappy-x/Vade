@@ -139,12 +139,12 @@ impl ResidentProjectionBatch {
         self.layer.push(projection)?;self.layer.ends[index+1]=end;
         if plain {self.plain|=1<<index;}Ok(())
     }
-    /// FOLD ROWS (`flash_resident_projection_fold_rows`, `_f32`): a plain descriptor of 2 to 8 FP32 source rows in the fold
-    /// envelope. It keeps its one-row fold blocks (FOLD_ROWS weight rows a block); a block runs all its source rows.
+    /// FOLD ROWS (`flash_resident_projection_fold_rows`, `_f32`): a plain descriptor of 2 to 16 FP32 source rows in the fold
+    /// envelope. It keeps its one-row fold blocks (FOLD_ROWS weight rows a block); a block runs one token tile.
     pub fn push_fold_rows(&mut self,projection:MxProjection)->Result<(),&'static str> {
-        if !(2..=8).contains(&projection.tokens) || projection.round!=0 || projection.input_bf16!=0 || projection.mode!=MX_SCALAR {return Err("resident projection fold rows require 2 to 8 FP32 source rows");}
+        if !(2..=crate::plain_admission::FOLD_ROWS_MAX_TOKENS).contains(&(projection.tokens as usize)) || projection.round!=0 || projection.input_bf16!=0 || projection.mode!=MX_SCALAR {return Err("resident projection fold rows require 2 to 16 FP32 source rows");}
         let index=self.layer.count as usize;if index>=9 {return Err("resident projection fold row batch is full");}let start=self.layer.ends[index];
-        let end=start.checked_add(projection.rows.div_ceil(4)).ok_or("resident projection fold row batch grid overflow")?;
+        let end=projection.rows.div_ceil(4).checked_mul(projection.tokens.div_ceil(8)).and_then(|blocks|start.checked_add(blocks)).ok_or("resident projection fold row batch grid overflow")?;
         self.layer.push(projection)?;self.layer.ends[index+1]=end;self.plain|=1<<index;Ok(())
     }
 }

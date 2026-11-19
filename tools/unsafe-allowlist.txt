@@ -2400,7 +2400,7 @@ engine/crates/gpu/kernels	src/pair_split.rs	fn:resident_tp_reduce_take	block:1	r
 engine/crates/gpu	src/backend/mxfp8_projection.rs	impl:Backend::fn:resident_projection_batch_rows	block:1
 engine/crates/gpu	src/backend/mxfp8_projection.rs	impl:Backend::fn:resident_projection_fold_rows	block:1
 engine/crates/gpu/kernels	src/next_decode.rs	fn:resident_projection_bf16_rows	block:1	ruling 2026-11-17 15:18
-engine/crates/gpu/kernels	src/next_decode.rs	fn:resident_projection_fold_rows	block:1
+engine/crates/gpu/kernels	src/next_decode.rs	fn:resident_projection_fold_rows	block:1	ruling 2026-11-17 23:13
 # EXPERT GLUE (HOUR-PROMPT-L, 2026-11-11): the device version of the fold of the routed experts that rounds its rows as it reads them (the round launch inside; `dim` = FOLD_ROUNDS). One kernel body, one unsafe block, SAFETY contract above the block. Rule: night block STATE.md line 157, allowed after a reviewer read (UNSAFE-ROWS-hour-glue.md in the hour folder).
 engine/crates/gpu/kernels	src/causal_fast.rs	fn:expert_fold	block:1
 # POOL SCORES TILE (PROMPT-TC, 2026-11-11): the indexer pool scores of a prompt group in shared-memory tiles (Op::PoolScoresRows; the method and the stage layout of scores_rows_tile, every chain as prompt_ops::unit makes it). One kernel body, one unsafe block, SAFETY contract above the block: checked extents from Shape::lengths, 16-byte aligned queries and keys (the block traps otherwise), one writer a word, every word stored, shared reads and writes inside the block's own two-stage array, a uniform early return before the first barrier. Device proof: kernel-bench --pool-scores (every word = the generic unit of main's image, from poisoned outputs). Row asked of the chief of staff in PROMPT-TC.log 20:53; a reviewer's ALLOW is owed before merge.
@@ -2417,7 +2417,7 @@ engine/crates/tp	src/transport.rs	impl:Ring::fn:post_rank_blocks_receive	fn:1	ru
 engine/crates/tp	tests/prompt_exchange.rs	fn:a_ring_without_rdma_posts_no_early_receive_and_gathers_as_before	block:1	ruling 2026-11-15 22:14
 # F8ROW fused mHC boundary, PROPOSED under LEAD 2026-11-16 03:53; one kernel block, contract review owed before landing.
 engine/crates/gpu/kernels	src/mhc_boundary_fused.rs	fn:mhc_boundary_block	block:1
-engine/crates/gpu/kernels	src/mx_tc.rs	fn:block	block:1	ruling 2026-11-16 01:57
+engine/crates/gpu/kernels	src/mx_tc.rs	fn:block	block:1	ruling 2026-11-17 23:13
 engine/crates/gpu/kernels	src/mx_tc.rs	fn:tile	block:1	ruling 2026-11-16 01:57
 engine/crates/gpu/kernels	src/mx_tc.rs	fn:mx_tc_probe	block:1	ruling 2026-11-16 01:57
 engine/crates/gpu/kernels	src/mx_tc.rs	fn:mx_tc_probe_cvt	block:1	ruling 2026-11-16 01:57
@@ -2448,7 +2448,7 @@ engine/crates/gpu/kernels	src/latent_tile3.rs	fn:values3	block:1	ruling 2026-11-
 # MXFP8 prompt groups, same word: one launch quantizes and packs the rows (mx_tc_quantize_pack, pack_rows), the tile on packed rows rounds as it stores (apply_packed_rows). MAINTAINER RULING 2026-11-17 01:00: approved, these exact rows, on the review seat's SOUND lines of 00:09:34 and 00:20:03 for each site. The changed bodies fn:tile_packed and impl:ResidentMxfp8Projection::fn:apply_rows keep their rows above and take the column of this ruling.
 engine/crates/gpu/kernels	src/mx_tc.rs	fn:mx_tc_quantize_pack	block:1	ruling 2026-11-17 01:00
 engine/crates/gpu	src/backend/mxfp8_projection.rs	impl:ResidentMxfp8Projection::fn:pack_rows	block:1	ruling 2026-11-17 01:00
-engine/crates/gpu	src/backend/mxfp8_projection.rs	impl:ResidentMxfp8Projection::fn:apply_packed_rows	block:1	ruling 2026-11-17 01:00
+engine/crates/gpu	src/backend/mxfp8_projection.rs	impl:ResidentMxfp8Projection::fn:apply_packed_rows	block:1	ruling 2026-11-17 23:13
 # RB3 (P7) rows form of the latent prompt tile for a check pass of 1 to 8 rows: the same word as latent_absorption_tile on the step form's bodies; one unsafe block an entry with a SAFETY note. REVD SOUND 2026-11-17 22:15:16; LEAD RULING U-RB3 2026-11-17 22:34.
 engine/crates/gpu/kernels	src/latent_rows.rs	fn:latent_rows_dense	block:1	ruling 2026-11-17 22:34
 engine/crates/gpu/kernels	src/latent_rows.rs	fn:latent_rows_attention	block:1	ruling 2026-11-17 22:34

@@ -44,14 +44,20 @@ pub fn mx(rows: usize, cols: usize, tokens: usize, weights: u64, input: u64, out
     let tile_first = (5..=8).contains(&tokens) && matches!((rows, cols), (4096, 4096) | (6144, 4096)) && mx_rows::admitted(rows, cols, tokens, 0, 0, weights, input, output);
     // The output head (77,440 x 4,096 a rank): at 3 and 4 tokens `mx_rows_small4` and at 5 to 8 the tile read it faster than the old pair
     // kernel (one Spark, `kernel-bench --mx-small {OLD} {X} head`, us a launch at 3 / 4 / 5 / 8 tokens: pair 1,561 / 1,895 / 2,224 / 2,973;
-    // small4 1,428 / 1,435; tile 1,527 / 1,537 at 5 / 8). At 2 tokens and from 9 the head keeps the old kernels, as before.
+    // small4 1,428 / 1,435; tile 1,527 / 1,537 at 5 / 8). At 2 tokens and above one 16-token tile the head keeps the old kernels, as before.
     if rows == mx_rows::HEAD_ROWS && cols == mx_rows::HEAD_COLS && weights & 15 == 0 && input & 15 == 0 && output & 3 == 0 {
         if matches!(tokens, 3 | 4) { return Mx::Small("mx_rows_small4", 4); }
-        if (5..=8).contains(&tokens) { return Mx::Tile; }
+        if (5..=mx_rows::TOKENS_PER_BLOCK).contains(&tokens) { return Mx::Tile; }
     }
     if !tile_first && mx_small::admitted(rows, cols, tokens, weights, input, output) { if let Some((entry, per, _)) = mx_small::entry(tokens, cols) { return Mx::Small(entry, per); } }
     if tokens != 1 && mx_rows::admitted(rows, cols, tokens.min(mx_rows::token_limit(rows,cols)), 0, 0, weights, input, output) { return Mx::Tile; }
     Mx::Old
+}
+
+/// Packed token rows per block and the entry with that geometry.
+pub fn packed_mx_tile(tokens: usize) -> (&'static str, usize) {
+    if (9..=16).contains(&tokens) { ("mx_tc_tile_packed16", 16) }
+    else { ("mx_tc_tile_packed", mx_rows::TC_TOKENS_PER_BLOCK) }
 }
 
 /// What the group launch is made of, as `expert_group` knows it from its table.
@@ -95,7 +101,19 @@ pub fn group(g: &Group) -> Option<(&'static str, u32, u32, u32)> {
         let few_rows = g.fp8.len() == 1 && (3..=4).contains(&longest) && g.fp8[0].rows <= fp8_small::SMALL_RULE_ROWS;
         if (longest <= 2 || few_rows) && fp8_small::admitted(g.fp8, g.input) { return Some(("fp8_rows_small", fp8_small::blocks(g.fp8)?, fp8_small::threads(g.fp8), fp8_small::shared(g.fp8))); }
         if (3..=4).contains(&longest) && fp8_small::few_wins(g.fp8[0].rows, g.fp8[0].cols, longest) && fp8_small::few_admitted(g.fp8, g.input) { return Some(("fp8_rows_few", fp8_small::few_blocks(g.fp8)?, fp8_small::threads(g.fp8), fp8_small::shared(g.fp8))); }
-        if longest >= 3 && fp8_small::multi_admitted(g.fp8, g.input) { return Some(("fp8_rows_multi", fp8_small::multi_blocks(g.fp8)?, fp8_small::threads(g.fp8), fp8_small::shared(g.fp8))); }
+        if longest >= 3 && fp8_small::multi_admitted(g.fp8, g.input) {
+            // One token tile covers the whole check. Four warps cover 64 weight rows. The
+            // rotating-weight sweep favours this tile from 32 such blocks, at 9 through 16 tokens.
+            const WARPS: usize = 4;
+            if let [part] = g.fp8 {
+                if (9..=16).contains(&part.tokens) && part.rows >= 32 * 16 * WARPS
+                    && part.block_cols == 128 && part.cols.is_multiple_of(128) && part.block_rows.is_multiple_of(16) {
+                    let blocks = u32::try_from(part.rows.div_ceil(16 * WARPS)).ok()?;
+                    return Some((fp8_rows::THIRD_KERNEL, blocks, (32 * WARPS) as u32, fp8_rows::THIRD_SHARED));
+                }
+            }
+            return Some(("fp8_rows_multi", fp8_small::multi_blocks(g.fp8)?, fp8_small::threads(g.fp8), fp8_small::shared(g.fp8)));
+        }
     }
     None
 }
@@ -106,6 +124,21 @@ mod tests {
     fn project(rows: u32, tokens: usize, cols: u32) -> Shape { let mut s = Shape::new(Op::ProjectRows, tokens).unwrap(); s.rows = rows; s.cols = cols; s }
     fn wrapped(op: crate::causal_ops::Op, tokens: usize) -> Shape { Shape::wrapped(crate::causal_ops::Shape { op, heads: 64, dim: 128, taps: 4, rows: 288, cols: 8, epsilon: 1e-5, bound: -5.0 }, tokens).unwrap() }
     fn step(tokens: usize) -> Shape { let mut s = Shape::new(Op::StepRows, tokens).unwrap(); s.heads = 64; s.dim = 128; s }
+    #[test]
+    fn packed_mx_grid_covers_every_token_once() {
+        for tokens in 1..=65 {
+            let (entry, width) = packed_mx_tile(tokens);
+            let narrow = (9..=16).contains(&tokens);
+            assert_eq!(entry, if narrow { "mx_tc_tile_packed16" } else { "mx_tc_tile_packed" });
+            let mut covered = vec![0; tokens];
+            for block in 0..tokens.div_ceil(width) {
+                for lane_token in 0..if narrow { 16 } else { 64 } {
+                    if let Some(word) = covered.get_mut(block * width + lane_token) { *word += 1; }
+                }
+            }
+            assert!(covered.iter().all(|&count| count == 1));
+        }
+    }
     #[test]
     fn the_small_pool_scores_and_the_tile_share_no_shape() {
         use crate::{pool_scores_small as small, pool_scores_tile as tile};
@@ -145,6 +178,22 @@ mod tests {
     fn fp8(rows: usize, cols: usize, tokens: &[usize]) -> Vec<fp8_rows::Part> { tokens.iter().map(|&t| fp8_rows::Part { rows, cols, block_rows: 128, block_cols: 128, tokens: t, weight: 256, scales: 512 }).collect() }
     fn pick(nv: &[nv_rows::Part], fp8: &[fp8_rows::Part], all_nv: bool, all_fp8: bool, words: u32, cumulative: bool) -> Option<&'static str> {
         group(&Group { nv, fp8, all_nv, all_fp8, words, cumulative, shared_rows: false, input: 256 }).map(|c| c.0)
+    }
+    #[test]
+    fn fp8_check_tile_covers_one_part_and_one_token_tile() {
+        for tokens in 9..=16 {
+            for (rows, cols) in [(2048, 2048), (2048, 16384), (8192, 1536)] {
+                let parts = fp8(rows, cols, &[tokens]);
+                let g = Group { nv: &[], fp8: &parts, all_nv: false, all_fp8: true, words: 1, cumulative: true, shared_rows: false, input: 256 };
+                assert_eq!(group(&g), Some((fp8_rows::THIRD_KERNEL, rows.div_ceil(64) as u32, 128, 8192)));
+            }
+            let mut parts = fp8(2048, 2048, &[tokens]);
+            parts[0].block_rows = 1;
+            assert_eq!(pick(&[], &parts, false, true, 1, true), Some("fp8_rows_multi"));
+            assert_eq!(pick(&[], &fp8(2048, 2048, &[tokens; 2]), false, true, 1, true), Some("fp8_rows_multi"));
+        }
+        assert_eq!(pick(&[], &fp8(2048, 2048, &[8]), false, true, 1, true), Some("fp8_rows_multi"));
+        assert_eq!(pick(&[], &fp8(2048, 2048, &[17]), false, true, 1, true), None);
     }
     #[test]
     fn a_group_launch_takes_its_small_kernel_before_the_tiles_and_only_on_the_tables_it_was_swept_on() {
@@ -226,12 +275,12 @@ mod tests {
                 if tile_first { assert_eq!(mx(rows, cols, t, w, i, o), Mx::Tile); }
             }
         } }
-        // The output head (77,440 x 4,096): small4 at 3 and 4 tokens, the tile at 5 to 8; the old kernels at every other count, for another
+        // The output head (77,440 x 4,096): small4 at 3 and 4 tokens, one tile at 5 to 16; the old kernels at every other count, for another
         // column count and for an unaligned operand.
         let got: Vec<Mx> = [1, 2, 3, 4, 5, 6, 7, 8, 9, 16, 17, 256].iter().map(|&t| mx(77440, 4096, t, w, i, o)).collect();
-        assert_eq!(got, [Mx::Old, Mx::Old, Mx::Small("mx_rows_small4", 4), Mx::Small("mx_rows_small4", 4), Mx::Tile, Mx::Tile, Mx::Tile, Mx::Tile, Mx::Old, Mx::Old, Mx::Old, Mx::Old]);
+        assert_eq!(got, [Mx::Old, Mx::Old, Mx::Small("mx_rows_small4", 4), Mx::Small("mx_rows_small4", 4), Mx::Tile, Mx::Tile, Mx::Tile, Mx::Tile, Mx::Tile, Mx::Tile, Mx::Old, Mx::Old]);
         assert_eq!(crate::mx_small::grid(77440, 4096, 4), Some([4840, 1]));
-        for t in 3..=8 { assert_eq!(mx(77440, 8192, t, w, i, o), Mx::Old); assert_eq!(mx(77441, 4096, t, w, i, o), Mx::Old); assert_eq!(mx(154880, 4096, t, w, i, o), Mx::Old);
+        for t in 3..=16 { assert_eq!(mx(77440, 8192, t, w, i, o), Mx::Old); assert_eq!(mx(77441, 4096, t, w, i, o), Mx::Old); assert_eq!(mx(154880, 4096, t, w, i, o), Mx::Old);
             assert_eq!(mx(77440, 4096, t, 8, i, o), Mx::Old); assert_eq!(mx(77440, 4096, t, w, 8, o), Mx::Old); assert_eq!(mx(77440, 4096, t, w, i, 2), Mx::Old); }
         // A shape off the lists keeps the tile (rows up to 8,192; columns up to 8,192, and 12,288) or the old kernels.
         assert_eq!(mx(4000, 4096, 3, w, i, o), Mx::Tile);

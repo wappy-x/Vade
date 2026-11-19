@@ -118,7 +118,7 @@ mod shared_form_tests {
     fn the_fold_shapes_take_one_fold_launch_at_2_to_8_rows_and_every_other_matrix_keeps_its_form() {
         // The router gate (FP32) and the narrow BF16 groups, rank-local and logical rows.
         for (rows,cols) in [(144,4096),(288,4096),(128,4096),(64,4096),(32,4096),(16,4096)] {
-            for m in 0..=20 {assert_eq!(super::fold_rows(m,rows,cols),(2..=8).contains(&m),"{rows}x{cols} m={m}");}
+            for m in 0..=20 {assert_eq!(super::fold_rows(m,rows,cols),(2..=16).contains(&m),"{rows}x{cols} m={m}");}
         }
         // Latent tables, index tables and wide matrices never take it: their forms are the base's.
         for (rows,cols) in [(4096,128),(8192,128),(2048,1536),(4096,1536),(16384,512),(32768,512),(4096,4096),(513,4096),(144,512)] {

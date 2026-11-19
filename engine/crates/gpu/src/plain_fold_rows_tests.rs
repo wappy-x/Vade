@@ -3,7 +3,11 @@ use super::*;
 /// The kernel's block on the CPU. Slots start as NaN (the bench's poisoned entry does the same on the device), so a read of
 /// a word that no producer wrote shows. `word` is the slot word of (layout, source row, block weight row, column): the kernel
 /// uses `fold_rows_word`; a test may pass a wrong one on purpose.
-fn twin(weights:&[f32],input:&[f32],rows:usize,cols:usize,tokens:usize,word:impl Fn(usize,usize,usize,usize)->usize)->Vec<f32> {
+fn twin(weights:&[f32],input:&[f32],rows:usize,cols:usize,tokens:usize,word:fn(usize,usize,usize,usize)->usize)->Vec<f32> {
+    let span=fold_token_span(tokens);
+    if span < tokens {
+        return input.chunks(span*cols).flat_map(|tile|twin(weights,tile,rows,cols,tile.len()/cols,word)).collect();
+    }
     let layout=fold_rows_layout(tokens);let ch=fold_rows_chunk(layout);let slot_words=FOLD_ROWS*layout*fold_rows_pitch(layout);
     assert!(2*slot_words*4<=FOLD_ROWS_BYTES);
     let mut output=vec![f32::NAN;tokens*rows];
@@ -69,7 +73,7 @@ fn every_slot_word_has_one_producer_and_one_reader_for_every_layout() {
     assert_eq!((fold_rows_layout(2),fold_rows_layout(3),fold_rows_layout(4),fold_rows_layout(5),fold_rows_layout(8)),(2,4,4,8,8));
 }
 #[test]
-fn a_row_in_a_group_of_2_to_8_equals_the_row_alone_and_ignores_its_neighbors() {
+fn a_row_in_a_group_of_2_to_16_equals_the_row_alone_and_ignores_its_neighbors() {
     // The model's fold shapes (router gate, narrow BF16 groups), and shapes with a ragged last block and a short last chunk.
     for (seed,(rows,cols)) in [(144usize,4096usize),(128,4096),(64,4096),(32,4096),(16,4096),(6,1024),(5,1056),(1,8192),(9,2080)].into_iter().enumerate() {
         for tokens in 2..=FOLD_ROWS_MAX_TOKENS {
@@ -105,9 +109,9 @@ fn wrong_on_purpose_forms_fail_the_same_check() {
     assert!(!equal(&reordered),"a changed chain order must change bits");
 }
 #[test]
-fn the_shape_rule_takes_the_fold_shapes_at_2_to_8_rows_and_nothing_else() {
+fn the_shape_rule_takes_the_fold_shapes_at_2_to_16_rows_and_nothing_else() {
     for (rows,cols) in [(144,4096),(288,4096),(128,4096),(64,4096),(32,4096),(16,4096),(1,1024),(512,8192)] {
-        for tokens in 0..=17 {assert_eq!(fold_rows_shape(rows,cols,tokens),(2..=8).contains(&tokens),"{rows}x{cols} tokens {tokens}");}
+        for tokens in 0..=17 {assert_eq!(fold_rows_shape(rows,cols,tokens),(2..=16).contains(&tokens),"{rows}x{cols} tokens {tokens}");}
         assert_eq!(plain_geometry(rows,cols).1 as usize,FOLD_THREADS);
         assert!(fold_rows_admitted(rows,cols,256,512,4) && !fold_rows_admitted(rows,cols,264,512,4) && !fold_rows_admitted(rows,cols,256,516,4));
     }
@@ -125,6 +129,7 @@ fn a_fold_rows_batch_keeps_the_one_row_fold_grid_and_refuses_other_row_counts() 
     assert_eq!((batch.layer.count,batch.plain,&batch.layer.ends[..4]),(3,0b111,&[0,36,68,70][..]));
     // The grid does not grow with the source rows: a block runs all of them.
     for job in 0..3 {let d=batch.layer.projections[job];assert_eq!(batch.layer.ends[job+1]-batch.layer.ends[job],plain_geometry(d.rows as usize,d.cols as usize).0);}
-    for tokens in [0,1,9,16] {assert!(ResidentProjectionBatch::default().push_fold_rows(p(144,tokens)).is_err(),"tokens {tokens}");}
+    for tokens in 9..=16 {let mut tiled=ResidentProjectionBatch::default();tiled.push_fold_rows(p(5,tokens)).unwrap();assert_eq!(tiled.layer.ends[1],4);}
+    for tokens in [0,1,17,32] {assert!(ResidentProjectionBatch::default().push_fold_rows(p(144,tokens)).is_err(),"tokens {tokens}");}
     let mut rounded=p(144,2);rounded.round=1;assert!(ResidentProjectionBatch::default().push_fold_rows(rounded).is_err());
 }

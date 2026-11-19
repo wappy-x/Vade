@@ -59,11 +59,17 @@ pub const fn fold_admitted(rows: usize, cols: usize, weights: usize, input: usiz
 }
 
 /// FOLD ROWS (`plain_warp::rows_fold_rows`, the entries `flash_resident_projection_fold_rows` and `_f32`): the fold schedule for a
-/// group of 2 to FOLD_ROWS_MAX_TOKENS source rows in ONE launch. A block keeps FOLD_ROWS weight rows and runs every source row:
+/// group of 2 to FOLD_ROWS_MAX_TOKENS source rows in ONE launch. A block keeps FOLD_ROWS weight rows and runs its token tile:
 /// its producers load a weight vector once and make one product vector a source row, and lane `token * FOLD_ROWS + row` of the
-/// folding warp adds the products of its own (weight row, source row) in column order. So the matrix is read once for all source
+/// folding warp adds the products of its own (weight row, source row) in column order. So the matrix is read once for each tile of source
 /// rows, and each (weight row, source row) keeps its own ascending chain from 0.0 (the one-row fold's chain).
-pub const FOLD_ROWS_MAX_TOKENS: usize = 8;
+pub const FOLD_ROWS_MAX_TOKENS: usize = 16;
+
+/// Source rows per block. Split larger descriptors into two balanced tiles of at most eight rows.
+#[inline(always)]
+pub const fn fold_token_span(tokens: usize) -> usize {
+    if tokens <= 8 { tokens } else { tokens.div_ceil(2) }
+}
 /// Source rows a block is laid out for: 2, 4 or 8 (the smallest that holds `tokens`). The chunk shrinks as the layout grows, so
 /// the two product slots keep about the one-row fold's shared bytes.
 #[inline(always)]

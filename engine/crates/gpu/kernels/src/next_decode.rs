@@ -327,23 +327,24 @@ pub(crate) fn resident_flash_resident_projection_plain_bf16(batch:crate::next_pa
         }
     }
 }
-/// FOLD ROWS: the plain fold batch for 2 to 8 source rows (several chats in a step, a drafting check). The descriptors are plain
+/// FOLD ROWS: the plain fold batch for 2 to 16 source rows (several chats in a step, a drafting check). The descriptors are plain
 /// matrices in the fold envelope (`plain_admission::fold_rows_admitted`), each with `tokens` = N source rows: input
-/// `[token][cols]` FP32, output `[token][rows]`. A block owns FOLD_ROWS weight rows of one descriptor and ALL its source rows: a
+/// `[token][cols]` FP32, output `[token][rows]`. A block owns FOLD_ROWS weight rows of one descriptor and one tile of its source rows: a
 /// weight vector is read once and multiplied into one product vector a source row (`plain_warp::rows_fold_rows`). Every output
 /// word is the one-row fold's word for that source row alone: the same products in the same ascending chain from 0.0, then the
 /// same BF16 round when the batch asks for it. BF16 = true reads BF16 weight patterns (`flash_resident_projection_fold_rows`),
 /// false FP32 weights (`flash_resident_projection_fold_rows_f32`). POISON (bench only) fills the block's shared memory with NaN
 /// first, so a read of a slot word that no producer wrote turns the output into NaN.
-/// Grid: `ends[count]` blocks of FOLD_THREADS threads, `rows.div_ceil(FOLD_ROWS)` blocks a descriptor.
+/// Grid: `ends[count]` blocks of FOLD_THREADS threads, `rows.div_ceil(FOLD_ROWS)` blocks per token tile.
 #[inline(always)]
 pub(crate) fn resident_projection_fold_rows<const BF16:bool,const POISON:bool>(batch:crate::next_params::ResidentProjectionBatch) {
     // SAFETY: The host admits only complete aligned plain matrices in the fold-rows envelope (`push_fold_rows`,
-    // `Backend::resident_projection_fold_rows`): FP32 weights or BF16 patterns as the entry says, `tokens` in 2..=8 on every
+    // `Backend::resident_projection_fold_rows`): FP32 weights or BF16 patterns as the entry says, `tokens` in 2..=16 on every
     // descriptor, `tokens * cols` initialized FP32 input words and `tokens * rows` private output words a descriptor, outputs
     // aliasing no operand and no other output, owners retained through stream completion. Every block has FOLD_THREADS threads
     // (the body traps otherwise) and owns FOLD_ROWS weight rows of one checked descriptor (`batch_block` is a bijection on the
-    // grid; all descriptors are plain). All threads enter the fold's barriers: the token count and the first row are the same on
+    // grid; all descriptors are plain). Adjacent blocks split groups above eight into disjoint token tiles.
+    // Both tile starts are within the checked input and output, and cols is a multiple of 32 so each input tile stays aligned. All threads enter the fold's barriers: the token count and the first row are the same on
     // every thread of a block. The block's shared area covers its two product slots for every layout. Only a live folding lane
     // writes, once, the one output word of its own (source row, weight row), after its own unchanged ascending add chain.
     unsafe {
@@ -353,20 +354,28 @@ pub(crate) fn resident_projection_fold_rows<const BF16:bool,const POISON:bool>(b
         let (rows,cols,tokens)=(p.rows as usize,p.cols as usize,p.tokens as usize);
         if core::arch::nvptx::_block_dim_x() as usize!=crate::plain_admission::FOLD_THREADS || batch.plain&(1<<job)==0
             || !crate::plain_admission::fold_rows_admitted(rows,cols,p.weights as usize,p.input as usize,tokens) {core::arch::nvptx::trap();}
-        let first=rest as usize*crate::plain_admission::FOLD_ROWS;let thread=_thread_idx_x() as usize;
+        let span=crate::plain_admission::fold_token_span(tokens);
+        let tiles=tokens.div_ceil(8);
+        let first=rest as usize/tiles*crate::plain_admission::FOLD_ROWS;
+        let token_start=rest as usize%tiles*span;
+        let tokens=(tokens-token_start).min(span);
+        let input=(p.input as *const f32).add(token_start*cols);
+        let thread=_thread_idx_x() as usize;
         let smem=crate::ptx::shared::<{crate::plain_admission::FOLD_ROWS_BYTES}>();
         if POISON {
             let mut at=thread;while at<crate::plain_admission::FOLD_ROWS_BYTES/4 {asm!("st.shared.u32 [{a}], {v};",a=in(reg32)(smem+(at*4) as u32),v=in(reg32)0x7fc0_0000u32);at+=crate::plain_admission::FOLD_THREADS;}
             asm!("bar.sync 0;");
         }
         let sum=match crate::plain_admission::fold_rows_layout(tokens) {
-            2=>crate::plain_warp::rows_fold_rows::<BF16,2>(p.weights as _,p.input as _,cols,first,rows,tokens,smem),
-            4=>crate::plain_warp::rows_fold_rows::<BF16,4>(p.weights as _,p.input as _,cols,first,rows,tokens,smem),
-            _=>crate::plain_warp::rows_fold_rows::<BF16,8>(p.weights as _,p.input as _,cols,first,rows,tokens,smem),
+            2=>crate::plain_warp::rows_fold_rows::<BF16,2>(p.weights as _,input,cols,first,rows,tokens,smem),
+            4=>crate::plain_warp::rows_fold_rows::<BF16,4>(p.weights as _,input,cols,first,rows,tokens,smem),
+            _=>crate::plain_warp::rows_fold_rows::<BF16,8>(p.weights as _,input,cols,first,rows,tokens,smem),
         };
         let (token,row)=(thread/crate::plain_admission::FOLD_ROWS,first+thread%crate::plain_admission::FOLD_ROWS);
         if thread<32 && token<tokens && row<rows {
-            *(p.output as *mut f32).add(token*rows+row)=if batch.round!=0 {rb(sum)} else {sum};
+            // Above eight rows this replaces ProjectRows and its separate bf16_lanes_round.
+            let value=if batch.round==0 {sum} else if tiles==1 {rb(sum)} else {crate::bf16::rounded(sum)};
+            *(p.output as *mut f32).add((token_start+token)*rows+row)=value;
         }
     }
 }

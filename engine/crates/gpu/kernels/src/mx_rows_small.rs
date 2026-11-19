@@ -46,7 +46,7 @@ pub(crate) fn rows<const T:usize,const DEPTH:usize,const R:usize>(p:MxProjection
     };
     // The tensor-core word: the host gives such a descriptor the grid (ceil(rows / 16), ceil(tokens / 8)) under any of these
     // entry names, and the block runs the one row body of `mx_tc` at its own place in that grid (1 to 8 tokens a block).
-    if p.mode==crate::next_params::MX_TC {crate::mx_tc::block::<{crate::mx_tc::AHEAD},{crate::mx_tc::EVERY}>(p,None,false);return;}
+    if p.mode==crate::next_params::MX_TC {crate::mx_tc::block::<{crate::mx_tc::AHEAD},{crate::mx_tc::EVERY},false>(p,None,false);return;}
     if first>=p.rows as usize || token>=p.tokens as usize {return;}
     wave::<T,DEPTH,R>(p,first,token);
 }
