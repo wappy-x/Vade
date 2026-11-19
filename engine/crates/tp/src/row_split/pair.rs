@@ -85,6 +85,11 @@ use std::collections::BTreeMap;
 /// The most chats that draft together. Three gained in the balanced duox-k bracket; more chats stay plain until the
 /// group is widened with its own measurement. The row bound stays unchanged.
 pub(super) const PAIR_CHATS:usize=4;
+/// The groups whose chats propose in ONE command (one_pass.rs) and price the rows a pass computes, carried rows included:
+/// two chats and four. A group of three proposes one chat at a time and prices the rows it submits, as on main.
+/// MEASURED (PR434 v8, two Sparks, four arms against main 4236d33cf0): two structured chats that joined so gained 1.02 and
+/// 1.15 percent; one of two three-chat repeats that joined ran 8.2 percent under its base.
+pub(super) fn joined(chats:usize)->bool {chats==2 || chats==PAIR_CHATS}
 const _:()=assert!(PAIR_CHATS*(super::trial::TRIAL_DEPTH+1)<=VERIFY_ROWS && PAIR_CHATS<=crate::bounded_decoder::BATCH_ROWS);
 /// The words every chat is expected to keep must be worth this share of the time a drafting tick adds, or more.
 pub(super) const PAIR_FLOOR:f64=1.05;
@@ -351,8 +356,8 @@ impl Pair {
         let most=rates.len();
         let (Some(at),Some(step),Some(plain))=(self.place(id,live),self.step,self.plain) else {return self.offer(id,live,most);};
         let (n,look)=(self.chats.len(),!self.hot);
-        // Carried rows price a group of four only; groups of two or three price their submitted rows, as on main.
-        let carried=if n==PAIR_CHATS {self.carried.values().sum::<usize>()} else {0};
+        // Carried rows price a joined group (two or four chats); a group of three prices its submitted rows, as on main.
+        let carried=if joined(n) {self.carried.values().sum::<usize>()} else {0};
         // gains[w]: the words this chat is expected to keep of its first `w`.
         let mut gains=vec![0.0;most+1];let mut chain=1.0;
         for (word,rate) in rates.iter().enumerate() {chain*=rate.clamp(0.0,1.0);gains[word+1]=gains[word]+chain;}
@@ -551,7 +556,7 @@ impl<C:super::Compute,E:super::Exchange> super::Session<'_,C,E> {
 #[cfg(test)] mod tests {
     use super::*;
     #[test]
-    fn two_chats_price_their_submitted_rows_after_a_second_rollback_as_on_main() {
+    fn two_chats_price_the_physical_rows_after_a_second_rollback() {
         use crate::bounded_decoder::{Host,TestCheckpoint,Verify};
         use crate::row_split::{Factory,Split,kept_charge_tests::Local,limits};
         use spark_serve::{BatchOutput,BatchRows,Engine,Predictions,Session as _};
@@ -612,14 +617,15 @@ impl<C:super::Compute,E:super::Exchange> super::Session<'_,C,E> {
         let pair=group.pair.borrow();
         eprintln!("physical and charged rows {charges:?}; price learned at 7/8/9: {:?}",
             [pair.pass[7].is_some(),pair.pass[8].is_some(),pair.pass[9].is_some()]);
-        // Two chats price the rows they submit, as on main: the carried rows ride uncharged.
-        assert_eq!(charges,[(8,8),(9,7)].repeat(3));
-        assert!(pair.pass[7].is_some() && pair.pass[8].is_some() && pair.pass[9].is_none());
+        // Two chats price the rows they compute: the carried rows are charged.
+        assert_eq!(charges,[(8,8),(9,9)].repeat(3));
+        assert!(pair.pass[8].is_some() && pair.pass[9].is_some() && pair.pass[7].is_none());
     }
     #[test]
-    fn only_a_group_of_four_chooses_at_its_physical_width() {
-        // Two and three chats price their submitted rows, as on main: carried rows do not change the choice.
-        for n in [2,3] {
+    fn groups_of_two_and_four_choose_at_their_physical_width() {
+        // Three chats price their submitted rows, as on main, so carried rows do not change their choice; two and four
+        // price the rows they compute, so two carried rows make the tick too dear.
+        for n in [2,3,4] {
             let chats=(1..=n as u64).collect::<Vec<_>>();
             let mut pair=Pair {
                 chats:chats.clone(),step:Some(60.0),plain:Some(60.0),outside:Some(0.0),
@@ -631,19 +637,8 @@ impl<C:super::Compute,E:super::Exchange> super::Session<'_,C,E> {
             pair.next=Next::default();
             pair.set_carried(2,2);
             assert_eq!(pair.carried.values().sum::<usize>(),2);
-            assert_eq!(pair.choose(1,n,&[1.0],0.0),1,"{n} chats ignore carried rows");
+            assert_eq!(pair.choose(1,n,&[1.0],0.0),usize::from(!joined(n)),"{n} chats with two carried rows");
         }
-        // Four chats price the rows they compute: two carried rows make the tick too dear.
-        let mut four=Pair {
-            chats:vec![1,2,3,4],step:Some(60.0),plain:Some(60.0),outside:Some(0.0),
-            hot:true,sure:[Some(1.0);PAIR_CHATS],..Pair::default()
-        };
-        four.pass[8]=Some(90.0);
-        four.pass[10]=Some(180.0);
-        assert_eq!(four.choose(1,4,&[1.0],0.0),1);
-        four.next=Next::default();
-        four.set_carried(2,2);
-        assert_eq!(four.choose(1,4,&[1.0],0.0),0);
     }
     #[test]
     fn net_uses_the_charged_physical_width_for_its_stall_cap() {

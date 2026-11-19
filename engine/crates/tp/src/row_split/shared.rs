@@ -49,9 +49,9 @@ impl<C:Compute,E:Exchange> Factory<'_,C,E> {
             let peak=self.split.rows_peak_end(whole);
             self.split.exchange.borrow_mut().complete()?;self.failed.set(false);
             let seconds=started.elapsed().as_secs_f64();let total=tokens.iter().map(|rows|rows.len()).sum::<usize>();
-            // A group of four prices its computed rows; two or three chats price their submitted rows, as on main.
+            // A joined group (two or four chats) prices its computed rows; three chats price their submitted rows, as on main.
             // Per-chat time and useful rows remain apportioned by submitted rows.
-            let computed_rows=total+carried;let priced_rows=if n==pair::PAIR_CHATS {computed_rows} else {total};
+            let computed_rows=total+carried;let priced_rows=if pair::joined(n) {computed_rows} else {total};
             if n==4 && computed_rows==crate::bounded_decoder::VERIFY_ROWS {
                 eprintln!("SERVED SHARED FULL rank={} chats={n} computed_rows={computed_rows} submitted_rows={total} sessions={:?}",self.split.topology.rank,sessions.iter().map(|session|session.id).collect::<Vec<_>>());
             }

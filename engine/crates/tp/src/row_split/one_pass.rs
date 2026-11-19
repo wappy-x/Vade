@@ -1,5 +1,5 @@
-//! ONE PASS on two ranks (command 33): the proposals of the chats of a group of four in one go. Each chat of a group of
-//! four live chats (pair.rs) defers its proposal (`Session::defers`); the scheduler then makes ONE `Engine::propose_batch` call a
+//! ONE PASS on two ranks (command 33): the proposals of the chats of a group of two or four in one go. Each chat of a group
+//! of two or four live chats (pair.rs `joined`) defers its proposal (`Session::defers`); the scheduler then makes ONE `Engine::propose_batch` call a
 //! tick for all of them (`Factory::propose_together`). There each chat first decides what it proposes, in the
 //! scheduler's order, as its own `propose_model` does; then the chains of all of them run word by word together
 //! (`bounded_decoder::propose_group`: each chat's steps on its own values, one vocabulary head pass a word); then each
@@ -14,11 +14,11 @@ use spark_engine::draft::ModelProposal;
 pub(super) const GROUP_PROPOSE:u32=33;
 impl<C:Compute,E:Exchange> Session<'_,C,E> {
     /// Some(words) when this chat's proposal of this tick waits for the scheduler's one call (`propose_together`): a
-    /// chat of a group of four live chats that may still draft; groups of two or three propose one chat at a time. `words` is the most its own `propose_model` could propose now (its depth,
+    /// chat of a group of two or four live chats that may still draft; a group of three proposes one chat at a time. `words` is the most its own `propose_model` could propose now (its depth,
     /// and a group's share of one check pass), so the tick's rows are reserved as that proposal could take them.
     pub(super) fn defers(&self,limit:usize)->Option<usize> {
         let live=self.factory.active.get();
-        if live!=pair::PAIR_CHATS || self.phase==Phase::Over || !self.decoder.predictor_enabled() || !self.factory.pair.borrow().member(self.id,live) {return None;}
+        if !pair::joined(live) || self.phase==Phase::Over || !self.decoder.predictor_enabled() || !self.factory.pair.borrow().member(self.id,live) {return None;}
         Some(limit.min(self.depth.min(self.factory.predictor)).min((crate::bounded_decoder::VERIFY_ROWS/live).saturating_sub(1)))
     }
 }

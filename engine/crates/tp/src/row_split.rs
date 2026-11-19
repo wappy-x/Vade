@@ -893,9 +893,9 @@ impl<C:Compute,E:Exchange> spark_serve::Engine for Factory<'_,C,E> {
     /// Fewer chats in decode than a batch step takes run their own plain steps, one a tick as on an engine with no batch step.
     /// Two chats alone on the server (two live sessions) ride one batch step; with any other count the floor is BATCH_MIN_ROWS.
     fn shared_decode_min(&self)->usize {if self.active.get()==crate::bounded_decoder::BATCH_PAIR_ROWS {crate::bounded_decoder::BATCH_PAIR_ROWS} else {crate::bounded_decoder::BATCH_MIN_ROWS}}
-    /// ONE PASS (one_pass.rs) serves a group of four live chats only. With one to three live chats the scheduler makes
-    /// each proposal through the session's own `propose_model`, as on main.
-    fn defer_strict_group_draft(&self)->bool {self.active.get()==pair::PAIR_CHATS}
+    /// ONE PASS (one_pass.rs) serves a group of two or four live chats (`pair::joined`). With one or three live chats the
+    /// scheduler makes each proposal through the session's own `propose_model`, as on main.
+    fn defer_strict_group_draft(&self)->bool {pair::joined(self.active.get())}
     /// ONE PASS (one_pass.rs): the deferred proposals of a tick, each what its chat's own `propose_model` returns.
     fn propose_batch<'s>(&'s self,rows:&mut [spark_serve::DraftRows<'_,Self::Session<'s>>])->std::result::Result<Vec<spark_engine::draft::ModelProposal>,spark_serve::BatchError> {
         self.propose_together(rows).map_err(|error|spark_serve::BatchError {request:None,message:error.to_string()})
