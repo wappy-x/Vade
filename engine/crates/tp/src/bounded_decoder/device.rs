@@ -864,6 +864,11 @@ if start==0 && v.pending.as_ref().and_then(|p|p.borrow().state_prefix)==Some(len
         self.check_selection(None)?;let picked=self.weights.borrow_mut().apply_greedy(name,self.backend,&x.vector,true)?;
         self.weights.borrow().check_exchange()?;Ok(picked)
     }
+    fn greedy_projection_mass_rows(&self,_:&CheckpointAdmission,name:&str,x:&Value<'b,'d>,rows:usize)->Result<Option<Vec<(u32,Option<f32>)>>> {
+        self.ready(x)?;self.weights.borrow().check_exchange()?;if let Some(error)=self.backend.fatal_error() {return Err(error);}
+        self.check_selection(None)?;let picked=self.weights.borrow_mut().apply_greedy_rows(name,self.backend,&x.vector,rows)?;
+        self.weights.borrow().check_exchange()?;Ok(picked.map(|picked|picked.into_iter().map(|(id,p)|(id,Some(p))).collect()))
+    }
     fn round(&self,x:&Value<'b,'d>)->Result<Value<'b,'d>> {self.ready(x)?;let stamp=self.cost.start(self.backend);let rounded=self.backend.round_bf16_lanes(&x.vector)?;
         // The fresh rounded owner can become the immutable value without a second allocation and copy.
         let out=if rounded.vector().len()==x.words {rounded.into_vector()} else {
@@ -943,6 +948,13 @@ if start==0 && v.pending.as_ref().and_then(|p|p.borrow().state_prefix)==Some(len
         // A group past PROMPT_GROUP rows: the pool's cap follows the rows until the group's end trims the pool (`rows_keep`).
         else if let Some(cap)=super::group_pool_cap(tokens.len()) {self.backend.group_vector_spares(cap,self.group_charge.get());}
         let stamp=self.cost.start(self.backend);let out=self.weights.borrow().embedding_rows(self.backend,tokens,streams)?;let words=out.len();let value=self.value(out,words)?;self.cost.record(||"rows_embedding".into(),stamp,self.backend,0);Ok(Some(value))
+    }
+    fn draft_embeddings(&self,tokens:&[u32])->Result<Option<Value<'b,'d>>> {
+        self.backend.resident_row_pass(tokens.len());
+        self.batch_route.set(2);
+        let out=self.weights.borrow().embedding_rows(self.backend,tokens,1)?;
+        let words=out.len();
+        Ok(Some(self.value(out,words)?))
     }
     fn rows_project(&self,_:&CheckpointAdmission,name:&str,x:&Value<'b,'d>,m:usize,round:bool)->Result<Option<Value<'b,'d>>> {
         self.ready(x)?;

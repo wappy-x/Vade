@@ -238,6 +238,9 @@ pub trait Engine {
     fn prefix_cache_opt_in(&self) -> bool { false }
     fn shared_prompt_limit(&self) -> usize { if self.shared_batch() { 64 } else { 8 } }
     fn shared_draft(&self) -> bool { false }
+    /// Complete eligible strict group proposals through `propose_batch`.
+    /// The session controls eligibility and reservation through `defer_model_draft`.
+    fn defer_strict_group_draft(&self) -> bool { false }
     /// Keep draft work off concurrent chats until this engine wins that gate.
     fn single_chat_draft(&self) -> bool { false }
     /// Largest active cohort that may draft; larger cohorts decode plain.

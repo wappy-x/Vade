@@ -228,6 +228,27 @@ impl<V> Verify<V> {
         Ok(decoder.prefill_rows(&self.open,&self.state,HeadRows::Last)?.1)
     }
 }
+/// ONE PASS: `Verify::propose_mass` of several chats, `chats[i]` = (its rows, its `next`, its depth, its stop). Each
+/// chat's waiting rows run first, as there; then the chains run word by word together (`Decoder::propose_chains`: each
+/// chat's steps on its own values, one head pass a word). Each chat's proposals, scores, cache and trail are what its
+/// own `propose_mass` leaves. `decoder` is any chat's: the chats of one service share its weights and its plans.
+#[allow(clippy::type_complexity)] // each chat's proposals, their scores and its catch-up seconds.
+pub fn propose_group<C:Compute>(decoder:&Decoder<'_,C>,chats:&mut [(&mut Verify<C::Value>,u32,usize,Option<f32>)])->Result<Vec<(Vec<u32>,Vec<Option<f32>>,f64)>> {
+    let mut caught=Vec::with_capacity(chats.len());
+    for (verify,_,depth,_) in chats.iter_mut() {
+        caught.push(if verify.trail.is_empty() || *depth==0 {None} else {Some(verify.catch_up(decoder,verify.trail.len()-1)?)});
+    }
+    let mut made={let starts=chats.iter().zip(&caught).filter_map(|((verify,next,depth,stop),caught)|caught.as_ref().map(|(cache,_)|
+        super::ChainStart {hidden:&verify.trail[verify.trail.len()-1].1,token:*next,depth:*depth,seen:cache.as_ref(),stop:*stop})).collect::<Vec<_>>();
+        decoder.propose_chains(&starts)?.into_iter()};
+    let mut results=Vec::with_capacity(chats.len());
+    for ((verify,_,depth,_),caught) in chats.iter_mut().zip(caught) {
+        let Some((_,waited))=caught else {results.push((Vec::new(),Vec::new(),0.0));continue;};
+        let (tokens,mass,after)=made.next().ok_or("proposal group lost a chain")?;
+        verify.predictor=Some(after);verify.trail.clear();verify.trail_cap=TRAIL_ROWS.max(*depth+1);verify.plane=None;results.push((tokens,mass,waited));
+    }
+    Ok(results)
+}
 /// SHARED PASS: ONE pass appends `tokens` to each chat (`Decoder::prefill_rows_shared`). Result `i` is the logits of
 /// chat `i`'s new rows, with the bits of its own `Verify::rows`; each chat's open rows, its state ahead and its trail
 /// are what its own pass leaves, so each takes its own `truncate` afterwards. `decoder` is any chat's: the chats of

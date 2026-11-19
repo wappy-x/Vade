@@ -245,11 +245,15 @@ impl<S: Session> Generation<S> {
                 let row_cap = if self.draft_options.is_some() {
                     self.verification_cap(row_cap)
                 } else { 1 };
+                let defer_group = chats > 1 && engine.defer_strict_group_draft()
+                    && self.draft_options.is_some_and(|(mode, _)| mode == spark_engine::draft::Mode::Strict);
                 let target = self.state.session.draft_target().unwrap();
                 let spec = self.draft.as_mut().unwrap();
                 let stop = |t| !self.ignore_eos && engine.eos_token_ids().contains(&t);
                 let plan = if engine.shared_draft() {
                     spec.prepare_model(target, row_cap, engine.shared_draft_costs(chats), stop, &allowed)?
+                } else if defer_group {
+                    spec.prepare_model(target, row_cap, None, stop, &allowed)?
                 } else { spec.prepare_with_target(target, row_cap, stop, &allowed)? };
                 return Ok((Some(Work::Draft(plan)), Vec::new()));
             }

@@ -535,7 +535,7 @@ topology-branch spark-tp next_gpu::Gpu::moe_bw 1
 topology-branch spark-tp next_gpu::Gpu@RankKernels::moe 2
 topology-branch spark-tp next_gpu::Gpu@RankKernels::moe_rows 1
 # orchestrator ruling 2026-11-10 09:10, B1 P6: refuses a split whose argmax row ownership is not the even split. It selects no arithmetic path.
-topology-branch spark-tp resident_weights::device::Weights::apply_greedy 1
+topology-branch spark-tp resident_weights::device::mass_gather::Weights::argmax_owners 1
 topology-branch spark-tp rows 1
 topology-branch spark-tp runtime::verify_artifacts_with_ab 2
 # Deferred argument validation only. Preserve tensor intervals and refuse

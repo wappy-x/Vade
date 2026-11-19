@@ -150,6 +150,8 @@ impl<C:Compute,E:Exchange> Compute for Split<C,E> {
         let head=Mxfp8Projection::matrix(c,name,spark_gpu_probe::norm_boundary::WeightType::F32)?;let values=self.mx(&head,x)?;
         crate::bounded_decoder::greedy_logits_mass(&self.read(&values)?,head.shape().rows())
     }
+    fn greedy_projection_mass_rows(&self,c:&CheckpointAdmission,name:&str,x:&C::Value,rows:usize)->Result<Option<Vec<(u32,Option<f32>)>>> {
+        if self.compute.projects_complete_rows() {self.compute.greedy_projection_mass_rows(c,name,x,rows)} else {Ok(None)}}
     fn projection_rows(&self,c:&engine_model::plan::admission::CheckpointAdmission,name:&str,x:&[&C::Value],round:bool)->Result<Option<Vec<C::Value>>> {self.compute.projection_rows(c,name,x,round)}
     fn projection_batch(&self,c:&CheckpointAdmission,input:&[(&str,&C::Value)],round:bool)->Result<Option<Vec<C::Value>>> {self.compute.projection_batch(c,input,round)}
     fn projection_stage(&self,c:&CheckpointAdmission,jobs:&[crate::projection_stage::Job<'_,C::Value>])->Result<Option<Vec<C::Value>>> {self.compute.projection_stage(c,jobs)}
@@ -201,6 +203,7 @@ impl<C:Compute,E:Exchange> Compute for Split<C,E> {
     fn rows_recurrent(&self,s:spark_gpu_probe::recurrent_rows::Shape,x:[&C::Value;7],gate:&C::Value,w:[&[f32];3],keep:bool)
         ->Result<Option<crate::bounded_decoder::RecurrentRows<C::Value>>> {self.compute.rows_recurrent(s,x,gate,w,keep)}
     fn rows_embedding(&self,t:&[u32],n:usize)->Result<Option<C::Value>> {self.compute.rows_embedding(t,n)}
+    fn draft_embeddings(&self,t:&[u32])->Result<Option<C::Value>> {self.compute.draft_embeddings(t)}
     fn rows_project(&self,c:&CheckpointAdmission,name:&str,x:&C::Value,m:usize,round:bool)->Result<Option<C::Value>> {self.compute.rows_project(c,name,x,m,round)}
     fn rows_stage(&self,c:&CheckpointAdmission,jobs:&[(&str,&C::Value,bool)],m:usize)->Result<Option<Vec<C::Value>>> {self.compute.rows_stage(c,jobs,m)}
     fn rows_stage_open(&self,c:&CheckpointAdmission,jobs:&[(&str,&C::Value,bool)],m:usize)->Result<Option<Vec<Option<C::Value>>>> {self.compute.rows_stage_open(c,jobs,m)}
@@ -739,6 +742,8 @@ pub fn workspace_reservation_bytes(&self)->usize {self.workspace}
                 })?;},
                 // Command 32: one shared pass of several chats (shared.rs). `token` is the number of chats.
                 shared::SHARED_PASS=>self.worker_shared(&mut sessions,token as usize,id)?,
+                // Command 33: the proposal chains of several chats in one go (one_pass.rs). `token` is the number of chats.
+                one_pass::GROUP_PROPOSE=>self.worker_propose_group(&mut sessions,token as usize,id)?,
                 // Commands 15 to 17: a kept prompt (`kept_command`). Out of this loop, so the step arms keep their code.
                 15..=17=>self.kept_command(code,id,&mut sessions,&mut kept)?,
                 _=>return Err("unknown row split service command".into()),
@@ -798,6 +803,7 @@ mod trial;
 mod deeper;
 mod pair; pub use pair::PairAccount; mod shared;
 mod confidence;
+mod one_pass;
 /// The command of a proposal chain of `depth` tokens. Depths 1 to 3 keep commands 9 to 11. Commands 12 to 20 have
 /// other owners, so a deeper chain takes the commands after them: depth 4 is command 21, and the largest depth
 /// is PROPOSE_DEEP_LAST. The worker reads the depth back from the command, so both ranks run the same chain.
@@ -832,7 +838,7 @@ pub struct Session<'a,C:Compute,E:Exchange> {factory:&'a Factory<'a,C,E>,decoder
     /// session has no `state` and no `open`, so no step or prompt group can run in it.
     kept:Option<KeptSlot<C::Value>>,
     /// DRAFT CONFIDENCE (confidence.rs): the draft head's probabilities of the tokens the open cycle's pass checks.
-    checked:Vec<f32>,chooser:confidence::Chooser,alone:bool}
+    checked:Vec<f32>,checked_in_four:bool,chooser:confidence::Chooser,alone:bool}
 impl<C:Compute,E:Exchange> spark_serve::Engine for Factory<'_,C,E> {
     type Session<'a>=Session<'a,C,E> where Self:'a;
     fn prepare_prompt_workspace(&self,available:usize)->Result<()> {self.prepare_prompt_lease(available)}
@@ -848,7 +854,7 @@ impl<C:Compute,E:Exchange> spark_serve::Engine for Factory<'_,C,E> {
         let result=(|| {let started=std::time::Instant::now();self.split.command_for(1,0,id)?;
             // The other sessions that are open now: the worker counts the same ones.
             let decoder=Decoder::from_prepared(&self.prepared,&self.split,self.context as u64,self.active.get()-1)?;
-            let state=decoder.zero_state()?;self.split.exchange.borrow_mut().complete()?;eprintln!("SERVED SESSION rank={} session={id} active={} setup_seconds={:.9}",self.split.topology.rank,self.active.get(),started.elapsed().as_secs_f64());self.split.cost_report("setup");self.split.trace_start();Ok(Session {factory:self,decoder,state:Some(state),id,open:None,strict:false,draft_handoff:false,phase:Phase::Off,trial:Trial::default(),text:pair::Text::default(),depth:0,step_low:None,step_ms:None,pass_ms:[None;17],after_step:false,gate:Gate::default(),held:pair::Held::default(),limit:0,kept:None,checked:Vec::new(),chooser:Default::default(),alone:false})})();
+            let state=decoder.zero_state()?;self.split.exchange.borrow_mut().complete()?;eprintln!("SERVED SESSION rank={} session={id} active={} setup_seconds={:.9}",self.split.topology.rank,self.active.get(),started.elapsed().as_secs_f64());self.split.cost_report("setup");self.split.trace_start();Ok(Session {factory:self,decoder,state:Some(state),id,open:None,strict:false,draft_handoff:false,phase:Phase::Off,trial:Trial::default(),text:pair::Text::default(),depth:0,step_low:None,step_ms:None,pass_ms:[None;17],after_step:false,gate:Gate::default(),held:pair::Held::default(),limit:0,kept:None,checked:Vec::new(),checked_in_four:false,chooser:Default::default(),alone:false})})();
         if result.is_err() {self.active.set(self.active.get()-1);}self.finish(result)
     }
     fn fatal_error(&self)->Option<String> {self.failure_reason()}
@@ -887,6 +893,13 @@ impl<C:Compute,E:Exchange> spark_serve::Engine for Factory<'_,C,E> {
     /// Fewer chats in decode than a batch step takes run their own plain steps, one a tick as on an engine with no batch step.
     /// Two chats alone on the server (two live sessions) ride one batch step; with any other count the floor is BATCH_MIN_ROWS.
     fn shared_decode_min(&self)->usize {if self.active.get()==crate::bounded_decoder::BATCH_PAIR_ROWS {crate::bounded_decoder::BATCH_PAIR_ROWS} else {crate::bounded_decoder::BATCH_MIN_ROWS}}
+    /// ONE PASS (one_pass.rs) serves a group of four live chats only. With one to three live chats the scheduler makes
+    /// each proposal through the session's own `propose_model`, as on main.
+    fn defer_strict_group_draft(&self)->bool {self.active.get()==pair::PAIR_CHATS}
+    /// ONE PASS (one_pass.rs): the deferred proposals of a tick, each what its chat's own `propose_model` returns.
+    fn propose_batch<'s>(&'s self,rows:&mut [spark_serve::DraftRows<'_,Self::Session<'s>>])->std::result::Result<Vec<spark_engine::draft::ModelProposal>,spark_serve::BatchError> {
+        self.propose_together(rows).map_err(|error|spark_serve::BatchError {request:None,message:error.to_string()})
+    }
     /// A request that drafts sends its rows as one verify pass.
     fn step_batch<'s>(&'s self,rows:&mut [spark_serve::BatchRows<'_,Self::Session<'s>>])->std::result::Result<Vec<spark_serve::Predictions>,spark_serve::BatchError> {
         use spark_serve::{BatchOutput,Session as _};
@@ -1084,6 +1097,7 @@ impl<C:Compute,E:Exchange> Session<'_,C,E> {
             else {spark_serve::Predictions::Logits(open.rows(&self.decoder,tokens)?)};
         let peak=factory.split.rows_peak_end(whole);
         factory.split.exchange.borrow_mut().complete()?;factory.failed.set(false);
+        if carried!=0 {factory.pair.borrow_mut().set_carried(self.id,0);}
         {let ms=started.elapsed().as_secs_f64()*1000.0;let mix=|old:Option<f64>,new:f64|Some(old.map_or(new,|old|0.75*old+0.25*new));
             self.gate.pass(tokens.len(),ms,picked);
             // A step is timed when the call before it was a step too: the first step after a
@@ -1124,9 +1138,12 @@ impl<C:Compute,E:Exchange> Session<'_,C,E> {
         if position as u64==now && !open.has_kept() {return Ok(());}
         // A refused request never reaches the other rank, so the service stays whole.
         if position as u64>now || (position as u64)<open.committed() {return Err("row split truncation is outside the open rows".into());}
+        let previous_carry=open.shared_count(0);
         let started=std::time::Instant::now();let kept_to=position as u64;let partial=kept_to<now;self.after_step=false;
         let result=factory.finish((|| -> Result<()> {let position=u32::try_from(position).map_err(|_|"row split truncation exceeds its bound")?;factory.failed.set(true);factory.split.command_for(7,position,id)?;
             factory.split.work(||open.truncate(decoder,u64::from(position)))?;factory.split.exchange.borrow_mut().complete()?;factory.failed.set(false);Ok(())})());
+        let carry=open.shared_count(0);
+        if result.is_ok() && carry!=previous_carry {factory.pair.borrow_mut().set_carried(id,carry);}
         // GROUP DRAFTING (pair.rs): the tokens this chat kept in the tick count against its plain pace.
         if let Some((drafted,kept,ms))=self.gate.verdict(kept_to,started.elapsed().as_secs_f64()*1000.0,partial) {factory.pair.borrow_mut().turned(id,factory.active.get(),drafted,kept,ms);self.calibrate(drafted,kept);}
         // A cycle of a shared pass gives its Pay and Deeper feedback to the group only (pair.rs `Held`).
@@ -1149,7 +1166,7 @@ impl<'a,C:Compute,E:Exchange> Session<'a,C,E> {
     pub fn kept_expanded_rows(&self)->Option<usize> {self.kept.as_deref().map(crate::bounded_decoder::Parked::held_rows)}
     #[cold] #[inline(never)]
     fn fresh_session(factory:&'a Factory<'a,C,E>,decoder:Decoder<'a,&'a Split<C,E>>,state:Option<State<C::Value>>,id:u64,kept:Option<KeptSlot<C::Value>>)->Self {
-        Session {factory,decoder,state,id,open:None,strict:false,draft_handoff:false,phase:Phase::Off,trial:Trial::default(),text:pair::Text::default(),depth:0,step_low:None,step_ms:None,pass_ms:[None;17],after_step:false,gate:Gate::default(),held:pair::Held::default(),limit:0,kept,checked:Vec::new(),chooser:Default::default(),alone:false}
+        Session {factory,decoder,state,id,open:None,strict:false,draft_handoff:false,phase:Phase::Off,trial:Trial::default(),text:pair::Text::default(),depth:0,step_low:None,step_ms:None,pass_ms:[None;17],after_step:false,gate:Gate::default(),held:pair::Held::default(),limit:0,kept,checked:Vec::new(),checked_in_four:false,chooser:Default::default(),alone:false}
     }
     #[cold] #[inline(never)]
     fn send_keep(&self,id:u64,state:&State<C::Value>)->Result<std::result::Result<crate::bounded_decoder::Parked<C::Value>,String>> {
@@ -1281,13 +1298,25 @@ impl<C:Compute,E:Exchange> spark_engine::draft::Target for Session<'_,C,E> {
     }
     fn model_draft_costs(&self)->Option<spark_engine::draft::CostCurve> {self.measured_costs()}
     fn propose_model(&mut self,history:&[u32],next:u32,limit:usize)->Result<Option<spark_engine::draft::ModelProposal>> {
+        let limit=self.model_limit(history,next,limit)?;if limit==0 {return Ok(Some(spark_engine::draft::ModelProposal {tokens:Vec::new(),proposal_ms:0.0,catchup_ms:0.0}));}
+        let (entry,waiting)=self.model_entry();
+        let started=std::time::Instant::now();let (tokens,mass,waited)=self.propose(next,limit)?;let total=started.elapsed().as_secs_f64();
+        Ok(Some(self.model_made(entry,waiting,started,tokens,&mass,(total-waited).max(0.0)*1000.0,waited*1000.0)))
+    }
+    fn verify_costs(&self,_context:usize)->Option<spark_engine::draft::CostCurve> {self.measured_costs()}
+    // ONE PASS (one_pass.rs): a chat of a group leaves its proposal to the scheduler's one call a tick for all chats.
+    fn defer_model_draft(&self,limit:usize)->Option<usize> {self.defers(limit)}
+}
+impl<C:Compute,E:Exchange> Session<'_,C,E> {
+    /// What `propose_model` decides before its chain: the words this chat may propose now, 0 for none.
+    fn model_limit(&mut self,history:&[u32],next:u32,limit:usize)->Result<usize> {
         // The rows that waited for the layer are catch-up: the chooser prices a proposal without them.
         self.gate.begin();self.held.back(&mut self.gate);
         // GROUP DRAFTING (pair.rs): beside another chat a request proposes when its group does, its whole depth (a look, or drafting). Any other chat beside another proposes nothing. The chat's own clock says whether its answer text is under way (`pair::Text`).
         let live=self.factory.active.get();
         let (reads,left)=(self.text.reads(next,self.factory.answer_marker.get()),self.text.left(history.len()));
         let limit=if live>1 {let mut pair=self.factory.pair.borrow_mut();pair.left(self.id,live,left);limit.min(pair.ask(self.id,live,self.depth.min(self.factory.predictor),next,reads))} else {limit};
-        if limit==0 {return Ok(Some(spark_engine::draft::ModelProposal {tokens:Vec::new(),proposal_ms:0.0,catchup_ms:0.0}));}
+        if limit==0 {return Ok(0);}
         // DEFAULT DRAFTING: real drafting that a trial started is steady. It does not use the chooser's depth, whose
         // price moves with one slow pass (the same request drafted with 229 or with under 100 proposals, 2026-11-11):
         // it proposes its full depth in every cycle, and it stops for good when its own cycles lose (Gate::losing:
@@ -1296,20 +1325,25 @@ impl<C:Compute,E:Exchange> spark_engine::draft::Target for Session<'_,C,E> {
         // (deeper.rs): TRIAL_DEPTH at first, deeper only while the deeper proposals are kept. It holds no time either.
         if self.phase==Phase::Drafting && self.gate.losing() {self.phase=Phase::Over;self.factory.trial_counted(1);let step=self.step_low.unwrap_or(0.0);
             eprintln!("SERVED DRAFT STOP rank={} session={} cycles={} score={} net_ms={:.1} step_ms={step:.1}",self.factory.split.topology.rank,self.id,self.gate.cycles(),self.gate.score(),self.gate.net_ms(step));}
-        if self.phase==Phase::Over {return Ok(Some(spark_engine::draft::ModelProposal {tokens:Vec::new(),proposal_ms:0.0,catchup_ms:0.0}));}
+        if self.phase==Phase::Over {return Ok(0);}
         // A chat alone times a plain step of its own before its first proposal. A chat of a group has the group's timed step.
-        if live==1 && !self.gate.allows(self.step_ms) {return Ok(Some(spark_engine::draft::ModelProposal {tokens:Vec::new(),proposal_ms:0.0,catchup_ms:0.0}));}
-        let limit=limit.min(if self.phase==Phase::Drafting {self.cycle_depth()} else {self.limit});let limit=self.chosen_depth(limit);if limit==0 {return Ok(Some(spark_engine::draft::ModelProposal {tokens:Vec::new(),proposal_ms:0.0,catchup_ms:0.0}));}
-        let entry=spark_engine::draft::Target::checkpoint(self) as u64;let waiting=self.open.as_ref().map_or(0,Verify::waiting)+self.factory.tail_rows(self.id);
-        let started=std::time::Instant::now();let (mut tokens,mass,waited)=self.propose(next,limit)?;let total=started.elapsed().as_secs_f64();
-        if !tokens.is_empty() {self.gate.proposed((total-waited).max(0.0)*1000.0,waited*1000.0,entry,started,tokens.len(),waiting.saturating_sub(1));}
-        self.checked.clear();if !tokens.is_empty() {let width=self.checked_width(&mass,(total-waited).max(0.0)*1000.0);
+        if live==1 && !self.gate.allows(self.step_ms) {return Ok(0);}
+        let limit=limit.min(if self.phase==Phase::Drafting {self.cycle_depth()} else {self.limit});let limit=self.chosen_depth(limit);if limit==0 {return Ok(0);}
+        Ok(limit)
+    }
+    /// Where a chain of this chat starts: its checkpoint, and its rows that wait for the predictor layer.
+    fn model_entry(&self)->(u64,usize) {(spark_engine::draft::Target::checkpoint(self) as u64,self.open.as_ref().map_or(0,Verify::waiting)+self.factory.tail_rows(self.id))}
+    /// What `propose_model` does with a chain it made from `started`: the record of its time, the words its rows check.
+    #[allow(clippy::too_many_arguments)]
+    fn model_made(&mut self,entry:u64,waiting:usize,started:std::time::Instant,mut tokens:Vec<u32>,mass:&[Option<f32>],proposal_ms:f64,catchup_ms:f64)->spark_engine::draft::ModelProposal {
+        let live=self.factory.active.get();
+        if !tokens.is_empty() {self.gate.proposed(proposal_ms,catchup_ms,entry,started,tokens.len(),waiting.saturating_sub(1));}
+        self.checked.clear();self.checked_in_four=false;if !tokens.is_empty() {let width=self.checked_width(mass,proposal_ms);
             // GROUP DRAFTING (pair.rs): no row checks a look's words. They wait for the tokens this chat decodes next.
             if width==0 && live>1 {self.factory.pair.borrow_mut().shadow(self.id,live,&tokens);}
             tokens.truncate(width);self.checked.extend(mass.iter().take(width).map(|p|p.unwrap_or(f32::NAN)));}
-        Ok(Some(spark_engine::draft::ModelProposal {tokens,proposal_ms:(total-waited).max(0.0)*1000.0,catchup_ms:waited*1000.0}))
+        spark_engine::draft::ModelProposal {tokens,proposal_ms,catchup_ms}
     }
-    fn verify_costs(&self,_context:usize)->Option<spark_engine::draft::CostCurve> {self.measured_costs()}
 }
 impl<C:Compute,E:Exchange> spark_serve::Session for Session<'_,C,E> {
     fn reject_unmapped_greedy(&self)->bool {true}
@@ -1332,7 +1366,13 @@ impl<C:Compute,E:Exchange> spark_serve::Session for Session<'_,C,E> {
         // (deeper.rs). With a predictor of TRIAL_DEPTH that is TRIAL_DEPTH, as before.
         self.depth=if named {r.mtp_depth.unwrap_or(0)} else if !default {0} else if r.draft.is_none() && !r.mtp_depth_explicit {self.factory.predictor} else {r.mtp_depth.unwrap_or(trial::TRIAL_DEPTH)};
         // GROUP DRAFTING (pair.rs): a request that the service keeps drafting beside another one is a chat of a group.
-        self.factory.pair_leave(self.id);if spark_serve::Engine::drafts_contended(self.factory,r) {self.factory.pair.borrow_mut().join(self.id);}
+        self.factory.pair_leave(self.id);
+        if spark_serve::Engine::drafts_contended(self.factory,r) {
+            let mut pair=self.factory.pair.borrow_mut();
+            pair.join(self.id);
+            let carry=self.open.as_ref().map_or(0,|open|open.shared_count(0));
+            if carry!=0 {pair.set_carried(self.id,carry);}
+        }
         if self.strict && !spark_engine::draft::plain_greedy(r.sampling) {return Err("strict drafting on the row split service requires greedy sampling".into());}
         self.predictor_mode(draft_admission::request_can_draft(r))
     }

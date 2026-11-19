@@ -144,6 +144,10 @@ impl<'f,C:Compute> Decoder<'f,C> {
     }
     /// One layer of a batch step. `residual` holds one row a chat, chat-major. Returns the
     /// layer's output in the same form and each chat's next state of this layer.
+    pub(super) fn draft_layer_batch(&self,contexts:&[u64],residual:C::Value,states:&[&BTreeMap<String,C::Value>])
+        ->Result<(C::Value,Vec<BTreeMap<String,C::Value>>)> {
+        self.layer_batch(self.checkpoint.description().layers.len(),contexts,residual,states,&vec![None;states.len()],&mut None)
+    }
     fn layer_batch(&self,layer:usize,contexts:&[u64],residual:C::Value,states:&[&BTreeMap<String,C::Value>],held:&[Option<&Expanded<C::Value>>],
         table:&mut ChatTable<C::Value>)->Result<(C::Value,Vec<BTreeMap<String,C::Value>>)> {
         let b=&self.compute;let n=contexts.len();let planning=std::time::Instant::now();
@@ -152,7 +156,9 @@ impl<'f,C:Compute> Decoder<'f,C> {
         // made once from the first context seen (a copy each step cost 4 ms a step on the real model).
         let kept=self.batch_plans.borrow().get(&layer).cloned();
         let plan=match kept {Some(plan)=>plan,None=>{
-            let made=Rc::new(self.schedules.borrow_mut().get_mut(layer).ok_or("batch layer is outside the recipe")?.at(contexts[0]).cloned().map_err(|e|e.to_string())?);
+            let mut main=self.schedules.borrow_mut();let mut draft=self.draft_schedule.borrow_mut();
+            let schedule=if layer==self.checkpoint.description().layers.len() {draft.as_mut()} else {main.get_mut(layer)};
+            let made=Rc::new(schedule.ok_or("batch layer is outside the recipe")?.at(contexts[0]).cloned().map_err(|e|e.to_string())?);
             self.batch_plans.borrow_mut().insert(layer,made.clone());made}};
         b.plan_cost("planning",planning.elapsed().as_nanos());
         let mut values=BTreeMap::new();values.insert("residual".to_owned(),residual);

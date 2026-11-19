@@ -23,6 +23,7 @@ impl<C:Compute> Compute for &C {
     fn rows_greedy(&self,logits:&C::Value,rows:usize)->Result<Option<Vec<u32>>> {(**self).rows_greedy(logits,rows)}
     fn greedy_projection(&self,c:&engine_model::plan::admission::CheckpointAdmission,name:&str,x:&C::Value)->Result<u32> {(**self).greedy_projection(c,name,x)}
     fn greedy_projection_mass(&self,c:&engine_model::plan::admission::CheckpointAdmission,name:&str,x:&C::Value)->Result<(u32,Option<f32>)> {(**self).greedy_projection_mass(c,name,x)}
+    fn greedy_projection_mass_rows(&self,c:&engine_model::plan::admission::CheckpointAdmission,name:&str,x:&C::Value,rows:usize)->Result<Option<Vec<(u32,Option<f32>)>>> {(**self).greedy_projection_mass_rows(c,name,x,rows)}
     fn sparse_topology(&self)->Topology {(**self).sparse_topology()}
     fn owned_expansion(&self,name:&str,input:&C::Value,tokens:usize,layout:crate::sparse_heads::Layout)->Result<Option<C::Value>> {(**self).owned_expansion(name,input,tokens,layout)}
     fn owned_expansion_rows(&self,name:&str,input:&C::Value,tokens:usize,layout:crate::sparse_heads::Layout)->Result<Option<C::Value>> {(**self).owned_expansion_rows(name,input,tokens,layout)}
@@ -79,6 +80,7 @@ impl<C:Compute> Compute for &C {
     fn rows_recurrent(&self,s:spark_gpu_probe::recurrent_rows::Shape,x:[&C::Value;7],gate:&C::Value,w:[&[f32];3],keep:bool)
         ->Result<Option<crate::bounded_decoder::RecurrentRows<C::Value>>> {(**self).rows_recurrent(s,x,gate,w,keep)}
     fn rows_embedding(&self,t:&[u32],n:usize)->Result<Option<C::Value>> {(**self).rows_embedding(t,n)}
+    fn draft_embeddings(&self,t:&[u32])->Result<Option<C::Value>> {(**self).draft_embeddings(t)}
     fn rows_project(&self,c:&CheckpointAdmission,name:&str,x:&C::Value,m:usize,round:bool)->Result<Option<C::Value>> {(**self).rows_project(c,name,x,m,round)}
     fn rows_stage(&self,c:&CheckpointAdmission,jobs:&[(&str,&C::Value,bool)],m:usize)->Result<Option<Vec<C::Value>>> {(**self).rows_stage(c,jobs,m)}
     fn rows_stage_open(&self,c:&CheckpointAdmission,jobs:&[(&str,&C::Value,bool)],m:usize)->Result<Option<Vec<Option<C::Value>>>> {(**self).rows_stage_open(c,jobs,m)}

@@ -94,7 +94,7 @@ fn two_strict_chats_in_turns_keep_their_own_bits_through_each_others_rollbacks_o
         // Which requests keep their draft state beside another: a strict one of depth 2 or more (a request that names
         // a depth and no mode is strict), and one that drafts by default: no draft mode or "auto", the depth the
         // scheduler gives it (the service's default) or its own of 3 or more, greedy, more than 64 tokens. No other.
-        assert!(engine.drafts_contended(&strict));assert!(engine.drafts_contended(&request(r#","mtp_depth":3"#)));assert_eq!(engine.contended_draft_chats(),3);assert_eq!(engine.draft_chat_limit(),3);
+        assert!(engine.drafts_contended(&strict));assert!(engine.drafts_contended(&request(r#","mtp_depth":3"#)));assert_eq!(engine.contended_draft_chats(),4);assert_eq!(engine.draft_chat_limit(),4);
         let default=|fields:&str,tokens:usize| {let mut request=request(fields);request.mtp_depth.get_or_insert(3);request.max_tokens=tokens;request};
         for kept in [default("",70),default(r#","draft":"auto""#,70),default(r#","draft":"auto","mtp_depth":3"#,70)] {assert!(engine.drafts_contended(&kept),"{:?} {:?} {}",kept.draft,kept.mtp_depth,kept.max_tokens);}
         assert!(!engine.drafts_contended(&default("",64)),"a short answer never drafts by default");assert!(!engine.drafts_contended(&default(r#","temperature":0.7"#,70)),"a sampled request");
@@ -230,7 +230,7 @@ fn served_pair(always:bool,default:bool) {
     let got=together(vec![(p1,long,kind,None,false),(p2,short,kind,None,false)]);assert_eq!(got,vec![a1.clone(),a2[..short].to_vec()],"one chat ends early");
     // A third chat arrives while two draft: the three are a new group, and all have their own answers.
     let got=together(vec![(p1,long,kind,None,false),(p2,long,kind,None,false),(p3,third,kind,None,true)]);assert_eq!(got,vec![a1.clone(),a2.clone(),a3.clone()],"a third chat arrives");
-    // Four chats together stay plain until one ends; the three survivors may share their check rows.
+    // Four chats can share check rows under the forced control, and each keeps its own answer.
     let got=together(vec![(p1,long,kind,None,false),(p2,long,kind,None,false),(p3,third,kind,None,false),(p1,long,kind,None,false)]);
     assert_eq!(got,vec![a1.clone(),a2.clone(),a3.clone(),a1.clone()],"four chats");
     // A strict chat beside a request that names no draft mode. On a service that drafts by default the two are a
@@ -248,7 +248,7 @@ fn served_pair(always:bool,default:bool) {
     // draft state up and no group exists.
     assert!(counts[0]>=3,"{counts:?}");
     // With the control every chat of a group brought its whole depth in every tick.
-    if always {assert!(counts[1]>=20,"{counts:?}");assert!(shared[0]>=20 && shared[2]==3,"three chats shared a pass: {shared:?}");}
+    if always {assert!(counts[1]>=20,"{counts:?}");assert!(shared[0]>=20 && shared[2]==4,"four chats shared a pass: {shared:?}");}
     // Without it each chat's record decides (pair.rs): the answers above are what is asserted.
 }
 #[test]

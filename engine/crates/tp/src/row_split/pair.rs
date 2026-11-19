@@ -81,9 +81,10 @@
 //! A chat that comes or goes starts a new record for the chats there are now: the step of a group of another size
 //! has another price. Nothing here can change a kept token: every proposed row is verified by its own chat's rows.
 use crate::bounded_decoder::VERIFY_ROWS;
+use std::collections::BTreeMap;
 /// The most chats that draft together. Three gained in the balanced duox-k bracket; more chats stay plain until the
 /// group is widened with its own measurement. The row bound stays unchanged.
-pub(super) const PAIR_CHATS:usize=3;
+pub(super) const PAIR_CHATS:usize=4;
 const _:()=assert!(PAIR_CHATS*(super::trial::TRIAL_DEPTH+1)<=VERIFY_ROWS && PAIR_CHATS<=crate::bounded_decoder::BATCH_ROWS);
 /// The words every chat is expected to keep must be worth this share of the time a drafting tick adds, or more.
 pub(super) const PAIR_FLOOR:f64=1.05;
@@ -192,6 +193,8 @@ struct Next {asks:u32,first:bool,offered:usize,done:[bool;PAIR_CHATS],words:[usi
 pub(super) struct Pair {
     /// Chats that keep their draft state beside others, in the order they came.
     chats:Vec<u64>,
+    /// Pending verify rows that a member will compute again in its next shared pass.
+    carried:BTreeMap<u64,usize>,
     /// The timed batch step of the chats together (engine ms), their plain period (wall ms) and its samples, and the
     /// plain ticks of all the chats in a row before the tick that runs.
     step:Option<f64>,plain:Option<f64>,samples:u32,run:u32,
@@ -235,17 +238,25 @@ impl Pair {
         if self.group()>0 && let Some(began)=self.began.take() {self.close((now-began).max(0.0));}
         let ended=(self.group()>0 && self.account!=PairAccount::default()).then(|| (self.chats.clone(),
             PairAccount {step_ms:self.step,plain_ms:self.plain,outside_ms:self.outside,look_cost:self.look,behind:self.behind,..self.account}));
-        self.chats.remove(at);self.fresh();
+        self.chats.remove(at);self.carried.remove(&id);self.fresh();
         ended
     }
     /// A new set of chats starts a new record: nothing of another group prices this one.
-    fn fresh(&mut self) {*self=Self {chats:std::mem::take(&mut self.chats),always:self.always,..Self::default()};}
+    fn fresh(&mut self) {
+        *self=Self {chats:std::mem::take(&mut self.chats),carried:std::mem::take(&mut self.carried),
+            always:self.always,..Self::default()};
+    }
+    /// Record the rows currently carried by this chat; zero clears a consumed prefix.
+    pub(super) fn set_carried(&mut self,id:u64,rows:usize) {
+        if rows==0 {self.carried.remove(&id);}
+        else if self.chats.contains(&id) {self.carried.insert(id,rows);}
+    }
     pub(super) fn set_always(&mut self,always:bool) {self.always=always;}
     /// Whether an answer of `output_cap` tokens keeps its draft state beside another chat (GROUP_ROOM).
     pub(super) fn has_room(&self,output_cap:usize)->bool {self.always || output_cap>=GROUP_ROOM}
     /// The chats that draft together: 2 to PAIR_CHATS chats. 0: one chat, or more than a group holds.
     pub(super) fn group(&self)->usize {if (2..=PAIR_CHATS).contains(&self.chats.len()) {self.chats.len()} else {0}}
-    /// Whether three chats may draft in this tick: the scheduler then gives a tick the rows of a whole pass.
+    /// Whether three or four chats may draft in this tick: the scheduler then gives a tick the rows of a whole pass.
     pub(super) fn wide(&self)->bool {self.group()>2}
     /// Chat `id`'s place in the group, when the group is all the chats that are live (`live` sessions are open).
     fn place(&self,id:u64,live:usize)->Option<usize> {if self.group()>0 && live==self.chats.len() {self.chats.iter().position(|&chat|chat==id)} else {None}}
@@ -340,6 +351,8 @@ impl Pair {
         let most=rates.len();
         let (Some(at),Some(step),Some(plain))=(self.place(id,live),self.step,self.plain) else {return self.offer(id,live,most);};
         let (n,look)=(self.chats.len(),!self.hot);
+        // Carried rows price a group of four only; groups of two or three price their submitted rows, as on main.
+        let carried=if n==PAIR_CHATS {self.carried.values().sum::<usize>()} else {0};
         // gains[w]: the words this chat is expected to keep of its first `w`.
         let mut gains=vec![0.0;most+1];let mut chain=1.0;
         for (word,rate) in rates.iter().enumerate() {chain*=rate.clamp(0.0,1.0);gains[word+1]=gains[word]+chain;}
@@ -355,7 +368,7 @@ impl Pair {
                 let (brings,keeps)=if look {(words,gain)} else if self.next.done[other] {(self.next.words[other],self.next.gain[other])}
                     else {(words,self.sure[other].map_or(0.0,|sure|(1..=words).map(|word|sure.powi(word as i32)).sum::<f64>()))};
                 rows+=brings;least=least.min(keeps);}
-            let added=self.rows_ms(rows).unwrap_or(step)+outside-plain;
+            let added=self.rows_ms(rows+carried).unwrap_or(step)+outside-plain;
             if least*plain>=PAIR_FLOOR*added && gain-added/plain>value {best=words;value=gain-added/plain;}
         }
         // What the others expect of this chat next: what its look saw; while it drafts, a lower chance at once and a
@@ -374,10 +387,10 @@ impl Pair {
             // chat checks the words that leave it better off than riding on them, and no more words than that chat
             // brought: it priced as many rows of this chat.
             self.next.ends=true;
-            self.next.failed[at]= !gains.iter().enumerate().skip(1).any(|(words,gain)|gain*plain>=PAIR_FLOOR*(self.rows_ms(n*(words+1)).unwrap_or(step)+outside-plain));
+            self.next.failed[at]= !gains.iter().enumerate().skip(1).any(|(words,gain)|gain*plain>=PAIR_FLOOR*(self.rows_ms(n*(words+1)+carried).unwrap_or(step)+outside-plain));
             let (base,most)=(n+self.next.offered,most.min(self.next.words[..n].iter().copied().max().unwrap_or(0)));
-            let ride=self.rows_ms(base).unwrap_or(step);
-            for (words,gain) in gains.iter().enumerate().take(most+1).skip(1) {let worth=gain-(self.rows_ms(base+words).unwrap_or(ride)-ride)/plain;if worth>value {best=words;value=worth;}}
+            let ride=self.rows_ms(base+carried).unwrap_or(step);
+            for (words,gain) in gains.iter().enumerate().take(most+1).skip(1) {let worth=gain-(self.rows_ms(base+words+carried).unwrap_or(ride)-ride)/plain;if worth>value {best=words;value=worth;}}
         }
         self.next.done[at]=true;self.next.words[at]=best;self.next.gain[at]=gains[best];self.next.offered+=best;
         best
@@ -462,9 +475,10 @@ impl Pair {
         // The first steps after a prompt or a pass are slower: only a step after PLAIN_SKIP steps in a row is timed.
         if self.run>=PLAIN_SKIP {self.step=Some(self.step.map_or(ms,|old|0.75*old+0.25*ms));}
     }
-    /// One shared pass of `chats` chats with `rows` rows in all took `ms`: the price of that many rows.
-    pub(super) fn passed(&mut self,chats:usize,rows:usize,ms:f64) {
-        if chats!=self.chats.len() || rows<=chats || rows>VERIFY_ROWS {return;}
+    /// One shared pass of `chats` chats computed `rows` rows, including carry, in `ms`.
+    /// Return the width charged to the group, or zero if this pass is outside its account.
+    pub(super) fn passed(&mut self,chats:usize,rows:usize,ms:f64)->usize {
+        if chats!=self.chats.len() || rows<=chats || rows>VERIFY_ROWS {return 0;}
         self.tick.whole=true;self.tick.pass=Some(ms);self.tick.rows=rows;self.warm+=1;
         // A row count timed once is no price yet: one slow pass must not refuse that row count for the group's life
         // (a refused row count is never timed again). Its second timed pass makes the price, the mean of the two.
@@ -478,6 +492,7 @@ impl Pair {
             (Some(old),_)=>Some(0.75*old+0.25*ms),
             (None,Some(first)) if first.max(ms)>SLOW*first.min(ms)=>Some(first.min(ms)),
             (None,Some(first))=>Some(0.5*first+0.5*ms),(None,None)=>{self.once[rows]=Some(ms);None}};}
+        self.tick.rows
     }
 }
 /// A chat's Pay and Deeper records (price.rs, deeper.rs) while a cycle of a shared pass is open (CLAIM A-5). The
@@ -521,10 +536,11 @@ impl<C:super::Compute,E:super::Exchange> super::Session<'_,C,E> {
     /// or with DRAFT CONFIDENCE off or the pair's test control on.
     pub(super) fn group_width(&mut self,mass:&[Option<f32>],proposal_ms:f64)->usize {
         let factory=self.factory;let (live,whole)=(factory.active.get(),mass.len());
+        self.checked_in_four=live==4 && factory.pair.borrow().member(self.id,live);
         if !(factory.confidence_on.get() && mass.iter().all(Option::is_some) && factory.pair.borrow().chooses(self.id,live)) {
             return factory.pair.borrow_mut().offer(self.id,live,whole);}
         // A chat reads and feeds the kept-share table of its request's kind (confidence.rs `Tables`).
-        let mut tables=factory.confidence.borrow_mut();let calibration=tables.of(self.alone);
+        let mut tables=factory.confidence.borrow_mut();let calibration=tables.checked_for(self.alone,self.checked_in_four);
         let rates=mass.iter().map(|p|calibration.rate(p.unwrap_or(0.0))).collect::<Vec<_>>();
         let width=factory.pair.borrow_mut().choose(self.id,live,&rates,proposal_ms);
         calibration.offered+=1;calibration.checked+=width as u64;
@@ -534,6 +550,115 @@ impl<C:super::Compute,E:super::Exchange> super::Session<'_,C,E> {
 }
 #[cfg(test)] mod tests {
     use super::*;
+    #[test]
+    fn two_chats_price_their_submitted_rows_after_a_second_rollback_as_on_main() {
+        use crate::bounded_decoder::{Host,TestCheckpoint,Verify};
+        use crate::row_split::{Factory,Split,kept_charge_tests::Local,limits};
+        use spark_serve::{BatchOutput,BatchRows,Engine,Predictions,Session as _};
+
+        let checkpoint=TestCheckpoint::new_with_predictor(80);
+        let factory=||Factory::new(&checkpoint.admission,Split::new(Host,Local).unwrap(),80,vec![0])
+            .unwrap().with_predictor(3).unwrap();
+        let group=factory();
+        let solo=factory();
+        let mut limits=limits(80,64).unwrap();
+        limits.next_mtp_depth=Some(3);
+        let request=spark_serve::protocol::parse(
+            br#"{"messages":[{"role":"user","content":"Continue."}],"max_tokens":64,"draft":"strict","mtp_depth":3}"#,
+            true,&limits).unwrap();
+        let mut chats=[group.session().unwrap(),group.session().unwrap()];
+        let mut reference=[solo.session().unwrap(),solo.session().unwrap()];
+        for (at,prompt) in [[3,5,1],[2,6,4]].iter().enumerate() {
+            for chat in [&mut chats[at],&mut reference[at]] {
+                chat.configure_request(&request).unwrap();
+                chat.prefill(prompt).unwrap();
+            }
+        }
+        // Warm the real price table. Each round first sends eight new rows, then seven new rows plus two carried.
+        let mut charges=Vec::new();
+        for _ in 0..3 {
+            for carry in [false,true] {
+                let left:&[u32]=if carry {&[1,5,2]} else {&[7,3,2,1]};
+                let words=[left,&[4,1,6,2]];
+                if carry {assert_eq!(chats[0].open.as_ref().unwrap().carried(),2);}
+                let physical=chats.iter().zip(words).map(|(chat,row)|chat.open.as_ref()
+                    .map_or(row.len(),|open|open.shared_count(row.len()))).sum::<usize>();
+                assert_eq!(physical,if carry {9} else {8});
+                assert_eq!(group.pair.borrow().carried.values().sum::<usize>(),if carry {2} else {0});
+                let mut batch=chats.iter_mut().zip(words).map(|(session,tokens)|BatchRows {
+                    session,tokens,output:BatchOutput::All,greedy:false,top_k:0,
+                }).collect::<Vec<_>>();
+                let replies=group.step_batch(&mut batch).map_err(|e|e.message).unwrap();
+                assert!(group.pair.borrow().carried.is_empty());
+                for ((reply,own),tokens) in replies.into_iter().zip(&mut reference).zip(words) {
+                    let Predictions::Logits(actual)=reply else {panic!("shared verification must return logits");};
+                    let expected=own.rows(tokens).unwrap();
+                    assert_eq!(actual.len(),expected.len());
+                    for (got,want) in actual.iter().zip(&expected) {
+                        let bits=|row:&[f32]|row.iter().map(|word|word.to_bits()).collect::<Vec<_>>();
+                        assert_eq!(bits(got),bits(want));
+                    }
+                }
+                charges.push((physical,group.pair.borrow().tick.rows));
+                if !carry {
+                    for chat in [&mut chats[0],&mut reference[0]] {
+                        let end=chat.open.as_ref().map(Verify::position).unwrap() as usize;
+                        chat.keep(end-1).unwrap();
+                        chat.keep(end-2).unwrap();
+                    }
+                }
+            }
+        }
+        let pair=group.pair.borrow();
+        eprintln!("physical and charged rows {charges:?}; price learned at 7/8/9: {:?}",
+            [pair.pass[7].is_some(),pair.pass[8].is_some(),pair.pass[9].is_some()]);
+        // Two chats price the rows they submit, as on main: the carried rows ride uncharged.
+        assert_eq!(charges,[(8,8),(9,7)].repeat(3));
+        assert!(pair.pass[7].is_some() && pair.pass[8].is_some() && pair.pass[9].is_none());
+    }
+    #[test]
+    fn only_a_group_of_four_chooses_at_its_physical_width() {
+        // Two and three chats price their submitted rows, as on main: carried rows do not change the choice.
+        for n in [2,3] {
+            let chats=(1..=n as u64).collect::<Vec<_>>();
+            let mut pair=Pair {
+                chats:chats.clone(),step:Some(60.0),plain:Some(60.0),outside:Some(0.0),
+                hot:true,sure:[Some(1.0);PAIR_CHATS],..Pair::default()
+            };
+            pair.pass[2*n]=Some(90.0);
+            pair.pass[2*n+2]=Some(180.0);
+            assert_eq!(pair.choose(1,n,&[1.0],0.0),1);
+            pair.next=Next::default();
+            pair.set_carried(2,2);
+            assert_eq!(pair.carried.values().sum::<usize>(),2);
+            assert_eq!(pair.choose(1,n,&[1.0],0.0),1,"{n} chats ignore carried rows");
+        }
+        // Four chats price the rows they compute: two carried rows make the tick too dear.
+        let mut four=Pair {
+            chats:vec![1,2,3,4],step:Some(60.0),plain:Some(60.0),outside:Some(0.0),
+            hot:true,sure:[Some(1.0);PAIR_CHATS],..Pair::default()
+        };
+        four.pass[8]=Some(90.0);
+        four.pass[10]=Some(180.0);
+        assert_eq!(four.choose(1,4,&[1.0],0.0),1);
+        four.next=Next::default();
+        four.set_carried(2,2);
+        assert_eq!(four.choose(1,4,&[1.0],0.0),0);
+    }
+    #[test]
+    fn net_uses_the_charged_physical_width_for_its_stall_cap() {
+        for (rows,cap,debt) in [(7,4.0,1.0),(9,5.0,1.5)] {
+            let mut pair=Pair {chats:vec![1,2],plain:Some(60.0),..Pair::default()};
+            assert!(pair.step_begins(true,0.0));
+            assert_eq!(pair.passed(2,rows,250.0),rows);
+            pair.turned(1,2,3,3,125.0);
+            pair.turned(2,2,3,3,125.0);
+            assert_eq!(pair.stall(),cap);
+            // A 4.5-period tick leaves both chats 1.5 periods behind at width nine.
+            pair.close(270.0);
+            assert_eq!(&pair.behind[..2],&[debt,debt]);
+        }
+    }
     /// A test's group and its clock: the ticks below move the clock by what they say a tick takes. Every chat's
     /// token of tick `t` is `t`, and chat `c` is in its answer text when `reads[c]`.
     struct Group {pair:Pair,now:f64,chats:usize,t:u32,reads:[bool;PAIR_CHATS]}
@@ -583,7 +708,7 @@ impl<C:super::Compute,E:super::Exchange> super::Session<'_,C,E> {
         }
     }
     const SURE:&[f64]=&[0.97,0.97,0.97];const PROSE:&[f64]=&[0.5,0.5,0.5];
-    #[test] fn a_group_is_two_or_three_drafting_chats_alone_on_the_server() {
+    #[test] fn a_group_is_two_to_four_drafting_chats_alone_on_the_server() {
         let mut one=Pair::default();one.join(7);
         assert_eq!(one.ask(7,1,3,0,true),0,"one chat is not a group");assert_eq!(one.ask(7,2,3,0,true),0,"the other live chat is not a drafting chat");
         let mut pair=Pair::default();pair.join(7);pair.join(9);
@@ -608,12 +733,19 @@ impl<C:super::Compute,E:super::Exchange> super::Session<'_,C,E> {
         // A chat that leaves ends the group, and the next group starts a new record.
         assert!(pair.step_begins(true,now));pair.passed(2,8,130.0);pair.turned(7,2,3,4,75.0);
         let (ids,account)=pair.leave(9,now+152.0).unwrap();assert_eq!(ids,[7,9]);
-        assert_eq!((account.turn_ticks,account.plain_steps,account.cycles,account.kept_rows,account.drafted_rows,account.looks),(1,steps,1,[4,0,0],[3,0,0],1));assert_eq!((account.step_ms,account.plain_ms),(Some(63.0),Some(64.0)));
+        assert_eq!((account.turn_ticks,account.plain_steps,account.cycles,account.kept_rows,account.drafted_rows,account.looks),(1,steps,1,[4,0,0,0],[3,0,0,0],1));assert_eq!((account.step_ms,account.plain_ms),(Some(63.0),Some(64.0)));
         assert_eq!(pair.ask(7,2,3,0,true),0);pair.join(11);assert!(pair.step.is_none() && pair.plain.is_none() && pair.paced==0.0 && pair.seen==[false;PAIR_CHATS] && pair.pass.iter().all(Option::is_none));assert!(pair.leave(11,now+200.0).is_none(),"a group that ran no tick prints nothing");
-        // Four chats are more than a group holds: plain rows, and no tracked step.
-        let mut four=Pair::default();for id in 1..=4 {four.join(id);}
-        assert_eq!((PAIR_CHATS,four.group()),(3,0));assert!(!four.wide() && !four.tracking(&[1,2,3,4]) && !four.member(1,4));
-        for tick in 0..60 {assert!(!four.step_begins(true,64.0*f64::from(tick)));four.stepped(&[1,2,3,4],82.0);for id in 1..=4 {assert_eq!(four.ask(id,4,3,0,true),0);}}
+        let mut four=Group::new(4,78.0,79.2);
+        assert!(four.pair.wide() && four.pair.tracking(&[1,2,3,4]) && (1..=4).all(|id|four.pair.member(id,4)));
+        assert!(!four.pair.member(1,5));
+        let looks=four.until_hot(&[SURE;4],&[3;4],78.0,79.2);
+        for at in 0..4 {assert_eq!(looks.iter().filter(|depths|depths[at]>0).count(),1);}
+        assert_eq!(four.tick(&[SURE;4],&[3;4],78.0,79.2),(vec![3;4],vec![3;4]));
+        assert_eq!(four.pair.tick.rows,16);
+        // Five live drafting chats exceed the group cap.
+        let mut five=Pair::default();for id in 1..=5 {five.join(id);}
+        assert_eq!(five.group(),0);assert!(!five.wide() && !five.tracking(&[1,2,3,4,5]));
+        for tick in 0..60 {assert!(!five.step_begins(true,64.0*f64::from(tick)));five.stepped(&[1,2,3,4,5],82.0);for id in 1..=5 {assert_eq!(five.ask(id,5,3,0,true),0);}}
         let three=Group::new(3,75.0,76.0).pair;assert!(three.wide() && three.tracking(&[1,2,3]) && !three.tracking(&[1,2]));
     }
     #[test] fn a_chat_is_looked_at_only_in_its_answer_text() {
@@ -628,9 +760,9 @@ impl<C:super::Compute,E:super::Exchange> super::Session<'_,C,E> {
         let mut text=Text::default();assert!((1..=300).filter(|&step|text.reads(if step==THINK_MOST+40 {9} else {4},Some(9))).eq(THINK_MOST..=300));
         // Two sure chats of which one still thinks: the other looks and passes, and then the round waits for the one
         // that thinks. No look is made of it, and the group does not draft. When it reads its answer, it looks at once.
-        let mut group=Group::new(2,64.0,64.5);group.reads=[false,true,true];group.rest(64.0,64.5);
+        let mut group=Group::new(2,64.0,64.5);group.reads[0]=false;group.rest(64.0,64.5);
         let asked=(0..100).map(|_|group.tick(&[SURE,SURE],&[3,3],64.0,64.5).0).filter(|asked|asked!=&[0,0]).collect::<Vec<_>>();
-        assert_eq!(asked,[[0,3]]);assert_eq!((group.pair.passed,group.pair.hot,group.pair.account.looks),([false,true,false],false,1));
+        assert_eq!(asked,[[0,3]]);assert_eq!((group.pair.passed,group.pair.hot,group.pair.account.looks),([false,true,false,false],false,1));
         group.reads=[true;PAIR_CHATS];assert_eq!(group.until_hot(&[SURE,SURE],&[3,3],64.0,64.5),[[3,0],[0,0],[0,0],[0,0]]);
         // Chats that all think are not looked at.
         let mut group=Group::new(2,64.0,64.5);group.reads=[false;PAIR_CHATS];
@@ -638,7 +770,7 @@ impl<C:super::Compute,E:super::Exchange> super::Session<'_,C,E> {
         // A prose chat beside a sure chat that still thinks: its look fails by its price, and it waits. When the sure
         // chat reads its answer, it does not look while the prose chat waits: the group cannot draft without that
         // chat, and a chat's first look is its dearest. The prose chat looks first, fails again, and waits longer.
-        let mut group=Group::new(2,64.0,64.5);group.reads=[false,true,true];group.rest(64.0,64.5);
+        let mut group=Group::new(2,64.0,64.5);group.reads[0]=false;group.rest(64.0,64.5);
         assert_eq!(group.tick(&[SURE,PROSE],&[3,3],64.0,64.5).0,[0,3]);let wait=group.pair.again[1];assert!((76.0..80.0).contains(&wait),"{wait}");
         group.reads=[true;PAIR_CHATS];while group.pair.paced<wait {assert_eq!(group.tick(&[SURE,PROSE],&[3,3],64.0,64.5).0,[0,0]);}
         group.rest(64.0,64.5);assert_eq!(group.tick(&[SURE,PROSE],&[3,3],64.0,64.5).0,[0,3]);
@@ -773,7 +905,7 @@ impl<C:super::Compute,E:super::Exchange> super::Session<'_,C,E> {
         // A chat whose FIRST look fails in the tick its answer text begins has been in it no time: it still waits
         // (TEXT_SKIP periods at the least) and it must be right twice. (Before, `again` was `paced` and one right look
         // of it started the drafting: MEASURED in every code pair of run draftm-order-o-1, look at step 55.)
-        let mut late=Group::new(2,64.0,64.5);late.reads=[true,false,false];late.rest(64.0,64.5);
+        let mut late=Group::new(2,64.0,64.5);late.reads[1]=false;late.rest(64.0,64.5);
         assert_eq!(late.tick(&[SURE,PROSE],&[3,3],64.0,64.5).0,[3,0]);for _ in 0..3 {late.tick(&[SURE,PROSE],&[3,3],64.0,64.5);}
         assert_eq!(late.pair.passed[..2],[true,false]);late.reads=[true;PAIR_CHATS];
         assert_eq!(late.tick(&[SURE,PROSE],&[3,3],64.0,64.5).0,[0,3],"the second chat looks in the tick it begins to read");
@@ -783,7 +915,7 @@ impl<C:super::Compute,E:super::Exchange> super::Session<'_,C,E> {
         // Three chats: the looks go round, one chat after the other. A look that fails is its own chat's to pass again.
         let mut three=Group::new(3,75.0,76.0);three.rest(75.0,76.0);
         let first=(0..7).map(|_|three.tick(&[SURE,SURE,PROSE],&[3,3,3],75.0,76.0).0).collect::<Vec<_>>();
-        assert_eq!(first,[[3,0,0],[0,0,0],[0,0,0],[0,3,0],[0,0,0],[0,0,0],[0,0,3]]);assert_eq!((three.pair.passed,three.pair.hot),([true,true,false],false));
+        assert_eq!(first,[[3,0,0],[0,0,0],[0,0,0],[0,3,0],[0,0,0],[0,0,0],[0,0,3]]);assert_eq!((three.pair.passed,three.pair.hot),([true,true,false,false],false));
         three.rest(75.0,76.0);
         assert_eq!(three.until_hot(&[SURE,SURE,SURE],&[3,3,3],75.0,76.0),[[0,0,3],[0,0,0],[0,0,0],[0,0,3],[0,0,0],[0,0,0],[0,0,0]],"only the chat whose look failed looks again, twice: it failed by its price");
         assert_eq!(three.tick(&[SURE,SURE,SURE],&[3,3,3],75.0,76.0),(vec![3,3,3],vec![3,3,3]));
@@ -933,7 +1065,8 @@ impl<C:super::Compute,E:super::Exchange> super::Session<'_,C,E> {
         assert!(!pair.step_begins(true,12000.0),"a step with no ask before it is not a pass of the group");
         assert!(!pair.tracking(&[7,9]) && !pair.chooses(7,2) && pair.member(7,2) && pair.behind==[0.0;PAIR_CHATS]);
         pair.join(11);assert_eq!(pair.ask(7,3,3,0,true),3,"three chats draft together");
-        pair.join(12);assert_eq!(pair.ask(7,4,3,0,true),0,"four chats are more than a group holds: plain rows");
+        pair.join(12);assert_eq!(pair.ask(7,4,3,0,true),3,"four chats draft together");
+        pair.join(13);assert_eq!(pair.ask(7,5,3,0,true),0,"five chats are more than a group holds: plain rows");
     }
     #[test] fn the_first_lone_decisions_after_a_fast_peer_and_after_a_slow_peer_leave_are_the_same() {
         // CLAIM A-5, the reviewer's test. A chat of depth 3 drafts alone, then beside a peer: its rows run in shared

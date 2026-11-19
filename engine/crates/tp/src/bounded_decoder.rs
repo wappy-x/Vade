@@ -179,6 +179,10 @@ pub trait Compute {
         let head=Mxfp8Projection::matrix(c,name,WeightType::F32)?;let values=self.mx(&head,x)?;
         greedy_logits_mass(&self.read(&values)?,head.shape().rows())
     }
+    /// ONE PASS (proposer.rs `propose_chains`): `greedy_projection_mass` of `rows` rows of `x` (row-major) at once, each
+    /// row's pick and probability as that call gives them for the row alone. None, before any work: no such form here;
+    /// the caller picks each row alone. A wrapper hands this on.
+    fn greedy_projection_mass_rows(&self,_:&CheckpointAdmission,_name:&str,_x:&Self::Value,_rows:usize)->Result<Option<Vec<(u32,Option<f32>)>>> {Ok(None)}
     fn projection_rows(&self,_:&CheckpointAdmission,_:&str,_:&[&Self::Value],_:bool)->Result<Option<Vec<Self::Value>>> {Ok(None)}
     fn projection_batch(&self,_:&CheckpointAdmission,_:&[(&str,&Self::Value)],_:bool)->Result<Option<Vec<Self::Value>>> {Ok(None)}
     fn projection_stage(&self,_:&CheckpointAdmission,_:&[crate::projection_stage::Job<'_,Self::Value>])->Result<Option<Vec<Self::Value>>> {Ok(None)}
@@ -278,6 +282,8 @@ pub trait Compute {
     fn rows_recurrent(&self,_:spark_gpu_probe::recurrent_rows::Shape,_:[&Self::Value;7],_:&Self::Value,
         _:[&[f32];3],_:bool)->Result<Option<RecurrentRows<Self::Value>>> {Ok(None)}
     fn rows_embedding(&self,_:&[u32],_:usize)->Result<Option<Self::Value>> {Ok(None)}
+    /// One stream per proposal, without starting a target row pass or trimming its workspace.
+    fn draft_embeddings(&self,_:&[u32])->Result<Option<Self::Value>> {Ok(None)}
     /// Token-major `[m,rows]`, complete on every rank. None runs one row at a time.
     fn rows_project(&self,_:&CheckpointAdmission,_:&str,_:&Self::Value,_:usize,_:bool)->Result<Option<Self::Value>> {Ok(None)}
     /// A batch step of `chats` chats starts. `state_bytes`: the recurrent state one chat's step
@@ -1235,9 +1241,11 @@ mod indirect;
 #[path="bounded_decoder/projection_stage.rs"] mod projection_stage;
 #[cfg(any(target_os="linux",test))] #[path="bounded_decoder/held.rs"] mod held;
 #[path="bounded_decoder/proposer.rs"] mod proposer;
+#[path="bounded_decoder/chains.rs"] mod chains;
+pub use chains::ChainStart;
 pub use proposer::{PROPOSER_HIDDEN,CHAIN_STOP,CHAIN_STOP_NAMED,PredictorState};
 #[path="bounded_decoder/verify.rs"] mod verify;
-pub use verify::{Verify,CARRIED_ROWS,VERIFY_ROWS,TRAIL_ROWS,PROMPT_TRAIL,SEED_PASS_ROWS,SEED_ROOM,learned_pass_ms,shared_pass};
+pub use verify::{Verify,CARRIED_ROWS,VERIFY_ROWS,TRAIL_ROWS,PROMPT_TRAIL,SEED_PASS_ROWS,SEED_ROOM,learned_pass_ms,shared_pass,propose_group};
 #[path="bounded_decoder/host.rs"] mod host;
 pub use host::Host;
 #[cfg(test)] pub(crate) use host::shadow_fixture::Checkpoint as TestCheckpoint;

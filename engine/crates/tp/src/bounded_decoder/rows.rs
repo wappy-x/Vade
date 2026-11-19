@@ -1060,6 +1060,7 @@ impl<'f,C:Compute> Decoder<'f,C> {
         // ROWS OVERLAP: a step that reads a held output records the held gather first.
         if step.inputs.iter().any(|name|fold.held.iter().any(|(_,held)|held==name)) {self.rows_close(values,fold)?;}
         match step.kind {
+            Kind::MhcPrepare|Kind::Combine if layer==d.layers.len()=>return self.draft_batch_residual(index,plan,m,values).map(Some),
             Kind::MhcPrepare=>{let key=(layer,index);let p=self.blocks.get(&key).ok_or("resident residual parameters are absent")?;
                 let (pass,norm)=b.rows_begin(key,p,&values[&step.inputs[0]],m)?;
                 passes.insert(step.id.split('.').next().unwrap().to_owned(),pass);values.insert(plan.steps[index+2].outputs[0].name.clone(),norm);skip=2;},
@@ -1073,7 +1074,7 @@ impl<'f,C:Compute> Decoder<'f,C> {
             Kind::Project=>{if !values.contains_key(&step.outputs[0].name) && !fold.held.iter().any(|(_,held)|*held==step.outputs[0].name) && !(fold.waits && self.rows_fold_shared(layer,index,plan,m,values,fold)?)
                 && !(fold.group && self.rows_query_local(layer,index,plan,m,values)?) && !self.rows_project_open(index,plan,m,values,fold)? {self.rows_project_stage(index,plan,m,values)?;}},
             Kind::Norm=>{let name=&step.weights[0].name;let width=step.outputs[0].elements().map_err(|e|e.to_string())?;
-                let value=b.rows_norm(name,norm_shape(c,name,width)?,&values[&step.inputs[0]],m,&self.parameters[name])?;values.insert(step.outputs[0].name.clone(),value);},
+                let value=b.rows_norm(name,norm_shape(c,name,width)?,&values[&step.inputs[0]],m,self.parameter(name)?)?;values.insert(step.outputs[0].name.clone(),value);},
             // LOOKAHEAD: a SwiGLU that `rows_ahead` made behind the routed gate and up is done.
             Kind::SwiGlu=>{if !values.contains_key(&step.outputs[0].name) {let value=self.rows_swiglu(step,m,values)?;values.insert(step.outputs[0].name.clone(),value);}},
             Kind::KdaPrepare|Kind::GatedNorm=>{let TokenMixer::Kda(k)=d.layers[layer].mixer else {return Err("recurrent operation requires a recurrent layer".into());};
@@ -1083,13 +1084,13 @@ impl<'f,C:Compute> Decoder<'f,C> {
                 let mut x=[None;5];for (slot,name) in step.inputs.iter().enumerate() {x[slot]=Some(&values[name]);}
                 let value=b.prompt(RowShape::wrapped(s,m).ok_or("prompt row count exceeds ABI")?,x,&weight)?;
                 let value=if step.kind==Kind::GatedNorm {b.gather_attended(&value,m,self.kda_layout(layer)?)?} else {value};values.insert(step.outputs[0].name.clone(),value);},
-            Kind::KeyNorm=>{let TokenMixer::LatentAttention(a)=d.layers[layer].mixer else {return Err("index key requires a latent layer".into());};
+            Kind::KeyNorm=>{let TokenMixer::LatentAttention(a)=self.mixer(layer)? else {return Err("index key requires a latent layer".into());};
                 let mut s=shape(Op::KeyNorm);s.heads=number(a.indexer.heads)?;s.dim=number(a.indexer.dim)?;s.taps=number(a.indexer.pool)?;s.epsilon=plan.settings.index_key_epsilon;
-                let mut weight=Vec::new();for w in &step.weights {weight.extend_from_slice(&self.parameters[&w.name]);}
+                let mut weight=Vec::new();for w in &step.weights {weight.extend_from_slice(self.parameter(&w.name)?);}
                 let value=b.prompt(RowShape::wrapped(s,m).ok_or("prompt row count exceeds ABI")?,[Some(&values[&step.inputs[0]]),None,None,None,None],&weight)?;values.insert(step.outputs[0].name.clone(),value);},
             Kind::Route=>{let mut s=shape(Op::Route);s.heads=number(d.routing.groups)?;s.dim=number(d.routing.selected_groups)?;s.rows=number(step.weights[0].shape[0])?;
                 s.cols=number(step.outputs[0].shape[0])?;s.taps=u32::from(d.routing.normalize_selected);s.bound=d.routing.scale as f32;s.epsilon=d.epsilon as f32;
-                let mut weight=Vec::new();for w in &step.weights {weight.extend_from_slice(&self.parameters[&w.name]);}
+                let mut weight=Vec::new();for w in &step.weights {weight.extend_from_slice(self.parameter(&w.name)?);}
                 let (_,_,_,words)=s.lengths().ok_or("invalid prompt route shape")?;
                 let rows=RowShape::wrapped(s,m).map(|mut r|{r.first=u32::from(spark_gpu_probe::prompt_admission::planes_admitted(r));r}).ok_or("prompt row count exceeds ABI")?;
                 let result=b.prompt(rows,[Some(&values[&step.inputs[0]]),None,None,None,None],&weight)?;let k=s.cols as usize;

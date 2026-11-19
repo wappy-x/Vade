@@ -499,9 +499,7 @@ let mut bytes=vec![0;rows.total*4];
             let mut partials=b.vector(output.len().div_ceil(1024)*words)?;let mut result=b.vector(words)?;
             b.enqueue_argmax_device(&output,&mut partials,&mut result,if mass {spark_gpu_probe::driver::ARGMAX_MASS} else {0})?;
             if !rows.split {return Ok((b.read_argmax_raw(&result,1,|values|merge_argmax(values,&[rows]))?,None));}
-            let parts=self.topology.parts as usize;
-            if rows.count.checked_mul(parts)!=Some(rows.total) || rows.start!=rows.count*self.topology.rank as usize {return Err("resident argmax ownership differs".into());}
-            let owners=(0..parts).map(|rank|Rows {start:rank*rows.count,..rows}).collect::<Vec<_>>();
+            let owners=self.argmax_owners(rows)?;let parts=owners.len();
             if let Some(mailbox)=self.mailbox {let stamp=self.cost.start(b);
                 let selected=if mass {mass_gather::gather_argmax_mass(b,mailbox,&mut self.sequence,self.topology,&result,&owners).map(|(id,p)|(id,Some(p)))}
                     else {gather_argmax(b,mailbox,&mut self.sequence,self.topology,&result,&owners).map(|id|(id,None))};

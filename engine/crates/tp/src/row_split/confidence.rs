@@ -60,10 +60,15 @@ impl Calibration {
 /// that loss is NOT PROVEN (the request takes one of two paths before this change too, 92 to 95 cycles); this takes
 /// away the one way a default request reached a named one.
 #[derive(Clone,Debug,Default,PartialEq)]
-pub(super) struct Tables {named:Calibration,alone:Calibration}
+pub(super) struct Tables {named:Calibration,alone:Calibration,four:Option<Box<[Calibration;2]>>}
 impl Tables {
     /// The table of a request: `alone`, it took a default request's rules at its setup (`default_rules`).
     pub(super) fn of(&mut self,alone:bool)->&mut Calibration {if alone {&mut self.alone} else {&mut self.named}}
+    /// Four-chat checks start from the existing priors and learn separately from smaller cohorts.
+    pub(super) fn checked_for(&mut self,alone:bool,four:bool)->&mut Calibration {
+        if !four {return self.of(alone);}
+        &mut self.four.get_or_insert_with(||Box::new([self.named.clone(),self.alone.clone()]))[usize::from(alone)]
+    }
 }
 /// Whether a request takes the rules of a lone chat's default drafting: one that STARTS in Phase::Alone. Asked once,
 /// at the request's setup (`Session::alone`), and kept to the request's end: a default request that ends its drafting
@@ -165,15 +170,8 @@ impl<C:Compute,E:Exchange> Session<'_,C,E> {
     /// With them the draft head's probability of each token under its own row (None: the backend made none).
     #[allow(clippy::type_complexity)]
     pub(super) fn propose(&mut self,next:u32,limit:usize)->Result<(Vec<u32>,Vec<Option<f32>>,f64)> {let factory=self.factory;if let Some(error)=factory.failure_reason() {return Err(error);}
-        let depth=limit.min(self.depth).min(factory.predictor);let flags=stop_flags(self.confident(),self.alone);
-        // GROUP DRAFTING (pair.rs): the chain of a chat of a group ends by its probability too, under the stop its
-        // request has alone (named strict or not).
-        let flags=if factory.confidence_on.get() && factory.pair.borrow().chooses(self.id,factory.active.get()) {stop_flags(true,self.alone)} else {flags};
-        let Some(open)=self.open.as_mut().filter(|open|open.can_propose()) else {return Ok((Vec::new(),Vec::new(),0.0));};
-        // A proposal names rows after the open ones: it is cut to the rows the context still has. The predictor layer
-        // refuses a chain past its capacity, and that refusal would come after the command is on the wire.
-        let depth=depth.min((factory.context as u64).saturating_sub(open.position()) as usize);
-        if depth==0 || u64::from(next)>=factory.checkpoint.description().vocab.min(u64::from(CHAIN_ALONE_FLAG)) {return Ok((Vec::new(),Vec::new(),0.0));}
+        let Some((depth,flags))=self.chain_plan(next,limit) else {return Ok((Vec::new(),Vec::new(),0.0));};
+        let open=self.open.as_mut().ok_or("row split proposal has no open rows")?;
         // The layer runs now: the pass after it is not a steady step, whatever its row count.
         let (decoder,id)=(&self.decoder,self.id);self.after_step=false;
         #[allow(clippy::type_complexity)]
@@ -181,10 +179,24 @@ impl<C:Compute,E:Exchange> Session<'_,C,E> {
             let tokens=factory.split.work(||{if let Some(groups)=factory.tails.borrow_mut().remove(&id) {open.seed_trail(decoder,&groups)?;}open.propose_mass(decoder,next,depth,chain_stop(flags).1)})?;
             factory.split.exchange.borrow_mut().complete()?;factory.failed.set(false);Ok(tokens)})())
     }
+    /// The depth and the stop flags of the chain `propose` sends after `next`, or None: no chain now (no open rows that
+    /// can propose, no depth, or a token outside the vocabulary). ONE PASS (one_pass.rs) asks the same of each chat.
+    pub(super) fn chain_plan(&self,next:u32,limit:usize)->Option<(usize,u32)> {let factory=self.factory;
+        let depth=limit.min(self.depth).min(factory.predictor);let flags=stop_flags(self.confident(),self.alone);
+        // GROUP DRAFTING (pair.rs): the chain of a chat of a group ends by its probability too, under the stop its
+        // request has alone (named strict or not).
+        let flags=if factory.confidence_on.get() && factory.pair.borrow().chooses(self.id,factory.active.get()) {stop_flags(true,self.alone)} else {flags};
+        let open=self.open.as_ref().filter(|open|open.can_propose())?;
+        // A proposal names rows after the open ones: it is cut to the rows the context still has. The predictor layer
+        // refuses a chain past its capacity, and that refusal would come after the command is on the wire.
+        let depth=depth.min((factory.context as u64).saturating_sub(open.position()) as usize);
+        if depth==0 || u64::from(next)>=factory.checkpoint.description().vocab.min(u64::from(CHAIN_ALONE_FLAG)) {return None;}
+        Some((depth,flags))
+    }
     /// The pass checked the first `drafted` tokens of the open cycle and kept `kept - 1` of them (the cycle's own row first).
     pub(super) fn calibrate(&mut self,drafted:u64,kept:u64) {
         let (checked,alone)=((drafted as usize).min(self.checked.len()),self.alone);
-        if checked>0 && self.checked[..checked].iter().all(|p|!p.is_nan()) {self.factory.confidence.borrow_mut().of(alone).verdict(&self.checked[..checked],kept.saturating_sub(1) as usize);}
+        if checked>0 && self.checked[..checked].iter().all(|p|!p.is_nan()) {self.factory.confidence.borrow_mut().checked_for(alone,self.checked_in_four).verdict(&self.checked[..checked],kept.saturating_sub(1) as usize);}
         if let Some(step)=self.step_ms.filter(|_|alone) {
             let row:[Option<f64>;spark_engine::draft::PREDICTOR_DEPTH_MAX+1]=std::array::from_fn(|word|Some(self.pass_cost(word+1)?-self.pass_cost(word)?));
             self.chooser.verdict(drafted as usize,kept.saturating_sub(1) as usize,step,&row);
@@ -229,6 +241,19 @@ impl<C:Compute,E:Exchange> Session<'_,C,E> {
 }
 #[cfg(test)] mod tests {
     use super::*;
+    #[test] fn four_chat_verdicts_do_not_train_smaller_cohorts() {
+        let mut tables=Tables::default();
+        for alone in [false,true] {tables.of(alone).verdict(&[0.9],1);}
+        for alone in [false,true] {
+            let original=tables.of(alone).clone();
+            assert_eq!(*tables.checked_for(alone,true),original);
+            tables.checked_for(alone,true).verdict(&[0.9],0);
+            assert_eq!(*tables.checked_for(alone,false),original);
+            let wide=tables.checked_for(alone,true).clone();
+            tables.checked_for(alone,false).verdict(&[0.7],1);
+            assert_eq!(*tables.checked_for(alone,true),wide);
+        }
+    }
     // MEASURED 2026-11-16 on two Sparks (draft4-m0-t1, d2-t15-four-1): plain step 41.4 ms, checks of 3 and 4 rows 75.5
     // and 84.2 ms, a 2-row check about 66 ms (between the two by the request's learned slope).
     const STEP:f64=41.4;

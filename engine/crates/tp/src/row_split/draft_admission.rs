@@ -42,13 +42,18 @@ impl<C:Compute,E:Exchange> Session<'_,C,E> {
         let enabled=word==1 && self.factory.predictor>0;let word=if enabled {1} else if word==HANDOFF {HANDOFF} else {0};
         if self.decoder.predictor_enabled()==enabled && (enabled || self.open.is_none() && self.factory.tail_rows(self.id)==0 && (word!=0 || !self.draft_handoff)) {return Ok(());}
         let f=self.factory;if let Some(error)=f.failure_reason() {return Err(error);}
+        let had_carry=!enabled && self.open.as_ref().is_some_and(|open|open.shared_count(0)!=0);
         let result=f.finish(f.split.work(|| {
             f.failed.set(true);f.split.command_for(PREDICTOR_MODE,word,self.id)?;
             set_mode(&mut self.decoder,&mut self.state,&mut self.open,&f.prepared,word)?;
             if !enabled {f.tails.borrow_mut().remove(&self.id);}
             f.split.exchange.borrow_mut().complete()?;f.failed.set(false);Ok(())
         }));
-        if result.is_ok() {self.draft_handoff=word==HANDOFF;}result
+        if result.is_ok() {
+            self.draft_handoff=word==HANDOFF;
+            if had_carry {f.pair.borrow_mut().set_carried(self.id,0);}
+        }
+        result
     }
 }
 #[cfg(test)] mod tests {
