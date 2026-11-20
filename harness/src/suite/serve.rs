@@ -562,6 +562,67 @@ mod tests {
         let endpoint = crate::transport::Endpoint::parse(&server.url).unwrap();
         TcpStream::connect((endpoint.host, endpoint.port)).unwrap()
     }
+    /// True when `bytes` hold one whole reply: a head that ends in a blank line, a Content-Length field, and exactly
+    /// that many body bytes after the head.
+    fn whole_reply(bytes: &[u8]) -> bool {
+        let Some(end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") else { return false };
+        let head = String::from_utf8_lossy(&bytes[..end]);
+        let length = head.split("\r\n").find_map(|line| line.strip_prefix("Content-Length: ")).and_then(|v| v.parse::<usize>().ok());
+        length.is_some_and(|length| bytes.len() == end + 4 + length)
+    }
+    /// Reads one reply to its end. The listener closes as soon as it has answered a bad or late request; a request byte
+    /// that reaches it after that close makes the peer reset the connection after the reply has arrived. That reset is
+    /// accepted only when the whole reply came first. Any other error, a reset before the whole reply, or an incomplete
+    /// reply at EOF fails the test.
+    fn read_reply(socket: &mut TcpStream) -> String {
+        let (mut bytes, mut chunk) = (Vec::new(), [0u8; 4096]);
+        loop {
+            match socket.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => bytes.extend_from_slice(&chunk[..n]),
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) if e.kind() == io::ErrorKind::ConnectionReset && whole_reply(&bytes) => break,
+                Err(e) => panic!("reply read failed after {} bytes: {e}: {:?}", bytes.len(), String::from_utf8_lossy(&bytes)),
+            }
+        }
+        let reply = String::from_utf8(bytes).expect("reply is UTF-8");
+        assert!(whole_reply(reply.as_bytes()), "incomplete reply: {reply:?}");
+        reply
+    }
+    /// A peer that answers without reading the request, then closes: unread input makes its stack send a reset.
+    fn reset_after(reply: &'static [u8]) -> TcpStream {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let (mut peer, _) = listener.accept().unwrap();
+        client.write_all(b"GET / HTTP/1.1\r\n\r\n").unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        peer.write_all(reply).unwrap();
+        drop(peer);
+        std::thread::sleep(Duration::from_millis(50));
+        client
+    }
+    #[test]
+    fn a_reset_after_the_whole_reply_still_gives_the_reply() {
+        let reply = b"HTTP/1.1 408 Request Timeout\r\nContent-Type: text/plain\r\nRetry-After: 1\r\nContent-Length: 4\r\nConnection: close\r\n\r\nlate";
+        assert_eq!(read_reply(&mut reset_after(reply)).as_bytes(), reply);
+    }
+    #[test]
+    #[should_panic(expected = "reply read failed")]
+    fn a_reset_before_the_whole_reply_fails() {
+        read_reply(&mut reset_after(b"HTTP/1.1 408 Request Timeout\r\nContent-Length: 4\r\n\r\nla"));
+    }
+    #[test]
+    #[should_panic(expected = "incomplete reply")]
+    fn an_incomplete_reply_at_eof_fails() {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let (mut peer, _) = listener.accept().unwrap();
+        peer.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 9\r\n\r\nshort").unwrap();
+        drop(peer);
+        read_reply(&mut client);
+    }
     #[test]
     fn suite_relay_refuses_before_writing_and_switch_allows() {
         // The relay opens its own socket to the engine. A review found that no test failed when its check was removed.
@@ -658,8 +719,7 @@ mod tests {
             let _ = slow.write_all(&[*byte]);
             std::thread::sleep(Duration::from_millis(60));
         }
-        let mut timeout = String::new();
-        slow.read_to_string(&mut timeout).unwrap();
+        let timeout = read_reply(&mut slow);
         assert!(timeout.starts_with("HTTP/1.1 408 ") && timeout.contains("Retry-After: 1\r\n"), "{timeout}");
 
         let mut oversized = Vec::from(&b"GET /v1/chat/completions HTTP/1.1\r\n"[..]);
@@ -672,8 +732,7 @@ mod tests {
         let mut client = connect(&server);
         client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
         let _ = client.write_all(&oversized);
-        let mut reply = String::new();
-        client.read_to_string(&mut reply).unwrap();
+        let reply = read_reply(&mut client);
         assert!(reply.starts_with("HTTP/1.1 400 ") && reply.contains("oversized request headers"), "{reply}");
 
         let mut body = connect(&server);
@@ -681,8 +740,7 @@ mod tests {
         body.write_all(b"POST /v1/chat/completions HTTP/1.1\r\nContent-Length: 3\r\n\r\na").unwrap();
         std::thread::sleep(Duration::from_millis(220));
         let _ = body.write_all(b"bc");
-        let mut reply = String::new();
-        let _ = body.read_to_string(&mut reply);
+        let reply = read_reply(&mut body);
         assert!(reply.starts_with("HTTP/1.1 408 ") && reply.contains("send the request again"), "{reply}");
     }
     fn relay_response(response: impl FnOnce(TcpStream) + Send + 'static, timeout: Duration) -> io::Result<(u16, String, Vec<u8>, bool)> {
