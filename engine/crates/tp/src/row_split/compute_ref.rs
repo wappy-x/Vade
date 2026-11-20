@@ -79,6 +79,10 @@ impl<C:Compute> Compute for &C {
     fn prompt(&self,s:spark_gpu_probe::prompt_ops::Shape,x:[Option<&C::Value>;5],w:&[f32])->Result<C::Value> {(**self).prompt(s,x,w)}
     fn rows_recurrent(&self,s:spark_gpu_probe::recurrent_rows::Shape,x:[&C::Value;7],gate:&C::Value,w:[&[f32];3],keep:bool)
         ->Result<Option<crate::bounded_decoder::RecurrentRows<C::Value>>> {(**self).rows_recurrent(s,x,gate,w,keep)}
+    fn rows_recurrent_prepared(&self,s:spark_gpu_probe::recurrent_rows::Shape,x:[&C::Value;7],gate:&C::Value,
+        w:[&std::rc::Rc<crate::bounded_decoder::StaticParameters>;3])->Result<Option<crate::bounded_decoder::RecurrentRows<C::Value>>> {
+        (**self).rows_recurrent_prepared(s,x,gate,w)
+    }
     fn rows_embedding(&self,t:&[u32],n:usize)->Result<Option<C::Value>> {(**self).rows_embedding(t,n)}
     fn draft_embeddings(&self,t:&[u32])->Result<Option<C::Value>> {(**self).draft_embeddings(t)}
     fn rows_project(&self,c:&CheckpointAdmission,name:&str,x:&C::Value,m:usize,round:bool)->Result<Option<C::Value>> {(**self).rows_project(c,name,x,m,round)}

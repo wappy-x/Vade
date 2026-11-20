@@ -912,26 +912,13 @@ if start==0 && v.pending.as_ref().and_then(|p|p.borrow().state_prefix)==Some(len
     }
     fn rows_recurrent(&self,shape:spark_gpu_probe::recurrent_rows::Shape,input:[&Value<'b,'d>;7],gate:&Value<'b,'d>,
         weights:[&[f32];3],keep:bool)->Result<Option<super::RecurrentRows<Value<'b,'d>>>> {
-        let Some((inputs,weight_words,[history,state,rows,prepared,decay]))=shape.lengths(keep) else {return Ok(None);};
-        for (value,words) in input.into_iter().zip(inputs).chain([(gate,rows)]) {
-            need(value.words==words,"recurrent row input extent differs")?;
-            self.ready(value)?;
-        }
-        let stamp=self.cost.start(self.backend);
-        let resolve=|values:&[f32],words:usize| -> Result<_> {
-            need(values.len()==words,"recurrent row weight extent differs")?;
-            self.parameters.borrow_mut().resolve(values,None,|x|self.backend.upload_vector(x))?.ok_or("recurrent row weight is absent".into())
-        };
-        let [conv,prepare,norm]=weights;
-        let [conv,prepare,norm]=[resolve(conv,weight_words[0])?,resolve(prepare,weight_words[1])?,resolve(norm,weight_words[2])?];
-        let ([next_history,next_state,gated],saved)=self.backend.recurrent_rows(shape,input.map(|v|&*v.vector),&gate.vector,
-            [&conv,&prepare,&norm],keep)?;
-        let saved=match saved {Some([p,d])=>Some((self.value(p,prepared)?,self.value(d,decay)?)),None=>None};
-        let result=super::RecurrentRows {history:self.value(next_history,history)?,state:self.value(next_state,state)?,
-            gated:self.value(gated,rows)?,saved};
-        self.cost.settle(self.backend)?;
-        self.cost.record(||"rows_recurrent".into(),stamp,self.backend,weight_words.iter().sum::<usize>()*4);
-        Ok(Some(result))
+        self.recurrent_row_values(shape,input,gate,weights.map(|w|(w,None)),keep)
+    }
+    fn rows_recurrent_prepared(&self,shape:spark_gpu_probe::recurrent_rows::Shape,input:[&Value<'b,'d>;7],gate:&Value<'b,'d>,
+        weights:[&Rc<StaticParameters>;3])->Result<Option<super::RecurrentRows<Value<'b,'d>>>> {
+        let made=self.recurrent_row_values(shape,input,gate,weights.map(|w|(w.values(),Some(w))),true)?;
+        if made.is_some() {spark_gpu_probe::prompt_launches::record("verify_bound_recurrent");}
+        Ok(made)
     }
     fn rows_embedding(&self,tokens:&[u32],streams:usize)->Result<Option<Value<'b,'d>>> {
         self.backend.resident_row_pass(tokens.len());
@@ -1235,6 +1222,29 @@ if start==0 && v.pending.as_ref().and_then(|p|p.borrow().state_prefix)==Some(len
 }
 
 impl<'b,'d> Device<'b,'d> {
+    fn recurrent_row_values(&self,shape:spark_gpu_probe::recurrent_rows::Shape,input:[&Value<'b,'d>;7],gate:&Value<'b,'d>,
+        weights:[(&[f32],Option<&Rc<StaticParameters>>);3],keep:bool)->Result<Option<super::RecurrentRows<Value<'b,'d>>>> {
+        let Some((inputs,weight_words,[history,state,rows,prepared,decay]))=shape.lengths(keep) else {return Ok(None);};
+        for (value,words) in input.into_iter().zip(inputs).chain([(gate,rows)]) {
+            need(value.words==words,"recurrent row input extent differs")?;
+            self.ready(value)?;
+        }
+        let stamp=self.cost.start(self.backend);
+        let resolve=|(values,owner):(&[f32],Option<&Rc<StaticParameters>>),words:usize| -> Result<_> {
+            need(values.len()==words,"recurrent row weight extent differs")?;
+            self.parameters.borrow_mut().resolve(values,owner,|x|self.backend.upload_vector(x))?.ok_or("recurrent row weight is absent".into())
+        };
+        let [conv,prepare,norm]=weights;
+        let [conv,prepare,norm]=[resolve(conv,weight_words[0])?,resolve(prepare,weight_words[1])?,resolve(norm,weight_words[2])?];
+        let ([next_history,next_state,gated],saved)=self.backend.recurrent_rows(shape,input.map(|v|&*v.vector),&gate.vector,
+            [&conv,&prepare,&norm],keep)?;
+        let saved=match saved {Some([p,d])=>Some((self.value(p,prepared)?,self.value(d,decay)?)),None=>None};
+        let result=super::RecurrentRows {history:self.value(next_history,history)?,state:self.value(next_state,state)?,
+            gated:self.value(gated,rows)?,saved};
+        self.cost.settle(self.backend)?;
+        self.cost.record(||"rows_recurrent".into(),stamp,self.backend,weight_words.iter().sum::<usize>()*4);
+        Ok(Some(result))
+    }
     /// WIDE COHORT: the body of `rows_experts_gathered_wide`. PACKED MIDDLE, `down`: each set's down list, when the fold of
     /// that list is the only reader of the set's result (`rows_experts_gathered_wide_for`).
     #[allow(clippy::type_complexity)] // the trait's tuple a set.

@@ -1,7 +1,7 @@
 //! How many launches each prompt row kernel took in this process, for proof logs: a model
 //! proof must show that the model reached a new kernel, not only that a bench did.
 use std::sync::atomic::{AtomicU64,Ordering};
-const COUNT:usize=93;
+const COUNT:usize=96;
 const NAMES:[&str;COUNT]=["fp8_rows_tile","prompt_rows","plain_rows_tile","scores_rows_tile","scores_rows_tile_packed","step_rows_block","transpose_tiles","nv_rows_tile","expert_group","mx_rows_tile","mx_rows_groups","plain_rows_small","plain_rows_few","prompt_rows_small","nv_rows_small","fp8_rows_small","fp8_rows_multi","fp8_rows_few","mx_rows_small",
     // Lane P's reading entries: prompt_operation records the first seven; the mHC launcher records the last two.
     "prompt_permute","prompt_place","prompt_prepare","prompt_gated_norm","prompt_route","prompt_fold","prompt_conv","mhc_residual_rows","mhc_project_tile",
@@ -78,6 +78,8 @@ const NAMES:[&str;COUNT]=["fp8_rows_tile","prompt_rows","plain_rows_tile","score
     // WIDE PHASE: a prompt group above 3,072 rows drained the stream at the end of a mixer run or of a layer, so no
     // buffer it dropped before stays charged (tp bounded_decoder rows_phase_end; the charge rule `wide_phase_workspace`).
     "wide_mixer_complete",
+    // A completed first layer of a kept row pass, and a completed recurrent pass with immutable operands.
+    "verify_solo_plan","verify_owned_plan","verify_bound_recurrent",
     // LATENT ROWS (RB3, P7): the launches of the rows form of a check pass (latent_absorb_rows::rows_form: the same bits).
     // They count in latent_absorption_tile too, the form they replace (the served BF16 gate reads that count).
     "latent_rows_dense","latent_rows_attention","recurrent_rows"];

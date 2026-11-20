@@ -5,6 +5,7 @@ use super::*;
 use spark_gpu_probe::prompt_ops::{Op as Row,Shape as RowShape};
 #[path="rows/pools.rs"] mod pools;
 #[path="rows/seed.rs"] mod seed;
+#[path="rows/solo.rs"] mod solo;
 #[path="rows/shared.rs"] mod shared; #[path="rows/recurrent.rs"] mod recurrent;
 #[path="rows/wide_charge.rs"] mod wide_charge;
 use wide_charge::{wide_phase_group,wide_phase_workspace};
@@ -364,7 +365,7 @@ fn row_shape(op:Row,m:usize)->Result<RowShape> {RowShape::new(op,m).ok_or_else(|
 /// (rows/shared.rs), so both run the same history steps (`Decoder::rows_history`).
 struct RowsChat<'a,V> {first:u64,m:usize,state:&'a BTreeMap<String,V>,expanded:Option<&'a Expanded<V>>,
     /// The pass keeps the inputs of the recurrent state producers (`OpenRows`), and holds the rows it expands.
-    keep:bool,persist:bool,
+    keep:bool,persist:bool,solo_verify:bool,
     kept_conv:Option<([V;3],String)>,kept_step:Option<(V,V,String)>,
     /// The expanded rows this pass reads, and how many; the selection of each row, on the host and on the device.
     cache:Option<V>,cache_rows:u64,selected:Vec<f32>,selected_device:Option<V>,selection_checked:bool}
@@ -428,24 +429,23 @@ impl<'f,C:Compute> Decoder<'f,C> {
     /// One chat's prompt rows in one group. No committed state changes until
     /// every layer and the head succeed. Equal bits to `step` for each row.
     pub fn prefill_rows(&self,tokens:&[u32],state:&State<C::Value>,head:HeadRows)->Result<(Vec<Vec<f32>>,State<C::Value>)> {
-        self.rows_pass(tokens,state,head,0,None).map(|(logits,next,_)|(logits,next))
+        self.rows_pass(tokens,state,head,0,false,None).map(|(logits,next,_)|(logits,next))
     }
     /// The same group, which also keeps what `prefix_state` needs.
     pub fn prefill_rows_open(&self,tokens:&[u32],state:&State<C::Value>,head:HeadRows)->Result<(Vec<Vec<f32>>,State<C::Value>,OpenRows<C::Value>)> {
-        let (logits,next,open)=self.rows_pass(tokens,state,head,2,None)?;Ok((logits,next,open.ok_or("prompt group kept no rows")?))
+        let (logits,next,open)=self.rows_pass(tokens,state,head,2,false,None)?;Ok((logits,next,open.ok_or("prompt group kept no rows")?))
     }
     /// The same group for a greedy caller: each row from `first` on answers with the ID its head picks, taken where
     /// the logits are (`Compute::rows_greedy`, the pick of the batch step). No logits come to the host. The same
     /// state and the same kept rows as `prefill_rows_open` with `HeadRows::From(first)`, and the ID of each row is
     /// the best of that pass's logits (the lower ID of two equal values).
     pub fn prefill_rows_open_greedy(&self,tokens:&[u32],state:&State<C::Value>,first:usize)->Result<(Vec<u32>,State<C::Value>,OpenRows<C::Value>)> {
-        let mut ids=Vec::new();let (_,next,open)=self.rows_pass(tokens,state,HeadRows::From(first),2,Some(&mut ids))?;
-        need(first<tokens.len() && ids.len()==tokens.len()-first,"prompt greedy row count differs")?;Ok((ids,next,open.ok_or("prompt group kept no rows")?))
+        let mut ids=Vec::new();let (_,next,open)=self.verify_open_rows(tokens,state,first,false,Some(&mut ids))?;Ok((ids,next,open))
     }
     /// The same group, which keeps only each row's last hidden state (`open_hidden`), for a
     /// proposer's cache of prompt positions. `prefix_state` does not apply to it.
     pub fn prefill_rows_hidden(&self,tokens:&[u32],state:&State<C::Value>,head:HeadRows)->Result<(Vec<Vec<f32>>,State<C::Value>,OpenRows<C::Value>)> {
-        let (logits,next,open)=self.rows_pass(tokens,state,head,1,None)?;Ok((logits,next,open.ok_or("prompt group kept no hidden rows")?))
+        let (logits,next,open)=self.rows_pass(tokens,state,head,1,false,None)?;Ok((logits,next,open.ok_or("prompt group kept no hidden rows")?))
     }
     /// The state after the first `rows` rows of a group, from the group's own results: appended
     /// caches are prefixes of the group's caches, and each recurrent layer runs its two state
@@ -524,19 +524,19 @@ impl<'f,C:Compute> Decoder<'f,C> {
         Ok(())
     }
     /// `picked`: the head rows answer with their IDs, pushed there, and the logits stay empty (`prefill_rows_open_greedy`).
-    fn rows_pass(&self,tokens:&[u32],state:&State<C::Value>,head:HeadRows,keep:u8,picked:Option<&mut Vec<u32>>)->Result<(Vec<Vec<f32>>,State<C::Value>,Option<OpenRows<C::Value>>)> {
+    fn rows_pass(&self,tokens:&[u32],state:&State<C::Value>,head:HeadRows,keep:u8,solo_verify:bool,picked:Option<&mut Vec<u32>>)->Result<(Vec<Vec<f32>>,State<C::Value>,Option<OpenRows<C::Value>>)> {
         // A check is already inside the resident queue opened by `Compute::work`. Unlike prompt
         // groups, its 2..=8-row shapes recur every cycle and can amortize retained pieces.
         let paused=if keep==2 {None} else {Some(self.compute.rows_unrecorded(true)?)};
         self.compute.rows_verify(keep==2 && self.predictor_enabled() && (2..=self.verify_routes.get()).contains(&tokens.len()));
-        let result=self.rows_pass_body(tokens,state,head,keep,picked);
+        let result=self.rows_pass_body(tokens,state,head,keep,solo_verify,picked);
         self.compute.rows_verify(false);
         // A failed large group must end its extra spare capacity too. Keep the
         // original error if the device cannot synchronize for this cleanup.
         if result.is_err() && group_pool_cap(tokens.len()).is_some() {let _=self.compute.rows_keep();}
         let restored=paused.map_or(Ok(()),|was|self.compute.rows_unrecorded(was).map(|_|()));let value=result?;restored?;Ok(value)
     }
-    fn rows_pass_body(&self,tokens:&[u32],state:&State<C::Value>,head:HeadRows,keep:u8,mut picked:Option<&mut Vec<u32>>)->Result<(Vec<Vec<f32>>,State<C::Value>,Option<OpenRows<C::Value>>)> {
+    fn rows_pass_body(&self,tokens:&[u32],state:&State<C::Value>,head:HeadRows,keep:u8,solo_verify:bool,mut picked:Option<&mut Vec<u32>>)->Result<(Vec<Vec<f32>>,State<C::Value>,Option<OpenRows<C::Value>>)> {
         let c=self.checkpoint;let d=c.description();let m=tokens.len();
         need(m>0 && m<=PROMPT_GROUP_CHECK && state.layers.len()==d.layers.len(),"prompt group differs")?;
         need(state.position.checked_add(m as u64).is_some_and(|n|n<=self.capacity && n<=u32::MAX as u64),"prompt group exceeds capacity")?;
@@ -576,7 +576,7 @@ impl<'f,C:Compute> Decoder<'f,C> {
         let mut residual=embed(tokens)?;
         let mut layers=Vec::new();let mut expanded=BTreeMap::new();let mut kept_layers=Vec::new();
         for layer in 0..d.layers.len() {
-            let (output,next,cache,kept)=self.layer_rows(layer,state.position,m,residual,&state.layers[layer],state.expanded.get(&layer).filter(|v|v.1<=state.position as usize && v.1<=self.expanded_limit.get()),keep==2,None)?;
+            let (output,next,cache,kept)=self.layer_rows(layer,state.position,m,residual,&state.layers[layer],state.expanded.get(&layer).filter(|v|v.1<=state.position as usize && v.1<=self.expanded_limit.get()),keep==2,solo_verify,None)?;
             residual=output;layers.push(next);kept_layers.push(kept);
             // A group past the held limit adds no rows, but the rows held before it stay:
             // they are the first rows of the same cache and admission charges them for the whole chat.
@@ -657,7 +657,7 @@ impl<'f,C:Compute> Decoder<'f,C> {
         for (n,rows) in runs {
             let first=state.position+at as u64;
             let owner=held.as_ref().filter(|v|v.1<=first as usize && v.1<=self.expanded_limit.get());
-            let (middle,next,cache,_)=self.layer_rows(layer,first,n,rows,before.as_ref().unwrap_or(&state.layers[layer]),owner,false,cut)?;
+            let (middle,next,cache,_)=self.layer_rows(layer,first,n,rows,before.as_ref().unwrap_or(&state.layers[layer]),owner,false,false,cut)?;
             // As between two groups: a run that made held rows replaces them, any other run keeps what was held.
             if let Some(cache)=cache {held=Some(Expanded(std::rc::Rc::new(cache),first as usize+n,self.sparse_layout(layer)?));}
             made.push((n,middle));before=Some(next);at+=n;
@@ -771,26 +771,6 @@ impl<'f,C:Compute> Decoder<'f,C> {
             _=>Ok(None),
         }
     }
-    #[allow(clippy::too_many_arguments)]
-    fn layer_rows(&self,layer:usize,first:u64,m:usize,residual:C::Value,state:&BTreeMap<String,C::Value>,expanded:Option<&Expanded<C::Value>>,keep:bool,cut:Option<(usize,&str)>)->Result<(C::Value,BTreeMap<String,C::Value>,Option<C::Value>,Option<KeptRows<C::Value>>)> {
-        let b=&self.compute;let last=first+m as u64;
-        let mut chat=self.rows_chat(layer,first,m,state,expanded,keep)?;
-        let planning=std::time::Instant::now();
-        let plan={let mut schedules=self.schedules.borrow_mut();schedules.get_mut(layer).ok_or("prompt layer is outside the recipe")?.at(last).cloned().map_err(|e|e.to_string())?};
-        b.plan_cost("planning",planning.elapsed().as_nanos());
-        let mut values=BTreeMap::new();values.insert("residual".to_owned(),residual);
-        // GROUP FOLD: a prompt group (no kept rows) may fold a routed layer's down rows before their exchange.
-        let mut passes=BTreeMap::new();let mut fold=if keep {RowsFold::default()} else {RowsFold::of_group()};let mut skip=0;
-        for index in 0..cut.map_or(plan.steps.len(),|cut|cut.0) {
-            if skip>0 {skip-=1;continue;}
-            if let Some(done)=self.rows_stateless(layer,index,&plan,m,&mut values,&mut passes,&mut fold)? {skip=done;continue;}
-            skip=self.rows_history(layer,index,&plan,&mut chat,&mut values)?;
-        }
-        need(skip==0,"prompt layer cut is inside a stage")?;
-        let output=values.remove(cut.map_or("output",|cut|cut.1)).ok_or("prompt layer has no output")?;
-        let (next,cache,kept)=self.rows_chat_end(layer,chat,&mut values)?;
-        Ok((output,next,cache,kept))
-    }
     /// One chat's side of a row pass of `m` rows that start at position `first` (`RowsChat`).
     fn rows_chat<'a>(&self,layer:usize,first:u64,m:usize,state:&'a BTreeMap<String,C::Value>,expanded:Option<&'a Expanded<C::Value>>,keep:bool)->Result<RowsChat<'a,C::Value>> {
         if let Some(owner)=expanded {need(owner.2==self.sparse_layout(layer)?,"expanded prompt owner layout differs")?;}
@@ -798,7 +778,7 @@ impl<'f,C:Compute> Decoder<'f,C> {
         // With a proposer a pass follows a few steps, each time. Its held rows then follow the decoded rows
         // (admission charges them by the request's tokens), so no pass expands a decoded row twice.
         let persist=last as usize<=self.expanded_limit.get() && (first==0 || expanded.is_some_and(|v|v.1==first as usize || self.draft.is_some() && v.1<first as usize));
-        Ok(RowsChat {first,m,state,expanded,keep,persist,kept_conv:None,kept_step:None,cache:None,cache_rows:last,selected:Vec::new(),selected_device:None,selection_checked:false})
+        Ok(RowsChat {first,m,state,expanded,keep,persist,solo_verify:false,kept_conv:None,kept_step:None,cache:None,cache_rows:last,selected:Vec::new(),selected_device:None,selection_checked:false})
     }
     /// What a chat's layer leaves: its next state (taken out of `values`, where its history steps put it), its new
     /// held rows when the pass holds them, and the kept inputs of a recurrent layer.

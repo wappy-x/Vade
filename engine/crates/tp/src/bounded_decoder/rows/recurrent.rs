@@ -55,12 +55,19 @@ impl<'f, C: Compute> Decoder<'f, C> {
         }
         let Some(old_history) = chat.state.get(history) else { return Ok(None); };
         let Some(old_state) = chat.state.get(state) else { return Ok(None); };
-        let weights = |s: &Step| s.weights.iter().flat_map(|w| self.parameters[&w.name].iter().copied()).collect::<Vec<_>>();
-        let [cw, pw, nw] = [conv, prepare, norm].map(weights);
         let b = &self.compute;
-        let Some(made) = b.rows_recurrent(shape, [&values[q], &values[k], &values[v], old_history,
-            &values[forget_in], &values[beta_in], old_state], &values[gate_in], [&cw, &pw, &nw], chat.keep)?
-            else { return Ok(None); };
+        let steps = [conv, prepare, norm];
+        let input = [&values[q], &values[k], &values[v], old_history, &values[forget_in], &values[beta_in], old_state];
+        let gate = &values[gate_in];
+        let result = if chat.solo_verify && let [Some(cw), Some(pw), Some(nw)] =
+            steps.map(|s| self.static_parameters.get(layer, &self.parameters, s)) {
+            b.rows_recurrent_prepared(shape, input, gate, [cw, pw, nw])?
+        } else {
+            let weights = |s: &Step| s.weights.iter().flat_map(|w| self.parameters[&w.name].iter().copied()).collect::<Vec<_>>();
+            let [cw, pw, nw] = steps.map(weights);
+            b.rows_recurrent(shape, input, gate, [&cw, &pw, &nw], chat.keep)?
+        };
+        let Some(made) = result else { return Ok(None); };
 
         if chat.keep {
             let row_words = m * layout.local_heads() * DIM;

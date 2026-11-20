@@ -202,6 +202,10 @@ impl<C:Compute,E:Exchange> Compute for Split<C,E> {
     fn prompt(&self,s:spark_gpu_probe::prompt_ops::Shape,x:[Option<&C::Value>;5],w:&[f32])->Result<C::Value> {self.compute.prompt(s,x,w)}
     fn rows_recurrent(&self,s:spark_gpu_probe::recurrent_rows::Shape,x:[&C::Value;7],gate:&C::Value,w:[&[f32];3],keep:bool)
         ->Result<Option<crate::bounded_decoder::RecurrentRows<C::Value>>> {self.compute.rows_recurrent(s,x,gate,w,keep)}
+    fn rows_recurrent_prepared(&self,s:spark_gpu_probe::recurrent_rows::Shape,x:[&C::Value;7],gate:&C::Value,
+        w:[&std::rc::Rc<crate::bounded_decoder::StaticParameters>;3])->Result<Option<crate::bounded_decoder::RecurrentRows<C::Value>>> {
+        self.compute.rows_recurrent_prepared(s,x,gate,w)
+    }
     fn rows_embedding(&self,t:&[u32],n:usize)->Result<Option<C::Value>> {self.compute.rows_embedding(t,n)}
     fn draft_embeddings(&self,t:&[u32])->Result<Option<C::Value>> {self.compute.draft_embeddings(t)}
     fn rows_project(&self,c:&CheckpointAdmission,name:&str,x:&C::Value,m:usize,round:bool)->Result<Option<C::Value>> {self.compute.rows_project(c,name,x,m,round)}
@@ -723,14 +727,14 @@ pub fn workspace_reservation_bytes(&self)->usize {self.workspace}
                 // pass as the plain greedy step (`Verify::row_greedy`): the controller sends it only with no row carried.
                 // Command 6 with PICK_ROWS on its row count is the greedy pass of 2 rows or more (`Verify::rows_greedy`):
                 // the same launches as the controller, and no logits are read here either.
-                6|8|14=>{self.split.work(|| {let (decoder,state,open)=sessions.get_mut(&id).ok_or("worker command has no session")?;
+                6|8|14=>{let live=sessions.len();self.split.work(|| {let (decoder,state,open)=sessions.get_mut(&id).ok_or("worker command has no session")?;
                     let ids=code==6 && token&PICK_ROWS!=0;
                     let tokens=if code!=6 {vec![token]} else {let rows=(token&!PICK_ROWS) as usize;if !(2..=crate::bounded_decoder::VERIFY_ROWS).contains(&rows) {return Err("worker verify pass exceeds its bound".into());}
                         let mut bytes=vec![0;rows*4];self.split.exchange.borrow_mut().command_payload(&mut bytes)?;
                         bytes.as_chunks::<4>().0.iter().map(|b|u32::from_le_bytes(*b)).collect::<Vec<_>>()};
                     if open.is_none() {let mut fresh=Verify::new(state.take().ok_or("worker session has no state")?);if decoder.predictor_enabled() {fresh.track_proposer();}*open=Some(fresh);}
                     if code==14 {open.as_mut().unwrap().row_greedy(decoder,token)?.ok_or("worker greedy pass has carried rows")?;}
-                    else if ids {open.as_mut().unwrap().rows_greedy(decoder,&tokens)?;} else {open.as_mut().unwrap().rows(decoder,&tokens)?;}
+                    else {open.as_mut().unwrap().session_rows(decoder,&tokens,live,ids)?;}
                     self.split.exchange.borrow_mut().complete()
                 })?;},
                 7=>{self.split.work(|| {let (decoder,_,open)=sessions.get_mut(&id).ok_or("worker command has no session")?;open.as_mut().ok_or("worker truncation has no open rows")?.truncate(decoder,u64::from(token))?;self.split.exchange.borrow_mut().complete()})?;},
@@ -1088,13 +1092,12 @@ impl<C:Compute,E:Exchange> Session<'_,C,E> {
             let mut fresh=Verify::new(self.state.take().ok_or("row split session has no state")?);if self.decoder.predictor_enabled() {fresh.track_proposer();}self.open=Some(fresh);}
         let open=self.open.as_mut().unwrap();let (position,carried)=(open.position(),open.carried());
         if position.checked_add(tokens.len() as u64).is_none_or(|n|n>factory.context as u64) {return Err("row split verify pass exceeds context".into());}
-        factory.failed.set(true);let picked=greedy && tokens.len()==1 && carried==0;let ids=greedy && tokens.len()>=2;
+        let live=factory.active.get();factory.failed.set(true);let picked=greedy && tokens.len()==1 && carried==0;let ids=greedy && tokens.len()>=2;
         if picked {factory.split.command_for(14,tokens[0],self.id)?;} else if tokens.len()==1 {factory.split.command_for(8,tokens[0],self.id)?;} else {factory.split.command_for(6,tokens.len() as u32|if ids {PICK_ROWS} else {0},self.id)?;
             let mut bytes=tokens.iter().flat_map(|t|t.to_le_bytes()).collect::<Vec<_>>();factory.split.exchange.borrow_mut().command(&mut bytes)?;}
         let whole=factory.split.rows_peak_begin();
         let output=if picked {spark_serve::Predictions::Greedy(vec![open.row_greedy(&self.decoder,tokens[0])?.ok_or("row split greedy pass has carried rows")?])}
-            else if ids {spark_serve::Predictions::Greedy(open.rows_greedy(&self.decoder,tokens)?)}
-            else {spark_serve::Predictions::Logits(open.rows(&self.decoder,tokens)?)};
+            else {open.session_rows(&self.decoder,tokens,live,ids)?};
         let peak=factory.split.rows_peak_end(whole);
         factory.split.exchange.borrow_mut().complete()?;factory.failed.set(false);
         if carried!=0 {factory.pair.borrow_mut().set_carried(self.id,0);}
@@ -1105,7 +1108,7 @@ impl<C:Compute,E:Exchange> Session<'_,C,E> {
             let one=tokens.len()==1 && carried==0;
             if one {if self.after_step {self.step_ms=mix(self.step_ms,ms);self.step_low=Some(self.step_low.map_or(ms,|low|low.min(ms)));}} else {let rows=(tokens.len()+carried).min(16);self.pass_ms[rows]=mix(self.pass_ms[rows],ms);}
             self.after_step=one;}
-        eprintln!("SERVED VERIFY rank={} session={} phase=decode position={position} rows={} carried={carried} picked={} ids={} peak_bytes={peak} seconds={:.9}",factory.split.topology.rank,self.id,tokens.len(),u8::from(picked),u8::from(ids),started.elapsed().as_secs_f64());factory.split.cost_report("decode");Ok(output)
+        eprintln!("SERVED VERIFY rank={} session={} phase=decode position={position} rows={} carried={carried} picked={} ids={} peak_bytes={peak} seconds={:.9} active={live}",factory.split.topology.rank,self.id,tokens.len(),u8::from(picked),u8::from(ids),started.elapsed().as_secs_f64());factory.split.cost_report("decode");Ok(output)
     }
     /// Lookback trial probe of `limit` already-decoded tokens ending at `best`, seeding the prompt tail on the first call.
     fn probe(&mut self,best:u32,limit:usize)->Result<Option<(usize,f64)>> {let factory=self.factory;if let Some(error)=factory.failure_reason() {return Err(error);}

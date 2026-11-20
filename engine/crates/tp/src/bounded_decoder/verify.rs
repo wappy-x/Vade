@@ -67,18 +67,27 @@ impl<V> Verify<V> {
     pub fn carried(&self)->usize {if self.ahead.is_some() {0} else {self.open.len()}}
     /// Append rows and return the logits of each. Row `i` is exact when the tokens
     /// before it are the tokens plain decoding chose.
-    pub fn rows<C:Compute<Value=V>>(&mut self,decoder:&Decoder<'_,C>,tokens:&[u32])->Result<Vec<Vec<f32>>> {self.rows_head(decoder,tokens,None)}
+    pub fn rows<C:Compute<Value=V>>(&mut self,decoder:&Decoder<'_,C>,tokens:&[u32])->Result<Vec<Vec<f32>>> {self.rows_head(decoder,tokens,false,None)}
     /// The same pass for a greedy caller, for 2 rows or more: each new row answers with the ID its head picks, taken
     /// where the logits are, and no logits are read (`Decoder::prefill_rows_open_greedy`). The same state, kept rows
     /// and trail as `rows`. One row with nothing carried is `row_greedy`; one row behind carried rows is `rows`.
     pub fn rows_greedy<C:Compute<Value=V>>(&mut self,decoder:&Decoder<'_,C>,tokens:&[u32])->Result<Vec<u32>> {
         if tokens.len()<2 {return Err("greedy verify rows are 2 or more".into());}
-        let mut ids=Vec::new();self.rows_head(decoder,tokens,Some(&mut ids))?;
+        let mut ids=Vec::new();self.rows_head(decoder,tokens,false,Some(&mut ids))?;
         if ids.len()!=tokens.len() {return Err("verify greedy row count differs".into());}Ok(ids)
+    }
+    /// An individual service command may also run with other live requests. Both ranks supply
+    /// their current live session count for this pass, including one-row commands with carried rows.
+    pub(crate) fn session_rows<C:Compute<Value=V>>(&mut self,decoder:&Decoder<'_,C>,tokens:&[u32],live:usize,greedy:bool)->Result<spark_serve::Predictions> {
+        if greedy {
+            if tokens.len()<2 {return Err("greedy verify rows are 2 or more".into());}
+            let mut ids=Vec::new();self.rows_head(decoder,tokens,live==1,Some(&mut ids))?;
+            Ok(spark_serve::Predictions::Greedy(ids))
+        } else {Ok(spark_serve::Predictions::Logits(self.rows_head(decoder,tokens,live==1,None)?))}
     }
     /// `picked`: the new rows answer with their IDs, pushed there, and the result is empty (`rows_greedy`).
     #[allow(clippy::needless_range_loop)] // index loops keep the arithmetic order.
-    fn rows_head<C:Compute<Value=V>>(&mut self,decoder:&Decoder<'_,C>,tokens:&[u32],picked:Option<&mut Vec<u32>>)->Result<Vec<Vec<f32>>> {
+    fn rows_head<C:Compute<Value=V>>(&mut self,decoder:&Decoder<'_,C>,tokens:&[u32],solo_verify:bool,picked:Option<&mut Vec<u32>>)->Result<Vec<Vec<f32>>> {
         if tokens.is_empty() || tokens.len()>VERIFY_ROWS {return Err("verify row count differs".into());}
         self.kept=None;if let Some(ahead)=self.ahead.take() {self.state=ahead;self.open.clear();}
         if self.open.len()>CARRIED_ROWS {let (_,next)=decoder.prefill_rows(&self.open,&self.state,HeadRows::Last)?;self.state=next;self.open.clear();}
@@ -90,11 +99,9 @@ impl<V> Verify<V> {
             return Ok(vec![logits]);
         }
         let carried=self.open.len();let mut all=self.open.clone();all.extend_from_slice(tokens);
-        let (logits,next,kept)=match picked {
-            Some(ids)=>{let (best,next,kept)=decoder.prefill_rows_open_greedy(&all,&self.state,carried)?;*ids=best;(Vec::new(),next,kept)},
-            None=>{let (logits,next,kept)=decoder.prefill_rows_open(&all,&self.state,HeadRows::From(carried))?;
-                if logits.len()!=tokens.len() {return Err("verify logits row count differs".into());}(logits,next,kept)},
-        };
+        let ids=picked.is_some();
+        let (logits,next,kept)=decoder.verify_open_rows(&all,&self.state,carried,solo_verify,picked)?;
+        if !ids && logits.len()!=tokens.len() {return Err("verify logits row count differs".into());}
         if self.tracking {for row in carried..all.len() {let [before,after]=decoder.open_hidden(&kept,row)?;self.push_trail(all[row],if PROPOSER_HIDDEN==0 {before} else {after});}}
         else {self.hidden=Some(decoder.open_hidden(&kept,all.len()-1)?);}
         self.open=all;self.ahead=Some(next);self.kept=Some(kept);Ok(logits)

@@ -281,6 +281,11 @@ pub trait Compute {
     fn prompt(&self,s:spark_gpu_probe::prompt_ops::Shape,x:[Option<&Self::Value>;5],w:&[f32])->Result<Self::Value>;
     fn rows_recurrent(&self,_:spark_gpu_probe::recurrent_rows::Shape,_:[&Self::Value;7],_:&Self::Value,
         _:[&[f32];3],_:bool)->Result<Option<RecurrentRows<Self::Value>>> {Ok(None)}
+    /// These immutable operands have the same words and order as the unprepared row operation.
+    fn rows_recurrent_prepared(&self,s:spark_gpu_probe::recurrent_rows::Shape,x:[&Self::Value;7],gate:&Self::Value,
+        weights:[&Rc<StaticParameters>;3])->Result<Option<RecurrentRows<Self::Value>>> {
+        self.rows_recurrent(s,x,gate,weights.map(|owner|owner.values()),true)
+    }
     fn rows_embedding(&self,_:&[u32],_:usize)->Result<Option<Self::Value>> {Ok(None)}
     /// One stream per proposal, without starting a target row pass or trimming its workspace.
     fn draft_embeddings(&self,_:&[u32])->Result<Option<Self::Value>> {Ok(None)}

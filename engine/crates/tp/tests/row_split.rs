@@ -5,7 +5,7 @@ use spark_serve::{Engine,Session};
 use std::sync::mpsc::{sync_channel,SyncSender,Receiver};
 #[path="support/attention_checkpoint.rs"] mod fixture;
 include!("support/draft_admission.rs");
-struct Wire {topology:Topology,controller:bool,tx:SyncSender<Vec<u8>>,rx:Receiver<Vec<u8>>}
+include!("support/row_wire.rs");
 #[test]
 fn compact_head_survives_reference_and_split_wrappers() {
     let checkpoint=fixture::Checkpoint::new_with_head(Dtype::Bf16,true);let (tx,rx)=std::sync::mpsc::channel();let calls=std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -356,20 +356,6 @@ impl Compute for Prepared {
     fn rows_finish(&self,p:Self::Pass,x:&Vec<f32>,m:usize)->Result<Vec<f32>> {Host.rows_finish(p,x,m)}
 }
 
-impl Exchange for Wire {
-    fn topology(&self)->Topology {self.topology}
-    fn gather(&mut self,local:&[f32],rows:usize)->Result<Vec<f32>> {
-        self.tx.send(local.iter().flat_map(|v|v.to_le_bytes()).collect()).map_err(|e|e.to_string())?;
-        let other=self.rx.recv().map_err(|e|e.to_string())?;
-        let peer=other.as_chunks::<4>().0.iter().map(|v|f32::from_le_bytes(*v)).collect::<Vec<_>>();
-        let mut out=vec![0.0;rows];let r=spark_tp::rows(rows,self.topology.rank as usize,self.topology.parts as usize);out[r].copy_from_slice(local);
-        let r=spark_tp::rows(rows,1-self.topology.rank as usize,self.topology.parts as usize);out[r].copy_from_slice(&peer);Ok(out)
-    }
-    fn command(&mut self,v:&mut [u8])->Result<()> {
-        if self.controller {self.tx.send(v.to_vec()).map_err(|e|e.to_string())} else {let p=self.rx.recv().map_err(|e|e.to_string())?;v.copy_from_slice(&p);Ok(())}
-    }
-    fn complete(&mut self)->Result<()> {self.tx.send(Vec::new()).map_err(|e|e.to_string())?;assert!(self.rx.recv().map_err(|e|e.to_string())?.is_empty());Ok(())}
-}
 #[test]
 fn scalar_service_generates_four_exact_tokens_across_row_parts_and_new_sessions() {
     let _constructor:fn(Dtype)->fixture::Checkpoint=fixture::Checkpoint::new;
