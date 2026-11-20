@@ -30,6 +30,7 @@ impl<V> PredictorState<V> {
     pub(super) fn seeded(rows:u64,layers:BTreeMap<String,V>)->Self {Self {rows,layers}}
 }
 pub struct Draft {pub(super) description:TextDescription,pub(super) parameters:BTreeMap<String,Vec<f32>>,
+    pub(super) cache_schedule:Option<RefCell<LayerSchedule>>,
     /// The layer's state inputs at its first position, each with its word count: the empty cache
     /// of a proposal that has no earlier position. Listed once, when the layer is loaded.
     pub(super) empty:Vec<(String,usize)>}
@@ -53,10 +54,20 @@ impl<'f,C:Compute> Decoder<'f,C> {
         for norm in ["enorm","hnorm","shared_head.norm"] {let name=format!("{prefix}.{norm}.weight");parameters.insert(name.clone(),plain(c,&name)?);}
         names.push(format!("{prefix}.eh_proj.weight"));
         self.compute.prepare_names(c,&names)?;
-        *self.draft_schedule.borrow_mut()=Some(LayerSchedule::new(&description,layer,topology).map_err(|e|e.to_string())?);
+        let schedule=LayerSchedule::new(&description,layer,topology).map_err(|e|e.to_string())?;
+        let cache_schedule=if matches!(description.layers[layer].mixer,TokenMixer::LatentAttention(_)) {
+            let indices=super::rows::seed_steps(&plan)?.into_iter().flat_map(|index| {
+                let count=if plan.steps[index].kind==Kind::MhcPrepare {3} else {1};
+                index..index+count
+            }).collect::<Vec<_>>();
+            let mut cache=schedule.clone();
+            cache.select_steps(&indices).map_err(|e|e.to_string())?;
+            Some(RefCell::new(cache))
+        } else {None};
         let empty=plan.inputs.iter().filter(|input|input.name!="residual" && input.name!="local_slots")
             .map(|input|Ok((input.name.clone(),input.elements().map_err(|e|e.to_string())?))).collect::<Result<Vec<_>>>()?;
-        self.draft=Some(Rc::new(Draft {description,parameters,empty}));Ok(())
+        *self.draft_schedule.borrow_mut()=Some(schedule);
+        self.draft=Some(Rc::new(Draft {description,parameters,cache_schedule,empty}));Ok(())
     }
     pub fn predictor_enabled(&self)->bool {self.draft.is_some()}
     pub(super) fn mixer(&self,layer:usize)->Result<TokenMixer> {

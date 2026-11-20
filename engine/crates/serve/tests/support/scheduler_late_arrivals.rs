@@ -142,6 +142,10 @@ impl Engine for ArrivalEngine {
 }
 
 fn late_arrivals(count: usize, grouped: bool) -> (Vec<Vec<u32>>, Vec<usize>) {
+    late_arrivals_of(count, grouped, 133, &[64, 64, 5], "")
+}
+
+fn late_arrivals_of(count: usize, grouped: bool, length: usize, slices: &[usize], older_extra: &str) -> (Vec<Vec<u32>>, Vec<usize>) {
     let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap(); let address = listener.local_addr().unwrap();
     let (live, calls, heads) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
     let order = Arc::new(Mutex::new(Vec::new())); let stop = Arc::new(AtomicBool::new(false));
@@ -150,6 +154,8 @@ fn late_arrivals(count: usize, grouped: bool) -> (Vec<Vec<u32>>, Vec<usize>) {
     let model = ArrivalEngine { model: Model { ab: None, cohort: None, live: live.clone(), calls: calls.clone(), heads: heads.clone(), order: order.clone(), opt_in: false, retention_extra: 0 }, next: AtomicUsize::new(0), turns, groups, gate: engine_gate, grouped, clock_due: std::cell::Cell::new(false) };
     let codec = ArrivalCodec { gate: codec_gate, expected: count };
     let shutdown = stop.clone();
+    // Public requests keep priority 0 unless the server's cap allows more; the priority case lets the older chat hold 1.
+    let cap: u8 = if older_extra.contains("priority") { 1 } else { 0 };
     let worker = std::thread::spawn(move || {
         let _clock = ClockGuard::new();
         scheduler::serve_requests(listener, &model, Some(&codec),
@@ -157,12 +163,12 @@ fn late_arrivals(count: usize, grouped: bool) -> (Vec<Vec<u32>>, Vec<usize>) {
         &CacheLimits { entries: 32, retained_bytes: 1 << 20, tokens_per_entry: 1024, logits_per_entry: 8, idle_ttl: Duration::from_secs(60) },
         &scheduler::Config { active: 8, connections: 16, prefill_chunk: 64, active_bytes: 8 * 16384,
             session_budget_bytes: 2 << 20, prefix_cache: false, mtp_depth: 0, foreground_rows: 8, background_rows: 16,
-            draft: protocol::DraftMode::Plain, draft_global_bank: false, sharing: scheduler::Sharing::default() }, &shutdown, "arrival", count + 2).unwrap() });
+            draft: protocol::DraftMode::Plain, draft_global_bank: false, sharing: scheduler::Sharing { client_priority_cap: cap, ..scheduler::Sharing::default() } }, &shutdown, "arrival", count + 2).unwrap() });
     let server = Server { address, stop, live, worker: Some(worker) };
     let extra = ",\"cache\":false,\"prefix_cache\":false,\"draft\":\"plain\",\"ignore_eos\":true";
-    let older = server.send(&[1], 256, extra);
+    let older = server.send(&[1], 256, &format!("{extra}{older_extra}"));
     gate.wait(|s| s.older_steps >= 1);
-    let late: Vec<_> = (0..count).map(|_| server.send(&[1; 133], 6, extra)).collect();
+    let late: Vec<_> = (0..count).map(|_| server.send(&vec![1; length], 6, extra)).collect();
     gate.update(|s| s.late_sent = true);
     gate.wait(|s| s.older_steps >= 2);
     // Completed client writes do not establish the server's intake order.
@@ -177,14 +183,14 @@ fn late_arrivals(count: usize, grouped: bool) -> (Vec<Vec<u32>>, Vec<usize>) {
         assert_eq!(reply.matches("data: [DONE]\n\n").count(), 1, "duplicate terminal record");
         assert!(!reply.contains("\"error\""), "response error");
         assert!(reply.contains("\"finish_reason\":\"length\""), "wrong finish reason");
-        let ids = tokens(&reply); let (prompt, output) = if index == 0 { (1, 256) } else { (133, 6) };
+        let ids = tokens(&reply); let (prompt, output) = if index == 0 { (1, 256) } else { (length, 6) };
         assert_eq!(ids.len(), output, "missing output tokens");
         assert_eq!(ids, oracle(prompt, output), "wrong output token IDs"); ids
     }).collect();
     let events = trace.lock().unwrap().clone();
     assert!(group_trace.lock().unwrap().iter().all(|g| g == &[1]), "late arrival used a grouped pass");
     for id in 1..=count {
-        assert_eq!(events.iter().filter(|(who, rows)| *who == id && *rows != 0).map(|(_, rows)| *rows).collect::<Vec<_>>(), [64, 64, 5]);
+        assert_eq!(events.iter().filter(|(who, rows)| *who == id && *rows != 0).map(|(_, rows)| *rows).collect::<Vec<_>>(), slices);
     }
     let prompt_indices: Vec<_> = events.iter().enumerate().filter(|(_, (id, rows))| *id != 0 && *rows != 0).map(|(i, _)| i).collect();
     for pair in prompt_indices.windows(2) {
@@ -205,4 +211,33 @@ fn late_arrivals_keep_the_pre_grouping_turn_order_even_when_alone() {
         let old = late_arrivals(count, false); let fresh_only = late_arrivals(count, true);
         assert_eq!(fresh_only, old, "late arrivals={count}");
     }
+}
+
+#[test]
+fn short_late_arrivals_finish_in_one_turn_between_older_decodes() {
+    // Two contended slices become one call when the prompt fits two minimum tiles; the
+    // exact output IDs, the older decode between prompts and the grouped path are unchanged.
+    for (length, slices) in [(65, &[65][..]), (100, &[100][..]), (128, &[128][..]), (129, &[64, 64, 1][..]), (64, &[64][..])] {
+        for count in [1, 3, 7] {
+            let old = late_arrivals_of(count, false, length, slices, ""); let fresh_only = late_arrivals_of(count, true, length, slices, "");
+            assert_eq!(fresh_only, old, "late arrivals={count} length={length}");
+        }
+    }
+}
+
+#[test]
+fn short_late_arrivals_keep_two_slices_while_another_chat_holds_priority() {
+    for count in [1, 3] { late_arrivals_of(count, false, 100, &[64, 36], ",\"priority\":1"); }
+}
+
+#[test]
+fn whole_short_prompt_needs_a_live_decoder_a_cold_prompt_and_funding() {
+    use super::prompt_workspace::whole_short_prompt as whole;
+    assert!(whole(100, 0, 64, 512, true, false, false));
+    assert!(!whole(100, 0, 64, 512, false, false, false), "idle or lone prompt keeps its path");
+    assert!(!whole(100, 16, 64, 512, true, false, false), "started or cached prefix keeps its path");
+    assert!(!whole(100, 0, 64, 512, true, true, false), "queued peers wait on this prefix");
+    assert!(!whole(100, 0, 64, 512, true, false, true), "another chat holds priority");
+    assert!(!whole(100, 0, 64, 96, true, false, false), "beyond the funded chunk");
+    assert!(!whole(64, 0, 64, 512, true, false, false) && !whole(129, 0, 64, 512, true, false, false), "one slice, or more than two");
 }

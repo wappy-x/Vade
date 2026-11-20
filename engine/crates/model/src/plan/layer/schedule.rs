@@ -9,6 +9,20 @@ impl LayerSchedule {
     pub fn new(d:&TextDescription,layer:usize,topology:Topology)->Result<Self> {
         Ok(Self {plan:LayerPlan::new(d,layer,1,topology)?,maximum:d.max_positions.min(u32::MAX as u64)})
     }
+    /// Keep an ordered dependency slice of the program. The caller supplies every
+    /// producer that the selected steps need. Context changes still resize the selected steps.
+    pub fn select_steps(&mut self, indices: &[usize]) -> Result<()> {
+        need(!indices.is_empty() && indices.windows(2).all(|pair| pair[0] < pair[1])
+            && indices.last().is_some_and(|&last| last < self.plan.steps.len()), "invalid cached layer step slice")?;
+        let mut indices = indices.iter().copied().peekable();
+        let mut at = 0;
+        self.plan.steps.retain(|_| {
+            let keep = indices.next_if_eq(&at).is_some();
+            at += 1;
+            keep
+        });
+        Ok(())
+    }
     /// `context` includes this token. Earlier rows occupy `context - 1` slots.
     /// Check the bound before changing any part of the program.
     pub fn at(&mut self,context:u64)->Result<&LayerPlan> {

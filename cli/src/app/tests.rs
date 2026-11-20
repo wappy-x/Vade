@@ -24,7 +24,6 @@ mod ssh_stop;
 use super::*;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(Default)]
 struct FakeRunner { calls: Vec<Exec>, started: BTreeSet<String>, fail: Option<String>, foreign: Option<String>, bad_hash: bool, ports: Vec<u16>, dry: bool, doctor_bad: bool, tunnel_bad: bool, refused_start: Option<String>, inspect_error: Option<String>, mac_secret_seen: bool, alter_build_outputs: bool, local_state: PathBuf, exit_on_health: Option<String>, ready_model: Option<String>, health_extra: String, silent_probe: bool, gateway: Option<String>, gateway_start: Option<String>, gateway_exits: bool, gateway_stubborn: bool, signals: Vec<String>, probe: Option<(bool, &'static str)>, hashes: Option<(bool, &'static str)>, ssh_says: Option<&'static str> }
@@ -123,9 +122,12 @@ impl Fixture {
         fixture
     }
     fn new(count: usize, dry: bool) -> Self {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let dir = PathBuf::from("target").join(format!("vade-cli-t-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
-        fs::create_dir_all(&dir).unwrap();
+        let target = Path::new("target");
+        fs::create_dir_all(target).unwrap();
+        // CI caches target/. An old run can leave a fixture behind, and a
+        // recycled process ID must never reopen its ownership record.
+        let dir = target.join(format!("vade-cli-t-{}", text::random_hex(8).unwrap()));
+        fs::create_dir(&dir).unwrap();
         let mut input = "[global]\nstate_dir = /state\nstage_dir = bin\nmodel = qwen3.8-flash-next-fp8\nmodel_repo = Qwen/Qwen3.8-Flash-Next-FP8\nmodel_revision = aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n".to_string();
         for index in 0..count {
             let name = char::from(b'a' + index as u8);
@@ -1293,7 +1295,6 @@ fn doctor_uses_default_one_spark_selection_and_checks_the_full_memory_floor() {
     assert!(!f.app.runner.calls.iter().any(|call| call.label.starts_with("b ") || call.label.ends_with(" fabric")));
     let probe = f.app.runner.calls.iter().find(|call| call.label == "a prerequisites").unwrap().args.last().unwrap();
     assert!(probe.contains("if test 0 = 1; then"), "{probe}");
-    std::mem::forget(f);
 }
 
 #[test]
@@ -1308,7 +1309,6 @@ fn doctor_accepts_replica_configs_without_fabric_and_uses_the_saved_ranks() {
     assert!(printed.contains("independent replicas; no fabric") && !printed.contains("FAIL"), "{printed}");
     assert!(printed.contains("a port 18080") && printed.contains("b port 18080"), "{printed}");
     assert!(!printed.contains("port 29960") && !printed.contains("c model files"), "{printed}");
-    std::mem::forget(f);
 }
 
 #[test]
@@ -1334,7 +1334,6 @@ fn doctor_checks_http_only_on_the_serving_rank_of_an_active_chain() {
             let call = f.app.runner.calls.iter().find(|call| call.label == label).unwrap();
             assert!(call.args.last().unwrap().contains(link[0].next.rsplit_once(':').unwrap().0));
         }
-        std::mem::forget(f);
     }
 }
 

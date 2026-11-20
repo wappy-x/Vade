@@ -594,7 +594,12 @@ fn predictor_layer_proposes_without_touching_plain_decoding() {
         assert_eq!(decoder.propose_after(&hidden[1],chosen,3,state_only.as_ref()).unwrap().0,decoder.propose_after(&hidden[1],chosen,3,seen.as_ref()).unwrap().0);
         // The cache after a proposal is the cache with this one position, whatever the depth of the chain was.
         assert_eq!(decoder.propose_after(&hidden[1],chosen,largest,seen.as_ref()).unwrap().1.rows(),after.rows());
-        state_only=Some(decoder.propose_after(&hidden[1],chosen,0,state_only.as_ref()).unwrap().1);seen=Some(after);
+        let cache=decoder.propose_after(&hidden[1],chosen,0,state_only.as_ref()).unwrap().1;
+        assert_eq!(cache.rows(),after.rows());
+        for (name,value) in after.layers() {
+            assert_eq!(bits(&cache.layers()[name]),bits(value),"{name}");
+        }
+        state_only=Some(cache);seen=Some(after);
     }
     assert!(decoder.propose(&decoder.zero_state().unwrap().layers[0].values().next().unwrap().clone(),vocab,1).is_err(),"a token outside the vocabulary is refused");
     use spark_tp::bounded_decoder::HeadRows;

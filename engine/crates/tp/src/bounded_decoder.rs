@@ -808,7 +808,13 @@ impl<'f,C:Compute> Decoder<'f,C> {
         // its prepare is the norm alone and its combine is a BF16 add (see proposer.rs).
         let drafting=layer==d.layers.len();let mixer=self.mixer(layer)?;let streams=if drafting {1} else {d.residual.streams as usize};
         let mut main=self.schedules.borrow_mut();let mut extra=self.draft_schedule.borrow_mut();
-        let schedule=if drafting {extra.as_mut().ok_or("predictor layer is not enabled")?} else {main.get_mut(layer).ok_or("bounded layer is outside recipe")?};
+        // Catch-up reads only the cache producers. In particular, the projection
+        // scheduler cannot bring query projections into this slice.
+        let mut cache=self.draft.as_ref().filter(|_|drafting && state_only)
+            .and_then(|draft|draft.cache_schedule.as_ref()).map(RefCell::borrow_mut);
+        let schedule=if let Some(cache)=cache.as_deref_mut() {cache}
+            else if drafting {extra.as_mut().ok_or("predictor layer is not enabled")?}
+            else {main.get_mut(layer).ok_or("bounded layer is outside recipe")?};
         let owned_plans:Vec<LayerPlan>;
         let plans:Vec<&LayerPlan>=if count==1 {vec![schedule.at(first_context).map_err(|e|e.to_string())?]} else {
             owned_plans=(0..count).map(|row|schedule.at(first_context+row as u64).cloned().map_err(|e|e.to_string())).collect::<Result<Vec<_>>>()?;

@@ -84,7 +84,7 @@ impl<'f,C:Compute> Decoder<'f,C> {
 }
 /// The steps of the predictor layer's plan that its caches depend on, in plan order. A prepare stands for itself and
 /// the two steps it covers. The rest of the layer (attention, experts) and the projections only they read are left out.
-fn seed_steps(plan:&LayerPlan)->Result<Vec<usize>> {
+pub(in crate::bounded_decoder) fn seed_steps(plan:&LayerPlan)->Result<Vec<usize>> {
     let mut units=Vec::new();let mut index=0;
     while index<plan.steps.len() {let step=&plan.steps[index];
         if step.kind==Kind::MhcPrepare {let target=plan.steps.get(index+2).ok_or("predictor prepare is incomplete")?;units.push((index,step.inputs.clone(),target.outputs.iter().map(|o|o.name.clone()).collect::<Vec<_>>()));index+=3;continue;}

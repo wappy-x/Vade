@@ -786,26 +786,47 @@ fn foreign_html_discovery_and_custom_routes_keep_standard_chat_behavior() {
 
 #[test]
 fn response_timing_in_native_and_direct_excludes_role_and_usage_trailer_waits() {
+    use std::sync::Arc;
+    use vade_harness::transport::NativePhase;
+
     for native in [false, true] {
         let (listener, endpoint) = listen();
+        let (observed_tx, observed_rx) = mpsc::channel();
+        let observer = Arc::new(move |phase| {
+            if matches!(phase, NativePhase::Thinking | NativePhase::Generating) {
+                observed_tx.send((phase, Instant::now())).unwrap();
+            }
+        });
         let server = thread::spawn(move || {
             let mut reader = accept(&listener);
             capabilities(&mut reader, CAPS);
             admission(&mut reader, 100, true);
             request(&mut reader);
             let role = "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n";
-            let first = "data: {\"choices\":[{\"delta\":{\"content\":\"first\"}}]}\n\n";
+            let first = "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"first\"}}]}\n\n";
             let tail = format!("{}{DONE}", usage(100, 0));
+            let observe = |expected| {
+                let (phase, at) = observed_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+                assert_eq!(phase, expected);
+                at
+            };
+            let role_sent = Instant::now();
             write!(reader.get_mut(), "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{role}", role.len() + first.len() + ANSWER.len() + tail.len()).unwrap();
             thread::sleep(Duration::from_millis(40));
+            let first_sent = Instant::now();
             reader.get_mut().write_all(first.as_bytes()).unwrap();
+            let first_observed = observe(NativePhase::Thinking);
             thread::sleep(Duration::from_millis(80));
+            let last_sent = Instant::now();
             reader.get_mut().write_all(ANSWER.as_bytes()).unwrap();
+            let last_observed = observe(NativePhase::Generating);
             thread::sleep(Duration::from_millis(160));
             reader.get_mut().write_all(tail.as_bytes()).unwrap();
+            (role_sent, first_sent, first_observed, last_sent, last_observed)
         });
         let context = if native {
             let mut model = NativeModel::new(&endpoint).unwrap();
+            model.set_progress_observer(Some(observer));
             let conversation = Conversation::from_request(json::parse(r#"{"model":"mock","stream":true,"messages":[{"role":"user","content":"timing"}]}"#).unwrap(), Limits::default()).unwrap();
             model
                 .complete(
@@ -817,6 +838,7 @@ fn response_timing_in_native_and_direct_excludes_role_and_usage_trailer_waits() 
             model.context().clone()
         } else {
             let mut client = ChatClient::new(&endpoint).unwrap();
+            client.set_progress_observer(Some(observer));
             client
                 .stream(
                     "mock",
@@ -830,13 +852,17 @@ fn response_timing_in_native_and_direct_excludes_role_and_usage_trailer_waits() 
                 .unwrap();
             client.context().clone()
         };
-        server.join().unwrap();
+        let (role_sent, first_sent, first_observed, last_sent, last_observed) =
+            server.join().unwrap();
         let turn = context.turns.back().unwrap();
-        assert!(turn.first_token_elapsed.unwrap() >= Duration::from_millis(30));
+        assert!(turn.first_token_elapsed.unwrap() >= first_sent - role_sent);
+        // Each token is timed between the socket write and the progress
+        // callback. Bound decode using those timestamps, with the trailer
+        // held back until the last token is observed.
         let decode = turn.decode_elapsed.unwrap();
         assert!(
-            decode >= Duration::from_millis(60) && decode < Duration::from_millis(180),
-            "{decode:?}"
+            (last_sent - first_observed..=last_observed - first_sent).contains(&decode),
+            "native={native}: decode {decode:?} outside the generated token interval"
         );
         assert!(turn.speed().contains("prompt 100 tokens · cached 0 tokens"));
     }

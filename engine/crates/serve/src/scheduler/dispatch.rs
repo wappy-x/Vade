@@ -1273,8 +1273,8 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
             let rows = if decoding || (owns && other_runnable) || (!owns && config.prefill_chunk < 512) { config.prefill_chunk }
                 else { job.generation.state.session.prefill_chunk_size(job.ready.prompt.len()) };
             let rows = rows.max(job.generation.state.session.prefill_chunk_min());
-            let chunk = if job.prefill_rows != 0 { job.prefill_rows }
-                else { rows.min(job.ready.prompt.len() - context) };
+            let chunk = if job.prefill_rows != 0 { job.prefill_rows } else { super::prompt_workspace::prompt_chunk(job.ready.prompt.len() - context,
+                context, rows, job.generation.state.session.prefill_chunk_size(job.ready.prompt.len()), decoding, shared_waiters, foreground.is_some_and(|id| id != job.id)) };
             // Complete the owner's wide tile without layer waits while its
             // queued peers depend on this prefix; unrelated work still yields.
             let slice = (other_runnable || chunk > config.prefill_chunk && !shared_waiters || job.ready.request.priority == 0)

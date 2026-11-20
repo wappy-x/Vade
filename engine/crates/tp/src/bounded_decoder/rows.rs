@@ -5,6 +5,7 @@ use super::*;
 use spark_gpu_probe::prompt_ops::{Op as Row,Shape as RowShape};
 #[path="rows/pools.rs"] mod pools;
 #[path="rows/seed.rs"] mod seed;
+pub(super) use seed::seed_steps;
 #[path="rows/solo.rs"] mod solo;
 #[path="rows/shared.rs"] mod shared; #[path="rows/recurrent.rs"] mod recurrent;
 #[path="rows/wide_charge.rs"] mod wide_charge;

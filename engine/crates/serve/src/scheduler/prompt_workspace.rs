@@ -16,6 +16,17 @@ pub(super) fn contention<E:Engine,T:Tokenizer>(jobs:&[Active<'_, '_, E,T>],i:usi
     let shared_waiters = !queued.is_empty() && !queued_runnable;
     (other_runnable,decoding,shared_waiters)
 }
+/// A cold prompt that arrives behind a live decoder and would take exactly two contended slices
+/// (the engine's minimum tile, then the rest) finishes in one turn when the engine's own idle chunk
+/// funds it, nothing waits on its prefix and no other chat holds priority. One prompt runs per turn,
+/// so due decode still runs before the next prompt. Longer prompts and idle or lone chats keep their path.
+pub(super) fn whole_short_prompt(remaining:usize,context:usize,rows:usize,funded:usize,decoding:bool,shared_waiters:bool,foreground_other:bool)->bool {
+    decoding && context==0 && !shared_waiters && !foreground_other && remaining>rows && remaining<=2*rows && remaining<=funded
+}
+/// The next prompt call's rows: the whole remainder when `whole_short_prompt` holds, else at most `rows`.
+pub(super) fn prompt_chunk(remaining:usize,context:usize,rows:usize,funded:usize,decoding:bool,shared_waiters:bool,foreground_other:bool)->usize {
+    if whole_short_prompt(remaining,context,rows,funded,decoding,shared_waiters,foreground_other) { remaining } else { rows.min(remaining) }
+}
 pub(super) fn prepare<'e,'t,E:Engine,T:Tokenizer>(engine:&'e E,(pool,retained):(usize,usize),jobs:&[Active<'e,'t,E,T>],active:&[Active<'e,'t,E,T>],retired:&[Retired<E::Session<'e>>],alone:bool,request_hold:impl Fn(&Ready)->usize)->Result<(),String> {
     let reserved = reservations(jobs.iter().map(|j| &j.generation.state)
         .chain(active.iter().map(|j| &j.generation.state))
