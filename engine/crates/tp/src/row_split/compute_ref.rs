@@ -124,7 +124,6 @@ impl<C:Compute> Compute for &C {
     fn rows_phase_end(&self)->Result<()> {(**self).rows_phase_end()}
     fn rows_unrecorded(&self,p:bool)->Result<bool> {(**self).rows_unrecorded(p)}
     fn prompt_end(&self)->Result<()> {(**self).prompt_end()}
-    fn lone_prompt_end(&self)->Result<()> {(**self).lone_prompt_end()}
     fn prompt_seeds(&self)->bool {(**self).prompt_seeds()}
     fn rows_charge(&self,bytes:usize) {(**self).rows_charge(bytes)}
     fn rows_follow(&self,follows:bool) {(**self).rows_follow(follows)}

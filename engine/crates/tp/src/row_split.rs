@@ -245,7 +245,6 @@ impl<C:Compute,E:Exchange> Compute for Split<C,E> {
     fn rows_phase_end(&self)->Result<()> {self.compute.rows_phase_end()}
     fn rows_unrecorded(&self,p:bool)->Result<bool> {self.compute.rows_unrecorded(p)}
     fn prompt_end(&self)->Result<()> {self.compute.prompt_end()}
-    fn lone_prompt_end(&self)->Result<()> {self.compute.lone_prompt_end()}
     fn prompt_seeds(&self)->bool {self.compute.prompt_seeds()}
     fn rows_charge(&self,bytes:usize) {self.compute.rows_charge(bytes)}
     fn rows_follow(&self,follows:bool) {self.compute.rows_follow(follows)}
@@ -589,20 +588,6 @@ impl<'f,C:Compute,E:Exchange> Factory<'f,C,E> {
     /// Only one synchronous execution runs at a time. Charge its scratch once;
     /// each live request separately funds committed and unpublished state.
 pub fn workspace_reservation_bytes(&self)->usize {self.workspace}
-    fn finish_prompt_group(&self, id: u64, position: u64, rows: usize, live: usize) -> Result<()> {
-        crate::mxfp8_projection::served_counts(self.split.topology.rank,id,"prompt");
-        if live == 1 && position == 0 && self.lease_bytes.get() == 0
-            && crate::bounded_decoder::trims_spares_first(rows, position)
-            && crate::bounded_decoder::group_pool_cap(rows).is_none()
-            && !self.prompt_spares.borrow().contains_key(&id)
-        {
-            self.split.lone_prompt_end()?;
-        } else {
-            self.split.prompt_end()?;
-        }
-        self.return_prompt_spares(id)
-    }
-
     /// One prompt group on this rank, with its peak device bytes against what admission
     /// charged for the sessions now live. Printed for a refused group too.
     fn prompt_group(&self,decoder:&Decoder<'_,&Split<C,E>>,tokens:&[u32],old:&State<C::Value>,live:usize,id:u64,last:bool)->Result<(Vec<Vec<f32>>,State<C::Value>)> {
@@ -711,7 +696,6 @@ pub fn workspace_reservation_bytes(&self)->usize {self.workspace}
                     // A plain step of a session with open verify rows settles them first, as the controller does (Session::settle).
                     if state.is_none() && let Some(rows)=open.take() {if rows.carried()>0 {return Err("worker plain step has carried rows".into());}*state=Some(rows.settle(decoder)?);}
                     let state=state.as_mut().ok_or("worker session has open verify rows")?;
-                    let position=state.position;
                     let last=code==5 && token&LAST_GROUP!=0;
                     let next=if code==5 {let rows=(token&(LAST_GROUP-1)) as usize;if rows==0 || rows>self.current_prompt_group() {return Err("worker prompt group exceeds its bound".into());}
                         let mut bytes=vec![0;rows*4];self.split.exchange.borrow_mut().command_payload(&mut bytes)?;
@@ -720,7 +704,7 @@ pub fn workspace_reservation_bytes(&self)->usize {self.workspace}
                     self.split.exchange.borrow_mut().complete()?;*state=next;
                     // The prompt's last group is done and the state before it is gone: decode steps follow. The pool is trimmed
                     // now, on this rank as on the controller, off the first decode step.
-                    if last {self.finish_prompt_group(id,position,(token&(LAST_GROUP-1)) as usize,live)?;}Ok(())
+                    if last {crate::mxfp8_projection::served_counts(self.split.topology.rank,id,"prompt");self.split.prompt_end()?;self.return_prompt_spares(id)?;}Ok(())
                 });let returned=self.return_prompt_lease();result?;returned?;},
                 26=>{self.return_prompt_lease()?;self.split.exchange.borrow_mut().complete()?;},
                 25=>{self.agree_prompt_lease(usize::try_from(id).map_err(|_|"prompt lease exceeds address space")?,sessions.len())?;self.split.exchange.borrow_mut().complete()?;},
@@ -1005,7 +989,7 @@ impl<C:Compute,E:Exchange> Session<'_,C,E> {
             // The prompt ends: one line of every prompt kernel's launch count in this process, so a served log
             // proves which paths ran (large-group runs, row stages, pool windows).
             if last {eprintln!("SERVED PROMPT COUNTS rank={} session={} {}",self.factory.split.topology.rank,self.id,spark_gpu_probe::prompt_launches::line());}
-            if last {self.factory.finish_prompt_group(self.id,position,tokens.len(),self.factory.active.get())?;}
+            if last {crate::mxfp8_projection::served_counts(self.factory.split.topology.rank,self.id,"prompt");self.factory.split.prompt_end()?;self.factory.return_prompt_spares(self.id)?;}
         }Ok(logits)
     }
     fn token(&mut self,token:u32,prefill:bool)->Result<Vec<f32>> {
