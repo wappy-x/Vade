@@ -123,13 +123,15 @@ pub fn run(args:&[String],checkpoint:CheckpointAdmission,root:&Path,output_setti
         startup::step("prompt_group");
         // The largest prompt group this budget funds, agreed by the ranks; its buffers are in the workspace below.
         // Before the group is chosen: a server whose latent layers are all absorbed is not charged the expanded rows it never makes.
-        let engine=engine.with_absorbed_charges()?.negotiate_prompt_group(budget)?.with_memo_bound()?;
+        let (engine,floor,predicted)=engine.with_absorbed_charges()?.with_prompt_group_and_memo(budget)?;
         startup::step("memory_admission");
         let resident=backend.accounted_bytes();let workspace=engine.workspace_reservation_bytes();
         let local=budget.saturating_sub(resident).saturating_sub(workspace);
         let pool=engine.negotiate_available_bytes(local)?;let reservation=engine.full_state_reservation_bytes();
         eprintln!("TEXT ADMISSION rank={rank} context={context} budget_bytes={budget} resident_bytes={resident} shared_workspace_bytes={workspace} session_pool_bytes={pool} full_session_bytes={reservation} cache_append_reservation_bytes={} index_append_reservation_bytes={} bf16_copy_bytes={} bf16_copy_matrices={} mhc_host_parameter_bytes={}",engine.cache_append_reservation_bytes(),engine.index_append_reservation_bytes(),spark_tp::resident_weights::BF16_COPY_BYTES.load(std::sync::atomic::Ordering::Relaxed),spark_tp::resident_weights::BF16_COPY_MATRICES.load(std::sync::atomic::Ordering::Relaxed),conductor.as_ref().map_or(0,|conductor|conductor.parameter_bytes()));
         eprintln!("TEXT PROMPT GROUP rank={rank} rows={} shared_workspace_bytes={workspace}",engine.prompt_group_rows());
+        eprintln!("TEXT PROMPT GROUP FLOOR rank={rank} rows={} floor_bytes={floor} predicted_pool_bytes={predicted} local_pool_bytes={local}",engine.prompt_group_rows());
+        if local!=predicted {eprintln!("TEXT PROMPT GROUP FLOOR WARNING predicted and admitted pool differ");}
         if spark_tp::row_split::admit_service_memory(resident,workspace,budget).is_err() || reservation>pool {
             return Err(format!("text service memory refusal: CONTEXT={context}; budget={budget}; resident={resident}; shared_workspace={workspace}; session_pool={pool}; full_session={reservation}; reduce CONTEXT"));
         }

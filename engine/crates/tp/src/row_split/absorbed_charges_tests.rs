@@ -4,7 +4,7 @@ use crate::bounded_decoder::{Host,LatentRows,TestCheckpoint,group_workspace_byte
 use engine_model::safetensors::Dtype;
 /// The host twin, except that it answers the load question the way a device does: `base` for the checkpoint's latent
 /// layers, `draft` for the predictor layer (the names under `prefix`). No test here runs a row.
-struct Loaded {base:Cell<bool>,draft:Cell<bool>,prefix:String}
+struct Loaded {base:Cell<bool>,draft:Cell<bool>,prefix:String,memo:Option<crate::projection_memo::Summary>}
 macro_rules! host {($(fn $name:ident($($arg:ident:$ty:ty),*)->$out:ty;)*)=>{$(
     fn $name(&self,$($arg:$ty),*)->$out {Host.$name($($arg),*)}
 )*};}
@@ -40,6 +40,8 @@ impl Compute for Loaded {
         fn rows_finish(p:Self::Pass,x:&Self::Value,m:usize)->Result<Self::Value>;
     }
     fn has_latent_absorption(&self,name:&str)->bool {if name.starts_with(&self.prefix) {self.draft.get()} else {self.base.get()}}
+    fn memo_summary(&self,_:&CheckpointAdmission)->Option<crate::projection_memo::Summary> {self.memo}
+    fn freeze_memo(&self,plan:crate::projection_memo::Plan)->Result<crate::projection_memo::Plan> {Ok(plan)}
     fn state_allocations(&self,v:&Self::Value,out:&mut Vec<(usize,usize)>)->bool {Host.state_allocations(v,out)}
 }
 /// Two ranks: every gathered word comes back as the smaller of this rank's and `peer`.
@@ -59,7 +61,33 @@ const CONTEXT:usize=8193;
 fn checkpoint(predictor:bool)->TestCheckpoint {TestCheckpoint::build_with(Dtype::Bf16,true,CONTEXT as u64,predictor,|_|{})}
 fn engine(c:&CheckpointAdmission,base:bool,draft:bool,peer:usize)->Factory<'_,Loaded,Wire> {
     let prefix=format!("model.language_model.layers.{}.",c.description().layers.len());
-    Factory::new(c,Split::new(Loaded {base:Cell::new(base),draft:Cell::new(draft),prefix},Wire {peer:Cell::new(peer)}).unwrap(),CONTEXT,vec![0]).unwrap()
+    Factory::new(c,Split::new(Loaded {base:Cell::new(base),draft:Cell::new(draft),prefix,memo:None},Wire {peer:Cell::new(peer)}).unwrap(),CONTEXT,vec![0]).unwrap()
+}
+#[test]
+fn prompt_group_requires_the_plain_floor_after_the_memo_bound() {
+    use crate::{projection_memo::{FULL,Plan,Summary},service_memory::{with_memo_bound,workspace_for_prompt_group_with}};
+    let c=checkpoint(false);
+    let summary=Summary {unabsorbed:1,selection:FULL/12-1,chunk:1};
+    let make=|| {
+        let mut e=engine(&c.admission,true,true,usize::MAX).with_absorbed_charges().unwrap();
+        e.split.compute.memo=Some(summary);
+        e.reservation=1;
+        e
+    };
+    let e=make();
+    let plan=Plan::new(Some(summary),LIVE_SESSIONS);
+    let floor=LIVE_SESSIONS*e.charge_plan.request(PROMPT_GROUP_MAX/LIVE_SESSIONS,PROMPT_GROUP_MAX).unwrap();
+    let threshold=|rows| {
+        let before=workspace_for_prompt_group_with(&c.admission,CONTEXT,e.workspace,rows,e.latent_rows).unwrap();
+        let after=with_memo_bound(before,plan).unwrap();
+        assert!(after<before && e.resident+after+floor>e.resident+before+e.reservation);
+        e.resident+after+floor
+    };
+    let (half,wide)=(threshold(512),threshold(1024));
+    for (budget,rows) in [(0,256),(half-1,256),(half,512),(wide-1,512),(wide,1024)] {
+        let (e,actual,pool)=make().with_prompt_group_and_memo(budget).unwrap();
+        assert_eq!((e.group,actual,pool),(rows,floor,budget.saturating_sub(e.resident).saturating_sub(e.workspace)));
+    }
 }
 #[test]
 fn a_server_that_expands_rows_keeps_every_charge() {

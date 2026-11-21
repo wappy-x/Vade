@@ -79,9 +79,15 @@ pub fn workspace_for_latent_rows(checkpoint:&CheckpointAdmission,context:usize,w
 pub fn largest_prompt_group(checkpoint:&CheckpointAdmission,context:usize,workspace:usize,resident:usize,session:usize,budget:usize)->Result<usize> {largest_prompt_group_with(checkpoint,context,workspace,resident,session,budget,LatentRows::Expanded)}
 /// The same for a server whose latent layers took `rows`.
 pub fn largest_prompt_group_with(checkpoint:&CheckpointAdmission,context:usize,workspace:usize,resident:usize,session:usize,budget:usize,rows:LatentRows)->Result<usize> {
+    largest_prompt_group_if(checkpoint,context,workspace,(resident,session,budget),rows,|_|Ok(true))
+}
+pub(crate) fn largest_prompt_group_if(checkpoint:&CheckpointAdmission,context:usize,workspace:usize,charges:(usize,usize,usize),rows:LatentRows,allows:impl Fn(usize)->Result<bool>)->Result<usize> {
     use crate::bounded_decoder::{PROMPT_GROUP,PROMPT_GROUP_MAX};
+    let (resident,session,budget)=charges;
     for group in [PROMPT_GROUP_MAX,PROMPT_GROUP_MAX/2] {
-        if group>PROMPT_GROUP && resident.checked_add(workspace_for_prompt_group_with(checkpoint,context,workspace,group,rows)?).and_then(|n|n.checked_add(session)).is_some_and(|n|n<=budget) {return Ok(group);}
+        if group<=PROMPT_GROUP {continue;}
+        let workspace=workspace_for_prompt_group_with(checkpoint,context,workspace,group,rows)?;
+        if resident.checked_add(workspace).and_then(|n|n.checked_add(session)).is_some_and(|n|n<=budget) && allows(workspace)? {return Ok(group);}
     }
     Ok(PROMPT_GROUP)
 }

@@ -571,14 +571,20 @@ impl<'f,C:Compute,E:Exchange> Factory<'f,C,E> {
     }
     /// All weights, including the optional predictor, are loaded before this call.
     /// Group selection has already used the full allowance, so its shape stays fixed.
-    pub fn with_memo_bound(mut self)->Result<Self> {
+    pub fn with_memo_bound(self)->Result<Self> {
+        let plan=self.memo_plan()?;
+        self.apply_memo_bound(plan)
+    }
+    fn memo_plan(&self)->Result<crate::projection_memo::Plan> {
         if self.memo_admitted {return Err("memo startup charge is already set".into());}
         if self.active.get()!=0 {return Err("memo admission requires no live session".into());}
         let local=crate::projection_memo::record(self.split.memo_summary(self.checkpoint));
         let count=local.len().checked_mul(self.split.topology.parts as usize).ok_or("memo record count overflow")?;
         let records=self.split.exchange.borrow_mut().gather(&local,count)?;
         if records.len()!=count {return Err("memo rank record count differs".into());}
-        let plan=crate::projection_memo::agree(&records,LIVE_SESSIONS)?;
+        crate::projection_memo::agree(&records,LIVE_SESSIONS)
+    }
+    fn apply_memo_bound(mut self,plan:crate::projection_memo::Plan)->Result<Self> {
         let locked=self.split.freeze_memo(plan)?;
         if locked!=plan {return Err("memo device capacity differs from its startup charge".into());}
         self.workspace=crate::service_memory::with_memo_bound(self.workspace,locked)?;self.memo_admitted=true;self.init_prompt_lease_plan()?;
@@ -624,11 +630,39 @@ pub fn workspace_reservation_bytes(&self)->usize {self.workspace}
     /// the larger group's buffers; past 256 rows a recurrent state copy can wait behind its
     /// source, so those copies are charged too. Row bits do not depend on the group.
     /// Every rank calls this after the predictor is loaded and before the session pool is negotiated.
-    pub fn negotiate_prompt_group(mut self,budget:usize)->Result<Self> {
+    pub fn negotiate_prompt_group(self,budget:usize)->Result<Self> {
         if self.memo_admitted {return Err("prompt group selection follows memo admission".into());}
-        use crate::bounded_decoder::{PROMPT_GROUP,PROMPT_GROUP_MAX};
         let resident=self.split.memory_bytes().map_or(self.resident,|m|m.0);
         let offer=crate::service_memory::largest_prompt_group_with(self.checkpoint,self.context,self.workspace,resident,self.reservation,budget,self.latent_rows)?;
+        self.agree_prompt_group(offer)
+    }
+    /// Keep the full-session test and fund every short plain chat from the pool left after the memo bound.
+    pub fn with_prompt_group_and_memo(self,budget:usize)->Result<(Self,usize,usize)> {
+        use crate::service_memory::{largest_prompt_group_if,with_memo_bound};
+        let plan=self.memo_plan()?;
+        let resident=self.split.memory_bytes().map_or(self.resident,|m|m.0);
+        let floor=self.prompt_group_pool_floor()?;
+        let pool=|workspace|Ok::<_,String>(budget.saturating_sub(resident).saturating_sub(with_memo_bound(workspace,plan)?));
+        let offer=largest_prompt_group_if(self.checkpoint,self.context,self.workspace,(resident,self.reservation,budget),
+            self.latent_rows,|workspace|Ok(pool(workspace)?>=floor))?;
+        let engine=self.agree_prompt_group(offer)?;
+        let predicted=pool(engine.workspace)?;
+        Ok((engine.apply_memo_bound(plan)?,floor,predicted))
+    }
+    fn prompt_group_pool_floor(&self)->Result<usize> {
+        use crate::bounded_decoder::{LatentRows,PROMPT_GROUP_MAX};
+        let prompt=PROMPT_GROUP_MAX/LIVE_SESSIONS;
+        // Use the same shape at the widest group even if the configured context is shorter.
+        let per_chat=if self.context<PROMPT_GROUP_MAX {
+            let mut plan=crate::admission_plan::SessionChargePlan::for_sparse_heads(
+                self.checkpoint.description(),self.split.sparse_topology(),PROMPT_GROUP_MAX)?;
+            if matches!(self.latent_rows,LatentRows::Absorbed {..}) {plan.drop_expanded_rows();}
+            plan.request(prompt,PROMPT_GROUP_MAX)?
+        } else {self.charge_plan.request(prompt,PROMPT_GROUP_MAX)?};
+        LIVE_SESSIONS.checked_mul(per_chat).ok_or_else(||"prompt group pool floor overflow".into())
+    }
+    fn agree_prompt_group(mut self,offer:usize)->Result<Self> {
+        use crate::bounded_decoder::{PROMPT_GROUP,PROMPT_GROUP_MAX};
         let group=self.negotiate_available_bytes(offer)?;
         if ![PROMPT_GROUP,PROMPT_GROUP_MAX/2,PROMPT_GROUP_MAX].contains(&group) || group>offer {return Err("ranks disagree on the prompt group".into());}
         self.workspace=crate::service_memory::workspace_for_prompt_group_with(self.checkpoint,self.context,self.workspace,group,self.latent_rows)?;self.group=group;Ok(self)
