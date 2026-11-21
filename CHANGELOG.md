@@ -7,6 +7,20 @@ A short revision such as `380d8e5` or a number such as PR 142 names a revision
 or pull request of the private development history. This repository does not
 hold them ([glossary](docs/GLOSSARY.md#ho), "Main `abc1234`").
 
+## v0.2.0-rc.24 - 2026-11-20
+
+GLM 5.3 Flash on two Sparks verifies proposed tokens faster and can share a proposal pass between two or four live chats. GLM remains a diagnostic text service. These measurements are from the comparisons for the individual changes.
+
+- **Faster verification.** Two-row checks took 54.36 ms, down from 57.57 ms. Four-row checks took 71.74 ms, down from 75.31 ms. Strict depth-three throughput across structured text, code and prose rose from 108.00 to 112.78 tokens/s. All 151,240 compared token IDs matched. The one-row time rose 0.67% pooled and its upper band crossed the guard (train 30).
+- **Shared proposals.** Ready proposals can share a pass at two or four live chats. Four structured chats rose from 51.237 to 53.914 aggregate tokens/s (+5.22%). Two structured chats rose from 42.159 to 42.702 aggregate tokens/s (+1.29%). Each comparison cleared all 40 checks and matched all 52,376 compared token IDs (PR 437 and PR 438).
+- **Faster four-chat projection.** Four structured chats measured 51.302, 56.011, 56.046 and 53.994 aggregate tokens/s in base, change, change, base order (+6.42% pooled). Three structured chats gained 3.97% pooled. All 52,376 compared token IDs matched. The comparison cleared 33 of 40 guards and the change landed under a band-only exception (PR 442).
+- **Faster drafted prose.** A single chat reuses layer programs and recurrent operands while verifying its draft. Across a memo, explanation and narrative, drafted throughput rose from 29.0611 to 29.6912 tokens/s (+2.17%). Plain throughput measured 24.0801 to 24.0765 tokens/s. All 23,160 compared token IDs matched (PR 444).
+- **Short prompts arriving during decoding.** In a six-chat burst behind two running chats, completion took 12.170 and 12.182 seconds on the two base starts and 10.601 and 10.610 seconds on the changed starts. All 6,144 burst and 3,584 control token IDs matched. The separate six-start stack check found a +0.022% plain-prose change by mean start rate.
+- Predictor catch-up runs only the cache producers. The measured gap between passes fell by about 0.052 ms, with all 72 compared answer lists equal. The drafted prose rates overlapped.
+- Test reliability improved for launcher fixtures, token timing and reset replies.
+
+**Measured against rc.23.** In four starts on the same two-Spark pair, mean drafted throughput rose from 27.15 to 29.22 tokens/s for prose (+7.65%), from 33.12 to 35.82 for code (+8.17%), and from 43.59 to 46.23 for structured text (+6.06%). The fixed default request rose from 36.89 to 39.29 tokens/s. Two, four and eight plain chats rose from 33.81 to 34.88, 49.94 to 51.50, and 64.34 to 65.55 aggregate tokens/s, respectively. Cold 8K read time was level with rc.23 given the spread between its two starts, 11.767 s and 10.787 s. The two candidate starts took 10.815 s and 10.728 s. Mean short-prompt first-token time went from 497.93 to 499.05 ms. Plain single-chat rates (rc.23, new, new, rc.23) were 24.246 / 24.258 / 24.128 / 24.254 tokens/s for prose, 24.297 / 24.251 / 24.225 / 24.253 for code, and 24.278 / 24.141 / 24.191 / 24.229 for structured text. Plain speed: the two new starts averaged 0.2 to 0.4 percent under the two rc.23 starts in this run (prose -0.23, code -0.15, structured -0.36 percent); single starts ranged from 0.05 percent above to 0.57 percent below. The second new prose start was 0.49% below the slower rc.23 start, and both new structured starts were 0.2% to 0.4% below the slower rc.23 structured start. All 12 measured rows cleared the comparison's timing rule, and all 69 compared answer lists and 16,800 token IDs matched.
+
 ## v0.2.0-rc.23 - 2026-11-18
 
 GLM now drafts by default. A request that names no draft mode drafts when it
