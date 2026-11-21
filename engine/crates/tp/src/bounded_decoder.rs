@@ -853,7 +853,7 @@ impl<'f,C:Compute> Decoder<'f,C> {
             }
             // A routed down step is never staged: a stage exchanges the unfolded rows, LOCAL FOLD the folded ones.
             if count==1 && matches!(first.kind,Kind::Project|Kind::ExpertProject) {
-                let done=self.projection_stage(index,&plans[0],&mut all_values[0])?;
+                let done=self.projection_stage(index,steps_end,&plans[0],&mut all_values[0])?;
                 if !done.is_empty() {projected.extend(done);continue;}
             }
             if first.kind==Kind::Project {

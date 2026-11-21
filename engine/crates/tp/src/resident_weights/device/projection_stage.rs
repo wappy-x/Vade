@@ -419,13 +419,19 @@ impl<'b,'d> Weights<'b,'d> {
                         rows.push(matrix.rows);counts.push(1);
                     }
                 },
-                Job::Routed {steps,ids,input}=>{
+                Job::Routed {steps,ids,input,middle}=>{
                     let Some(first)=steps.first().and_then(|step|step.weights.first()) else {return Ok(None);};
                     if !(1..=2).contains(&steps.len()) || !self.routes.get(&first.name).is_some_and(Option::is_some) {return Ok(None);}
                     let Some(matrix)=self.matrices.get(&first.name) else {return Ok(None);};
                     let width=if steps[0].kind==Kind::ExpertDown {matrix.cols.checked_mul(ids.len())} else {Some(matrix.cols)};
                     if ids.len()!=8 || width!=Some(input.len()) || ids.is_segmented() || input.is_segmented() {return Ok(None);}
-                    rows.extend(std::iter::repeat_n(matrix.rows,steps.len()*ids.len()));counts.extend(std::iter::repeat_n(ids.len(),steps.len()));
+                    let outputs=if let Some(shape)=middle {
+                        if steps.len()!=2 || steps[0].kind!=Kind::ExpertProject || !matrix.rows.split
+                            || shape.op!=spark_gpu_probe::causal_ops::Op::SwiGlu || shape.lengths().is_none()
+                            || matrix.rows.total.checked_mul(ids.len())!=Some(shape.rows as usize) {return Ok(None);}
+                        1
+                    } else {steps.len()};
+                    rows.extend(std::iter::repeat_n(matrix.rows,outputs*ids.len()));counts.extend(std::iter::repeat_n(ids.len(),outputs));
                 },
                 Job::Gated {name,gate,up,shape}=>{
                     let Some(matrix)=self.matrices.get(*name) else {return Ok(None);};
@@ -450,7 +456,7 @@ impl<'b,'d> Weights<'b,'d> {
     /// that is counted (projection_stage::Counts::refused), so a run can prove no stage was refused.
     pub fn apply_stage(&mut self,b:&Backend<'d>,jobs:&[Job<'_,DeviceVector<'d>>])->Result<Option<Vec<Vec<DeviceVector<'d>>>>> {
         let result=self.offered_stage(b,jobs)?;
-        if result.is_none() && self.mailbox.is_some() {projection_stage::refused();}
+        if result.is_none() && self.mailbox.is_some() && !jobs.iter().any(|job|matches!(job,Job::Routed {middle:Some(_),..})) {projection_stage::refused();}
         Ok(result)
     }
     fn offered_stage(&mut self,b:&Backend<'d>,jobs:&[Job<'_,DeviceVector<'d>>])->Result<Option<Vec<Vec<DeviceVector<'d>>>>> {
@@ -498,7 +504,7 @@ impl<'b,'d> Weights<'b,'d> {
                             if input.len()==1 {vec![self.apply(input[0].0,b,input[0].1,*round)?]}
                             else {let Some(values)=self.apply_batch(b,input,*round)? else {return Ok(None);};values}
                         },
-                        Job::Routed {steps,ids,input}=>{let Some(values)=self.apply_routed(b,steps,ids,input)? else {return Ok(None);};values},
+                        Job::Routed {steps,ids,input,middle}=>{let Some(values)=self.apply_routed(b,steps,ids,input,*middle)? else {return Ok(None);};values},
                         Job::Gated {name,gate,up,shape}=>{
                             let value=b.causal_operation(*shape,[Some(gate),Some(up),None,None],None)?;
                             vec![self.apply(name,b,&value,true)?]
@@ -518,7 +524,7 @@ impl<'b,'d> Weights<'b,'d> {
         if output.len()!=rows.len() || output.len()!=rounds.len() || output.iter().zip(&rows).any(|(value,row)|value.len()!=row.count) || rounds.iter().zip(&rows).any(|(round,row)|*round && !row.split) {return Err("projection stage local row extent differs".into());}
         let owned=jobs.iter().flat_map(|job|match job {
             Job::Project {input,..}=>input.iter().map(|(name,_)|self.kda_local.contains(*name)).collect::<Vec<_>>(),
-            Job::Routed {steps,ids,..}=>vec![false;steps.len()*ids.len()],Job::Gated {..}=>vec![false],
+            Job::Routed {steps,ids,middle,..}=>vec![false;if middle.is_some() {ids.len()} else {steps.len()*ids.len()}],Job::Gated {..}=>vec![false],
         }).collect::<Vec<_>>();
         // A whole output is complete here and already rounded (the check above): kept, not sent.
         let owned=owned.into_iter().zip(&rows).map(|(local,row)|local || !row.split).collect::<Vec<_>>();

@@ -669,7 +669,7 @@ impl<'b,'d> Compute for Device<'b,'d> {
     }
     fn routed_experts(&self,steps:&[engine_model::plan::layer::Step],ids:&Value<'b,'d>,input:&Value<'b,'d>)->Result<Option<Vec<Value<'b,'d>>>> {
         self.ready(ids)?;self.ready(input)?;
-        let Some(projected)=self.weights.borrow_mut().apply_routed(self.backend,steps,&ids.vector,&input.vector)? else {return Ok(None);};
+        let Some(projected)=self.weights.borrow_mut().apply_routed(self.backend,steps,&ids.vector,&input.vector,None)? else {return Ok(None);};
         let picks=ids.words;need(projected.len()==steps.len()*picks,"device routed projection count differs")?;
         let values=projected.into_iter().map(|value|{let words=value.len();self.value(value,words)}).collect::<Result<Vec<_>>>()?;
         values.chunks(picks).map(|stage|self.join(&stage.iter().collect::<Vec<_>>())).collect::<Result<Vec<_>>>().map(Some)
@@ -685,7 +685,7 @@ impl<'b,'d> Compute for Device<'b,'d> {
         for job in jobs {
             mapped.push(match job {
                 Job::Project {input,round}=>{for (_,value) in input {self.ready(value)?;}Job::Project {input:input.iter().map(|(name,value)|(*name,&*value.vector)).collect(),round:*round}},
-                Job::Routed {steps,ids,input}=>{self.ready(ids)?;self.ready(input)?;Job::Routed {steps,ids:&*ids.vector,input:&*input.vector}},
+                Job::Routed {steps,ids,input,middle}=>{self.ready(ids)?;self.ready(input)?;Job::Routed {steps,ids:&*ids.vector,input:&*input.vector,middle:*middle}},
                 Job::Gated {name,gate,up,shape}=>{self.ready(gate)?;self.ready(up)?;Job::Gated {name,gate:&*gate.vector,up:&*up.vector,shape:*shape}},
             });
         }

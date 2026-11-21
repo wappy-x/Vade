@@ -288,7 +288,7 @@ impl<'b,'d> Weights<'b,'d> {
         if SEEN.fetch_or(bit,std::sync::atomic::Ordering::Relaxed)&bit==0 {eprintln!("ROWS FOLD rank={} rows={m} picks={picks} local_rows={local} fused={fast} fold_launches={} verify={} first use",self.topology.rank,rows_fold::launches(one.is_some(),m),!wait);}
         Ok(Some(gathered))
     }
-    pub fn apply_routed(&mut self,b:&Backend<'d>,steps:&[engine_model::plan::layer::Step],ids:&DeviceVector<'_>,input:&DeviceVector<'_>)->Result<Option<Vec<DeviceVector<'d>>>> {
+    pub fn apply_routed(&mut self,b:&Backend<'d>,steps:&[engine_model::plan::layer::Step],ids:&DeviceVector<'_>,input:&DeviceVector<'_>,middle:Option<spark_gpu_probe::causal_ops::Shape>)->Result<Option<Vec<DeviceVector<'d>>>> {
         let Some(first)=steps.first().and_then(|step|step.weights.first()) else {return Ok(None);};
         let key=&first.name;let picks=ids.len();let down=steps[0].kind==Kind::ExpertDown;
         if !routed_shape(steps,picks) {return Ok(None);}
@@ -297,9 +297,23 @@ impl<'b,'d> Weights<'b,'d> {
         if group.phases!=steps.len() || group.picks!=picks || group.down!=down || !group.names.iter().map(String::as_str).eq(steps.iter().flat_map(|step|step.weights.iter().map(|weight|weight.name.as_str()))) {return Ok(None);}
         let stamp=self.cost.start(b);let started=std::time::Instant::now();
         let output=b.device_route_projection(&group.table,ids,input)?;
-        // The stage gather or the device gather below does this round inside its joined put.
-        let (rows,jobs)=(group.rows,group.picks*group.phases);let owed=rows.split && (self.deferring.get() || !self.collecting.get());
-        let output=if owed {output} else {let rounded=b.round_bf16_lanes(&output)?.into_vector();if !b.resident_queue_active() {b.synchronize()?;}rounded};
+        let rows=group.rows;
+        let (output,jobs,owed)=if let Some(shape)=middle {
+            // device_route_table admits only column tiles. Their projection writes
+            // BF16-rounded words, so the two input rounds of the joined put are
+            // already satisfied. SwiGLU reads matching words in pick order.
+            let words=group.picks*rows.count;
+            let output=output.into_resident_shared()?;
+            let gate=output.resident_range(0..words)?;
+            let up=output.resident_range(words..2*words)?;
+            let shape=spark_gpu_probe::causal_ops::Shape {rows:words.try_into().map_err(|_|"local routed middle exceeds ABI")?,..shape};
+            (b.causal_operation(shape,[Some(&gate),Some(&up),None,None],None)?,group.picks,false)
+        } else {
+            // The stage gather or the device gather below does this round inside its joined put.
+            let owed=rows.split && (self.deferring.get() || !self.collecting.get());
+            let output=if owed {output} else {let rounded=b.round_bf16_lanes(&output)?.into_vector();if !b.resident_queue_active() {b.synchronize()?;}rounded};
+            (output,group.picks*group.phases,owed)
+        };
         self.cost.record(||"projection_route_device".into(),stamp,b,0);let compute=started.elapsed().as_nanos();let stamp=self.cost.start(b);
         let result=if rows.split && !self.collecting.get() {
             gather_device(b,self.mailbox.ok_or("routed projection mailbox is absent")?,&mut self.sequence,self.topology,&[(&output,owed)],&vec![rows;jobs])?

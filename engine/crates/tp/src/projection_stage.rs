@@ -5,7 +5,7 @@ use std::collections::{BTreeMap,BTreeSet};
 
 pub enum Job<'a,V> {
     Project {input:Vec<(&'a str,&'a V)>,round:bool},
-    Routed {steps:&'a [Step],ids:&'a V,input:&'a V},
+    Routed {steps:&'a [Step],ids:&'a V,input:&'a V,middle:Option<Shape>},
     Gated {name:&'a str,gate:&'a V,up:&'a V,shape:Shape},
 }
 #[derive(Debug,PartialEq,Eq)]
@@ -13,6 +13,66 @@ pub struct Group {pub indices:Vec<usize>,pub middle:Option<usize>}
 #[derive(Debug,PartialEq,Eq)]
 pub struct Frontier {pub groups:Vec<Group>,pub outputs:Vec<usize>,pub skipped:Vec<usize>}
 fn sole_output(step:&Step)->Option<&str> {if step.outputs.len()==1 {Some(&step.outputs[0].name)} else {None}}
+/// The two routed products can stay local only when their sole reader is
+/// the next SwiGLU, in gate/up order, with the same pick and column shape.
+pub(crate) fn routed_middle(plan:&LayerPlan,gate:usize,up:usize,end:usize,available:&BTreeSet<&str>)->Option<usize> {
+    let middle=up+1;
+    if up!=gate+1 || middle>=end {return None;}
+    let [gate,up,step]=plan.steps.get(gate..=middle)? else {return None;};
+    if gate.kind!=Kind::ExpertProject || up.kind!=Kind::ExpertProject || gate.inputs!=up.inputs
+        || step.kind!=Kind::SwiGlu || !step.weights.is_empty() {return None;}
+    let operands=[sole_output(gate)?,sole_output(up)?];
+    let output=sole_output(step)?;
+    if !step.inputs.iter().map(String::as_str).eq(operands) || available.contains(output)
+        || gate.outputs[0].shape!=up.outputs[0].shape || gate.outputs[0].shape!=step.outputs[0].shape
+        || plan.returns.iter().any(|name|operands.contains(&name.as_str()))
+        || plan.steps.iter().filter(|reader|reader.inputs.iter().any(|name|operands.contains(&name.as_str()))).count()!=1 {return None;}
+    Some(middle)
+}
+
+#[cfg(test)]
+mod routed_middle_tests {
+    use super::*;
+    use engine_model::plan::{ConfigPlan,layer::Topology};
+
+    #[test]
+    fn routed_middle_requires_private_ordered_operands_inside_the_span() {
+        let ConfigPlan::Deferred(description)=ConfigPlan::from_config(include_bytes!("../../model/tests/fixtures/glm/config.json")).unwrap() else {panic!()};
+        let mut plan=(0..description.layers.len()).map(|layer|LayerPlan::new(&description,layer,1,Topology {parts:2,rank:0}).unwrap())
+            .find(|plan|plan.steps.iter().any(|step|step.kind==Kind::ExpertProject)).unwrap();
+        let gate=plan.steps.iter().position(|step|step.kind==Kind::ExpertProject).unwrap();
+        let (up,middle)=(gate+1,gate+2);
+        let available=BTreeSet::new();
+        assert_eq!(routed_middle(&plan,gate,up,plan.steps.len(),&available),Some(middle));
+        assert_eq!(routed_middle(&plan,gate,up,middle,&available),None);
+        plan.steps[middle].inputs.swap(0,1);
+        assert_eq!(routed_middle(&plan,gate,up,plan.steps.len(),&available),None);
+        plan.steps[middle].inputs.swap(0,1);
+        plan.returns.push(plan.steps[up].outputs[0].name.clone());
+        assert_eq!(routed_middle(&plan,gate,up,plan.steps.len(),&available),None);
+    }
+
+    #[test]
+    fn routed_middle_and_shared_down_fit_the_joined_put() {
+        use spark_gpu_probe::tp_put_join::{admitted,table};
+        for (picks,expected_bytes,expected_parts) in [(16,73728,17),(8,40960,9)] {
+            let mut parts=vec![(1024,picks==16);picks];
+            parts.push((2048,true));
+            let words=parts.iter().map(|part|part.0).sum::<usize>();
+            assert_eq!((words*4,parts.len()),(expected_bytes,expected_parts));
+            for rank in 0..2 {
+                let mut start=0;
+                let own=parts.iter().map(|&(count,_)| {
+                    let row=[start,2*start+rank*count,count];
+                    start+=count;
+                    row
+                }).collect::<Vec<_>>();
+                let rows=table(&parts,words*2,&own).unwrap();
+                assert!(admitted(parts.len(),rows.len(),words,words*2));
+            }
+        }
+    }
+}
 fn mixed(step:&Step,plan:&LayerPlan)->bool {
     step.kind==Kind::Project && step.weights.len()==1 && step.weights[0].shape.len()==2 && step.weights[0].shape[1].is_multiple_of(32)
         && matches!(step.weights[0].storage,WeightStorage::Mxfp8|WeightStorage::Plain)
