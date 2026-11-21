@@ -67,6 +67,8 @@ const STAGE_BASE:usize=COMMAND_BYTES+ZERO_BYTES;
 const ZERO_ROWS:usize=crate::resident_launch::stage::ZERO_ROWS;const ZERO_WORDS:usize=1<<15;
 #[derive(Default)]
 pub(super) struct Recorder<'a> {enabled:bool,paused:bool,rows:bool,row_pass:bool,pub(super) failure:Option<String>,calls:Vec<Call>,pieces:BTreeMap<Vec<Grid>,Piece<'a>>,
+    #[cfg(test)]
+    retained_budget: Option<usize>,
     stage:Option<DeviceVector<'a>>,staged:Vec<u8>,bells:Vec<(usize,std::sync::Arc<crate::tp_mailbox_host::Bell>,u64)>,
     zero_source:Option<DeviceVector<'a>>,zeros:Vec<(usize,u64,u32,bool)>,fresh:Vec<(u64,u64)>,fresh_at:u64,recorded:u64,
     // Fresh fills not yet placed (index, target, words); see `fuse_fresh_fills`. A proof run's poison words.
@@ -576,7 +578,10 @@ impl<'a> Backend<'a> {
                 loop {
                     let r=self.recorder.borrow();
                     let retained=r.pieces.values().map(|piece|piece.graph.storage_bytes).sum::<usize>();
+                    #[cfg(not(test))]
                     let fits=retained.saturating_add(storage)<=128*DecodeGraph::MAX_RESERVATION_BYTES;
+                    #[cfg(test)]
+                    let fits=retained.saturating_add(storage)<=r.retained_budget.unwrap_or(128*DecodeGraph::MAX_RESERVATION_BYTES);
                     let evict=!fits && !r.pieces.is_empty();drop(r);if !evict {break;}
                     // Retire the executable used longest ago, after its replays have ended.
                     if !retired {self.synchronize()?;retired=true;}let mut r=self.recorder.borrow_mut();
@@ -684,6 +689,59 @@ impl<'a> Backend<'a> {
         } else {Ok(())}
     }
 }
+#[cfg(test)]
+#[test]
+#[ignore = "requires CUDA and the built layer PTX"]
+fn resident_piece_eviction_preserves_output() -> Result<(), String> {
+    let ptx = crate::layer_ptx()?;
+    let budget = 4 * crate::GraphAllowance::flash(1)?.maximum_bytes();
+    let mut expected = Vec::new();
+    let mut compared_words = 0;
+    for retained_budget in [None, Some(budget)] {
+        crate::driver::with_backend(0, ptx, 1 << 30, |backend| {
+            backend.recorder.borrow_mut().retained_budget = retained_budget;
+            let inputs = (1..=96).map(|blocks| {
+                let values = (0..blocks * 256).map(|i| {
+                    let word = ((i * 19 + blocks * 7) % 101) as f32;
+                    (word - 50.0) / 7.0
+                }).collect::<Vec<_>>();
+                backend.upload_vector(&values)
+            }).collect::<Result<Vec<_>, _>>()?;
+            backend.synchronize()?;
+            let _queue = backend.resident_queue()?;
+            backend.enable_resident_launches()?;
+            for (case, input) in inputs.iter().cycle().take(2 * inputs.len()).enumerate() {
+                // One rounded vector per drain gives one recorded piece per new grid.
+                let output = backend.round_bf16_lanes(input)?.into_vector();
+                let bits = backend.read_vector_values(&output)?.into_iter().map(f32::to_bits);
+                if retained_budget.is_some() {
+                    let reference: &Vec<u32> = &expected[case];
+                    if bits.ne(reference.iter().copied()) {
+                        return Err(format!("eviction changed output bits in case {case}"));
+                    }
+                    compared_words += reference.len();
+                    if backend.graph_storage_bytes() > budget {
+                        return Err(format!("retained graph charge exceeded {budget} bytes in case {case}"));
+                    }
+                } else {
+                    expected.push(bits.collect());
+                }
+            }
+            let evictions = backend.resident_copy_counts().piece_evictions;
+            match retained_budget {
+                None if evictions != 0 => Err("default-budget control evicted pieces".into()),
+                None => Ok(()),
+                Some(_) if evictions < 32 => Err(format!("expected repeated evictions, got {evictions}")),
+                Some(_) => {
+                    println!("RESIDENT EVICTION PASS evictions={evictions} budget_bytes={budget} compared_bytes={}", compared_words * std::mem::size_of::<u32>());
+                    Ok(())
+                }
+            }
+        })?;
+    }
+    Ok(())
+}
+
 #[cfg(test)] mod ramp_tests {
     use super::{part_limit,RAMP};
     #[test] fn boundary_cohort_keys_keep_the_phase_grids_and_row_switch_distinct() {
