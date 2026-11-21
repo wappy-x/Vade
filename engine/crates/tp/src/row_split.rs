@@ -317,7 +317,7 @@ impl<V> std::ops::Deref for KeptSlot<V> {type Target=crate::bounded_decoder::Par
 /// `tails`: for a service with the predictor loaded, each chat's last prompt groups (tokens and
 /// hidden rows, the fewest groups that hold PROMPT_TRAIL rows) until its first verify pass takes them.
 pub struct Factory<'f,C:Compute,E> {checkpoint:&'f CheckpointAdmission,split:Split<C,E>,context:usize,eos:Vec<u32>,prepared:crate::bounded_decoder::Prepared<'f>,reservation:usize,workspace:usize,resident:usize,memo_admitted:bool,
-    /// Rows of the prompt group a chat reads in while no other chat waits. `negotiate_prompt_group` sets it.
+    /// Rows of the prompt group a chat reads in while no other chat waits. The text service sets it with `with_prompt_group_and_memo`.
     group:usize,latent_rows:crate::bounded_decoder::LatentRows,lease_extra:[usize;prompt_lease::SIZES.len()],lease_rows:Cell<usize>,lease_bytes:Cell<usize>,active:Cell<usize>,next_id:Cell<u64>,failed:Cell<bool>,failure:RefCell<Option<String>>,predictor:usize,charge_plan:crate::admission_plan::SessionChargePlan,with_layer:Option<crate::admission_plan::StateChargePlan>,tails:RefCell<BTreeMap<u64,Vec<(Vec<u32>,crate::bounded_decoder::OpenRows<C::Value>)>>>,
     prompt_spares: RefCell<BTreeMap<u64,usize>>,
     /// DEFAULT DRAFTING. `trial_always`: test control. `trial_counts`: trials that started real drafting, real drafting that stopped, trials that gave up.
@@ -546,7 +546,7 @@ impl<'f,C:Compute,E:Exchange> Factory<'f,C,E> {
         Ok((base && seen>0,draft))
     }
     /// Stop charging expanded rows that this server never makes. Every rank calls this once its weights and its
-    /// predictor layer are resident, before the prompt group is chosen (`negotiate_prompt_group`).
+    /// predictor layer are resident, before `with_prompt_group_and_memo` chooses the prompt group.
     /// A latent layer whose expansion matrix took the absorbed form at load expands no row: a prompt group and a decode
     /// step leave `Kind::ExpandKv` before they expand or hold one. MEASURED on the served model: a resumed chat holds 0
     /// expanded rows and a kept prompt holds its state planes only. When every latent layer of the checkpoint is absorbed
@@ -569,8 +569,8 @@ impl<'f,C:Compute,E:Exchange> Factory<'f,C,E> {
         eprintln!("TEXT LATENT ROWS rank={} absorbed=true draft_expands={} workspace_bytes={} workspace_released_bytes={} full_session_bytes={} session_released_bytes={}",self.split.topology.rank,!draft,self.workspace,workspace-self.workspace,self.reservation,reservation-self.reservation);
         Ok(self)
     }
-    /// All weights, including the optional predictor, are loaded before this call.
-    /// Group selection has already used the full allowance, so its shape stays fixed.
+    /// Set the memo bound alone after loading all weights, including the optional predictor.
+    /// The text service uses `with_prompt_group_and_memo` to check the pool before choosing the group.
     pub fn with_memo_bound(self)->Result<Self> {
         let plan=self.memo_plan()?;
         self.apply_memo_bound(plan)
@@ -629,7 +629,7 @@ pub fn workspace_reservation_bytes(&self)->usize {self.workspace}
     /// read, and every exchange and read-back of a layer, for more rows. The workspace grows by
     /// the larger group's buffers; past 256 rows a recurrent state copy can wait behind its
     /// source, so those copies are charged too. Row bits do not depend on the group.
-    /// Every rank calls this after the predictor is loaded and before the session pool is negotiated.
+    /// This selects the group alone. The text service uses `with_prompt_group_and_memo` on every rank.
     pub fn negotiate_prompt_group(self,budget:usize)->Result<Self> {
         if self.memo_admitted {return Err("prompt group selection follows memo admission".into());}
         let resident=self.split.memory_bytes().map_or(self.resident,|m|m.0);

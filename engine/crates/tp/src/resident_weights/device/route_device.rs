@@ -106,7 +106,8 @@ impl<'b,'d> Weights<'b,'d> {
     /// of that token's own one-token route). The rest is `apply_experts` as it stands: gate and up meet in SwiGLU on
     /// this rank's rows, one gather, one placement. The placement table is the identity: the rows are already one a
     /// (token, pick), in that order. None, before any work: a group this path does not take.
-    pub fn apply_routed_rows(&mut self,b:&Backend<'d>,steps:&[engine_model::plan::layer::Step],bound:Option<f32>,ids:&DeviceVector<'_>,input:&DeviceVector<'_>,m:usize,wait:bool)->Result<Option<DeviceVector<'d>>> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_routed_rows(&mut self,b:&Backend<'d>,steps:&[engine_model::plan::layer::Step],bound:Option<f32>,ids:&DeviceVector<'_>,input:&DeviceVector<'_>,m:usize,wait:bool,held:Option<&mut HeldStage<'d>>)->Result<Option<DeviceVector<'d>>> {
         use spark_gpu_probe::prompt_ops::{Op as Row,Shape as RowShape};
         let Some(first)=steps.first().and_then(|step|step.weights.first()) else {return Ok(None);};
         let admitted=if wait {self.routes_rows(m)} else {self.routes_verify_rows(m)};
@@ -137,7 +138,7 @@ impl<'b,'d> Weights<'b,'d> {
         let (parts,words)=(rows.total/local,output.len());
         crate::exchange_trace::kind(||"routed rows".into());
         // PLACED GATHER (`gather_placed`): the rows land in their places in the exchange itself, no place launch.
-        let (out,read)=if let Some(out)=self.gather_placed(b,&output,rows,pairs)? {drop(output);(out,false)} else {
+        let (out,read)=if let Some(out)=self.gather_placed(b,&output,rows,pairs,m,held)? {drop(output);(out,false)} else {
         let gathered=self.gather_small(b,&output)?;if gathered.is_none() {self.gather_mapped(b,&output)?;}drop(output);let stamp=self.cost.start(b);
         // PLACE KEEP (seat DRAFTR, 2026-11-17): a batch step makes the identity place table of its pair count ONCE and keeps
         // it, as a verify pass keeps the tables warmed at startup. Before, a batch step whose pair count was not warmed (a
@@ -174,7 +175,7 @@ impl<'b,'d> Weights<'b,'d> {
     /// and place 7.1 us a call). `batch_layout` lists, for `pairs` jobs of this rank's rows, job p's words as the words
     /// of part 0 then part 1 of pair p: the rows the identity table names. None, before any work: where `gather_small`
     /// would not run or the joined put does not take the shape (the path before then runs unchanged).
-    fn gather_placed(&mut self,b:&Backend<'d>,local:&DeviceVector<'d>,rows:Rows,pairs:usize)->Result<Option<DeviceVector<'d>>> {
+    fn gather_placed(&mut self,b:&Backend<'d>,local:&DeviceVector<'d>,rows:Rows,pairs:usize,m:usize,held:Option<&mut HeldStage<'d>>)->Result<Option<DeviceVector<'d>>> {
         const MOST:usize=spark_gpu_probe::tp_put_join::MOST_JOBS;
         let words=local.len();
         let Some(mailbox)=self.mailbox.filter(|m|self.small.get() && words>0 && words<=m.slot_bytes()/4) else {return Ok(None);};
@@ -183,6 +184,10 @@ impl<'b,'d> Weights<'b,'d> {
             || !spark_gpu_probe::tp_put_join::admitted(1,pairs,words,pairs.saturating_mul(rows.total)) {return Ok(None);}
         self.none_ahead()?;
         let stamp=self.cost.start(b);let list=[rows;MOST];
+        if let Some(held)=held && let Some(out)=self.gather_routed_held(b,mailbox,local,rows,pairs,m,held)? {
+            self.cost.record(||"exchange_device".into(),stamp,b,0);
+            return Ok(Some(out));
+        }
         let out=gather_joined(b,mailbox,&mut self.sequence,self.topology,&[(local,false)],&list[..pairs])?;
         crate::exchange_trace::device(words.saturating_mul(4));
         self.cost.record(||"exchange_device".into(),stamp,b,0);Ok(Some(out))

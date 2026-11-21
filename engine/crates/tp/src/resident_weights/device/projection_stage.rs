@@ -29,11 +29,12 @@ struct Defer(std::rc::Rc<std::cell::Cell<bool>>);
 impl Drop for Defer {fn drop(&mut self) {self.0.set(false);}}
 /// ROWS OVERLAP: the gather `Weights::apply_matrix_stage_open` held: the row count, and each mailbox gather's jobs as
 /// (job index, the matrix's rows, this rank's rows of the job). Given to `Weights::apply_matrix_stage_close`.
-pub struct HeldStage<'d> {m:usize,gathers:Vec<Vec<(usize,Rows,DeviceVector<'d>)>>}
+pub struct HeldStage<'d> {m:usize,gathers:Vec<Vec<(usize,Rows,DeviceVector<'d>)>>,gathered:Option<Vec<(usize,DeviceVector<'d>)>>}
 /// ROWS OVERLAP: the held form has run in this process (one line in the served log).
 static HELD_SEEN:std::sync::atomic::AtomicBool=std::sync::atomic::AtomicBool::new(false);
 /// What a row stage made (None: held) and what it holds.
 type Opened<'d>=(Vec<Option<DeviceVector<'d>>>,Option<HeldStage<'d>>);
+
 impl<'b,'d> Weights<'b,'d> {
     pub fn prepare_kda(&mut self,c:&CheckpointAdmission)->Result<()> {
         let owner=std::ptr::from_ref(c) as usize;
@@ -117,6 +118,7 @@ impl<'b,'d> Weights<'b,'d> {
     /// ROWS OVERLAP: the held gather of `apply_matrix_stage_open`, after a join of the side lane: each held job's
     /// gathered rows, by its job index.
     pub fn apply_matrix_stage_close(&mut self,b:&Backend<'d>,held:HeldStage<'d>)->Result<Vec<(usize,DeviceVector<'d>)>> {
+        if let Some(gathered)=held.gathered {return Ok(gathered);}
         b.resident_side_join();
         let mailbox=self.mailbox.ok_or("held row stage has no mailbox")?;
         let stamp=self.cost.start(b);let mut out=Vec::new();
@@ -128,15 +130,43 @@ impl<'b,'d> Weights<'b,'d> {
     /// [m, total rows], by its job index.
     fn stage_gather(&mut self,b:&Backend<'d>,mailbox:&'b spark_gpu_probe::driver::TpMailbox<'d>,m:usize,held:&[(usize,Rows,&DeviceVector<'d>)])->Result<Vec<(usize,DeviceVector<'d>)>> {
         let mut parts=Vec::with_capacity(held.len()*m);let mut rows=Vec::with_capacity(held.len()*m);
+        Self::stage_parts(m,held,&mut parts,&mut rows)?;
+        projection_stage::checked_rows(&rows)?;
+        let joined=gather_joined(b,mailbox,&mut self.sequence,self.topology,&parts.iter().map(|part|(part,false)).collect::<Vec<_>>(),&rows)?;
+        Self::stage_views(m,held,&joined,0)
+    }
+    fn stage_parts(m:usize,held:&[(usize,Rows,&DeviceVector<'d>)],parts:&mut Vec<DeviceVector<'d>>,rows:&mut Vec<Rows>)->Result<()> {
         for (_,matrix_rows,whole) in held {
             for token in 0..m {parts.push(whole.resident_range(token*matrix_rows.count..(token+1)*matrix_rows.count)?);rows.push(*matrix_rows);}
         }
-        projection_stage::checked_rows(&rows)?;
-        let joined=gather_joined(b,mailbox,&mut self.sequence,self.topology,&parts.iter().map(|part|(part,false)).collect::<Vec<_>>(),&rows)?;
+        Ok(())
+    }
+    fn stage_views(m:usize,held:&[(usize,Rows,&DeviceVector<'d>)],joined:&DeviceVector<'d>,mut start:usize)->Result<Vec<(usize,DeviceVector<'d>)>> {
         // The tokens of one projection are consecutive parts: [m,total rows] is one range of the gather.
-        let mut start=0;let mut out=Vec::with_capacity(held.len());
+        let mut out=Vec::with_capacity(held.len());
         for (job,matrix_rows,_) in held {let total=matrix_rows.total*m;out.push((*job,joined.resident_range(start..start+total)?));start+=total;}
         Ok(out)
+    }
+    /// The placed routed rows and the held shared outputs have the same readers as their separate gathers.
+    /// Keep the hold intact until both sets of gathered views are ready.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn gather_routed_held(&mut self,b:&Backend<'d>,mailbox:&'b spark_gpu_probe::driver::TpMailbox<'d>,local:&DeviceVector<'d>,rows:Rows,pairs:usize,m:usize,held:&mut HeldStage<'d>)->Result<Option<DeviceVector<'d>>> {
+        let [group]=held.gathers.as_slice() else {return Ok(None);};
+        let [gate,up]=group.as_slice() else {return Ok(None);};
+        if held.m!=m || !super::super::batch_layout::routed_held_admitted(m,pairs,rows,[gate.1,up.1],mailbox.slot_bytes()/4) {return Ok(None);}
+        let jobs=[(gate.0,gate.1,&gate.2),(up.0,up.1,&up.2)];
+        let mut parts=Vec::with_capacity(2*m);
+        let mut layout=vec![rows;pairs];
+        Self::stage_parts(m,&jobs,&mut parts,&mut layout)?;
+        let message=std::iter::once((local,false)).chain(parts.iter().map(|part|(part,false))).collect::<Vec<_>>();
+        b.resident_side_join();
+        let joined=gather_joined(b,mailbox,&mut self.sequence,self.topology,&message,&layout)?;
+        let routed=pairs*rows.total;
+        let out=joined.resident_range(0..routed)?;
+        held.gathered=Some(Self::stage_views(m,&jobs,&joined,routed)?);
+        held.gathers.clear();
+        crate::exchange_trace::device((local.len()+parts.iter().map(DeviceVector::len).sum::<usize>())*4);
+        Ok(Some(out))
     }
     fn stage_core(&mut self,b:&Backend<'d>,jobs:&[(&str,&DeviceVector<'_>,bool)],m:usize,widest:usize,hold:bool)->Result<Option<Opened<'d>>> {
         /// Most parts of one mailbox stage gather (the bound its device test proves).
@@ -349,7 +379,7 @@ impl<'b,'d> Weights<'b,'d> {
         self.cost.record(||"exchange_stage_rows".into(),stamp,b,0);
         // Proof for the served log, once a process: the held form ran (ROWS OVERLAP).
         if hold && !kept.is_empty() && !HELD_SEEN.swap(true,std::sync::atomic::Ordering::Relaxed) {eprintln!("ROWS OVERLAP held a row stage: {} rows, {} held gathers of {} jobs",m,kept.len(),kept.iter().map(Vec::len).sum::<usize>());}
-        Ok(Some((outputs,(hold && !kept.is_empty()).then_some(HeldStage {m,gathers:kept}))))
+        Ok(Some((outputs,(hold && !kept.is_empty()).then_some(HeldStage {m,gathers:kept,gathered:None}))))
     }
     /// The block-FP8 launches of a row stage (`apply_matrix_stage`): `made` takes each job they make.
     fn stage_fp8(&mut self,b:&Backend<'d>,jobs:&[(&str,&DeviceVector<'_>,bool)],m:usize,made:&mut [Option<(DeviceVector<'d>,bool)>])->Result<()> {
@@ -533,5 +563,64 @@ impl<'b,'d> Weights<'b,'d> {
         projection_stage::accepted(jobs.len(),words);
         let mut values=values.into_iter();let result=counts.into_iter().map(|count|values.by_ref().take(count).collect::<Vec<_>>()).collect::<Vec<_>>();
         if values.next().is_some() || result.iter().any(Vec::is_empty) {return Err("projection stage result extent differs".into());}Ok(Some(result))
+    }
+}
+
+#[cfg(test)]
+mod routed_held_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires CUDA"]
+    fn routed_held_device_matches_separate_gathers() -> Result<()> {
+        spark_gpu_probe::driver::with_backend(0,spark_gpu_probe::layer_ptx()?,1<<30,|b| {
+            for rank in 0..2 {
+                for m in 2..=6 {
+                    let mailbox=b.tp_mailbox(1<<19)?;
+                    let mut host=mailbox.take_host().ok_or("fixture mailbox host is absent")?;
+                    let mut weights=Weights::new(None,false);
+                    weights.topology=Topology {rank:rank as u32,parts:2};
+                    weights.attach_mailbox(&mailbox)?;
+                    let row=Rows {start:rank*1024,count:1024,total:2048,split:true};
+                    let pairs=8*m;
+                    let values=|origin:usize,plane:usize,rows:usize| (0..1024*rows).map(|i| {
+                        f32::from_bits(0x3f800000|((i*17+origin*31+plane*47) as u32&0x7fffff))
+                    }).collect::<Vec<_>>();
+                    let peers=[values(1-rank,0,pairs),values(1-rank,1,m),values(1-rank,2,m)];
+                    let routed=b.upload_vector(&values(rank,0,pairs))?;
+                    let gate=b.upload_vector(&values(rank,1,m))?.into_resident_shared()?;
+                    let up=b.upload_vector(&values(rank,2,m))?.into_resident_shared()?;
+                    b.synchronize()?;
+                    let queue=b.resident_queue()?;
+                    b.enable_resident_launches()?;
+                    let bytes=|planes:&[Vec<f32>]|planes.iter().flatten().flat_map(|v|v.to_le_bytes()).collect::<Vec<_>>();
+                    host.deliver(1,&bytes(&peers[..1]))?;
+                    let expected=gather_joined(b,&mailbox,&mut weights.sequence,weights.topology,&[(&routed,false)],&vec![row;pairs])?;
+                    host.deliver(2,&bytes(&peers[1..]))?;
+                    let expected_shared=weights.stage_gather(b,&mailbox,m,&[(0,row,&gate),(1,row,&up)])?;
+                    host.deliver(3,&bytes(&peers))?;
+                    let mut held=HeldStage {m,gathers:vec![vec![(0,row,gate),(1,row,up)]],gathered:None};
+                    let actual=weights.gather_routed_held(b,&mailbox,&routed,row,pairs,m,&mut held)?.ok_or("fixture join declined")?;
+                    let actual_shared=weights.apply_matrix_stage_close(b,held)?;
+                    assert_eq!(weights.sequence,3);
+                    let equal=|a:&DeviceVector<'_>,c:&DeviceVector<'_>|->Result<()> {
+                        let a=b.read_vector_values(a)?;
+                        let c=b.read_vector_values(c)?;
+                        assert!(a.iter().map(|v|v.to_bits()).eq(c.iter().map(|v|v.to_bits())));
+                        Ok(())
+                    };
+                    equal(&actual,&expected)?;
+                    assert_eq!(actual_shared.len(),expected_shared.len());
+                    for ((a_index,a),(c_index,c)) in actual_shared.iter().zip(&expected_shared) {
+                        assert_eq!(a_index,c_index);
+                        equal(a,c)?;
+                    }
+                    drop(queue);
+                    b.synchronize()?;
+                    mailbox.require_success()?;
+                }
+            }
+            Ok(())
+        })
     }
 }

@@ -1,6 +1,20 @@
 //! Checked chunk-major copy ranges. No floating-point operation enters the layout.
 use super::{Rows,Result};
 use std::ops::Range;
+
+/// Two held projections follow the routed rows in one mailbox message.
+#[cfg(any(test,target_os="linux"))]
+pub(super) fn routed_held_admitted(m:usize,pairs:usize,routed:Rows,held:[Rows;2],slot_words:usize)->bool {
+    if !(2..=6).contains(&m) || routed.count==0 || !routed.split || !routed.total.is_multiple_of(routed.count)
+        || pairs==0 || !routed.start.is_multiple_of(routed.count) || routed.start>=routed.total {return false;}
+    let chunks=routed.total/routed.count;
+    let owner=routed.start/routed.count;
+    if held.iter().any(|row|!row.split || row.count==0 || row.count.checked_mul(chunks)!=Some(row.total)
+        || row.count.checked_mul(owner)!=Some(row.start)) {return false;}
+    let Some(words)=held[0].count.checked_add(held[1].count).and_then(|n|n.checked_mul(m))
+        .and_then(|n|routed.count.checked_mul(pairs).and_then(|r|r.checked_add(n))) else {return false;};
+    words<=slot_words && spark_gpu_probe::tp_put_join::admitted(1+2*m,pairs.saturating_add(2*m),words,words.saturating_mul(chunks))
+}
 pub(super) struct Layout {pub stride:usize,pub chunks:usize,pub ranges:Vec<Vec<Range<usize>>>}
 impl Layout {
     /// Every origin owns one complete rank-major chunk, including replicated rows.
@@ -37,6 +51,25 @@ impl Layout {
 }
 #[cfg(test)] mod tests {
     use super::*;
+    #[test]
+    fn routed_and_held_gather_matches_the_separate_placements() {
+        for rank in 0..2 {
+            let row=Rows {start:rank*1024,count:1024,total:2048,split:true};
+            for m in 1..=8 {
+                let picks=m*8;
+                let admitted=routed_held_admitted(m,picks,row,[row;2],1<<17);
+                assert_eq!(admitted,(2..=6).contains(&m));
+                if !admitted {continue;}
+                assert!(!routed_held_admitted(m,picks,row,[row;2],10240*m-1));
+                let separate=[Layout::new(&vec![row;picks]).unwrap(),Layout::new(&vec![row;2*m]).unwrap()];
+                let joined=Layout::new(&vec![row;picks+2*m]).unwrap();
+                let mut expected=separate[0].scatter(rank).unwrap();
+                expected.extend(separate[1].scatter(rank).unwrap().into_iter()
+                    .map(|[from,to,words]|[from+separate[0].stride,to+separate[0].output_words().unwrap(),words]));
+                assert_eq!(joined.scatter(rank).unwrap(),expected);
+            }
+        }
+    }
     #[test] fn ranges_match_the_existing_rank_major_oracle_including_replicated_rows() {
         for chunks in 1..=5 {for jobs in 1..=9 {let rows=(0..jobs).map(|i|{let count=i+1;let split=chunks>1 && i%3!=0;Rows {start:0,count,total:if split {count*chunks} else {count},split}}).collect::<Vec<_>>();
             let p=Layout::new(&rows).unwrap();let values=(0..p.stride*p.chunks).map(|i|f32::from_bits(if i%7==0 {0x80000000} else {i as u32})).collect::<Vec<_>>();

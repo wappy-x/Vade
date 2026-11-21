@@ -60,8 +60,11 @@ impl Exchange for Wire {
 const CONTEXT:usize=8193;
 fn checkpoint(predictor:bool)->TestCheckpoint {TestCheckpoint::build_with(Dtype::Bf16,true,CONTEXT as u64,predictor,|_|{})}
 fn engine(c:&CheckpointAdmission,base:bool,draft:bool,peer:usize)->Factory<'_,Loaded,Wire> {
+    engine_at(c,base,draft,peer,CONTEXT)
+}
+fn engine_at(c:&CheckpointAdmission,base:bool,draft:bool,peer:usize,context:usize)->Factory<'_,Loaded,Wire> {
     let prefix=format!("model.language_model.layers.{}.",c.description().layers.len());
-    Factory::new(c,Split::new(Loaded {base:Cell::new(base),draft:Cell::new(draft),prefix,memo:None},Wire {peer:Cell::new(peer)}).unwrap(),CONTEXT,vec![0]).unwrap()
+    Factory::new(c,Split::new(Loaded {base:Cell::new(base),draft:Cell::new(draft),prefix,memo:None},Wire {peer:Cell::new(peer)}).unwrap(),context,vec![0]).unwrap()
 }
 #[test]
 fn prompt_group_requires_the_plain_floor_after_the_memo_bound() {
@@ -87,6 +90,36 @@ fn prompt_group_requires_the_plain_floor_after_the_memo_bound() {
     for (budget,rows) in [(0,256),(half-1,256),(half,512),(wide-1,512),(wide,1024)] {
         let (e,actual,pool)=make().with_prompt_group_and_memo(budget).unwrap();
         assert_eq!((e.group,actual,pool),(rows,floor,budget.saturating_sub(e.resident).saturating_sub(e.workspace)));
+    }
+}
+#[test]
+fn prompt_group_still_requires_the_full_session_charge() {
+    use crate::service_memory::workspace_for_prompt_group_with;
+    let c=checkpoint(false);
+    let mut e=engine(&c.admission,true,true,usize::MAX).with_absorbed_charges().unwrap();
+    let wide=workspace_for_prompt_group_with(&c.admission,CONTEXT,e.workspace,PROMPT_GROUP_MAX,e.latent_rows).unwrap();
+    let half=workspace_for_prompt_group_with(&c.admission,CONTEXT,e.workspace,PROMPT_GROUP_MAX/2,e.latent_rows).unwrap();
+    let floor=e.prompt_group_pool_floor().unwrap();
+    // The memo keeps its full charge in this fixture. The wider group meets the floor exactly.
+    assert_eq!(e.memo_plan().unwrap(),crate::projection_memo::Plan::full());
+    e.reservation=floor+1;
+    let budget=e.resident+wide+floor;
+    assert!(budget<e.resident+wide+e.reservation);
+    assert!(budget>=e.resident+half+e.reservation);
+    let (e,actual_floor,pool)=e.with_prompt_group_and_memo(budget).unwrap();
+    assert_eq!((e.group,actual_floor,pool),(PROMPT_GROUP_MAX/2,floor,budget-e.resident-half));
+}
+#[test]
+fn short_context_keeps_the_widest_group_plain_floor() {
+    let c=checkpoint(false);
+    for absorbed in [false,true] {
+        let full=engine(&c.admission,absorbed,true,usize::MAX).with_absorbed_charges().unwrap();
+        let expected=LIVE_SESSIONS*full.charge_plan.request(PROMPT_GROUP_MAX/LIVE_SESSIONS,PROMPT_GROUP_MAX).unwrap();
+        let short=engine_at(&c.admission,absorbed,true,usize::MAX,PROMPT_GROUP_MAX/2).with_absorbed_charges().unwrap();
+        assert_eq!(short.latent_rows,full.latent_rows);
+        assert!(short.charge_plan.request(PROMPT_GROUP_MAX/LIVE_SESSIONS,PROMPT_GROUP_MAX).is_err());
+        let (e,floor,pool)=short.with_prompt_group_and_memo(usize::MAX).unwrap();
+        assert_eq!((e.group,floor,pool),(PROMPT_GROUP_MAX,expected,usize::MAX-e.resident-e.workspace));
     }
 }
 #[test]

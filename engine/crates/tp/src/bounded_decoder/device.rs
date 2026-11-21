@@ -1013,7 +1013,10 @@ if start==0 && v.pending.as_ref().and_then(|p|p.borrow().state_prefix)==Some(len
         if !self.verify_route.get() && self.batch_route.get()!=3 {return Ok(None);}
         self.ready(ids)?;self.ready(x)?;
         let wait=!self.verify_route.get();
-        let Some(out)=self.weights.borrow_mut().apply_routed_rows(self.backend,steps,bound,&ids.vector,&x.vector,m,wait)? else {return Ok(None);};
+        let join=!wait && bound.is_some() && (2..=6).contains(&m);
+        let mut held=join.then(||self.held_stage.borrow_mut());
+        let held=held.as_deref_mut().and_then(Option::as_mut);
+        let Some(out)=self.weights.borrow_mut().apply_routed_rows(self.backend,steps,bound,&ids.vector,&x.vector,m,wait,held)? else {return Ok(None);};
         let words=out.len();Ok(Some(self.value(out,words)?))
     }
     // Verify passes (up to the row count warmed and charged at predictor startup) run all routed layers on the device without
