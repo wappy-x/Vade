@@ -1,5 +1,8 @@
 //! Bound a temporary prompt workspace before a synchronous scheduler slice.
 use super::{Active,Config,Engine,Ready,Retired,Tokenizer,reservations,shared_prefix};
+
+const CONTENDED_PROMPT_ROWS: usize = 512;
+
 pub(super) fn contention<E:Engine,T:Tokenizer>(jobs:&[Active<'_, '_, E,T>],i:usize,errors:&[Option<String>],queued:&[Ready],config:&Config,shared_prompt_limit:usize)->(bool,bool,bool) {
     let source = &jobs[i];
     // Waiters for this owner's uncommitted prefix cannot run yet.
@@ -23,9 +26,18 @@ pub(super) fn contention<E:Engine,T:Tokenizer>(jobs:&[Active<'_, '_, E,T>],i:usi
 pub(super) fn whole_short_prompt(remaining:usize,context:usize,rows:usize,funded:usize,decoding:bool,shared_waiters:bool,foreground_other:bool)->bool {
     decoding && context==0 && !shared_waiters && !foreground_other && remaining>rows && remaining<=2*rows && remaining<=funded
 }
-/// The next prompt call's rows: the whole remainder when `whole_short_prompt` holds, else at most `rows`.
-pub(super) fn prompt_chunk(remaining:usize,context:usize,rows:usize,funded:usize,decoding:bool,shared_waiters:bool,foreground_other:bool)->usize {
-    if whole_short_prompt(remaining,context,rows,funded,decoding,shared_waiters,foreground_other) { remaining } else { rows.min(remaining) }
+/// Widen long cold reads behind live decoders within the already-funded group.
+pub(super) fn prompt_chunk(
+    remaining: usize, context: usize, (rows, funded): (usize, usize), decoding: bool,
+    shared_waiters: bool, foreground_other: bool, cold_long: bool,
+) -> usize {
+    if whole_short_prompt(remaining, context, rows, funded, decoding, shared_waiters, foreground_other) {
+        return remaining;
+    }
+    let rows = if cold_long && decoding && !shared_waiters && !foreground_other {
+        rows.max(CONTENDED_PROMPT_ROWS.min(funded))
+    } else { rows };
+    rows.min(remaining)
 }
 pub(super) fn prepare<'e,'t,E:Engine,T:Tokenizer>(engine:&'e E,(pool,retained):(usize,usize),jobs:&[Active<'e,'t,E,T>],active:&[Active<'e,'t,E,T>],retired:&[Retired<E::Session<'e>>],alone:bool,request_hold:impl Fn(&Ready)->usize)->Result<(),String> {
     let reserved = reservations(jobs.iter().map(|j| &j.generation.state)

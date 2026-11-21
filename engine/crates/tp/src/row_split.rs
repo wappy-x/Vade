@@ -319,6 +319,7 @@ impl<V> std::ops::Deref for KeptSlot<V> {type Target=crate::bounded_decoder::Par
 pub struct Factory<'f,C:Compute,E> {checkpoint:&'f CheckpointAdmission,split:Split<C,E>,context:usize,eos:Vec<u32>,prepared:crate::bounded_decoder::Prepared<'f>,reservation:usize,workspace:usize,resident:usize,memo_admitted:bool,
     /// Rows of the prompt group a chat reads in while no other chat waits. `negotiate_prompt_group` sets it.
     group:usize,latent_rows:crate::bounded_decoder::LatentRows,lease_extra:[usize;prompt_lease::SIZES.len()],lease_rows:Cell<usize>,lease_bytes:Cell<usize>,active:Cell<usize>,next_id:Cell<u64>,failed:Cell<bool>,failure:RefCell<Option<String>>,predictor:usize,charge_plan:crate::admission_plan::SessionChargePlan,with_layer:Option<crate::admission_plan::StateChargePlan>,tails:RefCell<BTreeMap<u64,Vec<(Vec<u32>,crate::bounded_decoder::OpenRows<C::Value>)>>>,
+    prompt_spares: RefCell<BTreeMap<u64,usize>>,
     /// DEFAULT DRAFTING. `trial_always`: test control. `trial_counts`: trials that started real drafting, real drafting that stopped, trials that gave up.
     /// `answer_marker`: the token that ends an answer's think block; a trial makes its first shadow there (trial.rs).
     trial_always:Cell<bool>,trial_counts:Cell<[u32;3]>,answer_marker:Cell<Option<u32>>,
@@ -348,7 +349,7 @@ impl<'f,C:Compute,E:Exchange> Factory<'f,C,E> {
         let workspace=workspace.checked_add(prepared.fused_boundary_scratch()?.1).ok_or("boundary workspace charge overflow")?;
         if eos.is_empty() || eos.iter().any(|&id|u64::from(id)>=checkpoint.description().vocab) {return Err("service EOS set is invalid".into());}
         let resident=split.memory_bytes().map_or(0,|m|m.0);
-        Ok(Self {checkpoint,split,context,eos,prepared,reservation,workspace,resident,memo_admitted:false,group:crate::bounded_decoder::PROMPT_GROUP,latent_rows:Default::default(),lease_extra:[0;prompt_lease::SIZES.len()],lease_rows:Cell::new(0),lease_bytes:Cell::new(0),active:Cell::new(0),next_id:Cell::new(1),failed:Cell::new(false),batch_ended:Cell::new(None),failure:RefCell::new(None),predictor:0,charge_plan:crate::admission_plan::SessionChargePlan::for_sparse_heads(checkpoint.description(),topology,context)?,with_layer:None,tails:RefCell::new(BTreeMap::new()),trial_always:Cell::new(false),trial_counts:Cell::new([0;3]),answer_marker:Cell::new(None),deep_always:Cell::new(false),pair:RefCell::new(pair::Pair::default()),pair_counts:Cell::new([0;3]),confidence:RefCell::new(Default::default()),confidence_on:Cell::new(true),shared_counts:Cell::new([0;3]),keep:false,#[cfg(test)] kept_tail:kept_charge::Tail::new(checkpoint.description(),topology)?,kept:Cell::new(0),kept_account:Cell::new(None)})
+        Ok(Self {checkpoint,split,context,eos,prepared,reservation,workspace,resident,memo_admitted:false,group:crate::bounded_decoder::PROMPT_GROUP,latent_rows:Default::default(),lease_extra:[0;prompt_lease::SIZES.len()],lease_rows:Cell::new(0),lease_bytes:Cell::new(0),active:Cell::new(0),next_id:Cell::new(1),failed:Cell::new(false),batch_ended:Cell::new(None),failure:RefCell::new(None),predictor:0,charge_plan:crate::admission_plan::SessionChargePlan::for_sparse_heads(checkpoint.description(),topology,context)?,with_layer:None,tails:RefCell::new(BTreeMap::new()),prompt_spares:RefCell::new(BTreeMap::new()),trial_always:Cell::new(false),trial_counts:Cell::new([0;3]),answer_marker:Cell::new(None),deep_always:Cell::new(false),pair:RefCell::new(pair::Pair::default()),pair_counts:Cell::new([0;3]),confidence:RefCell::new(Default::default()),confidence_on:Cell::new(true),shared_counts:Cell::new([0;3]),keep:false,#[cfg(test)] kept_tail:kept_charge::Tail::new(checkpoint.description(),topology)?,kept:Cell::new(0),kept_account:Cell::new(None)})
     }
     /// Let the server's prompt cache fork this service's sessions (`Session::fork`). Every rank of the service
     /// makes the same call. Without it a session cannot be forked and no prompt is kept.
@@ -703,11 +704,12 @@ pub fn workspace_reservation_bytes(&self)->usize {self.workspace}
                     self.split.exchange.borrow_mut().complete()?;*state=next;
                     // The prompt's last group is done and the state before it is gone: decode steps follow. The pool is trimmed
                     // now, on this rank as on the controller, off the first decode step.
-                    if last {crate::mxfp8_projection::served_counts(self.split.topology.rank,id,"prompt");self.split.prompt_end()?;}Ok(())
+                    if last {crate::mxfp8_projection::served_counts(self.split.topology.rank,id,"prompt");self.split.prompt_end()?;self.return_prompt_spares(id)?;}Ok(())
                 });let returned=self.return_prompt_lease();result?;returned?;},
                 26=>{self.return_prompt_lease()?;self.split.exchange.borrow_mut().complete()?;},
                 25=>{self.agree_prompt_lease(usize::try_from(id).map_err(|_|"prompt lease exceeds address space")?,sessions.len())?;self.split.exchange.borrow_mut().complete()?;},
-                3=>{crate::mxfp8_projection::served_counts(self.split.topology.rank,id,"end");self.tails.borrow_mut().remove(&id);if sessions.remove(&id).is_none() {return Err("worker drop has no session".into());}self.capture_report(id);self.split.rows_settle()?;self.split.exchange.borrow_mut().complete()?;},
+                prompt_spares::SNAPSHOT=>{if token!=0 || !sessions.contains_key(&id) {return Err("prompt spare snapshot has no live session".into());}self.snapshot_prompt_spares(id);self.split.exchange.borrow_mut().complete()?;},
+                3=>{crate::mxfp8_projection::served_counts(self.split.topology.rank,id,"end");self.tails.borrow_mut().remove(&id);if sessions.remove(&id).is_none() {return Err("worker drop has no session".into());}self.capture_report(id);self.split.rows_settle()?;self.return_prompt_spares(id)?;self.split.exchange.borrow_mut().complete()?;},
                 // Command 13: one batch step. `token` is the row count; each row follows as a session ID and its input token.
                 13=>self.worker_batch(&mut sessions,(token&!batch::TRACK_BATCH) as usize,token&batch::TRACK_BATCH!=0)?,
                 // The same verify pass and the same kept prefix as the controller, so both ranks hold one state.
@@ -801,6 +803,7 @@ pub fn workspace_reservation_bytes(&self)->usize {self.workspace}
     }
 }
 mod prompt_lease;
+mod prompt_spares;
 mod gate;
 mod price;
 mod trial;
@@ -986,7 +989,7 @@ impl<C:Compute,E:Exchange> Session<'_,C,E> {
             // The prompt ends: one line of every prompt kernel's launch count in this process, so a served log
             // proves which paths ran (large-group runs, row stages, pool windows).
             if last {eprintln!("SERVED PROMPT COUNTS rank={} session={} {}",self.factory.split.topology.rank,self.id,spark_gpu_probe::prompt_launches::line());}
-            if last {crate::mxfp8_projection::served_counts(self.factory.split.topology.rank,self.id,"prompt");self.factory.split.prompt_end()?;}
+            if last {crate::mxfp8_projection::served_counts(self.factory.split.topology.rank,self.id,"prompt");self.factory.split.prompt_end()?;self.factory.return_prompt_spares(self.id)?;}
         }Ok(logits)
     }
     fn token(&mut self,token:u32,prefill:bool)->Result<Vec<f32>> {
@@ -1399,6 +1402,7 @@ impl<C:Compute,E:Exchange> spark_serve::Session for Session<'_,C,E> {
     fn prefill_chunk_size(&self,_:usize)->usize {self.factory.current_prompt_group()}
     fn prefill_chunk_min(&self)->usize {crate::bounded_decoder::PROMPT_SHARED}
     fn prefill_owns_chunks(&self)->bool {true}
+    fn begin_prompt_spare_scope(&mut self) -> Result<()> { self.factory.begin_prompt_spares(self.id) }
     fn prefill_slice(&mut self,tokens:&[u32],final_chunk:bool,_budget:Option<std::time::Duration>,_prompt_end:usize)->Result<Option<Vec<f32>>> {
         self.prompt(tokens,final_chunk).map(Some)
     }
@@ -1436,9 +1440,10 @@ impl<C:Compute,E:Exchange> Drop for Session<'_,C,E> {
     fn drop(&mut self) {
         crate::mxfp8_projection::served_counts(self.factory.split.topology.rank,self.id,"end");if let Some(kept)=self.kept.take() {return self.release_kept(kept);}
         self.factory.pair_leave(self.id);self.factory.capture_report(self.id);
-        if !self.factory.failed.get() {let result=self.factory.split.command_for(3,0,self.id).and_then(|()|self.factory.split.rows_settle()).and_then(|()|self.factory.split.exchange.borrow_mut().complete());if let Err(error)=result {self.factory.remember(error);}}
+        if self.factory.prompt_spares.borrow().contains_key(&self.id) {self.state=None;self.open=None;}
+        if !self.factory.failed.get() {let result=self.factory.split.command_for(3,0,self.id).and_then(|()|self.factory.split.rows_settle()).and_then(|()|self.factory.return_prompt_spares(self.id)).and_then(|()|self.factory.split.exchange.borrow_mut().complete());if let Err(error)=result {self.factory.remember(error);}}
         if self.factory.failed.get() {self.factory.split.exchange.borrow_mut().abort();}
         if self.depth>0 {self.gate.report(self.factory.split.topology.rank,self.id,self.depth,self.step_ms.unwrap_or(0.0));self.confidence_report();}
         if self.trial.proposals()>0 {eprintln!("SERVED TRIAL END rank={} session={} phase={:?} shadows={} matched={} score={} proposal_ms={:.1} waited_steps={} seed_ms={:.1}",self.factory.split.topology.rank,self.id,self.phase,self.trial.proposals(),self.trial.matched(),self.trial.score(),self.trial.proposal_ms(),self.trial.waited(),self.trial.seed_ms());}
-        self.state=None;self.open=None;self.factory.tails.borrow_mut().remove(&self.id);self.factory.active.set(self.factory.active.get()-1);}
+        self.state=None;self.open=None;self.factory.tails.borrow_mut().remove(&self.id);self.factory.prompt_spares.borrow_mut().remove(&self.id);self.factory.active.set(self.factory.active.get()-1);}
 }

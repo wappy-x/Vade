@@ -38,7 +38,6 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
     let min_prompt_age = crate::intake_grace::minimum_prompt_age(crate::intake_grace::load()?);
     let mut burst = crate::intake_burst::Burst::new(crate::intake_burst::load()?.unwrap_or(limits.intake_burst));
     // Retirement/admission gate passed; default on, explicit zero disables it.
-    // Read once, before serving.
     let mut refresh_retired = super::retirement_refresh_hook(
         super::retirement_pressure_refresh(std::env::var("VADE_RETIRE_PRESSURE_REFRESH"))?,
         || engine.refresh_memory_pressure());
@@ -1267,16 +1266,16 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
                 !other_runnable && preparing == 0,request_hold)?;
             let job = &mut jobs[i];
             let context = job.generation.state.tokens.len();
-            // Keep in-flight shapes fixed. Engines with canonical tiles retain
-            // their minimum row count under contention and yield between layers.
             let owns = job.generation.state.session.prefill_owns_chunks();
             let rows = if decoding || (owns && other_runnable) || (!owns && config.prefill_chunk < 512) { config.prefill_chunk }
                 else { job.generation.state.session.prefill_chunk_size(job.ready.prompt.len()) };
             let rows = rows.max(job.generation.state.session.prefill_chunk_min());
+            let cold_long = owns && job.ready.prompt.len() > shared_prefill_max_tokens
+                && job.echo.prefill.as_ref().is_some_and(|prefill| prefill.cache_restore.is_none());
             let chunk = if job.prefill_rows != 0 { job.prefill_rows } else { super::prompt_workspace::prompt_chunk(job.ready.prompt.len() - context,
-                context, rows, job.generation.state.session.prefill_chunk_size(job.ready.prompt.len()), decoding, shared_waiters, foreground.is_some_and(|id| id != job.id)) };
-            // Complete the owner's wide tile without layer waits while its
-            // queued peers depend on this prefix; unrelated work still yields.
+                context, (rows, job.generation.state.session.prefill_chunk_size(job.ready.prompt.len())), decoding, shared_waiters, foreground.is_some_and(|id| id != job.id),
+                cold_long) };
+            // Complete the owner's wide tile without layer waits when queued peers depend on its prefix.
             let slice = (other_runnable || chunk > config.prefill_chunk && !shared_waiters || job.ready.request.priority == 0)
                 .then(|| prefill_budget.slice(contended || !other_runnable));
             errors[i] = (|| -> Result<(), String> {
@@ -1314,6 +1313,7 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
                     job.generation.state.tokens.extend_from_slice(&job.ready.prompt);
                     Some(Event::Prefill)
                 } else {
+                    if cold_long && decoding && chunk > rows { job.generation.state.session.begin_prompt_spare_scope()?; }
                     job.prefill_rows = chunk;
                     job.generation.prefill_slice(&job.ready.prompt, chunk, slice)?
                 };

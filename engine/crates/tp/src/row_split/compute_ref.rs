@@ -118,6 +118,8 @@ impl<C:Compute> Compute for &C {
     fn warm_routed_rows(&self,steps:&[engine_model::plan::layer::Step],picks:usize,max_rows:usize)->Result<()> {(**self).warm_routed_rows(steps,picks,max_rows)}
     fn rows_release(&self)->Result<()> {(**self).rows_release()}
     fn rows_keep(&self)->Result<()> {(**self).rows_keep()}
+    fn prompt_spare_bytes(&self) -> Option<usize> { (**self).prompt_spare_bytes() }
+    fn return_prompt_spares(&self, target: usize) -> Result<(usize, usize)> { (**self).return_prompt_spares(target) }
     fn rows_return_lease(&self)->Result<()> {(**self).rows_return_lease()}
     fn rows_phase_end(&self)->Result<()> {(**self).rows_phase_end()}
     fn rows_unrecorded(&self,p:bool)->Result<bool> {(**self).rows_unrecorded(p)}

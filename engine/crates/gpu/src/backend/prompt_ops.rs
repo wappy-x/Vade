@@ -178,6 +178,14 @@ impl<'a> Backend<'a> {
     /// as each decode token does, instead of releasing every spare. The next group (or the
     /// next session's first group) takes its own buffer sizes back from the pool.
     pub fn keep_group_spares(&self,room:usize)->Result<(),String> {self.synchronize()?;self.context.trim_vector_pool(room);Ok(())}
+    pub fn prompt_spare_bytes(&self) -> usize { self.context.vector_pool.borrow().spare_bytes() }
+    pub fn return_prompt_spares(&self, target: usize) -> Result<(usize, usize), String> {
+        self.synchronize()?;
+        let mut pool = self.context.vector_pool.borrow_mut();
+        let before = pool.spare_bytes();
+        pool.return_vector_spares(self.context, target);
+        Ok((before, pool.spare_bytes()))
+    }
     /// LEASE SPARES: after a prompt group whose prompt goes on, when its lease goes back: drain, then end the group's pool
     /// cap and ceiling (`group_vector_spares`) without freeing a spare. The next group takes the same buffer sizes back
     /// from the pool. Free storage only: the device budget and the host pressure rule still release spares.

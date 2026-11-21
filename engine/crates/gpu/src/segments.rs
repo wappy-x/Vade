@@ -128,6 +128,17 @@ impl Reserve {
             self.release(context, page);
         }
     }
+    pub(super) fn spare_bytes(&self) -> usize { self.bytes }
+    /// Return large plain spares first, keeping the smaller buffers for subsequent reads.
+    pub(super) fn return_vector_spares(&mut self, context: &Context, target: usize) {
+        while self.bytes > target {
+            let Some((index, _)) = self.pages.iter().enumerate().filter(|(_, page)| !page.segment)
+                .max_by_key(|(_, page)| page.bytes) else { break; };
+            let page = self.pages.remove(index);
+            self.bytes -= page.bytes;
+            self.release(context, page);
+        }
+    }
     pub(super) fn direct_freed(&mut self, bytes: usize) {
         self.stats.direct_freed_count = self.stats.direct_freed_count.saturating_add(1);
         self.stats.direct_freed_bytes = self.stats.direct_freed_bytes.saturating_add(bytes);

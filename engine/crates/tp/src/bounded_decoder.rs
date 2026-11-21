@@ -412,6 +412,8 @@ pub trait Compute {
     fn rows_release(&self)->Result<()> {Ok(())}
     /// After a prompt group: keep its spares within the pool's normal room (default: release).
     fn rows_keep(&self)->Result<()> {self.rows_release()}
+    fn prompt_spare_bytes(&self) -> Option<usize> { None }
+    fn return_prompt_spares(&self, _target: usize) -> Result<(usize, usize)> { Ok((0, 0)) }
     /// Return a temporary prompt workspace and report actual spare ownership.
     fn rows_return_lease(&self)->Result<()> {self.rows_keep()}
     /// WIDE PHASE: a prompt group above the whole-charged lease sizes ended a mixer run or a layer. Submit what is

@@ -1123,6 +1123,8 @@ if start==0 && v.pending.as_ref().and_then(|p|p.borrow().state_prefix)==Some(len
         self.spares_kept.set(false);self.backend.keep_group_spares(super::POOL_ROOM)
     }
     fn rows_follow(&self,follows:bool) {self.group_follows.set(follows);}
+    fn prompt_spare_bytes(&self) -> Option<usize> { Some(self.backend.prompt_spare_bytes()) }
+    fn return_prompt_spares(&self, target: usize) -> Result<(usize, usize)> { self.backend.return_prompt_spares(target) }
     fn rows_settle(&self)->Result<()> {if self.spares_kept.take() {self.backend.keep_group_spares(super::POOL_ROOM)} else {Ok(())}}
     fn rows_return_lease(&self)->Result<()> {
         // WIDE COHORT: the operand scratch a wide group grew goes back with the lease, before the pool is trimmed.

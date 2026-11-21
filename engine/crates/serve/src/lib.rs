@@ -92,6 +92,8 @@ pub trait Session {
     /// The session's own group size applies whenever no other chat waits on it,
     /// whatever the server's small default is. Sessions opt in.
     fn prefill_owns_chunks(&self) -> bool { false }
+    /// Remember the spare pool before the scheduler widens a cold prompt slice.
+    fn begin_prompt_spare_scope(&mut self) -> Result<(), String> { Ok(()) }
     /// Resume the same prompt chunk until committed. None retains partial work;
     /// backends without layer-level yielding complete their ordinary chunk.
     /// No budget completes the chunk without synchronization between layers.
