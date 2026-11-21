@@ -1150,6 +1150,14 @@ if start==0 && v.pending.as_ref().and_then(|p|p.borrow().state_prefix)==Some(len
     fn prompt_seeds(&self)->bool {self.first_step.get() && self.memo.borrow().limit!=0}
     fn decode_selection_reads(&self,reads:bool) {self.weights.borrow_mut().side_lanes(!reads);}
     fn prompt_end(&self)->Result<()> {if self.first_step.get() && self.backend.decode_reserve_configured() {self.backend.keep_group_spares(super::POOL_ROOM+super::DECODE_RETURNS)?;}Ok(())}
+    fn lone_prompt_end(&self)->Result<()> {
+        // The group just left POOL_ROOM under the ordinary cap. Apply that same bound
+        // after the old state returns, keeping useful same-length scratch for the next read.
+        if self.first_step.get() && self.backend.decode_reserve_configured() {
+            self.backend.keep_group_spares(super::POOL_ROOM)?;
+        }
+        Ok(())
+    }
     fn rows_charge(&self,bytes:usize) {self.group_charge.set(bytes);}
     fn rows_peak_begin(&self)->usize {self.backend.begin_group_peak()}
     fn rows_peak_end(&self,whole:usize)->usize {self.group_follows.set(false);crate::exchange_trace::report(self.sparse_topology().rank);self.backend.end_group_peak(whole)}

@@ -427,6 +427,7 @@ pub trait Compute {
     /// The last group of a prompt is done and decode steps follow. A device trims its vector pool here, off the
     /// first decode step. No default: a wrapper that drops this call would lose the saving without a word.
     fn prompt_end(&self)->Result<()>;
+    fn lone_prompt_end(&self)->Result<()> {self.prompt_end()}
     /// True when the last group of a prompt leaves the rows it expanded in the projection memo (`Decoder::set_memo_seed`).
     /// No default, as above.
     fn prompt_seeds(&self)->bool;
