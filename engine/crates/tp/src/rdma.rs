@@ -11,7 +11,7 @@ fn present<T>(p:*mut T,what:&str)->Result<*mut T>{if p.is_null(){Err(format!("{w
 
 struct Region {mr:*mut Mr,id:u64}
 struct PeerRegion {base:usize,bytes:usize,address:u64,key:u32,local_key:u32}
-pub struct Endpoint {verbs:&'static Verbs,context:*mut Context,pd:*mut c_void,cq:*mut c_void,qp:*mut Qp,gid:[u8;16],index:u8,mtu:i32,timeout:Duration,regions:Vec<Region>,peers:Vec<PeerRegion>,pending:usize,retain:bool,control:TcpStream,receive_sge:Vec<Sge>,send_sge:Vec<Sge>,receives:Vec<Recv>,sends:Vec<Send>}
+pub struct Endpoint {verbs:&'static Verbs,context:*mut Context,pd:*mut c_void,cq:*mut c_void,qp:*mut Qp,gid:[u8;16],index:u8,mtu:i32,timeout:Duration,regions:Vec<Region>,peers:Vec<PeerRegion>,pending:usize,leave:usize,retain:bool,control:TcpStream,receive_sge:Vec<Sge>,send_sge:Vec<Sge>,receives:Vec<Recv>,sends:Vec<Send>}
 // A queue pair has one owner; no verbs object is accessed concurrently.
 unsafe impl std::marker::Send for Endpoint {}
 impl Endpoint {
@@ -41,7 +41,7 @@ impl Endpoint {
             if selected.is_some(){break;}
         }
         let(name,index,gid)=selected.or(first).ok_or("no IPv4 RoCE-v2 GID on neighbour interface")?;
-        let mut result=Self{verbs,context:ptr::null_mut(),pd:ptr::null_mut(),cq:ptr::null_mut(),qp:ptr::null_mut(),gid,index,mtu,timeout,regions:Vec::new(),peers:Vec::new(),pending:0,retain:false,control:socket.try_clone().map_err(|e|e.to_string())?,receive_sge:Vec::new(),send_sge:Vec::new(),receives:Vec::new(),sends:Vec::new()};
+        let mut result=Self{verbs,context:ptr::null_mut(),pd:ptr::null_mut(),cq:ptr::null_mut(),qp:ptr::null_mut(),gid,index,mtu,timeout,regions:Vec::new(),peers:Vec::new(),pending:0,leave:0,retain:false,control:socket.try_clone().map_err(|e|e.to_string())?,receive_sge:Vec::new(),send_sge:Vec::new(),receives:Vec::new(),sends:Vec::new()};
         unsafe {
             let mut count=0;let list=present((verbs.get_device_list)(&mut count),"verbs devices")?;
             for i in 0..count {let device=*list.add(i as usize);if CStr::from_ptr((verbs.get_device_name)(device)).to_bytes()==name.as_bytes(){result.context=(verbs.open_device)(device);break;}}
@@ -180,10 +180,15 @@ impl Endpoint {
         }
         Ok(())
     }
+    /// Waits until at most `leave` posted work requests are open: the receives of later rounds of a gather, posted
+    /// before their messages are sent (`Ring::post_rank_blocks_receive` on a path). A queue completes its receives in
+    /// the order they were posted, and a neighbor sends the message of a later round only after this rank's send of
+    /// this round reached it, so the requests that stay open are those later receives.
+    pub fn finish_to(&mut self,leave:usize)->Result<()> {self.leave=leave;let result=self.finish();self.leave=0;result}
     pub fn finish(&mut self)->Result<()> {
         let start=Instant::now();let mut control=start;let mut wc=[Wc::default();16];let mut polls=0u32;
         let poll:unsafe extern "C" fn(*mut c_void,i32,*mut Wc)->i32=unsafe{std::mem::transmute((*self.context).ops[11])};
-        while self.pending>0 {
+        while self.pending>self.leave {
             let n=unsafe{poll(self.cq,16,wc.as_mut_ptr())};if n<0{return Err("poll CQ failed".into());}
             for w in &wc[..n as usize] {
                 if w.status!=0{return Err(format!("RDMA completion status={} vendor={}",w.status,w.vendor));}
@@ -197,7 +202,8 @@ impl Endpoint {
             }
             std::hint::spin_loop();
         }
-        self.release_transient();
+        // Receives that stay open keep their registration.
+        if self.pending==0 {self.release_transient();}
         Ok(())
     }
 }

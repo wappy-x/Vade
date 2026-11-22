@@ -60,4 +60,41 @@ mod tests {
             ring.step_barrier().unwrap();
         });
     }
+    /// SECOND RAIL for more than two ranks: every rank trades its two offers (toward the rank after it, toward the
+    /// rank before it) and its port. Every cable gets its rail, or every rank stays on one rail and says why.
+    #[test]
+    fn four_ranks_find_the_second_rail_of_every_cable_or_all_stay_on_one_rail() {
+        use crate::second_rail::{Candidate, Offer};
+        use std::net::{Ipv4Addr, SocketAddr};
+        // Addresses built from their parts (a documentation range). Cable k joins rank k and the rank after it; its
+        // second rail is subnet 10 + k, with host 1 at rank k and host 2 at the rank after it.
+        let at = |cable: usize, host: u8, port: u16| SocketAddr::from((Ipv4Addr::new(198, 51, 10 + cable as u8, host), port));
+        let offer = |cable: usize, host: u8| Offer::Open(vec![Candidate { address: Ipv4Addr::new(198, 51, 10 + cable as u8, host), prefix: 24, apart: true }]);
+        let port = |slot: usize| 29960 + 10 * slot as u16;
+        for (path, whole) in [(true, true), (false, true), (true, false), (false, false)] {
+            // Without `whole`, the cable between rank 1 and rank 2 has no second rail at rank 1.
+            let after = [offer(0, 1), if whole { offer(1, 1) } else { Offer::Open(Vec::new()) }, offer(2, 1), offer(3, 1)];
+            let rails = super::super::tests::rings(4, path, |rank, mut ring| {
+                let found = ring.second_rail(&[after[rank].clone(), offer((rank + 3) % 4, 2)], port(rank)).unwrap();
+                // The trade leaves the ring as a start expects it: nothing counted, and the next collective in step.
+                assert_eq!((found.0.is_some(), ring.exchanges), (found.1.is_empty(), 0));
+                assert_eq!(ring.gather_batch_f32(&[rank as f32], 4, 1, 1).unwrap(), [0.0, 1.0, 2.0, 3.0]);
+                found
+            });
+            if whole {
+                // A rank listens on its end of the cable before it and connects to the far end of the cable after it,
+                // each on the port after that rank's own. An end of a path has one cable: its two ends, its own first.
+                let listen = |slot: usize| at((slot + 3) % 4, 2, port(slot) + 1);
+                let next = |slot: usize| at(slot, 2, port((slot + 1) % 4) + 1);
+                let expected = if path { [(at(0, 1, port(0) + 1), next(0)), (listen(1), next(1)), (listen(2), next(2)), (listen(3), at(2, 1, port(2) + 1))] }
+                    else { [0, 1, 2, 3].map(|slot| (listen(slot), next(slot))) };
+                assert_eq!(rails.iter().map(|found| found.0.unwrap()).collect::<Vec<_>>(), expected, "path={path}");
+            } else {
+                let lone = "has no second fast link that is up, has an address and runs at the speed of the first";
+                let other = "another link of this world has no second rail";
+                assert!(rails.iter().all(|found| found.0.is_none()), "path={path}");
+                assert_eq!(rails.iter().map(|found| found.1).collect::<Vec<_>>(), [other.to_string(), format!("this rank {lone}"), format!("the other rank {lone}"), other.to_string()], "path={path}");
+            }
+        }
+    }
 }

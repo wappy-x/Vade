@@ -337,7 +337,7 @@ impl<'b,'d> Weights<'b,'d> {
         }
         let stamp=self.cost.start(b);
         let mut kept=Vec::new();
-        for (held,words,_) in &gathers {
+        for (held,_,_) in &gathers {
             // ROWS OVERLAP: the gather waits for `apply_matrix_stage_close`; this rank's rows wait with it.
             if hold {
                 let mailbox=mailbox.ok_or("held row stage has no mailbox")?;
@@ -351,35 +351,69 @@ impl<'b,'d> Weights<'b,'d> {
                 let parts=held.iter().map(|&job|Ok((job,self.matrices[jobs[job].0].rows,local[job].as_ref().ok_or("row stage lost a local part")?))).collect::<Result<Vec<_>>>()?;
                 for (job,value) in self.stage_gather(b,mailbox,m,&parts)? {outputs[job]=Some(value);}
             } else {
-                let blocks=held.iter().map(|&job|local[job].as_ref().ok_or("row stage lost a local part")).collect::<std::result::Result<Vec<_>,_>>()?;
-                crate::exchange_trace::kind(||format!("stage {}",held.iter().map(|&job|jobs[job].0).collect::<Vec<_>>().join("+")));
-                self.gather_mapped_parts(b,&blocks)?;
-                // Each projection's rank blocks side by side, in their producer's layout, out of the exchange buffer
-                // (the next gather writes it again).
-                let ranks=self.topology.parts as usize;let mut placed=Vec::with_capacity(held.len()*ranks);let (mut from,mut to)=(0usize,0usize);
-                for &job in held {
-                    // A projection's gathered rows are one block of `block` words a part of the exchange.
-                    let rows=self.matrices[jobs[job].0].rows;let block=rows.count*m;let whole=block*ranks;
-                    if rows.total*m!=whole {return Err("row stage rank blocks differ".into());}
-                    for rank in 0..ranks {placed.push([rank**words+from,to+rank*block,block]);}
-                    from+=block;to+=rows.total*m;
-                }
-                let mut joined=b.vector(to)?;
-                b.resident_scatter_copy(self.exchange.as_ref().ok_or("prompt exchange is absent")?,&mut joined,&placed)?;
-                crate::exchange_trace::reader();self.exchange_read(b)?;
-                let joined=joined.into_resident_shared()?;let mut start=0;
-                for &job in held {
-                    let rows=self.matrices[jobs[job].0].rows;let extent=rows.total*m;
-                    let packet=joined.resident_range(start..start+extent)?;
-                    outputs[job]=Some(if row_orders[job] {Self::transpose(b,&packet,rows.total,m,true)?}
-                        else {Self::rank_rows(b,&packet,m,rows.count,ranks,true)?});start+=extent;
-                }
+                self.stage_mapped(b,&mut outputs,held,jobs,m,&row_orders,&local)?;
             }
         }
         self.cost.record(||"exchange_stage_rows".into(),stamp,b,0);
         // Proof for the served log, once a process: the held form ran (ROWS OVERLAP).
         if hold && !kept.is_empty() && !HELD_SEEN.swap(true,std::sync::atomic::Ordering::Relaxed) {eprintln!("ROWS OVERLAP held a row stage: {} rows, {} held gathers of {} jobs",m,kept.len(),kept.iter().map(Vec::len).sum::<usize>());}
         Ok(Some((outputs,(hold && !kept.is_empty()).then_some(HeldStage {m,gathers:kept,gathered:None}))))
+    }
+
+    /// The mixed stage contains the raw router result and the two rounded
+    /// block-FP8 projections of the same input. A finished FP8 product with a
+    /// rounded epilogue is eligible to use the lossless codec.
+    fn stage_wire_formats(&self,held:&[usize],jobs:&[(&str,&DeviceVector<'_>,bool)],m:usize)->Option<[Format;3]> {
+        let &[router,gate,up]=held else {return None;};
+        let (_,input,round)=jobs[router];
+        if m<=16 || round {return None;}
+        let shares=|job| {
+            let (name,source,round):(&str,&DeviceVector<'_>,bool)=jobs[job];
+            let matrix=&self.matrices[name];
+            round && source.device_address()==input.device_address() && (m.is_multiple_of(2) || matrix.rows.count.is_multiple_of(2))
+                && matches!(&matrix.storage,Storage::Packed {shape,..} if matches!(shape.op,Op::Fp8Project|Op::Fp8Serial)
+                    && !matches!(shape.role,spark_gpu_probe::expert_ops::FP8_QUARTER|spark_gpu_probe::expert_ops::FP8_UNROUNDED))
+        };
+        (shares(gate) && shares(up)).then_some([Format::Fp32,Format::Bf16,Format::Bf16])
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn stage_mapped(&mut self,b:&Backend<'d>,outputs:&mut [Option<DeviceVector<'d>>],held:&[usize],jobs:&[(&str,&DeviceVector<'_>,bool)],
+        m:usize,row_orders:&[bool],local:&[Option<DeviceVector<'d>>])->Result<()> {
+        let ranks=self.topology.parts as usize;
+        let formats=self.stage_wire_formats(held,jobs,m);
+        let format=|index|formats.as_ref().map_or(Format::Fp32,|formats|formats[index]);
+        let blocks=held.iter().map(|&job|local[job].as_ref().ok_or("row stage lost a local part")).collect::<std::result::Result<Vec<_>,_>>()?;
+        for (&job,block) in held.iter().zip(&blocks) {
+            let rows=self.matrices[jobs[job].0].rows;
+            let gathered_rows=rows.count.checked_mul(ranks);
+            if rows.count.checked_mul(m)!=Some(block.len()) || gathered_rows!=Some(rows.total) {
+                return Err("row stage rank blocks differ".into());
+            }
+        }
+        let parts=blocks.iter().enumerate().map(|(index,block)|(block.len(),format(index))).collect::<Vec<_>>();
+        let layout=wire_packet::Layout::new(ranks,&parts)?;
+        crate::exchange_trace::kind(||format!("stage {}",held.iter().map(|&job|jobs[job].0).collect::<Vec<_>>().join("+")));
+        if formats.is_some() {self.gather_bf16_parts(b,&blocks,format)?;}
+        else {self.gather_mapped_parts(b,&blocks)?;}
+
+        // Regroup into immutable per-job rank blocks. The next exchange can
+        // overwrite the mapped buffer as soon as this scatter finishes.
+        let mut joined=b.vector(layout.words)?;
+        b.resident_scatter_copy(self.exchange.as_ref().ok_or("prompt exchange is absent")?,&mut joined,&layout.copies)?;
+        crate::exchange_trace::reader();self.exchange_read(b)?;
+        let joined=joined.into_resident_shared()?;
+        for (index,(&job,section)) in held.iter().zip(layout.sections).enumerate() {
+            let rows=self.matrices[jobs[job].0].rows;
+            let packet=joined.resident_range(section)?;
+            outputs[job]=Some(if format(index)==Format::Bf16 {
+                let shape=wire_packet::unpack_shape(m,rows.count,ranks,row_orders[job],true)?;
+                b.prompt_operation(shape,[Some(&packet),None,None,None,None],None)?
+            } else if row_orders[job] {Self::transpose(b,&packet,rows.total,m,true)?}
+            else {Self::rank_rows(b,&packet,m,rows.count,ranks,true)?});
+        }
+        if formats.is_some() {spark_gpu_probe::prompt_launches::record("prompt_wire_bf16_exchange");}
+        Ok(())
     }
     /// The block-FP8 launches of a row stage (`apply_matrix_stage`): `made` takes each job they make.
     fn stage_fp8(&mut self,b:&Backend<'d>,jobs:&[(&str,&DeviceVector<'_>,bool)],m:usize,made:&mut [Option<(DeviceVector<'d>,bool)>])->Result<()> {

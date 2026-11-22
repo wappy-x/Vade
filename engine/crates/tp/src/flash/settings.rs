@@ -921,7 +921,8 @@ fn the_prompt_cache_is_on_unless_no_prompt_keep_is_given() {
     let cap=code.find("let kept_cap=if keep {engine.keep_within(pool)} else {0};").unwrap();assert!(cap<code.find("if !engine.controller() {return engine.worker();}").unwrap());assert_eq!(code.matches("keep_within(").count(),1);
     // The ranks compare the choice at start, so two ranks with different choices (or one build of before the
     // default and one of after it, both started with no option) refuse each other.
-    assert!(code.contains("(context as u64|u64::from(keep)<<63|u64::from(keep)<<62|1<<61)") && code.contains("if record[..72]!=records[..72] {return Err("));
+    assert!(code.contains("(context as u64|u64::from(keep)<<63|u64::from(keep)<<62|1<<61)|(cohort_chats as u64)<<57|1<<56")
+        && code.contains("if record[..72]!=records[..72] {return Err("));
     // These are all the places that read the choice.
     assert_eq!(code.matches("if keep ").count(),4);assert_eq!(code.matches("from(keep)").count(),2);assert_eq!(code.matches(":keep,").count(),2);assert_eq!(code.matches("{keep}").count(),1);
 }

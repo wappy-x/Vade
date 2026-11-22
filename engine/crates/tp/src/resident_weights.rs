@@ -89,6 +89,7 @@ fn gathered_mixed(values:&[f32],rows:&[Rows])->Result<Vec<Vec<f32>>> {
 #[cfg(test)]
 #[path="resident_weights/rank_proofs.rs"] mod rank_proofs;
 #[path="resident_weights/rows_fold.rs"] pub mod rows_fold;
+#[path="resident_weights/wire_packet.rs"] pub mod wire_packet;
 #[cfg(any(target_os="linux",test))]
 #[path="resident_weights/load_rows.rs"] mod load_rows;
 #[cfg(any(target_os="linux",test))]
@@ -106,7 +107,7 @@ pub static ABSORPTION_CALLS:std::sync::atomic::AtomicU64=std::sync::atomic::Atom
 pub static UNREAD_GATHERS:std::sync::atomic::AtomicU64=std::sync::atomic::AtomicU64::new(0);
 #[cfg(target_os="linux")]
 mod device {
-    use super::*;
+    use super::{*,wire_packet::Format};
     use engine_model::{plan::{admission::CheckpointAdmission,layer::{Kind,LayerPlan}},safetensors::Dtype};
     use spark_gpu_probe::{driver::{Backend,DeviceVector},norm_boundary::WeightType,expert_ops::{Shape,Op}};
     use crate::{mxfp8_projection::Mxfp8Projection,dynamic_projection::ResidentDynamicProjection,transport::Ring};
@@ -692,14 +693,16 @@ let mut bytes=vec![0;rows.total*4];
         /// caller queues between the two halves then runs on this rank's GPU while the link carries the blocks. Such work
         /// must not read or write the exchange buffer and must not exchange (`none_ahead`). Not `ahead`: the close drains
         /// the stream, and the two halves back to back are the exchange as it was.
-        fn gather_mapped_open(&mut self,b:&Backend<'d>,local:&[&DeviceVector<'_>],ahead:bool)->Result<OpenGather<'d>> {self.gather_mapped_open_wire(b,local,ahead,false)}
-        fn gather_mapped_open_wire(&mut self,b:&Backend<'d>,local:&[&DeviceVector<'_>],ahead:bool,packed:bool)->Result<OpenGather<'d>> {
+        fn gather_mapped_open(&mut self,b:&Backend<'d>,local:&[&DeviceVector<'_>],ahead:bool)->Result<OpenGather<'d>> {self.gather_mapped_open_wire(b,local,ahead,|_|Format::Fp32)}
+        fn gather_mapped_open_wire(&mut self,b:&Backend<'d>,local:&[&DeviceVector<'_>],ahead:bool,format:impl Fn(usize)->Format)->Result<OpenGather<'d>> {
             self.none_ahead()?;
             let stamp=self.cost.start(b);
             // EXCHANGE TRACE: host times around the waits this path already makes (None unless the trace is on).
             let trace=crate::exchange_trace::now;let started=trace();
-            let parts=self.topology.parts as usize;let words=local.iter().try_fold(0usize,|sum,part|sum.checked_add(part.len())).ok_or("prompt exchange overflow")?;
-            if packed && local.iter().any(|part|!part.len().is_multiple_of(2)) {return Err("BF16 wire part has an odd extent".into());}let words=if packed {words/2} else {words};
+            let parts=self.topology.parts as usize;
+            let words=local.iter().enumerate().try_fold(0usize,|sum,(index,part)| {
+                sum.checked_add(format(index).words(part.len())?).ok_or_else(||String::from("prompt exchange overflow"))
+            })?;
             let total=words.checked_mul(parts).ok_or("prompt exchange overflow")?;
             let fresh=self.exchange.as_mut().is_none_or(|v|v.resize_within_capacity(total).is_err());
             if fresh {
@@ -712,11 +715,8 @@ let mut bytes=vec![0;rows.total*4];
             let first=self.receive_first(b,parts,words,fresh)?;
             let packed=(||{
                 let exchange=self.exchange.as_mut().ok_or("prompt exchange is absent")?;let mut at=self.topology.rank as usize*words;
-                for part in local {
-                    if packed {
-                        let count=part.len()/2;let shape=spark_gpu_probe::prompt_ops::Shape {cols:u32::try_from(part.len()).map_err(|_|"wire pack extent exceeds ABI")?,..spark_gpu_probe::prompt_ops::Shape::new(spark_gpu_probe::prompt_ops::Op::WirePackBf16,1).ok_or("wire pack shape")?};
-                        let _packed=b.prompt_operation_output(shape,[Some(part),None,None,None,None],None,Some(exchange.resident_range(at..at+count)?))?;at+=count;
-                    } else {b.copy_range(part,exchange,0,at,part.len())?;at+=part.len();}
+                for (index,part) in local.iter().enumerate() {
+                    at=wire_packet::write_part(b,part,exchange,at,format(index))?;
                 }
                 let packed=trace();
                 // LOOKAHEAD: the mark is the end of the pack copy, the last queued write to this rank's block.

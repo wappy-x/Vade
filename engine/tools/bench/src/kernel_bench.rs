@@ -1038,10 +1038,11 @@ fn run() -> Result<()> {
             let image=args.next().ok_or("--latent3 needs an image")?;
             let mode=args.next().unwrap_or_else(|| "all".to_string());
             let only=args.next().unwrap_or_else(|| "all".to_string());
+            let heads=args.next().map(|n|n.parse::<usize>().map_err(|_|"--latent3 expects a whole head count")).transpose()?.unwrap_or(32);
             #[cfg(target_os = "linux")]
-            return cuda::absorbtc::latent3::run(&image,&mode,&only);
+            return cuda::absorbtc::latent3::run(&image,&mode,&only,heads);
             #[cfg(not(target_os = "linux"))]
-            { let _=(image,mode,only);return Err("--latent3 requires Linux and CUDA".into()); }
+            { let _=(image,mode,only,heads);return Err("--latent3 requires Linux and CUDA".into()); }
         }
         if flag == "--latent-rows" {
             let image=args.next().ok_or("--latent-rows needs an image")?;let mode=args.next().unwrap_or_else(|| "all".to_string());

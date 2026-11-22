@@ -51,11 +51,14 @@ fn the_grid_owns_every_output_unit_exactly_once() {
         }
     }
 }
+fn tile_shape(op:Op,tokens:usize)->Shape {
+    Shape {op,heads:32,dim:256,taps:256,rows:8192,cols:512,first:2051,slots:2051,..Shape::new(op,tokens).unwrap()}
+}
 /// The third form takes the model's shape from 17 token rows with 16-byte aligned operands, and nothing else: its
 /// kernels trap on any other launch, so the host must decline first.
 #[test]
 fn the_third_form_takes_the_model_shape_only() {
-    let model=|op,tokens:usize|Shape {op,heads:32,dim:256,taps:256,rows:8192,cols:512,first:2051,slots:2051,..Shape::new(op,tokens).unwrap()};
+    let model=tile_shape;
     let a=[0x1000u64,0x2000,0x3000,4,4];
     for (op,name,blocks) in [(Op::AbsorbQuery,"latent_weights3",32*32),(Op::AbsorbScores,"latent_scores3",1024),(Op::AbsorbValues,"latent_values3",4096),(Op::AbsorbProject,"latent_weights3_panel",32*32)] {
         assert_eq!(third(model(op,1024),a,0x4000,0x5000),Some((name,blocks,THIRD_THREADS)),"{op:?}");
@@ -65,7 +68,7 @@ fn the_third_form_takes_the_model_shape_only() {
         assert_eq!(third(model(op,THIRD_MIN_TOKENS),a,0x4000,0x5000).map(|t|t.0),Some(name),"{op:?}");
         assert_eq!(third(model(op,THIRD_MIN_TOKENS-1),a,0x4000,0x5000),None,"{op:?}");
         // Another head count, latent width or key width: the first form.
-        assert_eq!(third(Shape {heads:16,..model(op,1024)},a,0x4000,0x5000),None,"{op:?}");
+        assert_eq!(third(Shape {heads:24,..model(op,1024)},a,0x4000,0x5000),None,"{op:?}");
         assert_eq!(third(Shape {cols:256,..model(op,1024)},a,0x4000,0x5000),None,"{op:?}");
         // The first form still takes every launch the third takes.
         assert_eq!(launch(model(op,1024)).unwrap().0,"latent_absorption_tile");
@@ -82,6 +85,33 @@ fn the_third_form_takes_the_model_shape_only() {
     assert_eq!(third(model(Op::AbsorbProject,1024),[0x1008,0x2000,0x3000,4,4],0x4000,0x5000),None);
     // A cache too long for a 32-bit byte offset.
     assert_eq!(third(Shape {rows:1<<21,..model(Op::AbsorbValues,1024)},a,0x4000,0x5000),None);
+}
+
+#[test]
+fn sixteen_head_prompt_tiles_match_the_swept_launches() {
+    let aligned=[0x1000,0x2000,0x3000,0,0];
+    for (op,name) in [
+        (Op::AbsorbQuery,"latent_weights3_h16"),
+        (Op::AbsorbScores,"latent_scores3_h16"),
+        (Op::AbsorbValues,"latent_values3_h16"),
+        (Op::AbsorbProject,"latent_weights3_panel_h16"),
+    ] {
+        for tokens in [17,33,64,256,512,768,1024u32] {
+            let shape=Shape {heads:16,..tile_shape(op,tokens as usize)};
+            let blocks=match op {Op::AbsorbScores=>tokens,Op::AbsorbValues=>2*tokens,_=>16*tokens.div_ceil(32)};
+            assert_eq!(third(shape,aligned,0x4000,0x5000),Some((name,blocks,THIRD_THREADS)));
+            assert_eq!(third(Shape {dim:128,..shape},aligned,0x4000,0x5000),None);
+            assert_eq!(third(Shape {taps:128,..shape},aligned,0x4000,0x5000),None);
+        }
+        for tokens in [16,1025] {
+            assert_eq!(third(Shape {heads:16,..tile_shape(op,tokens)},aligned,0x4000,0x5000),None);
+        }
+    }
+    let shape=|op|Shape {heads:16,..tile_shape(op,1024)};
+    assert_eq!(third(shape(Op::AbsorbScores),[0x1004,0x2000,0x3000,0,0],0x4000,0x5000),None);
+    assert_eq!(third(shape(Op::AbsorbValues),aligned,0x4000,0x5004),None);
+    assert_eq!(third(shape(Op::AbsorbQuery),aligned,0x4002,0x5000),None);
+    assert_eq!(third(shape(Op::AbsorbProject),aligned,0x4002,0x5000),None);
 }
 /// Packed halves are the existing high-half operand, including nonzero low halves in the unpacked source. Counts
 /// include empty, short and full selections. This checks the CPU word and the new ABI's actual half-sized extent.
@@ -118,6 +148,27 @@ fn packed_launches_are_checked_and_never_fall_back_to_an_unpacked_kernel() {
         assert_eq!(third(s,a,4,0x4000),Some((name,1024,threads)));
         assert!(launch(s).is_none());
         assert!(third(model(op,16),a,4,0x4000).is_none());
-        assert!(third(Shape {heads:16,..s},a,4,0x4000).is_none());
+    }
+}
+
+#[test]
+fn sixteen_head_packed_tiles_share_the_swept_cache_extents() {
+    let aligned = [0x1000, 0x2000, 0x3000, 4, 4];
+    for (op, name, blocks_per_token, threads) in [
+        (Op::AbsorbScoresPacked, "latent_scores3_packed_h16", 1, 384),
+        (Op::AbsorbValuesPacked, "latent_values3_packed_h16", 2, THIRD_THREADS),
+    ] {
+        for tokens in [256, 512, 768, 1024] {
+            let shape = Shape { heads: 16, ..tile_shape(op, tokens) };
+            assert_eq!(shape.lengths().unwrap().0[1], 8192 * 512 / 2);
+            assert_eq!(third(shape, aligned, 4, 0x4000), Some((name, blocks_per_token * shape.tokens, threads)));
+            assert_eq!(third(Shape { rows: 8193, ..shape }, aligned, 4, 0x4000), None);
+            assert_eq!(third(shape, [0x1000, 0x2004, 0x3000, 4, 4], 4, 0x4000), None);
+            assert!(launch(shape).is_none());
+        }
+        for tokens in [17, 255, 1025] {
+            let shape = Shape { heads: 16, ..tile_shape(op, tokens) };
+            assert_eq!(third(shape, aligned, 4, 0x4000), None);
+        }
     }
 }

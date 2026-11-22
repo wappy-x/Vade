@@ -1,4 +1,5 @@
-//! SECOND RAIL: a pair of ranks finds the second rail of its cable by itself.
+//! SECOND RAIL: the ranks find the second rail of their cables by themselves: a pair on its one cable, a path or a
+//! ring of more ranks on every cable between a rank and the rank after it (`choose`).
 //!
 //! What it is for. A cable between two Sparks carries two rails. The transport already sends every pair gather of
 //! `PAIR_GATHER_FLOOR_BYTES` a rank or more over both rails, half on each, but the second rail was open only when the
@@ -16,7 +17,11 @@
 //! - A link that is down, has no address, or runs at another speed than the pair's first link is not offered.
 //! - A pair that finds no rail starts on one rail and prints one line that says why (`why_not`). A second rail that
 //!   fails to open leaves the pair on one rail with one log line, as a named one does.
-use std::net::Ipv4Addr;
+//! - More than two ranks: a rank has a link to the rank after it and one to the rank before it, so it makes one offer
+//!   for each (the other link is then a candidate like any other; only two ends of one cable share its subnet). Every
+//!   rank sees every offer, so every rank computes the rail of every link. All links have one, or the world stays
+//!   on one rail: a gather sends each block over each link in turn, and its slowest link sets its time.
+use std::net::{Ipv4Addr,SocketAddrV4};
 
 /// Bytes of one rank's offer on the wire.
 pub const OFFER_BYTES:usize=48;
@@ -94,6 +99,46 @@ pub fn pick(rank:usize,own:&Offer,peer:&Offer)->Option<(Ipv4Addr,Ipv4Addr)> {
         .filter(|(a,b)|a.prefix==b.prefix && a.address!=b.address && network(a.address,a.prefix)==network(b.address,b.prefix))
         .min_by_key(|(a,b)|(!(a.apart && b.apart),u32::from(a.address),u32::from(b.address)))?;
     let ends=[a.address,b.address];Some((ends[rank],ends[1-rank]))
+}
+
+/// Bytes of one rank's part of the trade of a world: its offer toward the rank after it, its offer toward the rank
+/// before it, and the port its first link listens on.
+pub const TRADE_BYTES:usize=2*OFFER_BYTES+2;
+/// This rank's part of the trade. `offers`: toward the rank after it, then toward the rank before it.
+pub fn record(offers:&[Offer;2],port:u16)->[u8;TRADE_BYTES] {
+    let mut bytes=[0u8;TRADE_BYTES];
+    bytes[..OFFER_BYTES].copy_from_slice(&encode(&offers[0]));bytes[OFFER_BYTES..2*OFFER_BYTES].copy_from_slice(&encode(&offers[1]));
+    bytes[2*OFFER_BYTES..].copy_from_slice(&port.to_le_bytes());bytes
+}
+/// The second rails of a world, from the parts of every rank in rank order (`trade`). `links`: how many links the
+/// world has, counted from the link of rank 0 to rank 1: a pair has one, a path one less than its ranks, a ring one a
+/// rank. Link `k` joins rank `k` and the rank after it; its rail is `pick` of the first rank's offer toward the rank
+/// after it and the second rank's offer toward the rank before it. Every rank calls this with the same bytes and
+/// gets the same rails, so all ranks open the second rail or none does.
+///
+/// Returns where this rank listens (its end of the rail to the rank before it) and where it connects (the end of
+/// the rank after it), each on the port after that rank's own first port. A rank at an end of a path has one link:
+/// it gets that link's two ends, its own first. On one rail: the reason for the one line a start prints.
+pub fn choose(rank:usize,links:usize,trade:&[u8])->Result<(SocketAddrV4,SocketAddrV4),&'static str> {
+    let parts=trade.as_chunks::<TRADE_BYTES>().0.iter().map(|part|{
+        let port=u16::from_le_bytes([part[2*OFFER_BYTES],part[2*OFFER_BYTES+1]]);
+        ([decode(&part[..OFFER_BYTES]),decode(&part[OFFER_BYTES..2*OFFER_BYTES])],port.checked_add(1))
+    }).collect::<Vec<_>>();
+    let world=parts.len();
+    let ends=|link:usize|(&parts[link%world].0[0],&parts[(link+1)%world].0[1]);
+    let rails=(0..links).map(|link|{let (first,second)=ends(link);pick(0,first,second)}).collect::<Vec<_>>();
+    // This rank's own links first: their reason names this rank or its neighbor.
+    let (after,before)=(rank,(rank+world-1)%world);
+    if let Some(None)=rails.get(after) {let (own,peer)=ends(after);return Err(why_not(own,peer));}
+    if let Some(None)=rails.get(before) {let (peer,own)=ends(before);return Err(why_not(own,peer));}
+    if rails.iter().any(Option::is_none) {return Err("another link of this world has no second rail");}
+    let (Some(own_port),Some(ports))=(parts[rank].1,parts.iter().map(|part|part.1).collect::<Option<Vec<_>>>()) else {return Err("no port is left after the port of a first link");};
+    let (own,peer,peer_port)=match (rails.get(before).copied().flatten(),rails.get(after).copied().flatten()) {
+        (Some((_,own)),Some((_,next)))|(None,Some((own,next)))=>(own,next,ports[(rank+1)%world]),
+        (Some((previous,own)),None)=>(own,previous,ports[before]),
+        (None,None)=>return Err("this rank has no link to another rank"),
+    };
+    Ok((SocketAddrV4::new(own,own_port),SocketAddrV4::new(peer,peer_port)))
 }
 
 /// Why this pair stays on one rail, for the one line a start prints. Call it when `pick` found none.
@@ -182,6 +227,47 @@ mod tests {
         // With no host path known, any shared subnet is a rail, and the two ranks still agree.
         let plain=|host:u8|Offer::Open(candidates(&[link(1,host,""),link(3,host,""),link(2,host,"")],at(1,host)));
         assert_eq!(pick(0,&plain(1),&plain(2)),Some((at(2,1),at(2,2))));assert_eq!(pick(1,&plain(2),&plain(1)),Some((at(2,2),at(2,1))));
+    }
+    /// Four Sparks cabled one after another (3 cables), and the same four with a cable from the last back to the first
+    /// (4 cables). Cable `k` joins rank `k` (host 1) and the rank after it (host 2): rail 0 is subnet 20+2k, rail 1 is
+    /// subnet 21+2k. A rank's other cable is in its offers too; only the two ends of one cable share a subnet.
+    #[test]
+    fn a_path_and_a_ring_of_four_find_the_second_rail_of_every_cable_or_none_does() {
+        let cable=|k:usize,host:u8|[link(20+2*k as u8,host,"0000"),link(21+2*k as u8,host,"0002")];
+        let ports=[29960u16,29970,29980,29990];
+        for cables in [3usize,4] {
+            // A rank's links: its end of the cable after it and its end of the cable before it, where the cable exists.
+            let links=|slot:usize|[(slot,1u8),((slot+3)%4,2)].into_iter().filter(|(k,_)|*k<cables).flat_map(|(k,host)|cable(k,host)).collect::<Vec<_>>();
+            let offers=|slot:usize|[Offer::Open(candidates(&links(slot),at(20+2*slot as u8,1))),Offer::Open(candidates(&links(slot),at(20+2*((slot+3)%4) as u8,2)))];
+            let trade=(0..4).flat_map(|slot|record(&offers(slot),ports[slot])).collect::<Vec<_>>();
+            // A rank listens on its end of the rail before it and connects to the far end of the rail after it, each on
+            // the port after that rank's own first port.
+            let end=|k:usize,host:u8,slot:usize|SocketAddrV4::new(at(21+2*k as u8,host),ports[slot]+1);
+            let whole=[0,1,2,3].map(|slot|(end((slot+3)%4,2,slot),end(slot,2,(slot+1)%4)));
+            let found=[0,1,2,3].map(|slot|choose(slot,cables,&trade).unwrap());
+            // The ends of a path have one cable: its two ends, the rank's own first.
+            if cables==4 {assert_eq!(found,whole);} else {assert_eq!(found,[(end(0,1,0),end(0,2,1)),whole[1],whole[2],(end(2,2,3),end(2,1,2))]);}
+            // One end of the middle cable has no address on rail 1: no rank opens a rail, and each says why.
+            let lone=[Offer::Open(candidates(&links(2),at(24,1))),Offer::Open(candidates(&[link(22,2,"0000"),link(24,1,"0000"),link(25,1,"0002")],at(22,2)))];
+            let mut broken=trade.clone();broken[2*TRADE_BYTES..3*TRADE_BYTES].copy_from_slice(&record(&lone,ports[2]));
+            let other="another link of this world has no second rail";
+            assert_eq!([0,1,2,3].map(|slot|choose(slot,cables,&broken)),[Err(other),Err("the two ranks share no second subnet"),Err("the two ranks share no second subnet"),Err(other)]);
+            // A rank that named its own rail closes its links: its neighbors say so, the others name another link.
+            let mut named=trade.clone();named[..TRADE_BYTES].copy_from_slice(&record(&[Offer::Closed,Offer::Closed],ports[0]));
+            assert_eq!(choose(0,cables,&named),Err("this rank was started for one rail"));
+            assert_eq!(choose(1,cables,&named),Err("the other rank was started for one rail or names its own second rail"));
+            assert_eq!(choose(2,cables,&named),Err(other));
+            // No port after a rank's first port: no rank opens a rail.
+            let mut last=trade.clone();last[4*TRADE_BYTES-2..].copy_from_slice(&u16::MAX.to_le_bytes());
+            assert!([0,1,2,3].iter().all(|&slot|choose(slot,cables,&last)==Err("no port is left after the port of a first link")));
+        }
+        // A pair is the world with one link: `choose` gives each rank the rail `pick` gives it.
+        let pair=[candidates(&spark(1,40),at(1,1)),candidates(&spark(2,60),at(1,2))].map(Offer::Open);
+        let trade=[0,1].iter().flat_map(|&slot|record(&[pair[slot].clone(),pair[slot].clone()],29960)).collect::<Vec<_>>();
+        for slot in [0,1] {
+            let (own,peer)=pick(slot,&pair[slot],&pair[1-slot]).unwrap();
+            assert_eq!(choose(slot,1,&trade),Ok((SocketAddrV4::new(own,29961),SocketAddrV4::new(peer,29961))));
+        }
     }
     #[test]
     fn a_damaged_offer_is_closed_and_an_offer_never_holds_more_than_its_slots() {

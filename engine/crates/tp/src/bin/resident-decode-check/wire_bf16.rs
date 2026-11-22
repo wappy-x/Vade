@@ -2,6 +2,7 @@
 use std::{path::Path,time::Instant};
 use spark_gpu_probe::{driver::Backend,prompt_ops::{self,Shape,Op}};
 use spark_tp::Result;
+#[path="wire_bf16/prompt.rs"] pub(super) mod prompt;
 fn run_case(b:&Backend<'_>,tokens:usize,ranks:usize,width:usize,transpose:bool,queued:bool)->Result<usize> {
     let words=tokens*ranks*width;
     let input=(0..words).map(|i| {

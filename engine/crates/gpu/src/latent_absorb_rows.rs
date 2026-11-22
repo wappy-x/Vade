@@ -58,18 +58,31 @@ pub fn rows_form(f:crate::absorb_tc::Form)->Option<(&'static str,u32,u32)> {
 /// Token rows from which the third form is launched (below it the first form stays).
 pub const THIRD_MIN_TOKENS:usize=17;
 pub const THIRD_THREADS:u32=256;
-/// (kernel, blocks, threads) of the third form for this launch, or None: keep `launch`. The kernels take the model's
-/// shape only (32 heads, 512 latent features, 256 key features, value rows in whole tiles of 16) and 16-byte aligned
-/// operands, and trap on anything else, so every condition they check is checked here first. `inputs`, `weight` and
-/// `output` are the device addresses of the launch.
+/// (kernel, blocks, threads) of the third form, or None for `launch`. The entries take 512 latent features and
+/// aligned operands. The 16-head tiles cover 256 key and value features through 1,024 tokens. The packed score and
+/// value tiles take the same measured prompt group sizes and share the lossless cache mirror through 8,192 rows.
+/// `inputs`, `weight` and `output` are the device addresses of the launch.
 pub fn third(s:Shape,inputs:[u64;5],weight:u64,output:u64)->Option<(&'static str,u32,u32)> {
     use crate::absorb_tc::{Form,Kind};
     if !admitted(s.op) || s.op==Op::AbsorbSoftmax {return None;}
     let f=Form::rows(s)?;
-    if f.tokens<THIRD_MIN_TOKENS || f.h!=32 || f.k!=512 || f.table==0 {return None;}
+    if f.tokens<THIRD_MIN_TOKENS || !matches!(f.h,16|32) || f.k!=512 || f.table==0 {return None;}
     // Values address a selected row by a 32-bit byte offset (2,048 bytes a row).
     if f.rows.checked_mul(2048)?>=crate::absorb_tc::NO_ROW as usize {return None;}
     let tokens=u32::try_from(f.tokens).ok()?;
+    if f.h==16 {
+        if f.d!=256 || f.v!=256 || tokens>1024 {return None;}
+        if f.packed && (f.rows>8192 || !matches!(tokens,256|512|768|1024)) {return None;}
+        return match f.kind {
+            Kind::Scores if f.packed && (inputs[0]|inputs[1])&15==0=>Some(("latent_scores3_packed_h16",tokens,384)),
+            Kind::Values if f.packed && (inputs[1]|output)&15==0=>Some(("latent_values3_packed_h16",2*tokens,THIRD_THREADS)),
+            Kind::Scores if (inputs[0]|inputs[1])&15==0=>Some(("latent_scores3_h16",tokens,THIRD_THREADS)),
+            Kind::Values if (inputs[1]|output)&15==0=>Some(("latent_values3_h16",2*tokens,THIRD_THREADS)),
+            Kind::Query if (inputs[0]|weight)&15==0=>Some(("latent_weights3_h16",16*tokens.div_ceil(32),THIRD_THREADS)),
+            Kind::Project if (inputs[0]|weight)&15==0=>Some(("latent_weights3_panel_h16",16*tokens.div_ceil(32),THIRD_THREADS)),
+            _=>None,
+        };
+    }
     match f.kind {
         Kind::Scores if f.packed && (inputs[0]|inputs[1])&15==0=>Some(("latent_scores3_packed",tokens,384)),
         Kind::Values if f.packed && (inputs[1]|output)&15==0=>Some(("latent_values3_full_park",tokens,THIRD_THREADS)),

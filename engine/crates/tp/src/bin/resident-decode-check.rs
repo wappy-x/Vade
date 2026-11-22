@@ -946,6 +946,8 @@ fn main() {
         #[cfg(target_os="linux")]
         [mode,out] if mode=="wire-bf16"=>wire_bf16::run(Path::new(out)),
         #[cfg(target_os="linux")]
+        [mode,out] if mode=="wire-prompt-stages"=>wire_bf16::prompt::run(Path::new(out)),
+        #[cfg(target_os="linux")]
         [mode,kind] if mode=="wire-bf16-reject"=>kind.parse::<usize>().map_err(|e|e.to_string()).and_then(wire_bf16::rejects),
         #[cfg(target_os="linux")]
         [mode,out] if mode=="put-wide"=>put_wide::run(Path::new(out)),

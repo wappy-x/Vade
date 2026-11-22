@@ -60,7 +60,8 @@ pub fn run(args:&[String],checkpoint:CheckpointAdmission,root:&Path,output_setti
     // Bit 61 identifies the lossless BF16 prompt packet format. A mixed build
     // must fail here, before either rank posts a differently sized collective.
     // Bits 57 through 60 carry the agreed maximum chats in a prompt cohort.
-    let context_word=(context as u64|u64::from(keep)<<63|u64::from(keep)<<62|1<<61)|(cohort_chats as u64)<<57;
+    // Bit 56 identifies the native fold and mixed router-stage packet layouts.
+    let context_word=(context as u64|u64::from(keep)<<63|u64::from(keep)<<62|1<<61)|(cohort_chats as u64)<<57|1<<56;
     local[..64].copy_from_slice(identity.fingerprint().as_bytes());local[64..72].copy_from_slice(&context_word.to_le_bytes());local[72..].copy_from_slice(&(budget as u64).to_le_bytes());
     ring.all_gather(&mut records,80)?;
     for record in records.as_chunks::<80>().0 {

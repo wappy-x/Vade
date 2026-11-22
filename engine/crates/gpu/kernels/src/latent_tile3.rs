@@ -48,13 +48,13 @@ macro_rules! mul {($a:expr,$b:expr)=>{{let value:f32;asm!("mul.rn.f32 {value}, {
 
 /// Scores. `PF`: 0 no hints, 1 the next stage of the warp's rows (and the first stage of its next tile).
 #[inline(always)]
-fn scores3<const PF:usize,const PANEL:bool,const PACKED:bool,const PARALLEL:bool>(p:crate::prompt_ops::Arguments) {
+fn scores3<const PF:usize,const PANEL:bool,const PACKED:bool,const PARALLEL:bool,const HEADS:usize>(p:crate::prompt_ops::Arguments) {
     // SAFETY: the backend (`latent_absorb_rows::third`) and the bench validate every extent (`lengths`) and launch whole
     // warps; a launch this body does not take traps here as a whole block: another operation, another feature count
-    // than 512, another head count than 32, no selection table, or an input that is not 16-byte aligned. A block
+    // than 512, a head count different from HEADS, no selection table, or an input that is not 16-byte aligned. A block
     // past the token count returns as a whole block before any read. The count word is a finite integer at most the
     // score capacity and a selected ID is a finite integer below the row bound, or the block traps before the read
-    // that would use it. Global reads: the token's 32 x 512 B words; the token's selection row; 8-byte pairs inside a
+    // that would use it. Global reads: the token's HEADS x 512 B words; the token's selection row; 8-byte pairs inside a
     // selected cache row (a lane whose slot is past the count reads the row of the tile's first slot and drops the
     // value). A hint names an address inside a selected row or up to 64 bytes past it and reads nothing. Inputs are
     // immutable for the launch (the non-coherent loads need that). PACKED is bench-only: the cache has two high
@@ -66,7 +66,7 @@ fn scores3<const PF:usize,const PANEL:bool,const PACKED:bool,const PARALLEL:bool
     unsafe {
         let Some(f)=Form::rows(p.shape) else {asm!("trap;");return;};
         let threads=_block_dim_x() as usize;let warps=threads/32;
-        if f.kind!=Kind::Scores || f.k!=512 || f.h!=32 || f.table==0 || warps==0 || threads%32!=0 || (p.input[0]|p.input[1])&15!=0 {asm!("trap;");}
+        if f.kind!=Kind::Scores || f.k!=512 || f.h!=HEADS || f.table==0 || warps==0 || threads%32!=0 || (p.input[0]|p.input[1])&15!=0 {asm!("trap;");}
         if PARALLEL && threads!=256 {asm!("trap;");}
         if PACKED && p.lengths[1]<(f.rows*256) as u64 {asm!("trap;");}
         let token=_block_idx_x() as usize;
@@ -77,13 +77,13 @@ fn scores3<const PF:usize,const PANEL:bool,const PACKED:bool,const PARALLEL:bool
         let partials=if PARALLEL {crate::ptx::shared::<16384>()} else {0};
         // Stage the token's B operand once. Item `i`: head `i / 128`, then 16 bytes: step `s`, quarter `q`. Its two
         // pairs go to lanes `(n % 8) * 4 + (2 q) % 4` and the next one, register `q / 2`, N tile `n / 8`.
-        let b=(p.input[0] as *const u32).add(token*32*512);
+        let b=(p.input[0] as *const u32).add(token*HEADS*512);
         let mut item=tid;
-        while item<4096 {
+        while item<HEADS*128 {
             let mut raw=[[0u32;4];4];
             crate::strip_warp::unroll!(4,j,{
                 let i=item+j*threads;
-                if i<4096 {
+                if i<HEADS*128 {
                     let (w0,w1,w2,w3):(u32,u32,u32,u32);
                     asm!("ld.global.nc.v4.u32 {{{a},{b},{c},{d}}}, [{p}];",a=out(reg32)w0,b=out(reg32)w1,c=out(reg32)w2,d=out(reg32)w3,p=in(reg64)b.add(i*4),options(nostack,readonly));
                     raw[j]=[w0,w1,w2,w3];
@@ -91,7 +91,7 @@ fn scores3<const PF:usize,const PANEL:bool,const PACKED:bool,const PARALLEL:bool
             });
             crate::strip_warp::unroll!(4,j,{
                 let i=item+j*threads;
-                if i<4096 {
+                if i<HEADS*128 {
                     let (n,s,q)=(i/128,i%128/4,i%4);
                     let at=stage+((((s*32+(n%8)*4+(2*q)%4)*4+n/8)*8+4*(q/2)) as u32);
                     let (first,second)=(high2!(raw[j][0],raw[j][1]),high2!(raw[j][2],raw[j][3]));
@@ -196,9 +196,10 @@ fn scores3<const PF:usize,const PANEL:bool,const PACKED:bool,const PARALLEL:bool
                     rep8!(S,{
                         let ahead=if S+1<8 {if PANEL {panel[(S+1)%8]} else {fetch_a!(ra,rb,(S+1)%8)}} else {[0u32;4]};
                         let a=[if la {now[0]} else {0},if lb {now[1]} else {0},if la {now[2]} else {0},if lb {now[3]} else {0}];
-                        let (low,high)=(quad!(bq,1024*S),quad!(bq,1024*S+16));
+                        let low=quad!(bq,1024*S);
+                        let high=if HEADS>16 {quad!(bq,1024*S+16)} else {[0u32;4]};
                         acc[0]=madd(a,[low[0],low[1]],acc[0]);acc[1]=madd(a,[low[2],low[3]],acc[1]);
-                        acc[2]=madd(a,[high[0],high[1]],acc[2]);acc[3]=madd(a,[high[2],high[3]],acc[3]);
+                        if HEADS>16 {acc[2]=madd(a,[high[0],high[1]],acc[2]);acc[3]=madd(a,[high[2],high[3]],acc[3]);}
                         now=ahead;
                     });
                     ra=ra.wrapping_add(if PACKED {256} else {512});rb=rb.wrapping_add(if PACKED {256} else {512});bq+=8192;
@@ -213,10 +214,12 @@ fn scores3<const PF:usize,const PANEL:bool,const PACKED:bool,const PARALLEL:bool
             // The words of the lane: rows `sa` and `sb`, heads `T * 8 + 2 t` and the next one. A slot at or past the
             // count is +0.0.
             rep4!(T,{
-                let w=out.wrapping_add((token*32+T*8+2*t)*f.c+sa);
-                let sum:Acc=acc[T];
-                if sa<f.c {w.write(if la {mul!(sum.a,scale)} else {0.0});w.wrapping_add(f.c).write(if la {mul!(sum.b,scale)} else {0.0});}
-                if sb<f.c {w.wrapping_add(8).write(if lb {mul!(sum.c,scale)} else {0.0});w.wrapping_add(f.c+8).write(if lb {mul!(sum.d,scale)} else {0.0});}
+                if T<HEADS/8 {
+                    let w=out.wrapping_add((token*HEADS+T*8+2*t)*f.c+sa);
+                    let sum:Acc=acc[T];
+                    if sa<f.c {w.write(if la {mul!(sum.a,scale)} else {0.0});w.wrapping_add(f.c).write(if la {mul!(sum.b,scale)} else {0.0});}
+                    if sb<f.c {w.wrapping_add(8).write(if lb {mul!(sum.c,scale)} else {0.0});w.wrapping_add(f.c+8).write(if lb {mul!(sum.d,scale)} else {0.0});}
+                }
             });
             (ra,rb)=(na,nb);
             mt=next;
@@ -229,11 +232,11 @@ fn scores3<const PF:usize,const PANEL:bool,const PACKED:bool,const PARALLEL:bool
 /// step ahead, at a register plus a constant. A range of the word is one stage: 4 steps for query (256 key
 /// features), 8 for project (512 latent features).
 #[inline(always)]
-fn weights3<const PANEL:bool,const ASYNC:bool,const W64:bool>(p:crate::prompt_ops::Arguments) {
+fn weights3<const PANEL:bool,const ASYNC:bool,const W64:bool,const HEADS:usize>(p:crate::prompt_ops::Arguments) {
     // SAFETY: as `scores3`: the backend (`third`) and the bench validate every extent with the shape's `lengths` and
     // launch whole warps; a launch this body does not take traps here as a whole block (another operation or
     // shape than query with 256 key features and 512 latent features, or project with 512 latent features; a row
-    // count that is not a multiple of 16; another head count than 32; an input or a weight address that is not
+    // count that is not a multiple of 16; a head count different from HEADS; an input or a weight address that is not
     // 16-byte aligned). A block past the last head returns as a whole block before any read. Global reads: the B
     // words of a token below `tokens` (a column past the last token is staged as +0.0 and its words are dropped);
     // 4-byte weight pairs of a row below the row count at a column below the term count; for project the count word
@@ -253,7 +256,7 @@ fn weights3<const PANEL:bool,const ASYNC:bool,const W64:bool>(p:crate::prompt_op
         let threads=_block_dim_x() as usize;let warps=threads/32;
         let query=f.kind==Kind::Query;
         let (m_all,terms)=(f.m(),f.terms(0));
-        if !(query && f.d==256 && f.k==512 || f.kind==Kind::Project && f.k==512) || m_all%16!=0 || f.h!=32 || warps==0 || threads%32!=0
+        if !(query && f.d==256 && f.k==512 || f.kind==Kind::Project && f.k==512) || m_all%16!=0 || f.h!=HEADS || warps==0 || threads%32!=0
             || (p.input[0]|p.weight)&15!=0 {asm!("trap;");}
         if ASYNC && warps>12 {asm!("trap;");}
         let ntiles=if W64 {8} else {4};let token_width=ntiles*8;
@@ -272,7 +275,7 @@ fn weights3<const PANEL:bool,const ASYNC:bool,const W64:bool>(p:crate::prompt_op
         // Stage the block's B operand once. Item `i`: column `i / quads` (token `n0 + column`), then 16 bytes: step
         // `s`, quarter `q`, as in `scores3` with the token in the place of the head.
         let quads=terms/4;
-        let b=(p.input[0] as *const u32).add((n0*32+head)*terms);
+        let b=(p.input[0] as *const u32).add((n0*HEADS+head)*terms);
         let mut item=tid;
         while item<token_width*quads {
             let mut raw=[[0u32;4];4];
@@ -281,7 +284,7 @@ fn weights3<const PANEL:bool,const ASYNC:bool,const W64:bool>(p:crate::prompt_op
                 if i<token_width*quads && n0+i/quads<f.tokens {
                     let (w0,w1,w2,w3):(u32,u32,u32,u32);
                     asm!("ld.global.nc.v4.u32 {{{a},{b},{c},{d}}}, [{p}];",a=out(reg32)w0,b=out(reg32)w1,c=out(reg32)w2,d=out(reg32)w3,
-                        p=in(reg64)b.add(i/quads*32*terms+i%quads*4),options(nostack,readonly));
+                        p=in(reg64)b.add(i/quads*HEADS*terms+i%quads*4),options(nostack,readonly));
                     raw[j]=[w0,w1,w2,w3];
                 }
             });
@@ -369,7 +372,7 @@ fn weights3<const PANEL:bool,const ASYNC:bool,const W64:bool>(p:crate::prompt_op
                             if !(raw>=0.0 && raw==raw as u32 as f32) || raw as usize>f.c {asm!("trap;");}
                             raw==0.0
                         };
-                        let w=out.add(((n+e)*32+head)*m_all);
+                        let w=out.add(((n+e)*HEADS+head)*m_all);
                         w.add(ma).write(if empty {0.0} else {round(if e==0 {sum.a} else {sum.b})});
                         w.add(mb).write(if empty {0.0} else {round(if e==0 {sum.c} else {sum.d})});
                     }
@@ -380,13 +383,17 @@ fn weights3<const PANEL:bool,const ASYNC:bool,const W64:bool>(p:crate::prompt_op
     }
 }
 #[no_mangle]
-pub extern "ptx-kernel" fn latent_weights3(p:crate::prompt_ops::Arguments) {weights3::<false,false,false>(p);}
+pub extern "ptx-kernel" fn latent_weights3(p:crate::prompt_ops::Arguments) {weights3::<false,false,false,32>(p);}
 #[no_mangle]
-pub extern "ptx-kernel" fn latent_weights3_panel(p:crate::prompt_ops::Arguments) {weights3::<true,false,false>(p);}
+pub extern "ptx-kernel" fn latent_weights3_panel(p:crate::prompt_ops::Arguments) {weights3::<true,false,false,32>(p);}
 #[no_mangle]
-pub extern "ptx-kernel" fn latent_weights3_async(p:crate::prompt_ops::Arguments) {weights3::<false,true,false>(p);}
+pub extern "ptx-kernel" fn latent_weights3_async(p:crate::prompt_ops::Arguments) {weights3::<false,true,false,32>(p);}
 #[no_mangle]
-pub extern "ptx-kernel" fn latent_weights3_tile64(p:crate::prompt_ops::Arguments) {weights3::<false,false,true>(p);}
+pub extern "ptx-kernel" fn latent_weights3_tile64(p:crate::prompt_ops::Arguments) {weights3::<false,false,true,32>(p);}
+#[no_mangle]
+pub extern "ptx-kernel" fn latent_weights3_h16(p:crate::prompt_ops::Arguments) {weights3::<false,false,false,16>(p);}
+#[no_mangle]
+pub extern "ptx-kernel" fn latent_weights3_panel_h16(p:crate::prompt_ops::Arguments) {weights3::<true,false,false,16>(p);}
 /// Shared bytes of a values block: the A registers of 32 steps x 2 head tiles x 32 lanes, then the row offsets of the
 /// chunk's 512 slots.
 const VSTAGE:usize=32*2*32*16;const VIDS:usize=512*4;
@@ -401,7 +408,7 @@ const NO_ROW:u32=u32::MAX;
 /// `w % 2` and the 32 features from `32 (w / 2)`. `PF`: steps ahead for which the lines of the rows are asked (0: no
 /// hints).
 #[inline(always)]
-fn values3<const PF:usize,const PANEL:bool,const PACKED:bool,const WIDE:bool,const PARK:bool,const FULL:bool>(p:crate::prompt_ops::Arguments) {
+fn values3<const PF:usize,const PANEL:bool,const PACKED:bool,const WIDE:bool,const PARK:bool,const FULL:bool,const HEADS:usize>(p:crate::prompt_ops::Arguments) {
     // SAFETY: as `scores3`: the backend (`third`) and the bench validate every extent with the shape's `lengths`; a
     // launch this body does not take traps here as a whole block (another operation, feature count, head count or
     // block size, no selection table, a cache or an output that is not 16-byte aligned). A block past the last token
@@ -419,14 +426,14 @@ fn values3<const PF:usize,const PANEL:bool,const PACKED:bool,const WIDE:bool,con
     // has one writer; blocks own disjoint (token, feature) sets. The output is private until the stream completes.
     unsafe {
         let Some(f)=Form::rows(p.shape) else {asm!("trap;");return;};
-        if f.kind!=Kind::Values || f.k!=512 || f.h!=32 || f.table==0 || _block_dim_x()!=256 || (p.input[1]|p.output)&15!=0 {asm!("trap;");}
+        if f.kind!=Kind::Values || f.k!=512 || f.h!=HEADS || f.table==0 || _block_dim_x()!=256 || (p.input[1]|p.output)&15!=0 {asm!("trap;");}
         if PACKED && p.lengths[1]<(f.rows*256) as u64 {asm!("trap;");}
-        let block=_block_idx_x() as usize;let pieces=if FULL {1} else if WIDE {2} else {4};let (token,quarter)=(block/pieces,block%pieces);
+        let block=_block_idx_x() as usize;let pieces=if FULL {1} else if WIDE || HEADS==16 {2} else {4};let (token,quarter)=(block/pieces,block%pieces);
         if token>=f.tokens {return;}
         let tid=_thread_idx_x() as usize;let (warp,lane)=(tid/32,tid%32);let (g,t)=(lane/4,lane%4);
         let features=if FULL {8} else {4};
-        let (mtile,first_feature)=if FULL {(0,warp*64)} else if WIDE {(0,quarter*256+warp*32)} else {(warp&1,quarter*128+(warp>>1)*32)};
-        let x=(p.input[0] as *const u32).add(token*32*f.c);
+        let (mtile,first_feature)=if FULL {(0,warp*64)} else if WIDE || HEADS==16 {(0,quarter*256+warp*32)} else {(warp&1,quarter*128+(warp>>1)*32)};
+        let x=(p.input[0] as *const u32).add(token*HEADS*f.c);
         // The lane's four words (N tiles 0 to 3 of column `g`) of cache row 0.
         let latent=(p.input[1] as *const u8).wrapping_add((first_feature+features*g)*if PACKED {2} else {4});
         let selected=(p.input[2] as *const f32).add(token*f.table);
@@ -491,7 +498,7 @@ fn values3<const PF:usize,const PANEL:bool,const PACKED:bool,const WIDE:bool,con
         // PARK uses each word's private output slot for the first joined half. The same thread writes and reads
         // that slot, using coherent loads (never .nc). No other block or lane owns that output word. The final
         // store replaces the temporary FP32 value with the ordinary rounded word before stream publication.
-        let word_base=(p.output as *mut f32).add((token*32+mtile*16+g)*512+first_feature+2*features*t);
+        let word_base=(p.output as *mut f32).add((token*HEADS+mtile*16+g)*512+first_feature+2*features*t);
         macro_rules! save_half {($merge:expr)=>{{
             crate::strip_warp::unroll!(2,H,{
                 if H==0 || WIDE {
@@ -534,7 +541,7 @@ fn values3<const PF:usize,const PANEL:bool,const PACKED:bool,const WIDE:bool,con
             // and `2 tid + 1` of the chunk (pair `tid % 8` of chunk step `tid / 8`). Four heads a round of loads.
             let (k,cs,pair)=(first*16+2*tid,tid/8,tid%8);
             let mut r=0usize;
-            while r<32 {
+            while r<HEADS {
                 let mut raw=[[0u32;2];4];
                 crate::strip_warp::unroll!(4,j,{
                     // The pointer of a slot is formed under the guard of its read: a slot past the count has none.
@@ -612,6 +619,7 @@ fn values3<const PF:usize,const PANEL:bool,const PACKED:bool,const WIDE:bool,con
         };}
         if FULL {
             crate::strip_warp::unroll!(2,H,{
+                if H==0 || WIDE {
                 crate::strip_warp::unroll!(2,N,{
                     let at=w.add(H*16*512+N*4);
                     store4!(at,round(acc[H*8+N*4].a),round(acc[H*8+N*4+1].a),round(acc[H*8+N*4+2].a),round(acc[H*8+N*4+3].a));
@@ -619,6 +627,7 @@ fn values3<const PF:usize,const PANEL:bool,const PACKED:bool,const WIDE:bool,con
                     store4!(at.add(8*512),round(acc[H*8+N*4].c),round(acc[H*8+N*4+1].c),round(acc[H*8+N*4+2].c),round(acc[H*8+N*4+3].c));
                     store4!(at.add(8*512+8),round(acc[H*8+N*4].d),round(acc[H*8+N*4+1].d),round(acc[H*8+N*4+2].d),round(acc[H*8+N*4+3].d));
                 });
+                }
             });
         } else {
         store4!(w,round(acc[0].a),round(acc[1].a),round(acc[2].a),round(acc[3].a));
@@ -638,37 +647,47 @@ fn values3<const PF:usize,const PANEL:bool,const PACKED:bool,const WIDE:bool,con
 /// The served entries (`gpu/src/latent_absorb_rows.rs`, `third`): no hints. A cache that fits the GPU's second-level
 /// cache is read faster without them (MEASURED, kernel bench runs `f8tc-lat3-1` and `f8tc-lat3-2`).
 #[no_mangle]
-pub extern "ptx-kernel" fn latent_scores3(p:crate::prompt_ops::Arguments) {scores3::<0,false,false,false>(p);}
+pub extern "ptx-kernel" fn latent_scores3(p:crate::prompt_ops::Arguments) {scores3::<0,false,false,false,32>(p);}
 #[no_mangle]
-pub extern "ptx-kernel" fn latent_values3(p:crate::prompt_ops::Arguments) {values3::<0,false,false,false,false,false>(p);}
+pub extern "ptx-kernel" fn latent_values3(p:crate::prompt_ops::Arguments) {values3::<0,false,false,false,false,false,32>(p);}
 #[no_mangle]
-pub extern "ptx-kernel" fn latent_scores3_panel(p:crate::prompt_ops::Arguments) {scores3::<0,true,false,false>(p);}
+pub extern "ptx-kernel" fn latent_scores3_h16(p:crate::prompt_ops::Arguments) {scores3::<0,false,false,false,16>(p);}
 #[no_mangle]
-pub extern "ptx-kernel" fn latent_values3_panel(p:crate::prompt_ops::Arguments) {values3::<0,true,false,false,false,false>(p);}
+pub extern "ptx-kernel" fn latent_values3_h16(p:crate::prompt_ops::Arguments) {values3::<0,false,false,false,false,false,16>(p);}
+#[no_mangle]
+pub extern "ptx-kernel" fn latent_scores3_packed_h16(p:crate::prompt_ops::Arguments) {scores3::<0,true,true,false,16>(p);}
+#[no_mangle]
+pub extern "ptx-kernel" fn latent_values3_packed_h16(p:crate::prompt_ops::Arguments) {values3::<0,false,true,false,false,false,16>(p);}
+#[no_mangle]
+pub extern "ptx-kernel" fn latent_values3_full_park_h16(p:crate::prompt_ops::Arguments) {values3::<0,false,true,false,true,true,16>(p);}
+#[no_mangle]
+pub extern "ptx-kernel" fn latent_scores3_panel(p:crate::prompt_ops::Arguments) {scores3::<0,true,false,false,32>(p);}
+#[no_mangle]
+pub extern "ptx-kernel" fn latent_values3_panel(p:crate::prompt_ops::Arguments) {values3::<0,true,false,false,false,false,32>(p);}
 /// Bench-only packed-cache forms. No backend launches these entries.
 #[no_mangle]
-pub extern "ptx-kernel" fn latent_scores3_packed(p:crate::prompt_ops::Arguments) {scores3::<0,true,true,false>(p);}
+pub extern "ptx-kernel" fn latent_scores3_packed(p:crate::prompt_ops::Arguments) {scores3::<0,true,true,false,32>(p);}
 #[no_mangle]
-pub extern "ptx-kernel" fn latent_values3_packed(p:crate::prompt_ops::Arguments) {values3::<0,true,true,false,false,false>(p);}
+pub extern "ptx-kernel" fn latent_values3_packed(p:crate::prompt_ops::Arguments) {values3::<0,true,true,false,false,false,32>(p);}
 #[no_mangle]
-pub extern "ptx-kernel" fn latent_scores3_packed_single(p:crate::prompt_ops::Arguments) {scores3::<0,false,true,false>(p);}
+pub extern "ptx-kernel" fn latent_scores3_packed_single(p:crate::prompt_ops::Arguments) {scores3::<0,false,true,false,32>(p);}
 #[no_mangle]
-pub extern "ptx-kernel" fn latent_scores3_quarters(p:crate::prompt_ops::Arguments) {scores3::<0,true,true,true>(p);}
+pub extern "ptx-kernel" fn latent_scores3_quarters(p:crate::prompt_ops::Arguments) {scores3::<0,true,true,true,32>(p);}
 #[no_mangle]
-pub extern "ptx-kernel" fn latent_values3_packed_single(p:crate::prompt_ops::Arguments) {values3::<0,false,true,false,false,false>(p);}
+pub extern "ptx-kernel" fn latent_values3_packed_single(p:crate::prompt_ops::Arguments) {values3::<0,false,true,false,false,false,32>(p);}
 #[no_mangle]
-pub extern "ptx-kernel" fn latent_values3_wide(p:crate::prompt_ops::Arguments) {values3::<0,false,true,true,false,false>(p);}
+pub extern "ptx-kernel" fn latent_values3_wide(p:crate::prompt_ops::Arguments) {values3::<0,false,true,true,false,false,32>(p);}
 #[no_mangle]
-pub extern "ptx-kernel" fn latent_values3_park(p:crate::prompt_ops::Arguments) {values3::<0,false,true,false,true,false>(p);}
+pub extern "ptx-kernel" fn latent_values3_park(p:crate::prompt_ops::Arguments) {values3::<0,false,true,false,true,false,32>(p);}
 #[no_mangle]
-pub extern "ptx-kernel" fn latent_values3_wide_park(p:crate::prompt_ops::Arguments) {values3::<0,false,true,true,true,false>(p);}
+pub extern "ptx-kernel" fn latent_values3_wide_park(p:crate::prompt_ops::Arguments) {values3::<0,false,true,true,true,false,32>(p);}
 #[no_mangle]
-pub extern "ptx-kernel" fn latent_values3_full(p:crate::prompt_ops::Arguments) {values3::<0,false,true,true,false,true>(p);}
+pub extern "ptx-kernel" fn latent_values3_full(p:crate::prompt_ops::Arguments) {values3::<0,false,true,true,false,true,32>(p);}
 #[no_mangle]
-pub extern "ptx-kernel" fn latent_values3_full_park(p:crate::prompt_ops::Arguments) {values3::<0,false,true,true,true,true>(p);}
+pub extern "ptx-kernel" fn latent_values3_full_park(p:crate::prompt_ops::Arguments) {values3::<0,false,true,true,true,true,32>(p);}
 /// Bench forms with hints (the next stage; 4 steps ahead): ahead only where the cache is far larger than the GPU's
 /// second-level cache (32,768 rows).
 #[no_mangle]
-pub extern "ptx-kernel" fn latent_scores3_p1(p:crate::prompt_ops::Arguments) {scores3::<1,false,false,false>(p);}
+pub extern "ptx-kernel" fn latent_scores3_p1(p:crate::prompt_ops::Arguments) {scores3::<1,false,false,false,32>(p);}
 #[no_mangle]
-pub extern "ptx-kernel" fn latent_values3_p4(p:crate::prompt_ops::Arguments) {values3::<4,false,false,false,false,false>(p);}
+pub extern "ptx-kernel" fn latent_values3_p4(p:crate::prompt_ops::Arguments) {values3::<4,false,false,false,false,false,32>(p);}

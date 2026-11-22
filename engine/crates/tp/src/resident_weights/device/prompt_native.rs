@@ -111,6 +111,11 @@ impl<'b,'d> Weights<'b,'d> {
         for (output,(m,_,marker,ids,weights,shared)) in outputs.into_iter().zip(sets) {
             let (_,wrapped)=group_fold_shapes(local,m*picks,fold,*m)?.ok_or("device expert fold admission changed")?;
             let folded=b.prompt_operation(wrapped,[Some(ids),Some(weights),Some(&output),*shared,None],None)?;
+            if *m>16 && folded.len().is_multiple_of(2) {
+                out.push(self.exchange_bf16(b,&folded,*m,local,false,false)?);
+                spark_gpu_probe::prompt_launches::record("prompt_fold_first");
+                continue;
+            }
             let gathered=self.gather_small(b,&folded)?;if gathered.is_none() {self.gather_mapped(b,&folded)?;}drop(folded);drop(output);
             let exchange=match &gathered {Some(v)=>v,None=>self.exchange.as_ref().ok_or("device folded exchange is absent")?};
             out.push(Self::rank_rows(b,exchange,*m,local,epoch.rows.total/local,false)?);
