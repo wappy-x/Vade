@@ -365,7 +365,7 @@ fn run_pair(args:&[String])->Result<()> {
     use spark_serve::{Tokenizer,protocol::{self,DraftMode,Prompt}};
     use spark_gpu_probe::driver::with_backend;
     use spark_tp::{bounded_decoder::{Device,Decoder,Compute,HeadRows},transport::Ring};
-    if args.len()<10 {return Err("usage: resident-decode-check RANK 2 LISTEN NEXT pair MODEL INPUT_IDS REQUEST_JSON NEW_OUT REPEATS".into());}
+    if args.len()<10 {return Err("usage: resident-decode-check RANK WORLD LISTEN NEXT pair MODEL INPUT_IDS REQUEST_JSON NEW_OUT REPEATS".into());}
     // One load serves every job: the positional prompt first, then each line of --jobs=FILE.
     // --queue-per-step: sessions after the first open and close the resident queue around each
     // plain decode step, as the served session does. Same bits; for timing.
@@ -397,7 +397,11 @@ fn run_pair(args:&[String])->Result<()> {
     let options=profile_options(&args[10..].iter().filter(is_harness).cloned().collect::<Vec<_>>())?;let (cost,gpu_cost,device_wire)=(options.0,options.1,options.5);
     let root=Path::new(&args[5]);
     let rank=args[0].parse::<usize>().map_err(|e|e.to_string())?;let listen=args[2].parse::<std::net::SocketAddr>().map_err(|_|"invalid listen")?;let next=args[3].parse::<std::net::SocketAddr>().map_err(|_|"invalid next")?;
-    if args[1].parse::<usize>().map_err(|e|e.to_string())?!=spark_tp::layer_transport::PAIR_RANKS {return Err("resident pair probe requires its declared pair size".into());}
+    // ANY NUMBER OF RANKS on a path, from the pair up. Each rank owns its share of the rows of every split matrix
+    // (`resident_weights::Rows::new`), and every exchange is one put and one take for each other rank. The mailbox
+    // layout and the wire below come from the links (`tp_route::Links`), so no line here names a count of ranks.
+    let world=args[1].parse::<usize>().map_err(|e|e.to_string())?;
+    if world<spark_tp::layer_transport::PAIR_RANKS {return Err("resident pair probe needs two ranks or more".into());}
     let tokenizer=spark_serve::tokenizer::ModelTokenizer::from_directory(root)?;
     let limits=spark_serve::Limits {input_tokens:PROMPT_BOUND,output_tokens:256,context_tokens:PROMPT_BOUND+256,default_thinking:false,next_mtp_depth:Some(0),..Default::default()};
     let checkpoint=open_checkpoint(root)?;
@@ -425,12 +429,14 @@ fn run_pair(args:&[String])->Result<()> {
     for name in ["config.json","model.safetensors.index.json","tokenizer.json","tokenizer_config.json"] {identity.push_str(&format!("{name}={}\n",sha256::digest_reader(fs::File::open(root.join(name)).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?));}
     for job in &jobs {fs::create_dir(&job.2).map_err(|e|e.to_string())?;write(&job.2.join("IDENTITY"),identity.as_bytes())?;}
     let _cpu_pin=spark_tp::runtime::defer_cpu_pin();
-    let mut ring=Ring::connect(rank,2,listen,next)?;let digest=sha256::digest(identity.as_bytes());let mut agreement=vec![0;digest.len()*ring.world()];
+    let mut ring=Ring::connect(rank,world,listen,next)?;let digest=sha256::digest(identity.as_bytes());let mut agreement=vec![0;digest.len()*ring.world()];
     let start=rank*digest.len();agreement[start..start+digest.len()].copy_from_slice(digest.as_bytes());ring.all_gather(&mut agreement,digest.len())?;
     if !agreement.chunks_exact(digest.len()).all(|v|v==digest.as_bytes()) {return Err("pair request, checkpoint metadata, or GPU program differs".into());}
     let initial_budget=jobs.iter().filter_map(|job|job.4.8.map(|case|case.0)).min().unwrap_or(usize::MAX);
     with_backend(0,spark_gpu_probe::layer_ptx()?,initial_budget,|backend| {
-        let mailbox=if device_wire {Some(backend.tp_mailbox(4<<20)?)} else {None};
+        // One receive channel for each other rank, with room for a message of 4 MiB (`tp_route::Channels`). For two
+        // ranks this IS the pair's mailbox: `tp_mailbox(4<<20)` is this same call with the links of a pair.
+        let mailbox=if device_wire {Some(backend.tp_mailbox_routed(spark_gpu_probe::tp_route::Channels::new(&spark_gpu_probe::tp_route::Links::new(world,false)?,(4<<20)/4)?)?)} else {None};
         // The host mHC lane takes the rows of a batch step too (one row a core).
         let conductor=spark_tp::host_conductor::Conductor::with_rows(backend,&checkpoint,3,spark_tp::bounded_decoder::BATCH_ROWS)?;
         let mut placement=spark_tp::thread_affinity::Placement::new(&mut ring,conductor.as_ref().map_or(0,|conductor|conductor.cores()))?;
@@ -443,10 +449,13 @@ fn run_pair(args:&[String])->Result<()> {
             let left=links.neighbor(rank,Side::Left).map(|_|port(listen)).transpose()?;
             let right=links.neighbor(rank,Side::Right).map(|_|port(next)).transpose()?;
             let lead=left.is_none();
-            let (incoming,outgoing)=spark_seqpar::control::connect_peers(left,right,
+            // `connect_peers` gives the link this rank connected (toward the higher rank), then the link it accepted.
+            let (outgoing,incoming)=spark_seqpar::control::connect_peers(left,right,
                 std::time::Instant::now()+std::time::Duration::from_secs(300))?;
-            let link=incoming.or(outgoing).ok_or("resident device wire has no peer")?;
-            let wire=spark_tp::tensor_wire::Wire::Write(spark_tp::tensor_wire::WriteLink::new(&link)?);
+            // The links this rank has, left then right. `Wire::bind` gives a pair its write wire; on a longer path the
+            // wire thread writes this rank's messages to both neighbors and relays the others on.
+            let end=|link:Option<std::net::TcpStream>|link.as_ref().map(spark_tp::tensor_wire::WriteLink::new).transpose();
+            let wire=spark_tp::tensor_wire::Wire::Relay([end(incoming)?,end(outgoing)?],links,rank);
             Some(wire.bind(m.take_host().ok_or("resident mailbox endpoint is taken")?,lead,m.layout())?)
         } else {None};
         use std::sync::atomic::{AtomicBool,Ordering};
@@ -982,7 +991,7 @@ fn main() {
         [mode,out] if mode=="route-bench"=>routing::bench(Path::new(out)),
         #[cfg(target_os="linux")]
         [mode,out] if mode=="route-random"=>routing::random(Path::new(out)),
-        _=>Err("usage: resident-decode-check RANK 2 LISTEN NEXT pair MODEL INPUT_IDS REQUEST_JSON NEW_OUT REPEATS | prepare MODEL REQUEST_JSON NEW_IDS | quantizer NEW_OUT | layout NEW_OUT | compare LEFT RIGHT | plan-time MODEL REPEATS".into()),
+        _=>Err("usage: resident-decode-check RANK WORLD LISTEN NEXT pair MODEL INPUT_IDS REQUEST_JSON NEW_OUT REPEATS | prepare MODEL REQUEST_JSON NEW_IDS | quantizer NEW_OUT | layout NEW_OUT | compare LEFT RIGHT | plan-time MODEL REPEATS".into()),
     };if let Err(error)=result {eprintln!("RESIDENT CHECK FAIL {error}");std::process::exit(1);}
 }
 #[cfg(test)] #[test]

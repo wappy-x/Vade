@@ -20,11 +20,18 @@ fn batch_bf16(kind:Kind)->bool {matches!(kind,Kind::MixedBf16|Kind::PlainBatch)}
 /// groups of several chats and the check rows of a drafting pass) receives most of its hand-offs with that kind, and
 /// those waits ran with an idle memory bus. Only a row window (`bus_shadow::rows`) asks for it, so a one-row step
 /// records what it recorded before.
+/// FIRST TAKE: the wait for the messages of an exchange starts at the first of its takes (`bus_shadow::one_exchange`). The prefetch
+/// goes in front of that FIRST take, not the last, so it runs during the whole wait; all the takes of the exchange then
+/// copy beside it. On a pair a take is always alone, so its place is what it was. MEASURED 2026-11-21 on four Sparks:
+/// 31.04 to 31.24 -> 30.02 to 30.04 ms a step, token IDs and logits equal. Prefetch only: no value can change with it.
 fn take_for(recorder:&mut Recorder<'_>,range:std::ops::Range<usize>,plain:bool)->Option<usize> {
-    let mut crossed=false;
+    let mut crossed=false;let start=range.start;
     for index in range.rev() {
         let kind=recorder.calls[index].grid.kind;
-        if kind==Kind::TakeScatter || plain && kind==Kind::Take {if crossed {recorder.shadow[0]+=1;return None;}return Some(index);}
+        if kind==Kind::TakeScatter || plain && kind==Kind::Take {if crossed {recorder.shadow[0]+=1;return None;}
+            let mut first=index;
+            while first>start && crate::bus_shadow::one_exchange(&recorder.calls[first-1].command,&recorder.calls[first].command) {first-=1;}
+            return Some(first);}
         if boundary(kind) {return None;}
         crossed|=batch_bf16(kind);
     }None

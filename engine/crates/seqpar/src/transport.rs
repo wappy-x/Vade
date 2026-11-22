@@ -1299,7 +1299,23 @@ fn pump<'a>(mut right: Option<&'a TcpStream>, mut left: Option<&'a TcpStream>, s
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::TcpListener;
+    mod loopback { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-support/loopback.rs")); }
+
+    #[test]
+    fn loopback_retries_setup_only() {
+        use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+        let (connects, checks) = (AtomicUsize::new(0), AtomicUsize::new(0));
+        let panic = std::panic::catch_unwind(|| {
+            loopback::run_ranks(1, 1, |_, _| {
+                match connects.fetch_add(1, Relaxed) {
+                    0 => Err("listen: Address already in use (os error 98)".into()),
+                    _ => Ok(()),
+                }
+            }, |_, ()| { checks.fetch_add(1, Relaxed); panic!("wrong bits"); });
+        });
+        assert_eq!(panic.unwrap_err().downcast_ref::<&str>(), Some(&"wrong bits"));
+        assert_eq!((connects.into_inner(), checks.into_inner()), (2, 1));
+    }
 
     #[derive(Default)]
     struct CpuSender { pending: Option<(*mut u8, usize)>, output: Vec<u8>, blocked: bool, fail: bool }
@@ -1407,32 +1423,26 @@ mod tests {
     #[test]
     fn uneven_ring_preserves_kv_bits_for_any_rank_count() {
         for (world, path) in [1, 2, 3, 4, 5, 6, 8].into_iter().flat_map(|n| [false, true].map(move |p| (n, p))) {
-            let listeners = (0..world).map(|_| TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap()).collect::<Vec<_>>();
-            let addresses = listeners.iter().map(|l| l.local_addr().unwrap()).collect::<Vec<_>>();
-            drop(listeners);
-            std::thread::scope(|scope| {
-                for rank in 0..world {
-                    let addresses = &addresses;
-                    scope.spawn(move || {
-                        let mut ring = Ring::connect_topology(rank, world, addresses[rank], addresses[(rank + 1) % world], "ring-test", path, TIMEOUT).unwrap();
-                        ring.barrier().unwrap();
-                        for (tokens, prefix) in [0, 1, 3, 19, 4099].into_iter().flat_map(|n| [false, true].map(move |p| (n, p))) {
-                            let p = Partition::balanced(tokens, world, 2.0).unwrap();
-                            let staging = if prefix { ring.prefix_tokens(&p).unwrap() } else { tokens };
-                            let (mut k, mut v) = (vec![f32::NAN; staging * 3], vec![f32::NAN; staging * 3]);
-                            for i in p.range(rank).start * 3..(p.range(rank).end * 3).min(k.len()) {
-                                k[i] = f32::from_bits(i as u32 + 1);
-                                v[i] = f32::from_bits(0x80000000 | (i as u32 + 1));
-                            }
-                            if prefix { ring.exchange_prefix_kv(&mut k, &mut v, &p, 3).unwrap(); }
-                            else { ring.exchange_kv(&mut k, &mut v, &p, 3).unwrap(); }
-                            let end = if prefix { (p.range(rank).end * 3).min(k.len()) } else { k.len() };
-                            assert!(k[..end].iter().enumerate().all(|(i, x)| x.to_bits() == i as u32 + 1));
-                            assert!(v[..end].iter().enumerate().all(|(i, x)| x.to_bits() == (0x80000000 | (i as u32 + 1))));
-                        }
-                        ring.barrier().unwrap();
-                    });
+            let connect = |rank, addresses: &[std::net::SocketAddr]| {
+                Ring::connect_topology(rank, world, addresses[rank], addresses[(rank + 1) % world], "ring-test", path, Duration::from_secs(5))
+            };
+            loopback::run_ranks(world, 1, connect, |rank, mut ring| {
+                ring.barrier().unwrap();
+                for (tokens, prefix) in [0, 1, 3, 19, 4099].into_iter().flat_map(|n| [false, true].map(move |p| (n, p))) {
+                    let p = Partition::balanced(tokens, world, 2.0).unwrap();
+                    let staging = if prefix { ring.prefix_tokens(&p).unwrap() } else { tokens };
+                    let (mut k, mut v) = (vec![f32::NAN; staging * 3], vec![f32::NAN; staging * 3]);
+                    for i in p.range(rank).start * 3..(p.range(rank).end * 3).min(k.len()) {
+                        k[i] = f32::from_bits(i as u32 + 1);
+                        v[i] = f32::from_bits(0x80000000 | (i as u32 + 1));
+                    }
+                    if prefix { ring.exchange_prefix_kv(&mut k, &mut v, &p, 3).unwrap(); }
+                    else { ring.exchange_kv(&mut k, &mut v, &p, 3).unwrap(); }
+                    let end = if prefix { (p.range(rank).end * 3).min(k.len()) } else { k.len() };
+                    assert!(k[..end].iter().enumerate().all(|(i, x)| x.to_bits() == i as u32 + 1));
+                    assert!(v[..end].iter().enumerate().all(|(i, x)| x.to_bits() == (0x80000000 | (i as u32 + 1))));
                 }
+                ring.barrier().unwrap();
             });
         }
     }
@@ -1450,9 +1460,6 @@ mod tests {
     #[test]
     fn all_reduce_adds_ranks_as_a_pair_tree() {
         for (world, path) in [1, 2, 3, 4, 5, 6, 8].into_iter().flat_map(|n| [false, true].map(move |p| (n, p))) {
-            let listeners = (0..world).map(|_| TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap()).collect::<Vec<_>>();
-            let addresses = listeners.iter().map(|l| l.local_addr().unwrap()).collect::<Vec<_>>();
-            drop(listeners);
             // Values whose sums round differently in other orders.
             let value = |rank: usize, i: usize| [1.0e8f32, 1.0, -1.0e8, 3.0, 0.5, -7.25, 2.0e-3, 9.0e7][(rank + i) % 8] * (1.0 + i as f32 / 7.0);
             let expected = (0..37).map(|i| {
@@ -1461,31 +1468,25 @@ mod tests {
                 while step < world { for first in (0..world - step).step_by(2 * step) { p[first] += p[first + step]; } step *= 2; }
                 p[0].to_bits()
             }).collect::<Vec<_>>();
-            std::thread::scope(|scope| {
-                for rank in 0..world {
-                    let (addresses, expected) = (&addresses, &expected);
-                    scope.spawn(move || {
-                        let mut ring = Ring::connect_topology(rank, world, addresses[rank], addresses[(rank + 1) % world], "reduce-test", path, TIMEOUT).unwrap();
-                        let mut values = (0..37).map(|i| value(rank, i)).collect::<Vec<_>>();
-                        ring.all_reduce_f32(&mut values, &mut vec![0.0; 37 * world]).unwrap();
-                        assert_eq!(&values.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), expected, "world {world} path {path}");
-                    });
-                }
+            let connect = |rank, addresses: &[std::net::SocketAddr]| {
+                Ring::connect_topology(rank, world, addresses[rank], addresses[(rank + 1) % world], "reduce-test", path, Duration::from_secs(5))
+            };
+            loopback::run_ranks(world, 1, connect, |rank, mut ring| {
+                let mut values = (0..37).map(|i| value(rank, i)).collect::<Vec<_>>();
+                ring.all_reduce_f32(&mut values, &mut vec![0.0; 37 * world]).unwrap();
+                assert_eq!(values.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), expected, "world {world} path {path}");
             });
         }
     }
     #[test]
     fn disconnected_peer_poisoned_collective_fails_without_waiting() {
-        let listeners = (0..2).map(|_| TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap()).collect::<Vec<_>>();
-        let addresses = listeners.iter().map(|l| l.local_addr().unwrap()).collect::<Vec<_>>();
-        drop(listeners);
+        let connect = |rank, addresses: &[std::net::SocketAddr]| {
+            Ring::connect_topology(rank, 2, addresses[rank], addresses[1 - rank], "disconnect-test", false, Duration::from_secs(5))
+        };
+        let [mut ring, mut peer]: [Ring; 2] =
+            loopback::run_ranks(2, 1, connect, |_, ring| ring).try_into().ok().unwrap();
         std::thread::scope(|scope| {
-            let addresses = &addresses;
-            let peer = scope.spawn(move || {
-                let mut ring = Ring::connect(1, 2, addresses[1], addresses[0], "disconnect-test").unwrap();
-                ring.barrier().unwrap();
-            });
-            let mut ring = Ring::connect(0, 2, addresses[0], addresses[1], "disconnect-test").unwrap();
+            let peer = scope.spawn(move || peer.barrier().unwrap());
             ring.barrier().unwrap();
             peer.join().unwrap();
             let mut values = [0.0; 16];

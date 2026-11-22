@@ -86,6 +86,8 @@ fn gathered_mixed(values:&[f32],rows:&[Rows])->Result<Vec<Vec<f32>>> {
 }
 #[cfg(any(target_os="linux",test))]
 #[path="resident_weights/batch_layout.rs"] mod batch_layout;
+#[cfg(test)]
+#[path="resident_weights/rank_proofs.rs"] mod rank_proofs;
 #[path="resident_weights/rows_fold.rs"] pub mod rows_fold;
 #[cfg(any(target_os="linux",test))]
 #[path="resident_weights/load_rows.rs"] mod load_rows;

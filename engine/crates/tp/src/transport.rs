@@ -1214,6 +1214,13 @@ fn exchange_duplex_timeout(right: Option<&TcpStream>, left: Option<&TcpStream>, 
 mod tests {
     use super::*;
     use std::net::TcpListener;
+    mod loopback { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-support/loopback.rs")); }
+
+    fn rings<T: Send>(world: usize, path: bool, run: impl Fn(usize, Ring) -> T + Sync) -> Vec<T> {
+        loopback::run_ranks(world, 1, |rank, addresses| {
+            Ring::connect_options(rank, world, addresses[rank], addresses[(rank + 1) % world], path)
+        }, run)
+    }
     #[test]
     fn auxiliary_rdma_setup_stall_falls_back_after_tcp_connects() {
         fn stalled_setup(ring:&mut Ring,timeout:Duration)->Result<()> {
@@ -1222,32 +1229,29 @@ mod tests {
             // No host RDMA device is needed. Both peers withhold the setup hello after TCP connects.
             exchange_timeout(socket,socket,&[],&mut [0;24],timeout)
         }
-        let listeners=(0..4).map(|_|TcpListener::bind("127.0.0.1:0").unwrap()).collect::<Vec<_>>();
-        let addresses=listeners.iter().map(|s|s.local_addr().unwrap()).collect::<Vec<_>>();drop(listeners);
-        let (primary,auxiliary)=addresses.split_at(addresses.len()/2);
-        let started=Instant::now();
-        std::thread::scope(|scope| {
-            let mut workers=Vec::new();
-            for rank in 0..primary.len() {
-                workers.push(scope.spawn(move || {
-                    let next=(rank+1)%primary.len();
-                    let mut ring=Ring::connect_options(rank,primary.len(),primary[rank],primary[next],false).unwrap();
-                    AUX_RDMA_SETUP.with(|hook|hook.set(Some(stalled_setup)));
-                    ring.aux=Ring::open_configured_aux(rank,auxiliary.len(),auxiliary[rank],auxiliary[next],false,true);
-                    AUX_RDMA_SETUP.with(|hook|hook.set(None));
-                    assert!(ring.aux.is_none(),"stalled RDMA setup must reject the auxiliary rail");
-                    let gathered=ring.gather_batch_f32(&[rank as f32],primary.len(),1,1).unwrap();
-                    assert_eq!(gathered,(0..primary.len()).map(|i|i as f32).collect::<Vec<_>>());
-                    ring.barrier().unwrap();
-                }));
+        let connect = |rank, addresses: &[SocketAddr]| {
+            let started = Instant::now();
+            let next = 1 - rank;
+            let ring = Ring::connect_options(rank, 2, addresses[rank], addresses[next], false)?;
+            AUX_RDMA_SETUP.with(|hook| hook.set(Some(stalled_setup)));
+            let aux = Ring::try_open_configured_aux(rank, 2, addresses[2 + rank], addresses[2 + next], false, true);
+            AUX_RDMA_SETUP.with(|hook| hook.set(None));
+            match aux {
+                // One peer can close the auxiliary socket just before the other's timeout.
+                Err(error) if matches!(error.as_str(), "TCP exchange timed out" | "peer closed while receiving") => Ok((ring, started)),
+                Err(error) => Err(error),
+                Ok(_) => panic!("stalled RDMA setup must reject the auxiliary rail"),
             }
-            for worker in workers {worker.join().unwrap();}
+        };
+        loopback::run_ranks(2, 2, connect, |rank, (mut ring, started)| {
+            assert_eq!(ring.gather_batch_f32(&[rank as f32], 2, 1, 1).unwrap(), [0.0, 1.0]);
+            ring.barrier().unwrap();
+            // The stall consumes its own timeout and stays within the auxiliary budget.
+            let elapsed = started.elapsed();
+            let budget = AUX_CONNECT_TIMEOUT + 2 * AUX_RDMA_TIMEOUT;
+            assert!(elapsed >= AUX_RDMA_TIMEOUT, "the stalled setup returned after {elapsed:?}, before its timeout");
+            assert!(elapsed < budget && budget < TIMEOUT, "auxiliary RDMA setup took {elapsed:?}");
         });
-        // The setup did stall for its own timeout, and the whole fallback stays inside the auxiliary budget
-        // (the wait of the connection, the setup, the probe), far below the 30 seconds of the main link.
-        let elapsed=started.elapsed();let budget=AUX_CONNECT_TIMEOUT+2*AUX_RDMA_TIMEOUT;
-        assert!(elapsed>=AUX_RDMA_TIMEOUT,"the stalled setup returned after {elapsed:?}, before its timeout");
-        assert!(elapsed<budget && budget<TIMEOUT,"auxiliary RDMA setup took {elapsed:?}");
     }
     /// SECOND RAIL: the two ranks trade their offers on the link they hold and reach one answer.
     #[test]
@@ -1260,20 +1264,14 @@ mod tests {
         let cases=[(open(1),open(2),29960u16,true),(Offer::Closed,open(2),29960,false),(open(1),Offer::Closed,29960,false),
             (open(1),Offer::Open(Vec::new()),29960,false),(Offer::Closed,Offer::Closed,29960,false),(open(1),open(2),u16::MAX,false)];
         for path in [false,true] { for (zero,one,port,found) in &cases {
-            let listeners=(0..2).map(|_|TcpListener::bind("127.0.0.1:0").unwrap()).collect::<Vec<_>>();
-            let addresses=listeners.iter().map(|s|s.local_addr().unwrap()).collect::<Vec<_>>();drop(listeners);
-            let rails=std::thread::scope(|scope| {
-                let workers=(0..2).map(|rank| {let (addresses,offer)=(&addresses,[zero,one][rank]);scope.spawn(move || {
-                    let mut ring=Ring::connect_options(rank,2,addresses[rank],addresses[1-rank],path).unwrap();
-                    let (rail,why)=ring.second_rail(offer,*port).unwrap();
-                    // A pair that stays on one rail has a reason for its startup line; a pair with a rail has none.
-                    assert_eq!(rail.is_some(),why.is_empty());
-                    // The trade leaves the ring as a start expects it: nothing counted, and the next collective in step.
-                    assert_eq!((ring.exchanges,ring.elapsed),(0,Duration::ZERO));
-                    assert_eq!(ring.gather_batch_f32(&[rank as f32],2,1,1).unwrap(),[0.0,1.0]);
-                    rail
-                })}).collect::<Vec<_>>();
-                workers.into_iter().map(|w|w.join().unwrap()).collect::<Vec<_>>()
+            let rails = rings(2, path, |rank, mut ring| {
+                let (rail, why) = ring.second_rail([zero, one][rank], *port).unwrap();
+                // A pair that stays on one rail has a reason for its startup line; a pair with a rail has none.
+                assert_eq!(rail.is_some(), why.is_empty());
+                // The trade leaves the ring as a start expects it: nothing counted, and the next collective in step.
+                assert_eq!((ring.exchanges, ring.elapsed), (0, Duration::ZERO));
+                assert_eq!(ring.gather_batch_f32(&[rank as f32], 2, 1, 1).unwrap(), [0.0, 1.0]);
+                rail
             });
             if *found {
                 let (zero,one)=(SocketAddr::from((at(2,1),29961)),SocketAddr::from((at(2,2),29961)));
@@ -1377,20 +1375,11 @@ mod tests {
     #[test]
     fn the_step_barrier_of_a_pair_without_a_mailbox_is_the_control_stream_barrier() {
         // Loopback has no fabric mailbox: the step barrier must fall back, on both ranks, and stay in step with `barrier`.
-        let listeners = (0..2).map(|_| TcpListener::bind("127.0.0.1:0").unwrap()).collect::<Vec<_>>();
-        let addresses = listeners.iter().map(|s| s.local_addr().unwrap()).collect::<Vec<_>>();
-        drop(listeners);
-        std::thread::scope(|scope| {
-            for rank in 0..2 {
-                let addresses = &addresses;
-                scope.spawn(move || {
-                    let mut ring = Ring::connect_options(rank, 2, addresses[rank], addresses[(rank + 1) % 2], true).unwrap();
-                    for _ in 0..3 { ring.step_barrier().unwrap(); ring.barrier().unwrap(); }
-                    let mut values = vec![(rank + 1) as f32; 3]; ring.reduce_small(&mut values).unwrap();
-                    assert_eq!(values, [3.0; 3]);
-                    ring.step_barrier().unwrap();
-                });
-            }
+        rings(2, true, |rank, mut ring| {
+            for _ in 0..3 { ring.step_barrier().unwrap(); ring.barrier().unwrap(); }
+            let mut values = vec![(rank + 1) as f32; 3]; ring.reduce_small(&mut values).unwrap();
+            assert_eq!(values, [3.0; 3]);
+            ring.step_barrier().unwrap();
         });
         // One rank alone has nothing to wait for.
         let alone = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
@@ -1399,40 +1388,31 @@ mod tests {
     #[test]
     fn odd_rings_uneven_and_empty_partitions() {
         for (world, path) in [1, 2, 3, 4, 5, 8].into_iter().flat_map(|n| [false, true].map(move |p| (n, p))) {
-            let listeners = (0..world).map(|_| TcpListener::bind("127.0.0.1:0").unwrap()).collect::<Vec<_>>();
-            let addresses = listeners.iter().map(|s| s.local_addr().unwrap()).collect::<Vec<_>>();
-            drop(listeners);
-            std::thread::scope(|scope| {
-                for rank in 0..world {
-                    let addresses = &addresses;
-                    scope.spawn(move || {
-                        let mut ring = Ring::connect_options(rank, world, addresses[rank], addresses[(rank + 1) % world], path).unwrap();
-                        ring.barrier().unwrap();
-                        for units in [1, 3, 8, 19] { for tokens in [1, 7, 16] {
-                            let width = 4;
-                            let r = rows(units, rank, world);
-                            let local = (0..tokens).flat_map(|t| (r.start*width..r.end*width).map(move |i| (t*units*width+i) as f32)).collect::<Vec<_>>();
-                            let result = ring.gather_batch_f32(&local, units, width, tokens).unwrap();
-                            assert!(result.iter().enumerate().all(|(i,&v)| v == i as f32));
-                        }
-                        let mut values=vec![(rank+1) as f32;19];ring.reduce_small(&mut values).unwrap();
-                        assert!(values.iter().all(|&v|v==(world*(world+1)/2) as f32));
-                        }
-                        let mut command = if rank == 0 { [19u8; 24] } else { [0; 24] };
-                        ring.command(&mut command).unwrap();
-                        assert_eq!(command, [19; 24]);
-                        // A payload beyond the socket buffers takes the blocking send
-                        // fallback; a command after the spin window parks the reader.
-                        let mut payload = vec![if rank == 0 { 7u8 } else { 0 }; 4 << 20];
-                        ring.command_payload(&mut payload).unwrap();
-                        assert!(payload.iter().all(|&b| b == 7));
-                        if rank == 0 { std::thread::sleep(COMMAND_SPIN * 2); }
-                        let mut late = if rank == 0 { [5u8; 8] } else { [0; 8] };
-                        ring.command(&mut late).unwrap();
-                        assert_eq!(late, [5; 8]);
-                        ring.barrier().unwrap();
-                    });
+            rings(world, path, |rank, mut ring| {
+                ring.barrier().unwrap();
+                for units in [1, 3, 8, 19] { for tokens in [1, 7, 16] {
+                    let width = 4;
+                    let r = rows(units, rank, world);
+                    let local = (0..tokens).flat_map(|t| (r.start*width..r.end*width).map(move |i| (t*units*width+i) as f32)).collect::<Vec<_>>();
+                    let result = ring.gather_batch_f32(&local, units, width, tokens).unwrap();
+                    assert!(result.iter().enumerate().all(|(i,&v)| v == i as f32));
                 }
+                let mut values=vec![(rank+1) as f32;19];ring.reduce_small(&mut values).unwrap();
+                assert!(values.iter().all(|&v|v==(world*(world+1)/2) as f32));
+                }
+                let mut command = if rank == 0 { [19u8; 24] } else { [0; 24] };
+                ring.command(&mut command).unwrap();
+                assert_eq!(command, [19; 24]);
+                // A payload beyond the socket buffers takes the blocking send
+                // fallback; a command after the spin window parks the reader.
+                let mut payload = vec![if rank == 0 { 7u8 } else { 0 }; 4 << 20];
+                ring.command_payload(&mut payload).unwrap();
+                assert!(payload.iter().all(|&b| b == 7));
+                if rank == 0 { std::thread::sleep(COMMAND_SPIN * 2); }
+                let mut late = if rank == 0 { [5u8; 8] } else { [0; 8] };
+                ring.command(&mut late).unwrap();
+                assert_eq!(late, [5; 8]);
+                ring.barrier().unwrap();
             });
         }
     }
@@ -1442,30 +1422,21 @@ mod tests {
     fn final_rank_transfer_relays_multi_piece_payloads() {
         let pattern = |len: usize, salt: usize| (0..len).map(|i| ((i * 31 + salt) % 251) as u8).collect::<Vec<_>>();
         for (world, path) in [3, 4].into_iter().flat_map(|n| [false, true].map(move |p| (n, p))) {
-            let listeners = (0..world).map(|_| TcpListener::bind("127.0.0.1:0").unwrap()).collect::<Vec<_>>();
-            let addresses = listeners.iter().map(|s| s.local_addr().unwrap()).collect::<Vec<_>>();
-            drop(listeners);
-            std::thread::scope(|scope| {
-                for rank in 0..world {
-                    let addresses = &addresses;
-                    scope.spawn(move || {
-                        let mut ring = Ring::connect_options(rank, world, addresses[rank], addresses[(rank + 1) % world], path).unwrap();
-                        let last = rank == world - 1;
-                        for destination in 0..world {
-                            let mut bytes = if last { pattern(600_001, destination) } else { vec![0; 600_001] };
-                            ring.transfer_from_last(destination, &mut bytes).unwrap();
-                            let expect = if rank >= destination { pattern(600_001, destination) } else { vec![0; 600_001] };
-                            assert!(bytes == expect, "world={world} path={path} rank={rank} destination={destination}");
-                            let (mut a, mut b) = if last { (pattern(300_000, 1), pattern(300_000, 2)) } else { (vec![0; 300_000], vec![0; 300_000]) };
-                            ring.transfer_from_last_batch(destination, &mut [&mut a[..], &mut [][..], &mut b[..]]).unwrap();
-                            let received = rank >= destination;
-                            assert!(a == if received { pattern(300_000, 1) } else { vec![0; 300_000] }, "batch a rank={rank} destination={destination}");
-                            assert!(b == if received { pattern(300_000, 2) } else { vec![0; 300_000] }, "batch b rank={rank} destination={destination}");
-                        }
-                        assert!(ring.transfer_from_last(world, &mut [0; 4]).is_err());
-                        ring.barrier().unwrap();
-                    });
+            rings(world, path, |rank, mut ring| {
+                let last = rank == world - 1;
+                for destination in 0..world {
+                    let mut bytes = if last { pattern(600_001, destination) } else { vec![0; 600_001] };
+                    ring.transfer_from_last(destination, &mut bytes).unwrap();
+                    let expect = if rank >= destination { pattern(600_001, destination) } else { vec![0; 600_001] };
+                    assert!(bytes == expect, "world={world} path={path} rank={rank} destination={destination}");
+                    let (mut a, mut b) = if last { (pattern(300_000, 1), pattern(300_000, 2)) } else { (vec![0; 300_000], vec![0; 300_000]) };
+                    ring.transfer_from_last_batch(destination, &mut [&mut a[..], &mut [][..], &mut b[..]]).unwrap();
+                    let received = rank >= destination;
+                    assert!(a == if received { pattern(300_000, 1) } else { vec![0; 300_000] }, "batch a rank={rank} destination={destination}");
+                    assert!(b == if received { pattern(300_000, 2) } else { vec![0; 300_000] }, "batch b rank={rank} destination={destination}");
                 }
+                assert!(ring.transfer_from_last(world, &mut [0; 4]).is_err());
+                ring.barrier().unwrap();
             });
         }
     }

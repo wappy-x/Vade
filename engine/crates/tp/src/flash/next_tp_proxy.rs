@@ -45,8 +45,8 @@ const IDLE_MAX: Duration = Duration::from_micros(100);
 pub enum Wire {
     #[cfg(target_os = "linux")]
     Write(WriteLink),
-    /// More than two ranks: the links to the left and right neighbors (None at an end of the
-    /// path), the path and this rank.
+    /// Any number of ranks: the links to the left and right neighbors (None at an end of the
+    /// path), the path and this rank. `bind` gives a pair the write wire (one neighbor, no relayed slot).
     #[cfg(target_os = "linux")]
     Relay([Option<WriteLink>; 2], Links, usize),
 }
@@ -157,7 +157,13 @@ impl Wire {
             host.set_take_ctas(TAKE_CTAS);
             match self {
                 Wire::Write(link) => Ok(Worker::Write(host, link, lead)),
-                Wire::Relay(links, route, rank) => Ok(Worker::Relay(host, links, route, layout, rank)),
+                // ONE PATH for any number of ranks: the caller hands over the links it has and the mailbox layout says
+                // which worker serves them. A layout with no relayed slot and one neighbor is the pair, and the pair's
+                // worker is the write wire, as when the caller names it. Every other layout takes the relay.
+                Wire::Relay(links, route, rank) => match (layout.relayed(), links) {
+                    (false, [Some(link), None] | [None, Some(link)]) => Ok(Worker::Write(host, link, lead)),
+                    (_, links) => Ok(Worker::Relay(host, links, route, layout, rank)),
+                },
             }
         }
     }

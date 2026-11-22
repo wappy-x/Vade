@@ -476,7 +476,7 @@ fn replay(g: &mut Gpu, (ma, mb): (H, H)) -> Result<()> {
 /// the reference is the head's `project_f32_ordered` on that copy, and the candidate reads the patterns. Outputs start poisoned (0xff) with 16-byte
 /// guards; the candidate runs in its one-warp geometry, the four-warp geometry and a 64-thread geometry (not admitted: the scalar chain of the same entry).
 /// plain_admission::BF16_SHAPES, as one literal (the bench cannot link the gpu crate; a host test there compares the two).
-const BF16_STEP_SHAPES: [(usize, usize); 10] = [(16, 4096), (32, 4096), (64, 4096), (128, 4096), (4096, 128), (8192, 128), (2048, 1536), (4096, 1536), (16384, 512), (32768, 512)];
+const BF16_STEP_SHAPES: [(usize, usize); 11] = [(16, 4096), (32, 4096), (64, 4096), (128, 4096), (4096, 128), (8192, 128), (1024, 1536), (2048, 1536), (4096, 1536), (16384, 512), (32768, 512)];
 fn bf16_patterns(values: &[f32]) -> (Vec<u16>, Vec<f32>) {
     let patterns: Vec<u16> = values.iter().map(|v| (v.to_bits() >> 16) as u16).collect();
     let widened = patterns.iter().map(|p| f32::from_bits(u32::from(*p) << 16)).collect();

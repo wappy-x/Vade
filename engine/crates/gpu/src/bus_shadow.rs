@@ -164,12 +164,42 @@ pub fn side_plain(take:&Command,window:Window)->Option<Command> {
 }
 #[cfg(not(target_arch="nvptx64"))]
 static ARMED:[std::sync::atomic::AtomicU64;2]=[const {std::sync::atomic::AtomicU64::new(0)};2];
+/// The words of a take that name its message: the address of its arrival word, then the message number. A scatter take
+/// keeps them in words 1 and 2 (`tp_mailbox_take_scatter`), a plain take in words 6 and 7 (`tp_mailbox_take_shared`).
+#[cfg(not(target_arch="nvptx64"))]
+fn message(take:&Command)->Option<(u64,u64)> {
+    let at=if take.kind==Kind::TakeScatter as u32 {8} else if take.kind==Kind::Take as u32 {48} else {return None;};
+    Some((word(&take.payload,at)?,word(&take.payload,at+8)?))
+}
+/// Two takes of ONE exchange: one kind, the SAME message number, DIFFERENT arrival words. A mailbox has one receive
+/// channel for each other rank, so above two ranks an exchange has one take for each of them, back to back. A pair has
+/// one channel: there no two takes are of one exchange. The launch recorder puts a prefetch in front of the first take
+/// of an exchange (`resident_launch_shadow::take_for`).
+#[cfg(not(target_arch="nvptx64"))]
+pub fn one_exchange(a:&Command,b:&Command)->bool {
+    a.kind==b.kind && matches!((message(a),message(b)),(Some((x,s)),Some((y,t))) if s==t && x!=y)
+}
 #[cfg(not(target_arch="nvptx64"))]
 pub fn record(routed:bool) {ARMED[usize::from(routed)].fetch_add(1,std::sync::atomic::Ordering::Relaxed);}
 #[cfg(not(target_arch="nvptx64"))]
 pub fn counts()->[u64;2] {ARMED.each_ref().map(|value|value.load(std::sync::atomic::Ordering::Relaxed))}
 const _:()={assert!(OFFSET.is_multiple_of(16));assert!(OFFSET+core::mem::size_of::<Window>()<=1024);};
 #[cfg(test)] mod tests {
+    /// The prefetch moves to the first take only inside one exchange: the same message number on different arrival
+    /// words. A pair's mailbox has one arrival word a slot, so two takes there never match.
+    #[test] fn takes_of_one_exchange_share_the_message_number_on_different_arrival_words() {
+        use crate::resident_launch::{Command,Kind};
+        let take=|kind:Kind,arrival:u64,number:u64| {let at=if kind==Kind::Take {6} else {1};let mut command=Command::new(kind);command.word(at,arrival);command.word(at+1,number);command};
+        for kind in [Kind::TakeScatter,Kind::Take] {
+            let (a,b,c,d)=(take(kind,0x100,7),take(kind,0x108,7),take(kind,0x100,8),take(kind,0x100,7));
+            assert!(super::one_exchange(&a,&b));
+            assert!(!super::one_exchange(&a,&c),"another message number is another exchange");
+            assert!(!super::one_exchange(&a,&d),"one arrival word is one channel: a pair");
+        }
+        assert!(!super::one_exchange(&take(Kind::TakeScatter,0x100,7),&take(Kind::Take,0x108,7)),"two kinds are not one exchange");
+        let put=Command::new(Kind::Put);
+        assert!(!super::one_exchange(&put,&put),"only a take waits for a message");
+    }
     #[test] fn more_targets_are_one_job_static_projections_of_two_megabytes_or_more() {
         use crate::expert_ops::{Arguments,LaunchArguments,Op,Shape};use core::mem::offset_of;
         let mut plain=Command::new(Kind::PlainBf16);plain.word(0,0x4000_0000);plain.word(3,1536);plain.word(4,4096);

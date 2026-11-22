@@ -111,6 +111,9 @@ impl Channels {
     pub fn recv_seq(&self, channel: usize, slot: usize) -> usize { RECV_SEQ + channel * self.slots + slot }
     /// The mailbox's words.
     pub fn words(&self) -> usize { HEADER + self.slots * self.world * self.slot_words }
+    /// Whether a message here may pass through a rank between its origin and its reader (the slots then start with a
+    /// FRAME). One hop keeps the pair's layout, with no frame.
+    pub fn relayed(&self) -> bool { self.frame != 0 }
 }
 
 /// One link of a relaying rank: its queue pair and the write ids it posted and completed.

@@ -670,6 +670,8 @@ mod tests {
         assert!(decode_chunk(&payload, (CHUNK_MAX + 1) as u64).is_err());
         assert!(decode_chunk(&payload, 3 | 2 << 16).is_err());
     }
+    mod loopback { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-support/loopback.rs")); }
+
     #[test]
     fn real_shape_admission_cancel_reuse() {
         for (world, path) in [(2, false), (4, false), (4, true)] {
@@ -679,49 +681,22 @@ mod tests {
                     (d.hidden, d.vocab, d.qh / world, d.vh / world),
                     (2560, 248320, 24 / world, 48 / world)
                 );
-                let listeners = (0..world)
-                    .map(|_| {
-                        std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap()
-                    })
-                    .collect::<Vec<_>>();
-                let addresses = listeners
-                    .iter()
-                    .map(|l| l.local_addr().unwrap())
-                    .collect::<Vec<_>>();
-                drop(listeners);
+                let mut rings = loopback::run_ranks(world, 1, |rank, addresses| {
+                    crate::transport::Ring::connect_options(
+                        rank,
+                        world,
+                        addresses[rank],
+                        addresses[(rank + 1) % world],
+                        path,
+                    )
+                }, |_, ring| ring).into_iter();
+                let coordinator = rings.next().unwrap();
+                let runtime = || Runtime::new(248320, Box::new(|_| Ok(Box::new(Fake))));
                 std::thread::scope(|scope| {
-                    let jobs = (1..world)
-                        .map(|rank| {
-                            let addresses = &addresses;
-                            scope.spawn(move || {
-                                worker(
-                                    crate::transport::Ring::connect_options(
-                                        rank,
-                                        world,
-                                        addresses[rank],
-                                        addresses[(rank + 1) % world],
-                                        path,
-                                    )
-                                    .unwrap(),
-                                    Runtime::new(248320, Box::new(|_| Ok(Box::new(Fake)))),
-                                )
-                                .unwrap()
-                            })
-                        })
-                        .collect::<Vec<_>>();
-                    let e = Engine::new(
-                        crate::transport::Ring::connect_options(
-                            0,
-                            world,
-                            addresses[0],
-                            addresses[1],
-                            path,
-                        )
-                        .unwrap(),
-                        Runtime::new(248320, Box::new(|_| Ok(Box::new(Fake)))),
-                        vec![248046],
-                        1 << 30,
-                    );
+                    for ring in rings {
+                        scope.spawn(move || worker(ring, runtime()).unwrap());
+                    }
+                    let e = Engine::new(coordinator, runtime(), vec![248046], 1 << 30);
                     let mut live = (0..SLOTS).map(|_| e.session().unwrap()).collect::<Vec<_>>();
                     assert!(e.session().is_err());
                     let mut cohort = live
@@ -774,9 +749,6 @@ mod tests {
                     drop(live);
                     assert!(e.runtime.borrow().sessions.is_empty());
                     e.shutdown().unwrap();
-                    for j in jobs {
-                        j.join().unwrap();
-                    }
                 });
             }
         }

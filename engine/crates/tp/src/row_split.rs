@@ -5,6 +5,7 @@ use spark_gpu_probe::{causal_ops::{Shape,Op},norm_boundary::NormShape};
 use std::{cell::{Cell,RefCell},collections::BTreeMap};
 mod batch;
 mod draft_admission;
+#[cfg(test)] mod rank_proofs;
 #[cfg(test)] mod validation_tests;
 mod kept_charge;
 #[cfg(test)] mod kept_charge_tests;

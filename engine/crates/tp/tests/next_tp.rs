@@ -15,10 +15,11 @@ use spark_tp::{
 use std::{
     collections::BTreeMap,
     fs,
-    net::TcpListener,
     ops::Range,
     path::{Path, PathBuf},
 };
+mod loopback { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-support/loopback.rs")); }
+
 type R<T> = Result<T, String>;
 fn raw(c: &ShardCheckpoint, n: &str) -> Vec<u8> {
     let mut b = vec![0; c.plan.tensors[n].bytes() as usize];
@@ -374,159 +375,137 @@ fn run(
     world: usize,
     path: bool,
 ) -> Vec<(Vec<u32>, Vec<f32>)> {
-    let listeners = (0..world)
-        .map(|_| TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap())
-        .collect::<Vec<_>>();
-    let addresses = listeners
-        .iter()
-        .map(|l| l.local_addr().unwrap())
-        .collect::<Vec<_>>();
-    drop(listeners);
-    std::thread::scope(|scope| {
-        let jobs = (0..world)
-            .map(|rank| {
-                let addresses = &addresses;
-                scope.spawn(move || {
-                    let model =
-                        NextModel::from_checkpoint(checkpoint(root, s, f, rank, world)).unwrap();
-                    let cpu = Cpu {
-                        c: checkpoint(root, s, f, rank, world),
-                        x: vec![0.; 32],
-                        state: [0.; 4],
-                        token: 0,
-                        trace: vec![],
-                        logits: vec![],
-                        fail: false,
-                        routes: vec![],
-                    };
-                    let ring = Ring::connect_options(
-                        rank,
-                        world,
-                        addresses[rank],
-                        addresses[(rank + 1) % world],
-                        path,
-                    )
-                    .unwrap();
-                    let shared = SharedTransport::new(ring);
-                    let mut session = model.session(shared.clone(), cpu, 1, 16).unwrap();
-                    let mut ids = session.prefill(&[1, 3, 2, 5]).unwrap();
-                    ids.extend(session.prefill(&[6, 4]).unwrap());
-                    let make_cpu = || Cpu {
-                        c: checkpoint(root, s, f, rank, world),
-                        x: vec![0.; 32],
-                        state: [0.; 4],
-                        token: 0,
-                        trace: vec![],
-                        logits: vec![],
-                        fail: false,
-                        routes: vec![],
-                    };
-                    let mut rows = (0..8)
-                        .map(|i| {
-                            model
-                                .session(shared.clone(), make_cpu(), 100 + i, 16)
-                                .unwrap()
-                        })
-                        .collect::<Vec<_>>();
-                    let mut solo = (0..8)
-                        .map(|i| {
-                            model
-                                .session(shared.clone(), make_cpu(), 200 + i, 16)
-                                .unwrap()
-                        })
-                        .collect::<Vec<_>>();
-                    for (i, (a, b)) in rows.iter_mut().zip(&mut solo).enumerate() {
-                        for _ in 0..i % 3 {
-                            assert_eq!(a.step(3).unwrap(), b.step(3).unwrap());
-                        }
-                    }
-                    for step in 0..6 {
-                        let tokens = (0..8).map(|i| 1 + (i + step) % 6).collect::<Vec<_>>();
-                        let expected = solo
-                            .iter_mut()
-                            .zip(&tokens)
-                            .map(|(s, &t)| s.step(t).unwrap())
-                            .collect::<Vec<_>>();
-                        assert_eq!(
-                            spark_tp::next::NextSession::step_rows(
-                                &mut rows.iter_mut().collect::<Vec<_>>(),
-                                &tokens
-                            )
-                            .unwrap(),
-                            expected
-                        );
-                        for (a, b) in rows.iter().zip(&solo) {
-                            for (a, b) in [
-                                (&a.kernels().trace, &b.kernels().trace),
-                                (&a.kernels().logits, &b.kernels().logits),
-                            ] {
-                                assert_eq!(
-                                    a.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
-                                    b.iter().map(|x| x.to_bits()).collect::<Vec<_>>()
-                                );
-                            }
-                        }
-                    }
-                    let positions = rows.iter().map(|s| s.position()).collect::<Vec<_>>();
-                    assert!(
-                        spark_tp::next::NextSession::step_rows(
-                            &mut rows.iter_mut().collect::<Vec<_>>(),
-                            &[99; 8]
-                        )
-                        .is_err()
-                    );
-                    assert_eq!(
-                        positions,
-                        rows.iter().map(|s| s.position()).collect::<Vec<_>>()
-                    );
-                    assert!(
-                        spark_tp::next::NextSession::step_rows(
-                            &mut rows.iter_mut().collect::<Vec<_>>(),
-                            &[7; 8]
-                        )
-                        .is_err()
-                    );
-                    assert!(rows.iter().all(|s| s.is_failed()));
-                    let trace = session.kernels().trace.clone();
-                    assert_eq!(session.position(), 6);
-                    assert!(session.step(99).is_err());
-                    assert_eq!(session.position(), 6);
-                    session.reset().unwrap();
-                    assert_eq!(ids, session.prefill(&[1, 3, 2, 5, 6, 4]).unwrap());
-                    assert_eq!(trace, session.kernels().trace);
-                    assert!(session.step(7).is_err());
-                    assert!(session.is_failed());
-                    session.reset().unwrap();
-                    let mismatch = session.step(0);
-                    assert_eq!(mismatch.is_err(), world.is_multiple_of(2));
-                    if let Err(error) = mismatch {
-                        assert!(error.contains("routing mismatch"));
-                    }
-                    session.reset().unwrap();
-                    let cpu = Cpu {
-                        c: checkpoint(root, s, f, rank, world),
-                        x: vec![0.; 32],
-                        state: [0.; 4],
-                        token: 0,
-                        trace: vec![],
-                        logits: vec![],
-                        fail: false,
-                        routes: vec![],
-                    };
-                    let mut other = model.session(shared, cpu, 2, 16).unwrap();
-                    session.reset().unwrap();
-                    let mut interleaved = Vec::new();
-                    for t in [1, 3, 2, 5, 6, 4] {
-                        interleaved.push(session.step(t).unwrap());
-                        other.step(2).unwrap();
-                    }
-                    assert_eq!(ids, interleaved);
-                    assert_eq!(trace, session.kernels().trace);
-                    (ids, trace)
-                })
+    loopback::run_ranks(world, 1, |rank, addresses| {
+        Ring::connect_options(rank, world, addresses[rank], addresses[(rank + 1) % world], path)
+    }, |rank, ring| {
+        let model =
+            NextModel::from_checkpoint(checkpoint(root, s, f, rank, world)).unwrap();
+        let cpu = Cpu {
+            c: checkpoint(root, s, f, rank, world),
+            x: vec![0.; 32],
+            state: [0.; 4],
+            token: 0,
+            trace: vec![],
+            logits: vec![],
+            fail: false,
+            routes: vec![],
+        };
+        let shared = SharedTransport::new(ring);
+        let mut session = model.session(shared.clone(), cpu, 1, 16).unwrap();
+        let mut ids = session.prefill(&[1, 3, 2, 5]).unwrap();
+        ids.extend(session.prefill(&[6, 4]).unwrap());
+        let make_cpu = || Cpu {
+            c: checkpoint(root, s, f, rank, world),
+            x: vec![0.; 32],
+            state: [0.; 4],
+            token: 0,
+            trace: vec![],
+            logits: vec![],
+            fail: false,
+            routes: vec![],
+        };
+        let mut rows = (0..8)
+            .map(|i| {
+                model
+                    .session(shared.clone(), make_cpu(), 100 + i, 16)
+                    .unwrap()
             })
             .collect::<Vec<_>>();
-        jobs.into_iter().map(|j| j.join().unwrap()).collect()
+        let mut solo = (0..8)
+            .map(|i| {
+                model
+                    .session(shared.clone(), make_cpu(), 200 + i, 16)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        for (i, (a, b)) in rows.iter_mut().zip(&mut solo).enumerate() {
+            for _ in 0..i % 3 {
+                assert_eq!(a.step(3).unwrap(), b.step(3).unwrap());
+            }
+        }
+        for step in 0..6 {
+            let tokens = (0..8).map(|i| 1 + (i + step) % 6).collect::<Vec<_>>();
+            let expected = solo
+                .iter_mut()
+                .zip(&tokens)
+                .map(|(s, &t)| s.step(t).unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                spark_tp::next::NextSession::step_rows(
+                    &mut rows.iter_mut().collect::<Vec<_>>(),
+                    &tokens
+                )
+                .unwrap(),
+                expected
+            );
+            for (a, b) in rows.iter().zip(&solo) {
+                for (a, b) in [
+                    (&a.kernels().trace, &b.kernels().trace),
+                    (&a.kernels().logits, &b.kernels().logits),
+                ] {
+                    assert_eq!(
+                        a.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                        b.iter().map(|x| x.to_bits()).collect::<Vec<_>>()
+                    );
+                }
+            }
+        }
+        let positions = rows.iter().map(|s| s.position()).collect::<Vec<_>>();
+        assert!(
+            spark_tp::next::NextSession::step_rows(
+                &mut rows.iter_mut().collect::<Vec<_>>(),
+                &[99; 8]
+            )
+            .is_err()
+        );
+        assert_eq!(
+            positions,
+            rows.iter().map(|s| s.position()).collect::<Vec<_>>()
+        );
+        assert!(
+            spark_tp::next::NextSession::step_rows(
+                &mut rows.iter_mut().collect::<Vec<_>>(),
+                &[7; 8]
+            )
+            .is_err()
+        );
+        assert!(rows.iter().all(|s| s.is_failed()));
+        let trace = session.kernels().trace.clone();
+        assert_eq!(session.position(), 6);
+        assert!(session.step(99).is_err());
+        assert_eq!(session.position(), 6);
+        session.reset().unwrap();
+        assert_eq!(ids, session.prefill(&[1, 3, 2, 5, 6, 4]).unwrap());
+        assert_eq!(trace, session.kernels().trace);
+        assert!(session.step(7).is_err());
+        assert!(session.is_failed());
+        session.reset().unwrap();
+        let mismatch = session.step(0);
+        assert_eq!(mismatch.is_err(), world.is_multiple_of(2));
+        if let Err(error) = mismatch {
+            assert!(error.contains("routing mismatch"));
+        }
+        session.reset().unwrap();
+        let cpu = Cpu {
+            c: checkpoint(root, s, f, rank, world),
+            x: vec![0.; 32],
+            state: [0.; 4],
+            token: 0,
+            trace: vec![],
+            logits: vec![],
+            fail: false,
+            routes: vec![],
+        };
+        let mut other = model.session(shared, cpu, 2, 16).unwrap();
+        session.reset().unwrap();
+        let mut interleaved = Vec::new();
+        for t in [1, 3, 2, 5, 6, 4] {
+            interleaved.push(session.step(t).unwrap());
+            other.step(2).unwrap();
+        }
+        assert_eq!(ids, interleaved);
+        assert_eq!(trace, session.kernels().trace);
+        (ids, trace)
     })
 }
 #[test]
@@ -768,54 +747,45 @@ fn prompt_chunks_match_token_steps() {
     fs::create_dir(&root).unwrap();
     let (s, f) = fixture(&root);
     for world in [1, 2] {
-        let listeners = (0..world)
-            .map(|_| TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap())
-            .collect::<Vec<_>>();
-        let addresses = listeners.iter().map(|l| l.local_addr().unwrap()).collect::<Vec<_>>();
-        drop(listeners);
         let (root, s, f) = (&root, &s, &f);
-        std::thread::scope(|scope| {
-            for rank in 0..world {
-                let addresses = &addresses;
-                scope.spawn(move || {
-                    let model = NextModel::from_checkpoint(checkpoint(root, s, f, rank, world)).unwrap();
-                    let cpu = || Cpu {
-                        c: checkpoint(root, s, f, rank, world),
-                        x: vec![0.; 32],
-                        state: [0.; 4],
-                        token: 0,
-                        trace: vec![],
-                        logits: vec![],
-                        fail: false,
-                        routes: vec![],
-                    };
-                    let ring = Ring::connect_options(rank, world, addresses[rank], addresses[(rank + 1) % world], false).unwrap();
-                    let shared = SharedTransport::new(ring);
-                    let mut plain = model.session(shared.clone(), cpu(), 1, 16).unwrap();
-                    let ids = plain.prefill(&[1, 3, 2, 5, 6, 4]).unwrap();
-                    let after = [3, 1, 2].map(|t| plain.step(t).unwrap());
-                    let chunked = Chunked { cpu: cpu(), tokens: vec![], xs: vec![], routes: vec![], cohort: vec![] };
-                    let mut c = model.session(shared.clone(), chunked, 2, 16).unwrap();
-                    assert_eq!(c.chunk(&[1, 3, 2], false).unwrap(), 0);
-                    assert_eq!(c.position(), 3);
-                    assert_eq!(c.chunk(&[5, 6, 4], true).unwrap(), ids[5]);
-                    assert_eq!(c.position(), 6);
-                    assert_eq!([3, 1, 2].map(|t| c.step(t).unwrap()), after);
-                    // Longer than the hooks' rows: token by token, same result.
-                    let mut long = model.session(shared.clone(), Chunked { cpu: cpu(), tokens: vec![], xs: vec![], routes: vec![], cohort: vec![] }, 3, 16).unwrap();
-                    assert_eq!(long.chunk(&[1, 3, 2, 5, 6, 4], true).unwrap(), ids[5]);
-                    // Cohort rows: two sessions stepped together == each stepped alone.
-                    let mut a = model.session(shared.clone(), cpu(), 10, 16).unwrap();
-                    let mut b = model.session(shared.clone(), cpu(), 11, 16).unwrap();
-                    let alone = [a.step(1).unwrap(), b.step(5).unwrap(), a.step(3).unwrap(), b.step(2).unwrap()];
-                    let fresh = || Chunked { cpu: cpu(), tokens: vec![], xs: vec![], routes: vec![], cohort: vec![] };
-                    let (mut ca, mut cb) = (model.session(shared.clone(), fresh(), 12, 16).unwrap(), model.session(shared.clone(), fresh(), 13, 16).unwrap());
-                    let one = spark_tp::next::NextSession::step_rows(&mut [&mut ca, &mut cb], &[1, 5]).unwrap();
-                    let two = spark_tp::next::NextSession::step_rows(&mut [&mut ca, &mut cb], &[3, 2]).unwrap();
-                    assert_eq!([one[0], one[1], two[0], two[1]], alone);
-                    assert_eq!(ca.step(4).unwrap(), a.step(4).unwrap());
-                });
-            }
+        loopback::run_ranks(world, 1, |rank, addresses| {
+            Ring::connect_options(rank, world, addresses[rank], addresses[(rank + 1) % world], false)
+        }, |rank, ring| {
+            let model = NextModel::from_checkpoint(checkpoint(root, s, f, rank, world)).unwrap();
+            let cpu = || Cpu {
+                c: checkpoint(root, s, f, rank, world),
+                x: vec![0.; 32],
+                state: [0.; 4],
+                token: 0,
+                trace: vec![],
+                logits: vec![],
+                fail: false,
+                routes: vec![],
+            };
+            let shared = SharedTransport::new(ring);
+            let mut plain = model.session(shared.clone(), cpu(), 1, 16).unwrap();
+            let ids = plain.prefill(&[1, 3, 2, 5, 6, 4]).unwrap();
+            let after = [3, 1, 2].map(|t| plain.step(t).unwrap());
+            let chunked = Chunked { cpu: cpu(), tokens: vec![], xs: vec![], routes: vec![], cohort: vec![] };
+            let mut c = model.session(shared.clone(), chunked, 2, 16).unwrap();
+            assert_eq!(c.chunk(&[1, 3, 2], false).unwrap(), 0);
+            assert_eq!(c.position(), 3);
+            assert_eq!(c.chunk(&[5, 6, 4], true).unwrap(), ids[5]);
+            assert_eq!(c.position(), 6);
+            assert_eq!([3, 1, 2].map(|t| c.step(t).unwrap()), after);
+            // Longer than the hooks' rows: token by token, same result.
+            let mut long = model.session(shared.clone(), Chunked { cpu: cpu(), tokens: vec![], xs: vec![], routes: vec![], cohort: vec![] }, 3, 16).unwrap();
+            assert_eq!(long.chunk(&[1, 3, 2, 5, 6, 4], true).unwrap(), ids[5]);
+            // Cohort rows: two sessions stepped together == each stepped alone.
+            let mut a = model.session(shared.clone(), cpu(), 10, 16).unwrap();
+            let mut b = model.session(shared.clone(), cpu(), 11, 16).unwrap();
+            let alone = [a.step(1).unwrap(), b.step(5).unwrap(), a.step(3).unwrap(), b.step(2).unwrap()];
+            let fresh = || Chunked { cpu: cpu(), tokens: vec![], xs: vec![], routes: vec![], cohort: vec![] };
+            let (mut ca, mut cb) = (model.session(shared.clone(), fresh(), 12, 16).unwrap(), model.session(shared.clone(), fresh(), 13, 16).unwrap());
+            let one = spark_tp::next::NextSession::step_rows(&mut [&mut ca, &mut cb], &[1, 5]).unwrap();
+            let two = spark_tp::next::NextSession::step_rows(&mut [&mut ca, &mut cb], &[3, 2]).unwrap();
+            assert_eq!([one[0], one[1], two[0], two[1]], alone);
+            assert_eq!(ca.step(4).unwrap(), a.step(4).unwrap());
         });
     }
     fs::remove_dir_all(&root).unwrap();

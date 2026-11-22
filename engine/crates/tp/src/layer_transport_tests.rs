@@ -1,6 +1,6 @@
 use super::*;
 use engine_model::plan::{ConfigPlan, layer::Topology};
-use std::net::TcpListener;
+mod loopback { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-support/loopback.rs")); }
 
 fn program(rank: u32, layer: usize, context: u64) -> LayerPlan {
     let ConfigPlan::Deferred(d)=ConfigPlan::from_config(include_bytes!("../../model/tests/fixtures/glm/config.json")).unwrap() else { panic!() };
@@ -11,15 +11,10 @@ fn plan(rank: u32, layer: usize, context: u64, dtype: WireType) -> PairPlan {
     let types=vec![dtype;p.steps.iter().map(|s| s.gather.len()).sum()];
     PairPlan::new(p,&types,usize::MAX).unwrap()
 }
-fn groups(work: impl Fn(usize,PairGroup)+Sync) {
-    let listeners=(0..PAIR_RANKS).map(|_| TcpListener::bind("127.0.0.1:0").unwrap()).collect::<Vec<_>>();
-    let addresses=listeners.iter().map(|l| l.local_addr().unwrap()).collect::<Vec<_>>(); drop(listeners);
-    std::thread::scope(|scope| { for rank in 0..PAIR_RANKS { let work=&work; let addresses=&addresses;
-        scope.spawn(move || {
-            let ring=Ring::connect_options(rank,PAIR_RANKS,addresses[rank],addresses[(rank+1)%PAIR_RANKS],true).unwrap();
-            work(rank,PairGroup::new(ring).unwrap());
-        });
-    } });
+fn groups(work: impl Fn(usize, PairGroup) + Sync) {
+    loopback::run_ranks(PAIR_RANKS, 1, |rank, addresses| {
+        Ring::connect_options(rank, PAIR_RANKS, addresses[rank], addresses[(rank + 1) % PAIR_RANKS], true)
+    }, |rank, ring| work(rank, PairGroup::new(ring).unwrap()));
 }
 
 #[test]

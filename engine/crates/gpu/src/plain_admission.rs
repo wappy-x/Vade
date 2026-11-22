@@ -113,13 +113,13 @@ pub const fn bf16_geometry(rows: usize) -> (u32, u32) {
 /// BF16 weights (`project_bf16_ordered`): admitted ONLY for the matrix shapes the plain single-token step reads on its own, in the launch geometry
 /// `bf16_geometry` gives them (the one-warp / four-warp rule; the FP32 entry's fold and short-row rules do not apply to this entry), with 16-byte aligned weights and input. Rank-local (two-way row split) and logical (unsplit) forms:
 /// f_a, g_a, wk, compress gate 64 / 128 x 4096; b_proj 32 / 64 x 4096 (also 64 x 4096 rank-local f_a); weights_proj 16 / 32 x 4096;
-/// f_b, g_b 4096 / 8192 x 128; indexer wq_b 2048 / 4096 x 1536; kv_b 16384 / 32768 x 512. Any other shape takes the scalar chain of the same entry. The router gate
+/// f_b, g_b 4096 / 8192 x 128; indexer wq_b 1024 / 2048 / 4096 x 1536; kv_b 16384 / 32768 x 512. Any other shape takes the scalar chain of the same entry. The router gate
 /// (144 / 288 x 4096) is NOT listed (ruling of 2026-11-06, router fold): BF16 gives it nothing (35 us a call in either dtype, chain-bound),
 /// and it reads FP32 through the fold schedule (`plain_geometry`, `fold_admitted`).
 /// The device sweep (kernel-bench --plain-probe ... bf16) walks exactly this list (`BF16_STEP_SHAPES` in kernel_plainp.rs; a host test compares the two) from poisoned
 /// outputs, with the neighbours of each shape outside it.
-pub const BF16_SHAPES: [(usize, usize); 10] = [(16, 4096), (32, 4096), (64, 4096), (128, 4096),
-    (4096, 128), (8192, 128), (2048, 1536), (4096, 1536), (16384, 512), (32768, 512)];
+pub const BF16_SHAPES: [(usize, usize); 11] = [(16, 4096), (32, 4096), (64, 4096), (128, 4096),
+    (4096, 128), (8192, 128), (1024, 1536), (2048, 1536), (4096, 1536), (16384, 512), (32768, 512)];
 pub const fn bf16_listed(rows: usize, cols: usize) -> bool {
     let mut i = 0;
     while i < BF16_SHAPES.len() { if BF16_SHAPES[i].0 == rows && BF16_SHAPES[i].1 == cols { return true; } i += 1; }
@@ -244,12 +244,12 @@ mod tests {
         }
     }
     #[test]
-    fn the_four_bf16_standalone_matrices_have_a_listed_shape_at_one_and_two_ranks_and_none_at_four() {
+    fn the_four_bf16_standalone_matrices_keep_their_swept_rank_shapes() {
         // Logical shapes (rows, cols) of the matrices the measuring form copies: kv_b, indexer wq_b, f_b and g_b (the router gate is not one, below).
         for (rows, cols) in [(32768usize, 512usize), (4096, 1536), (8192, 128)] {
             assert!(bf16_listed(rows, cols), "{rows}x{cols} at one rank");
             assert!(bf16_listed(rows / 2, cols), "{} x {cols} at two ranks", rows / 2);
-            assert!(!bf16_listed(rows / 4, cols), "{} x {cols} at four ranks must keep the FP32 reads", rows / 4);
+            assert_eq!(bf16_listed(rows / 4, cols), (rows, cols) == (4096, 1536), "{} x {cols} at four ranks", rows / 4);
         }
     }
     #[test]
@@ -276,8 +276,9 @@ mod tests {
     fn the_bf16_sweep_walks_exactly_the_admitted_list() {
         // The bench cannot link this crate, so it carries the list as one literal; the two must be equal, in order.
         let bench = include_str!("../../../tools/bench/src/kernel_plainp.rs");
-        let at = bench.find("const BF16_STEP_SHAPES: [(usize, usize); 10] = [").expect("the bench list") + "const BF16_STEP_SHAPES: [(usize, usize); 10] = [".len();
-        let literal = &bench[at..at + bench[at..].find("];").expect("end of list")];
+        let declaration = &bench[bench.find("const BF16_STEP_SHAPES:").expect("the bench list")..];
+        let at = declaration.find("= [").expect("start of list") + "= [".len();
+        let literal = &declaration[at..at + declaration[at..].find("];").expect("end of list")];
         let numbers: Vec<usize> = literal.split(|c: char| !c.is_ascii_digit()).filter(|t| !t.is_empty()).map(|t| t.parse().unwrap()).collect();
         let pairs: Vec<(usize, usize)> = numbers.chunks(2).map(|p| (p[0], p[1])).collect();
         assert_eq!(pairs, BF16_SHAPES.to_vec());

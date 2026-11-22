@@ -85,12 +85,13 @@ pub const fn fast_admitted(s:Shape,threads:u32)->bool {
     threads==FAST_THREADS && match s.op {
         // Heads and dims are structure, not counts: only the listed values were swept (kernel-bench --causal-probe, specs for
         // `bytes`), each with every pattern, so only those are admitted; the row and key counts are intervals whose edges were swept.
-        Op::Prepare|Op::GatedNorm=>swept_heads_wide(h) && swept_dims_wide(d) && h*d<=140000 && (h<100 || matches!(d,1|128|1024)),
+        Op::Prepare|Op::GatedNorm=>(swept_heads_wide(h) || h==16 && d==128)
+            && swept_dims_wide(d) && h*d<=140000 && (h<100 || matches!(d,1|128|1024)),
         Op::Step|Op::StepColumns|Op::StepLayout=>d==128 && matches!(h,1|2|3|17|63|64),
-        Op::StepPlanar=>d==128 && matches!(h,1|2|3|17|32|63|64),
+        Op::StepPlanar=>d==128 && matches!(h,1|2|3|16|17|32|63|64),
         // Conv writes its final layout in one launch (kernels/src/causal_small.rs) and KeyNorm stages its key in shared memory;
         // only the head, dim and tap values the device sweep covers are admitted.
-        Op::Conv|Op::ConvParts=>(matches!(h,1|2|3|8|17|63|64|65) || matches!(s.op,Op::ConvParts) && h==32 && d==128 && s.taps==4)
+        Op::Conv|Op::ConvParts=>(matches!(h,1|2|3|8|17|63|64|65) || matches!(s.op,Op::ConvParts) && matches!(h,16|32) && d==128 && s.taps==4)
             && matches!(d,1|3|32|127|128|129) && matches!(s.taps,2|3|4|5),
         Op::KeyNorm=>swept_dims_wide(d),
         // One warp per 32-word group; the column counts the device sweep covers (the model's 4,096 and 8,192, the dense 12,288, and small and odd multiples of 32).
@@ -614,7 +615,7 @@ mod tests {
         let fill=|n:usize,seed:usize|(0..n).map(|j|((j*7+seed*3) as i32%13-6) as f32/8.0+0.0625).collect::<Vec<f32>>();
         let sentinel=0x7fc0_dead_u32;
         // StepPlanar: the states of all heads, then the outputs of all heads, equal Step's per-head [state | output] re-placed.
-        for (heads,dim) in [(1usize,2usize),(3,4),(2,5)] {
+        for (heads,dim) in [(1usize,2usize),(3,4),(2,5),(16,128)] {
             let step=Shape {op:Op::Step,heads:heads as u32,dim:dim as u32,taps:0,rows:0,cols:0,epsilon:1e-5,bound:0.0};
             let planar=Shape {op:Op::StepPlanar,..step};
             let (l,_,units,words)=step.lengths().unwrap();let (pl,_,punits,pwords)=planar.lengths().unwrap();
@@ -630,7 +631,7 @@ mod tests {
             assert!(got.iter().all(|v|v.to_bits()!=sentinel));
         }
         // ConvParts: the three convolution outputs, then the three histories, equal Conv's per-plane [output | history] re-placed.
-        for (heads,dim,taps) in [(1usize,2usize,2usize),(2,3,4),(1,5,5)] {
+        for (heads,dim,taps) in [(1usize,2usize,2usize),(2,3,4),(1,5,5),(16,128,4)] {
             let conv=Shape {op:Op::Conv,heads:heads as u32,dim:dim as u32,taps:taps as u32,rows:0,cols:0,epsilon:1e-5,bound:0.0};
             let parts=Shape {op:Op::ConvParts,..conv};
             let (l,wn,_,_)=conv.lengths().unwrap();let (pl,pw,punits,pwords)=parts.lengths().unwrap();let width=heads*dim;
@@ -648,12 +649,25 @@ mod tests {
         }
         // Admission and launch geometry: the swept values only, 128 threads, no generic launch.
         let sp=|h:u32,d:u32|Shape {op:Op::StepPlanar,heads:h,dim:d,taps:0,rows:0,cols:0,epsilon:1e-5,bound:0.0};
-        for h in [1u32,2,3,17,32,63,64] {assert!(fast_admitted(sp(h,128),128));assert_eq!(geometry(sp(h,128),1),(h,128));}
+        for h in [1u32,2,3,16,17,32,63,64] {assert!(fast_admitted(sp(h,128),128));assert_eq!(geometry(sp(h,128),1),(h,128));}
         for (h,d) in [(4u32,128u32),(65,128),(64,127),(64,129),(0,128)] {assert!(!fast_admitted(sp(h,d),128));}
         assert!(!fast_admitted(sp(64,128),64) && !fast_admitted(sp(64,128),256));
         let cp=|h:u32,d:u32,t:u32|Shape {op:Op::ConvParts,heads:h,dim:d,taps:t,rows:0,cols:0,epsilon:1e-5,bound:0.0};
+        assert!(fast_admitted(cp(16,128,4),128));
+        assert_eq!(geometry(cp(16,128,4),1),(48,128));
+        assert!(!fast_admitted(cp(16,128,3),128) && !fast_admitted(cp(16,127,4),128));
         assert!(fast_admitted(cp(64,128,4),128) && !fast_admitted(cp(64,128,6),128) && fast_admitted(cp(32,128,4),128) && !fast_admitted(cp(32,127,4),128) && !fast_admitted(cp(64,128,4),64));
         assert_eq!(geometry(cp(64,128,4),1),(192,128));
+    }
+    #[test]
+    fn the_sixteen_head_recurrent_boundaries_keep_their_swept_geometry() {
+        let gate=Shape {op:Op::GatedNorm,heads:16,dim:128,taps:0,rows:0,cols:0,epsilon:1e-6,bound:0.0};
+        for shape in [gate,Shape {op:Op::Prepare,..gate}] {
+            assert!(fast_admitted(shape,FAST_THREADS));
+            assert_eq!(geometry(shape,16),(4,128));
+            assert!(!fast_admitted(Shape {dim:127,..shape},FAST_THREADS));
+            assert!(!fast_admitted(shape,64));
+        }
     }
     #[test]
     fn listed_operations_write_every_word_of_every_unit() {

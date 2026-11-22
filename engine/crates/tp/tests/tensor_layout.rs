@@ -128,29 +128,24 @@ fn device_route_limits_are_separate_from_logical_topology() {
     }
 }
 
+mod loopback { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-support/loopback.rs")); }
+
 #[test]
 fn checked_intervals_cross_the_existing_tcp_ring_and_path() {
-    use std::net::TcpListener;
     use spark_tp::transport::Ring;
     for parts in 1..=engine_model::shapes::MAX_SPARKS {
         for path in [false,true] {
-            let sockets: Vec<_> = (0..parts).map(|_| TcpListener::bind("127.0.0.1:0").unwrap()).collect();
-            let addresses: Vec<_> = sockets.iter().map(|s| s.local_addr().unwrap()).collect();
-            drop(sockets);
-            let p = layout(&[3,u64::from(parts)*4,2],1,2,parts,2); let global = source(p.bytes());
-            std::thread::scope(|s| {
-                let handles: Vec<_> = (0..parts as usize).map(|rank| {
-                    let (p,global,addresses) = (&p,&global,&addresses);
-                    s.spawn(move || {
-                        let mut ring = Ring::connect_options(rank,parts as usize,addresses[rank],addresses[(rank+1)%parts as usize],path).unwrap();
-                        for _ in 0..3 {
-                            let mut got = vec![0xa5;p.bytes()];
-                            p.gather_ring(&mut ring,&local(p,rank as u32,global),&mut got).unwrap();
-                            assert_eq!(&got,global);
-                        }
-                    })
-                }).collect();
-                for h in handles { h.join().unwrap(); }
+            let p = layout(&[3, u64::from(parts) * 4, 2], 1, 2, parts, 2);
+            let global = source(p.bytes());
+            let world = parts as usize;
+            loopback::run_ranks(world, 1, |rank, addresses| {
+                Ring::connect_options(rank, world, addresses[rank], addresses[(rank + 1) % world], path)
+            }, |rank, mut ring| {
+                for _ in 0..3 {
+                    let mut got = vec![0xa5; p.bytes()];
+                    p.gather_ring(&mut ring, &local(&p, rank as u32, &global), &mut got).unwrap();
+                    assert_eq!(got, global);
+                }
             });
             println!("TENSOR_TCP parts={parts} path={path} repeats=3 bytes={} identical=true",p.bytes());
         }
