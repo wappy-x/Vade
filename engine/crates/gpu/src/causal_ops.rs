@@ -97,7 +97,7 @@ pub const fn fast_admitted(s:Shape,threads:u32)->bool {
         // One warp per 32-word group; the column counts the device sweep covers (the model's 4,096 and 8,192, the dense 12,288, and small and odd multiples of 32).
         Op::Mxfp8Quantize|Op::Mxfp8QuantizePositiveZero=>r<=2 && (matches!(k,32|64|96|128|160|1024|2048|4096|8192|12288|16384) || quantize_rows(k)),
         Op::PoolScores=>matches!(d,1|2|31|32|33|127|128|255|256) && matches!(h,1|2|3|31|32|33|63|64|65|100|128) && r<=8192,
-        Op::Softmax=>matches!(h,1|2|3|32|33|64|65|100|128) && r>=1 && r<=4096,
+        Op::Softmax=>matches!(h,1|2|3|16|32|33|64|65|100|128) && r>=1 && r<=4096,
         Op::Gather=>matches!(d,1|3|32|33|512|1024) && r>=1 && r<=32768 && k>=1 && k<=4096,
         // Heads are not read by either version. Dims and taps are the swept lists of `swept.rs`, rows an interval with swept edges.
         Op::PoolChannels=>matches!(d,1|2|31|32|33|127|128|129) && matches!(s.taps,1|2|3|4|5|8|127|128|129) && r>=1 && r<=16384,
@@ -167,8 +167,19 @@ pub fn geometry(s:Shape,units:usize)->(u32,u32) {
 #[repr(C)]
 #[derive(Clone,Copy)]
 pub struct Arguments {pub input:[u64;4],pub weight:u64,pub output:u64,pub shape:Shape}
+fn indirect_attention_shape(s:Shape)->bool {
+    s.op==Op::ScoresIndirect && s.dim==256 && s.cols==256 && (1..=2051).contains(&s.rows)
+        && s.taps>0 && s.taps<=s.rows && (s.taps==s.rows || s.rows==2051)
+}
 pub fn indirect_attention_proven(s:Shape)->bool {
-    s.op==Op::ScoresIndirect && matches!(s.heads,32|64) && s.dim==256 && s.cols==256 && (1..=2051).contains(&s.rows) && s.taps>0 && s.taps<=s.rows && (s.taps==s.rows || s.rows==2051)
+    matches!(s.heads,32|64) && indirect_attention_shape(s)
+}
+/// The aligned 16-head table reads the same packed K/V words as the
+/// expanded predictor path. The replay covers full selections and the
+/// 2048–2051 live rows of a padded 2051-slot selection.
+pub fn packed_attention_proven(s:Shape,aligned:bool)->bool {
+    indirect_attention_proven(s)
+        || aligned && s.heads==16 && indirect_attention_shape(s) && (s.taps==s.rows || s.taps>=2048)
 }
 /// Shape-only family of the table form (`attention_table`): heads 1..=128, plane width 256, 1..=4096 rows of which
 /// 1..=rows are live. Scores: dim = key width; Values: dim = value width. Launch: ScoresTable `heads*ceil(rows/128)`
@@ -411,6 +422,18 @@ mod tests {
         for wrong in [Shape {heads:7,..shape},Shape {dim:19,..shape},Shape {cols:255,..shape},Shape {taps:0,..shape},Shape {op:Op::ScoresSlots,..shape}] {assert!(!indirect_attention_proven(wrong));}
         assert!(reference(shape,[&[],&[],&[],&[]],&[]).is_err());
     }
+    #[test] fn aligned_short_head_table_admits_only_the_proved_selection_shapes() {
+        let shape=Shape {op:Op::ScoresIndirect,heads:16,dim:256,cols:256,rows:2051,taps:2048,epsilon:0.0,bound:0.0};
+        for rows in 1..=2051 {assert!(packed_attention_proven(Shape {rows,taps:rows,..shape},true));}
+        for taps in 0..=2052 {assert_eq!(packed_attention_proven(Shape {taps,..shape},true),(2048..=2051).contains(&taps));}
+        for rejected in [Shape {heads:15,..shape},Shape {heads:17,..shape},Shape {rows:2052,..shape},
+            Shape {rows:2050,..shape},Shape {dim:255,..shape},Shape {cols:255,..shape},Shape {op:Op::ScoresSlots,..shape}] {
+            assert!(!packed_attention_proven(rejected,true));
+        }
+        assert!(!packed_attention_proven(shape,false));
+        assert!(!indirect_attention_proven(shape));
+        assert!(packed_attention_proven(Shape {heads:32,..shape},false));
+    }
     fn shape(op:Op)->Shape {Shape {op,heads:1,dim:2,taps:2,rows:2,cols:2,epsilon:1e-5,bound:-5.0}}
     #[test]
     fn kv_layout_keeps_slot_head_order_signed_zero_and_padding() {
@@ -510,6 +533,11 @@ mod tests {
         for op in [Op::Step,Op::StepColumns,Op::StepLayout] {assert!(!fast_admitted(s(op,4,128,0,0),128) && !fast_admitted(s(op,32,128,0,0),128) && fast_admitted(s(op,17,128,0,0),128) && fast_admitted(s(op,63,128,0,0),128));}
         assert!(!fast_admitted(s(Op::PoolScores,30,128,10,0),128) && !fast_admitted(s(Op::PoolScores,32,129,10,0),128) && fast_admitted(s(Op::PoolScores,32,128,10,0),128) && fast_admitted(s(Op::PoolScores,100,255,8192,0),128));
         assert!(!fast_admitted(s(Op::Softmax,4,0,10,0),128) && !fast_admitted(s(Op::Softmax,63,0,10,0),128) && fast_admitted(s(Op::Softmax,100,0,10,0),128));
+        for rows in [1,97,160,2051,4096] {
+            let softmax=s(Op::Softmax,16,256,rows,0);
+            assert!(fast_admitted(softmax,128));assert_eq!(geometry(softmax,16),(16,128));
+        }
+        assert!(!fast_admitted(s(Op::Softmax,16,256,4097,0),128) && !fast_admitted(s(Op::Softmax,17,256,160,0),128));
         assert!(!fast_admitted(s(Op::Gather,0,128,10,10),128) && !fast_admitted(s(Op::Gather,0,2,10,10),128) && fast_admitted(s(Op::Gather,0,3,10,10),128));
         // PoolChannels (READ-SPLIT): the swept dims and taps, rows 1 to 16,384, any heads; every other value keeps the original entry.
         {let p=|h:u32,d:u32,t:u32,r:u32|Shape {op:Op::PoolChannels,heads:h,dim:d,taps:t,rows:r,cols:0,epsilon:0.0,bound:0.0};

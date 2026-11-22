@@ -14,11 +14,11 @@ pub const ROUTED:usize=8;
 
 /// Permute: (rows, cols, source rows) for the expert inputs of a group of `tokens`.
 pub fn permute_cases()->Vec<(usize,usize,usize)> {(1..=MOVE_MAX).flat_map(|m|[2048usize,4096].into_iter().map(move |cols|(m*ROUTED,cols,m))).collect()}
-/// Place: (tokens, local rows, ranks). The expert results of two ranks, one rank's own down rows before their fold (GROUP FOLD),
+/// Place: (tokens, local rows, ranks). The expert results of two or four ranks, one rank's own down rows before their fold (GROUP FOLD),
 /// and one rank's own middle rows before their quantizer (PACKED MIDDLE).
-pub fn place_cases()->Vec<(usize,usize,usize)> {(1..=MOVE_MAX).flat_map(|m|[(1024usize,2usize),(2048,2),(FOLD_LOCAL,1),(MIDDLE_LOCAL,1)].into_iter().map(move |(d,parts)|(m,d,parts))).collect()}
-/// Head counts of the recurrent prompt kernels (`prompt_admission::recurrent_heads`): 64 on one box, 32 a rank on two.
-pub const RECURRENT_HEADS:[usize;2]=[32,64];
+pub fn place_cases()->Vec<(usize,usize,usize)> {(1..=MOVE_MAX).flat_map(|m|[(1024usize,2usize),(2048,2),(512,4),(1024,4),(FOLD_LOCAL,1),(MIDDLE_LOCAL,1),(MIDDLE_LOCAL_FOUR,1)].into_iter().map(move |(d,parts)|(m,d,parts))).collect()}
+/// Head counts of the recurrent prompt kernels: 64 on one rank, 32 on two and 16 on four.
+pub const RECURRENT_HEADS:[usize;3]=[16,32,64];
 /// Wrapped Prepare (true) and GatedNorm (false): (tokens, heads, dim, is_prepare).
 pub fn prepare_cases()->Vec<(usize,usize,usize,bool)> {
     group_tokens().flat_map(|m|RECURRENT_HEADS.into_iter().flat_map(move |h|[true,false].into_iter().map(move |p|(m,h,128,p)))).collect()
@@ -27,12 +27,14 @@ pub fn prepare_cases()->Vec<(usize,usize,usize,bool)> {
 pub fn route_cases()->Vec<(usize,usize,usize,usize)> {group_tokens().map(|m|(m,288,ROUTED,1)).collect()}
 /// The rows one rank of a pair owns of the fold's 4096, and the most tokens of ONE fold launch of a batch step at that width (its chats).
 pub const FOLD_LOCAL:usize=2048;
+pub const FOLD_LOCAL_FOUR:usize=1024;
 /// The middle rows one rank of a pair owns of a routed expert's 2048 (PACKED MIDDLE).
 pub const MIDDLE_LOCAL:usize=1024;
+pub const MIDDLE_LOCAL_FOUR:usize=512;
 pub const FOLD_LOCAL_TOKENS:usize=8;
 /// Wrapped ExpertFold: (tokens, routed rows, width, shared). The whole width and a pair rank's own rows, each at every group
 /// size (ROWS FOLD of a batch step; GROUP FOLD of a prompt group).
-pub fn fold_cases()->Vec<(usize,usize,usize,usize)> {group_tokens().flat_map(|m|[4096usize,FOLD_LOCAL].into_iter().map(move |k|(m,ROUTED,k,1))).collect()}
+pub fn fold_cases()->Vec<(usize,usize,usize,usize)> {group_tokens().flat_map(|m|[4096usize,FOLD_LOCAL,FOLD_LOCAL_FOUR].into_iter().map(move |k|(m,ROUTED,k,1))).collect()}
 /// ConvRows: (tokens, heads, dim, taps).
 pub fn conv_cases()->Vec<(usize,usize,usize,usize)> {group_tokens().flat_map(|m|RECURRENT_HEADS.into_iter().map(move |h|(m,h,128,4))).collect()}
 /// mHC project tile: (rows, streams, hidden).

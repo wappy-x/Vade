@@ -113,13 +113,14 @@ pub const fn bf16_geometry(rows: usize) -> (u32, u32) {
 /// BF16 weights (`project_bf16_ordered`): admitted ONLY for the matrix shapes the plain single-token step reads on its own, in the launch geometry
 /// `bf16_geometry` gives them (the one-warp / four-warp rule; the FP32 entry's fold and short-row rules do not apply to this entry), with 16-byte aligned weights and input. Rank-local (two-way row split) and logical (unsplit) forms:
 /// f_a, g_a, wk, compress gate 64 / 128 x 4096; b_proj 32 / 64 x 4096 (also 64 x 4096 rank-local f_a); weights_proj 16 / 32 x 4096;
-/// f_b, g_b 4096 / 8192 x 128; indexer wq_b 1024 / 2048 / 4096 x 1536; kv_b 16384 / 32768 x 512. Any other shape takes the scalar chain of the same entry. The router gate
+/// f_b, g_b 2048 / 4096 / 8192 x 128; indexer wq_b 1024 / 2048 / 4096 x 1536; kv_b 16384 / 32768 x 512;
+/// predictor eh_proj 1024 x 8192. Any other shape takes the scalar chain of the same entry. The router gate
 /// (144 / 288 x 4096) is NOT listed (ruling of 2026-11-06, router fold): BF16 gives it nothing (35 us a call in either dtype, chain-bound),
 /// and it reads FP32 through the fold schedule (`plain_geometry`, `fold_admitted`).
 /// The device sweep (kernel-bench --plain-probe ... bf16) walks exactly this list (`BF16_STEP_SHAPES` in kernel_plainp.rs; a host test compares the two) from poisoned
 /// outputs, with the neighbours of each shape outside it.
-pub const BF16_SHAPES: [(usize, usize); 11] = [(16, 4096), (32, 4096), (64, 4096), (128, 4096),
-    (4096, 128), (8192, 128), (1024, 1536), (2048, 1536), (4096, 1536), (16384, 512), (32768, 512)];
+pub const BF16_SHAPES: [(usize, usize); 13] = [(16, 4096), (32, 4096), (64, 4096), (128, 4096),
+    (2048, 128), (4096, 128), (8192, 128), (1024, 1536), (2048, 1536), (4096, 1536), (16384, 512), (32768, 512), (1024, 8192)];
 pub const fn bf16_listed(rows: usize, cols: usize) -> bool {
     let mut i = 0;
     while i < BF16_SHAPES.len() { if BF16_SHAPES[i].0 == rows && BF16_SHAPES[i].1 == cols { return true; } i += 1; }
@@ -127,6 +128,10 @@ pub const fn bf16_listed(rows: usize, cols: usize) -> bool {
 }
 pub const fn bf16_admitted(rows: usize, cols: usize, weights: usize, input: usize, threads: usize) -> bool {
     threads == bf16_geometry(rows).1 as usize && bf16_listed(rows, cols) && (weights | input) & 15 == 0
+}
+/// The eight-row projection keeps a BF16 copy for the folded batch. Its standalone FP32 fold is faster.
+pub const fn bf16_copy_shape(rows:usize,cols:usize)->bool {
+    bf16_listed(rows,cols) || matches!((rows,cols),(8,4096))
 }
 
 /// Mixed projection batch: which descriptor and which block of it a grid block runs, with the blocks of
@@ -158,7 +163,9 @@ mod tests {
     use super::*;
     #[test]
     fn the_row_stage_takes_every_bf16_copied_shape_and_decides_by_shape_alone() {
-        for (rows, cols) in BF16_SHAPES { assert!(rows_admitted(rows, cols), "{rows} {cols}"); }
+        for (rows, cols) in BF16_SHAPES { assert!(rows_admitted(rows, cols) && bf16_copy_shape(rows,cols), "{rows} {cols}"); }
+        assert!(bf16_copy_shape(8,4096) && !bf16_listed(8,4096) && rows_admitted(8,4096));
+        assert!(!bf16_copy_shape(7,4096) && !bf16_copy_shape(9,4096) && !bf16_copy_shape(8,4088));
         for (rows, cols) in [(64, 4096), (4096, 128), (1, 32), (4096, 8192)] { assert!(rows_admitted(rows, cols)); assert!(deep_admitted(rows, cols, 16, 32)); }
         for (rows, cols) in [(0, 4096), (64, 0), (64, 48), (64, 8224), (8192, 8192)] { assert!(!rows_admitted(rows, cols), "{rows} {cols}"); }
     }
@@ -249,7 +256,14 @@ mod tests {
         for (rows, cols) in [(32768usize, 512usize), (4096, 1536), (8192, 128)] {
             assert!(bf16_listed(rows, cols), "{rows}x{cols} at one rank");
             assert!(bf16_listed(rows / 2, cols), "{} x {cols} at two ranks", rows / 2);
-            assert_eq!(bf16_listed(rows / 4, cols), (rows, cols) == (4096, 1536), "{} x {cols} at four ranks", rows / 4);
+            assert_eq!(bf16_listed(rows / 4, cols), matches!((rows,cols),(4096,1536)|(8192,128)), "{} x {cols} at four ranks", rows / 4);
+        }
+    }
+    #[test]
+    fn predictor_input_reads_the_packed_copy_at_the_proved_shape() {
+        assert!(bf16_copy_shape(1024,8192) && bf16_admitted(1024,8192,256,512,128));
+        for (rows,cols) in [(1023,8192),(1025,8192),(1024,8184),(2048,8192),(4096,8192)] {
+            assert!(!bf16_copy_shape(rows,cols),"{rows}x{cols}");
         }
     }
     #[test]

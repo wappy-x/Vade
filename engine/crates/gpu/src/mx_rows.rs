@@ -16,6 +16,8 @@ pub const MAX_TOKENS: usize = 1024;
 /// NOT take it. The kernels hold no row bound of their own; `small_choice::mx` sends ONLY 5 to 8 tokens of this one table to the tile
 /// (and 3 and 4 tokens to `mx_rows_small4`), and the device sweep covers exactly that (`kernel-bench --mx-small {OLD} {X} head`).
 pub const HEAD_ROWS: usize = 77_440;
+/// The four-rank head, swept with the scalar word by `kernel-bench --mx-small ... head-quarter`.
+pub const QUARTER_HEAD_ROWS: usize = 38_720;
 pub const HEAD_COLS: usize = 4096;
 /// The tensor-core tile `mx_tc_tile` (kernels `mx_tc::TILE_WARPS`, `TILE_TOKENS`): 8 warps of 16 weight rows, 64 tokens.
 /// Its grid is (ceil(tokens / 64), ceil(rows / 128)): the token tile on x.

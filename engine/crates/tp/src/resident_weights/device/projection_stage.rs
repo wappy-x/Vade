@@ -219,7 +219,7 @@ impl<'b,'d> Weights<'b,'d> {
         const FEW:usize=8;const SMALL:usize=8<<20;
         #[derive(Clone,Copy,PartialEq)] enum Form {Fp32,Fold,Rows,FoldRowsF32,FoldRows}
         // Choose only measured few-row forms; larger groups retain their prior parts.
-        let part=match m {2=>2,4=>4,6=>3,8=>4,_=>0};
+        let part=match m {2=>2,3=>3,4|8=>4,6=>3,_=>0};
         let form=|name:&str,input:&DeviceVector<'_>| {let matrix=&self.matrices[name];
             let folds=|address:u64,segmented:bool|projection_stage::fold_rows(m,matrix.rows.count,matrix.cols) && !segmented
                 && spark_gpu_probe::plain_admission::fold_rows_admitted(matrix.rows.count,matrix.cols,address as usize,input.device_address() as usize,m);

@@ -87,7 +87,8 @@ pub(crate) fn prompt_place(p:Arguments) {
     // one channel, hence to one tile and one thread; the inverse is a permutation, so no two slots share a row. Table
     // entries are data and are checked before use: a row at or beyond `rows`, a triple whose `earlier + at` is not
     // its slot, or a source index at or beyond `slots * taps` traps (the generic kernel's slice index traps on the
-    // last). Shared memory is this kernel's own 4,352 bytes: the 32x33-word tile and 32 row words. Every shared read
+    // last). Placement retains the generic path's finite-word check when requested. Shared memory
+    // is this kernel's own 4,352 bytes: the 32x33-word tile and 32 row words. Every shared read
     // follows a write: phase 1 writes tile[c][s] for all 32 channels c of every slot s < rows - tile start (thread
     // (s, ty) writes channels ty, ty+8, ty+16, ty+24) and rows[s] (ty = 0), phase 2 reads only those slots, and
     // each tile ends with a barrier before the next tile reuses the shared words. A slot beyond the last row writes
@@ -96,6 +97,7 @@ pub(crate) fn prompt_place(p:Arguments) {
         let s=p.shape;
         if s.op!=Op::ExpertPlaceTile || core::arch::nvptx::_block_dim_x() as usize!=THREADS {core::arch::nvptx::trap();}
         let (rows,cols,d,parts,slots)=(s.rows as usize,s.cols as usize,s.dim as usize,s.taps as usize,s.slots as usize);
+        let check_finite=s.first!=0;
         let edge=crate::prompt_admission::TILE as usize;
         let tid=core::arch::nvptx::_thread_idx_x() as usize;let tx=tid%32;let ty=tid/32;
         let exchange=p.input[0] as *const u32;let table=p.input[1] as *const f32;let output=p.output as *mut u32;
@@ -120,6 +122,7 @@ pub(crate) fn prompt_place(p:Arguments) {
                         let source=(channel/d)*slots+earlier*d+(channel%d)*tokens+at;
                         if source>=slots*parts {core::arch::nvptx::trap();}
                         let v=*exchange.add(source);
+                        if check_finite && v&0x7f80_0000==0x7f80_0000 {core::arch::nvptx::trap();}
                         asm!("st.shared.u32 [{a}], {v};",a=in(reg32)(smem+(((ty+8*j)*33+tx) as u32)*4),v=in(reg32)v);
                         j+=1;
                     }

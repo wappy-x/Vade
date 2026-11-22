@@ -169,7 +169,8 @@ impl<'a> Backend<'a> {
         use crate::causal_ops::Op;
         self.require_resident_stream()?;
         if shape.op!=Op::ScoresIndirect {return Err("packed attention requires a scores shape".into());}
-        if !crate::causal_ops::indirect_attention_proven(shape) {return Err("packed attention shape is outside the byte-proven family".into());}
+        let table_form=query.device_address().is_multiple_of(16) && parts.iter().all(|part|part.device_address().is_multiple_of(16));
+        if !crate::causal_ops::packed_attention_proven(shape,table_form) {return Err("packed attention shape is outside the byte-proven family".into());}
         if shape.taps>1<<24 {return Err("packed live count exceeds exact FP32 integers".into());}
         let (_,_,units,_)=shape.lengths().ok_or("invalid packed attention shape")?;
         let width=(shape.heads as usize).checked_mul((shape.dim as usize).checked_add(shape.cols as usize).ok_or("packed row width overflow")?).ok_or("packed row width overflow")?/2;
@@ -177,7 +178,6 @@ impl<'a> Backend<'a> {
         for part in parts {self.check_vector(part,part.len())?;
             if part.is_segmented() || part.len()%width!=0 {return Err("packed row owner extent differs".into());}}
         if parts.iter().map(|part|part.len()/width).sum::<usize>()!=shape.taps as usize {return Err("packed live rows differ".into());}
-        let table_form=query.device_address().is_multiple_of(16) && parts.iter().all(|part|part.device_address().is_multiple_of(16));
         if !table_form {
             let mut plain=Vec::with_capacity(parts.len());
             for part in parts {let unpack=Shape {op:Op::UnpackBf16,heads:0,dim:0,taps:0,rows:u32::try_from(part.len()).map_err(|_|"packed row owner exceeds the ABI")?,cols:0,epsilon:0.0,bound:0.0};

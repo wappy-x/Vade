@@ -450,7 +450,7 @@ mod device {
             let class=match &matrix.storage {Storage::Mx(_)=>0,Storage::Plain {..}=>1,Storage::Packed {shape,..}=>if shape.op==Op::NvProject {2} else {3}};
             let output=match &matrix.storage {
                 Storage::Mx(p)=>p.project_vector(input)?.into_output().into_vector(),
-                Storage::Plain {shape,weight,bf16}=>match bf16 {Some(packed) if shape.op==spark_gpu_probe::causal_ops::Op::Project => b.project_bf16(shape.rows as usize,shape.cols as usize,input,packed)?,_=>b.causal_operation(*shape,[Some(input),None,None,None],Some(weight))?},
+                Storage::Plain {shape,weight,bf16}=>match bf16 {Some(packed) if spark_gpu_probe::plain_admission::bf16_listed(shape.rows as usize,shape.cols as usize) => b.project_bf16(shape.rows as usize,shape.cols as usize,input,packed)?,_=>b.causal_operation(*shape,[Some(input),None,None,None],Some(weight))?},
                 Storage::Packed {shape,weight,scales}=>{
                     let packed=if shape.op==Op::NvProject {Some(b.expert_operation(Shape {op:Op::Quantize,..*shape},[Some(input),None,None,None],None,None)?)} else {None};
                     b.expert_operation(*shape,[Some(packed.as_ref().unwrap_or(input)),None,None,None],Some(weight),Some(scales))?
@@ -463,7 +463,7 @@ mod device {
             // Only rows that a gather sends can owe the round: a whole (not split) output is a value on this rank at once.
             let owed=round && !rounded && gather && !self.kda_local.contains(name) && matrix.rows.split && (self.deferring.get() || !self.collecting.get() && self.mailbox.is_some());
             let output=if round && !rounded && !owed {b.round_bf16_lanes(&output)?.into_vector()} else {output};
-            let bytes=match &matrix.storage {Storage::Mx(_)=>matrix.rows.count*(matrix.cols+matrix.cols/32),Storage::Plain {weight,bf16,..}=>bf16.as_ref().map_or(weight.len()*4,|packed|packed.len()*4),Storage::Packed {weight,scales,..}=>(weight.len()+scales.len())*4};
+            let bytes=match &matrix.storage {Storage::Mx(_)=>matrix.rows.count*(matrix.cols+matrix.cols/32),Storage::Plain {shape,weight,bf16}=>bf16.as_ref().filter(|_|spark_gpu_probe::plain_admission::bf16_listed(shape.rows as usize,shape.cols as usize)).map_or(weight.len()*4,|packed|packed.len()*4),Storage::Packed {weight,scales,..}=>(weight.len()+scales.len())*4};
             self.cost.record(||if name=="lm_head.weight" {"projection_head".into()} else {format!("projection_{class}")},stamp,b,bytes);
             self.timings[class][0]+=1;self.timings[class][1]+=started.elapsed().as_nanos();Ok((output,matrix.rows,class,owed))
         }
@@ -1116,8 +1116,7 @@ let mut bytes=vec![0;rows.total*4];
             let number=|value:usize|u32::try_from(value).map_err(|_|"prompt expert rows exceed ABI".to_string());
             let mut place=RowShape::new(Row::ExpertPlaceTile,1).ok_or("prompt expert place shape")?;
             place.rows=number(rows)?;place.cols=number(local)?;place.dim=number(local)?;place.taps=1;place.slots=number(words)?;
-            // Carry the generic place reader's finite-check flag. The admitted fast `prompt_place` moves raw words
-            // and does not inspect this flag, as the prior two-rank fast place did. This is not a device finite check.
+            // The middle reader checks finiteness before quantizing, as the FP32 exchange does before placement.
             place.first=1;
             let placed=b.prompt_operation(place,[Some(&output),Some(&table),None,None,None],None)?;
             let row_scales=b.upload_vector(scales)?;
@@ -1295,7 +1294,7 @@ let mut bytes=vec![0;rows.total*4];
     }
     /// Keep the checkpoint's BF16 bytes for the admitted plain projection shapes.
     fn bf16_copy_wanted(rows:usize,cols:usize)->bool {
-        spark_gpu_probe::plain_admission::bf16_listed(rows,cols) && cols.is_multiple_of(8)
+        spark_gpu_probe::plain_admission::bf16_copy_shape(rows,cols) && cols.is_multiple_of(8)
     }
     impl<'b,'d> Matrix<'b,'d> {
         fn read(c:&CheckpointAdmission,name:&str,t:Topology)->Result<Prepared> {
@@ -1410,11 +1409,12 @@ mod tests {
     fn packed_middle_requires_the_actual_fold_reader_before_packing() {
         use spark_gpu_probe::causal_ops::{Op,Shape};
         let fold=Shape {op:Op::ExpertFold,heads:0,dim:128,taps:1,rows:8,cols:4096,epsilon:0.0,bound:0.0};
-        for m in [1,256,1024] {
-            assert!(group_fold_shapes(2048,m*8,fold,m).unwrap().is_some());
-            assert!(group_fold_shapes(2048,m*8,Shape {taps:0,..fold},m).unwrap().is_none(),"no shared expert keeps the FP32 fallback");
-            assert!(group_fold_shapes(2048,m*4,Shape {rows:4,..fold},m).unwrap().is_none(),"four picks keep the FP32 fallback");
-            for local in [1024,3072,4096] {assert!(group_fold_shapes(local,m*8,fold,m).unwrap().is_none(),"unsupported local width {local}");}
+        for (m,local) in [1,256,1024].into_iter().flat_map(|m|[(m,1024),(m,2048)]) {
+            let (place,wrapped)=group_fold_shapes(local,m*8,fold,m).unwrap().expect("local fold reader");
+            assert_eq!((place.dim,place.taps,wrapped.inner.cols),(local as u32,1,local as u32));
+            assert!(group_fold_shapes(local,m*8,Shape {taps:0,..fold},m).unwrap().is_none(),"no shared expert keeps the FP32 fallback");
+            assert!(group_fold_shapes(local,m*4,Shape {rows:4,..fold},m).unwrap().is_none(),"four picks keep the FP32 fallback");
+            for width in [512,3072,4096] {assert!(group_fold_shapes(width,m*8,fold,m).unwrap().is_none(),"unsupported local width {width}");}
         }
     }
     #[test]

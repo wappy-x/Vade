@@ -613,7 +613,7 @@ fn list_bytes(g: &mut Gpu, base: H, mb: H, which: &str, started: Instant) -> Res
         }
         "fold-local" => {
             let cf = g.function(mb, "prompt_fold")?;
-            for (m, r, k, t) in swept::fold_cases().into_iter().filter(|case| case.2 == swept::FOLD_LOCAL) {
+            for (m, r, k, t) in swept::fold_cases().into_iter().filter(|case| matches!(case.2,swept::FOLD_LOCAL|swept::FOLD_LOCAL_FOUR)) {
                 let inner = Inner { op: EXPERT_FOLD, heads: 0, dim: 0, taps: t as u32, rows: r as u32, cols: k as u32, epsilon: 0.0, bound: 0.0 };
                 for &(idk, ik, wk) in &[(0u32, 0u32, 0u32), (1, 5, 5), (0, 4, 0)] {
                     let fx = wfixture(g, wshape(m, inner), ik, wk, idk, 900 + cases)?;
@@ -884,7 +884,7 @@ fn pair(g: &Gpu, label: &str, run: &mut dyn FnMut(&Gpu, usize) -> Result<()>) ->
 fn decay(g:&mut Gpu,ma:H,mb:H,started:Instant)->Result<()> {
     let base=g.function(ma,"prompt_rows")?;let candidate=g.function(mb,"prompt_prepare")?;
     let (mut cases,mut compared,mut controls)=(0usize,0usize,0usize);
-    for m in (1usize..=256).chain([512,768,1024]) {for h in [32usize,64] {for kind in [0u32,2,4,5] {
+    for m in swept::group_tokens() {for h in swept::RECURRENT_HEADS {for kind in [0u32,2,4,5] {
         let words=m*h*128;let length=m*h*513;
         let values=pattern(kind,length,71+m as u64*13+h as u64);
         let source=Buffer::new(g,&values)?;

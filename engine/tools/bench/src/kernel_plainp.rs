@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 use super::{Gpu, H, Result, ptr, sha256};
 use std::time::Instant;
+#[path = "kernel_plain_decode.rs"] mod plain_decode;
 const GUARD: [u8; 16] = [0x5a; 16];
 struct Rng(u64);
 impl Rng {
@@ -88,6 +89,7 @@ pub(crate) fn run(base_path: &str, candidate_path: &str, names: &str, mode: &str
     for name in names.split(',').filter(|n| !n.is_empty()) { candidates.push((name.to_string(), g.function(mb, name)?)); }
     let mut check = Check { g, reference, candidates: &candidates, comparisons: 0, bytes: 0 };
     let started = Instant::now();
+    if mode == "decode" {return plain_decode::run(&mut check.g,(ma,mb));}
     if mode == "interleave" { return rowsp1::interleave::run(&mut check.g, (ma, mb)); }
     if mode == "replay" || mode == "all" {
         replay(&mut check.g, (ma, mb))?;
@@ -476,7 +478,7 @@ fn replay(g: &mut Gpu, (ma, mb): (H, H)) -> Result<()> {
 /// the reference is the head's `project_f32_ordered` on that copy, and the candidate reads the patterns. Outputs start poisoned (0xff) with 16-byte
 /// guards; the candidate runs in its one-warp geometry, the four-warp geometry and a 64-thread geometry (not admitted: the scalar chain of the same entry).
 /// plain_admission::BF16_SHAPES, as one literal (the bench cannot link the gpu crate; a host test there compares the two).
-const BF16_STEP_SHAPES: [(usize, usize); 11] = [(16, 4096), (32, 4096), (64, 4096), (128, 4096), (4096, 128), (8192, 128), (1024, 1536), (2048, 1536), (4096, 1536), (16384, 512), (32768, 512)];
+const BF16_STEP_SHAPES: [(usize, usize); 13] = [(16, 4096), (32, 4096), (64, 4096), (128, 4096), (2048, 128), (4096, 128), (8192, 128), (1024, 1536), (2048, 1536), (4096, 1536), (16384, 512), (32768, 512), (1024, 8192)];
 fn bf16_patterns(values: &[f32]) -> (Vec<u16>, Vec<f32>) {
     let patterns: Vec<u16> = values.iter().map(|v| (v.to_bits() >> 16) as u16).collect();
     let widened = patterns.iter().map(|p| f32::from_bits(u32::from(*p) << 16)).collect();

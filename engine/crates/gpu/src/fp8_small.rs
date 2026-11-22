@@ -21,12 +21,22 @@ pub fn warps(parts: &[Part]) -> u32 { let (blocks, most) = extent(parts); crate:
 pub fn threads(parts: &[Part]) -> u32 { 32 * warps(parts) }
 /// Dynamic shared bytes of a launch: the row body's bytes for the part with the most scale blocks and the longest part's tokens.
 pub fn shared(parts: &[Part]) -> u32 { let (blocks, most) = extent(parts); crate::expert_ops::fp8_row_shared(warps(parts), blocks, most, false) }
+
+/// The row sweeps cover the old axes and the complete 128-by-128 block shapes swept for quarter projections.
+fn swept_shape(first: &Part, parts: &[Part]) -> bool {
+    let ordinary = FP8_ROWS.contains(&first.rows) && FP8_COLS.contains(&first.cols);
+    let quarter = matches!((first.rows, first.cols, parts.len()),
+        (512, 4096, 2) | (384 | 128, 4096, 1) | (4096, 1536, 1))
+        && (2..=8).contains(&first.tokens)
+        && parts.iter().all(|p| (p.block_rows, p.block_cols, p.tokens) == (128, 128, first.tokens));
+    (ordinary || quarter) && fp8_parts_swept(first.rows, first.cols, parts.len()) && first.rows * first.cols <= FP8_MAX_BYTES
+}
 /// True when the whole launch may use `fp8_rows_small`: every part has the same listed rows and cols and a listed block shape, 1 to 8
 /// tokens (each token is a job that decodes the weights again; at 16 tokens lane K's tile is faster), a 16-byte aligned weight and a
 /// 4-byte aligned scale array; the activation rows are 16-byte aligned.
 pub fn admitted(parts: &[Part], input: u64) -> bool {
     let Some(first) = parts.first() else { return false; };
-    fp8_parts_swept(first.rows, first.cols, parts.len()) && FP8_ROWS.contains(&first.rows) && FP8_COLS.contains(&first.cols) && first.rows * first.cols <= FP8_MAX_BYTES && input & 15 == 0
+    swept_shape(first, parts) && input & 15 == 0
         && parts.iter().all(|p| p.rows == first.rows && p.cols == first.cols && FP8_BLOCKS.contains(&(p.block_rows, p.block_cols))
             && (1..=FP8_MAX_PART_TOKENS).contains(&p.tokens) && p.weight & 15 == 0 && p.scales & 3 == 0)
 }
@@ -36,7 +46,7 @@ pub const SMALL_RULE_ROWS: usize = 768;
 pub const MULTI_ROWS_PER_BLOCK: usize = ROWS_PER_BLOCK;
 pub fn multi_admitted(parts: &[Part], input: u64) -> bool {
     let Some(first) = parts.first() else { return false; };
-    fp8_parts_swept(first.rows, first.cols, parts.len()) && FP8_ROWS.contains(&first.rows) && FP8_COLS.contains(&first.cols) && first.rows * first.cols <= FP8_MAX_BYTES && input & 15 == 0
+    swept_shape(first, parts) && input & 15 == 0
         && parts.iter().all(|p| p.rows == first.rows && p.cols == first.cols && FP8_BLOCKS.contains(&(p.block_rows, p.block_cols))
             && (1..=FP8_MULTI_MAX_PART_TOKENS).contains(&p.tokens) && p.weight & 15 == 0 && p.scales & 3 == 0)
 }
@@ -89,7 +99,8 @@ pub fn share_shared(tokens: usize) -> u32 { (3 * 16 * 128 + 3 * 128 * 4 + 2 * 16
 /// (`shared_rows`) exactly two parts of one shape, block shape and count on the same rows. Any other table keeps the older kernels.
 pub fn share_admitted(parts: &[Part], input: u64, shared_rows: bool) -> bool {
     let Some(first) = parts.first() else { return false; };
-    parts.len() == (if shared_rows { SHARE_SHARED_PARTS } else { 1 }) && (SHARE_MIN_TOKENS..=SHARE_MAX_TOKENS).contains(&first.tokens) && multi_admitted(parts, input)
+    parts.len() == (if shared_rows { SHARE_SHARED_PARTS } else { 1 }) && (SHARE_MIN_TOKENS..=SHARE_MAX_TOKENS).contains(&first.tokens)
+        && FP8_ROWS.contains(&first.rows) && multi_admitted(parts, input)
         && parts.iter().all(|p| p.tokens == first.tokens && p.block_rows == first.block_rows && p.block_cols == first.block_cols)
 }
 /// Blocks of `fp8_rows_share`: `ceil(rows/16)` for each part.
@@ -147,7 +158,7 @@ mod tests {
     }
     #[test]
     fn the_few_admitted_set_is_the_sweep_set() {
-        for rows in 0..=8200 { assert_eq!(few_admitted(&[part(rows, 4096, 3)], 16), FP8_ROWS.contains(&rows), "rows {rows}"); }
+        for rows in 0..=8200 { assert_eq!(few_admitted(&[part(rows, 4096, 3)], 16), FP8_ROWS.contains(&rows) || matches!(rows,128|384), "rows {rows}"); }
         for cols in 0..=16400 { assert_eq!(few_admitted(&[part(1024, cols, 3)], 16), FP8_COLS.contains(&cols) && 1024 * cols <= FP8_MAX_BYTES, "cols {cols}"); }
         for tokens in 0..=20 { assert_eq!(few_admitted(&[part(1024, 4096, tokens)], 16), (1..=4).contains(&tokens), "tokens {tokens}"); }
         for br in 0..=200 { for bc in 0..=200 { assert_eq!(few_admitted(&[Part { block_rows: br, block_cols: bc, ..part(1024, 4096, 3) }], 16), FP8_BLOCKS.contains(&(br, bc))); } }
@@ -161,6 +172,26 @@ mod tests {
         // where it wins
         assert!(few_wins(1024, 4096, 3) && few_wins(2048, 2048, 3) && !few_wins(2048, 16384, 3) && !few_wins(8192, 1536, 3) && few_wins(1024, 4096, 4) && few_wins(2048, 2048, 4) && !few_wins(2048, 16384, 4) && !few_wins(8192, 1536, 4)
             && !few_wins(768, 4096, 4) && !few_wins(1024, 4096, 2) && !few_wins(1024, 4096, 5));
+    }
+    #[test]
+    fn quarter_block_tables_take_only_the_swept_shapes_and_counts() {
+        for tokens in 0..=17 {
+            let swept=(2..=8).contains(&tokens);
+            for (r,k) in [(128,4096),(384,4096),(4096,1536)] {
+                let p=part(r,k,tokens);
+                assert_eq!(admitted(&[p],16),swept);
+                assert_eq!(multi_admitted(&[p],16),swept);
+                assert!(!multi_admitted(&[p;2],16));
+                assert!(!multi_admitted(&[Part {block_cols:16,..p}],16));
+                assert!(!multi_admitted(&[Part {cols:k-16,..p}],16));
+            }
+            let p=part(512,4096,tokens);
+            assert_eq!(shared_admitted(&[p;2],16),swept);
+            assert!(!shared_admitted(&[p;3],16));
+            assert!(!shared_admitted(&[p;2],8));
+            assert!(!admitted(&[p],16));
+            assert!(!multi_admitted(&[p,Part {tokens:tokens+1,..p}],16));
+        }
     }
     #[test]
     fn shared_rows_admit_two_to_four_parts_of_one_shape_block_shape_and_count() {

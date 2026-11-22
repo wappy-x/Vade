@@ -11,6 +11,11 @@ pub const MAX_COLS: usize = 8192;
 /// The prompt group cap. Device checks reach this limit.
 pub const MAX_TOKENS: usize = 1024;
 pub const MAX_PARTS: usize = 512;
+/// The swept dense tensor-core products that fit in one eight-token tile.
+#[cfg(any(target_os="linux",test))]
+pub(crate) fn short_cohort(rows:usize,cols:usize,most:u32,chains:u32)->bool {
+    (2..=8).contains(&most) && matches!((rows,cols,chains),(512,2048,1)|(1024,1024,4))
+}
 /// One part of a group launch: expert rows, columns, tokens, and the raw owners' device addresses.
 #[derive(Clone, Copy)]
 pub struct Part { pub rows: usize, pub cols: usize, pub tokens: usize, pub weight: u64, pub scales: u64 }
@@ -39,6 +44,15 @@ pub fn grid(parts: &[Part]) -> Option<[u32; 3]> {
 mod tests {
     use super::*;
     fn part(rows: usize, cols: usize, tokens: usize) -> Part { Part { rows, cols, tokens, weight: 256, scales: 512 } }
+    #[test]
+    fn short_cohort_keeps_only_the_swept_shapes_and_chains() {
+        for tokens in 0..=9 {for (rows,cols,chains) in [(512,2048,1),(1024,1024,4)] {
+            assert_eq!(short_cohort(rows,cols,tokens,chains),(2..=8).contains(&tokens));
+            assert!(!short_cohort(rows*2,cols,tokens,chains));
+            assert!(!short_cohort(rows,cols*2,tokens,chains));
+            assert!(!short_cohort(rows,cols,tokens,5-chains));
+        }}
+    }
     #[test]
     fn layer_launches_are_admitted() {
         let parts: Vec<Part> = (0..288).map(|i| part(1024, 4096, 1 + i % 13)).collect();

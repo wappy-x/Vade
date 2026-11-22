@@ -620,7 +620,9 @@ impl<'b,'d> Compute for Device<'b,'d> {
         let words=output.len();let value=self.value(output,words)?;self.cost.record(||"chat_attention".into(),stamp,self.backend,0);Ok(Some(value))
     }
     fn indirect_attention(&self,shape:Shape,parts:&[&Value<'b,'d>],query:&Value<'b,'d>)->Result<Option<Value<'b,'d>>> {
-        if !spark_gpu_probe::causal_ops::indirect_attention_proven(shape) {return Ok(None);}
+        let aligned=query.vector.device_address().is_multiple_of(16)
+            && parts.iter().all(|value|value.vector.device_address().is_multiple_of(16));
+        if !spark_gpu_probe::causal_ops::packed_attention_proven(shape,aligned) {return Ok(None);}
         self.ready(query)?;for value in parts {self.ready(value)?;}
         // ExpandKv stores every row packed (see pack_expanded); the packed entry widens each half in-kernel.
         let stamp=self.cost.start(self.backend);let rows=parts.iter().map(|value|&*value.vector).collect::<Vec<_>>();

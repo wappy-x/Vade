@@ -159,10 +159,16 @@ pub fn checked_rows(rows:&[crate::resident_weights::Rows])->Result<usize> {
     words.checked_mul(chunks).ok_or("projection stage gathered extent overflow")?;Ok(words)
 }
 
-/// Source rows per BF16 part. Only the measured two-row latent form changes.
-/// Every other count retains the base part exactly; zero keeps fold or FP32.
+/// Source rows per BF16 part. Short groups use the measured gate expansion
+/// shapes. Zero keeps the fold or FP32 entry.
 pub fn plain_rows_part(tokens:usize,rows:usize,cols:usize)->usize {
-    match tokens {2 if (rows,cols)==(4096,128)=>2,4=>4,6=>3,8=>4,_=>0}
+    match (tokens,rows,cols) {
+        (2,4096|2048,128)=>2,
+        (3,2048,128)=>3,
+        (4,_,_) | (8,_,_)=>4,
+        (6,_,_)=>3,
+        _=>0,
+    }
 }
 /// FOLD ROWS: whether a plain matrix of a group of `tokens` rows takes the one fold launch for all its rows
 /// (`flash_resident_projection_fold_rows`, `_f32`). By shape alone, so every rank chooses the same: the fold's own
@@ -186,11 +192,13 @@ mod shared_form_tests {
         }
     }
     #[test]
-    fn two_rows_change_but_three_four_and_prompt_parts_match_base() {
+    fn only_proved_gate_expansions_take_the_two_and_three_row_parts() {
         assert_eq!(plain_rows_part(2,4096,128),2);assert_eq!(plain_rows_part(2,128,4096),0);
-        for rows in [16,32,64,128,144,256,4096,8192] {for cols in [128,1536,4096,8192] {
-            for m in [1,3,4,5,6,7,8,9,16,32,128,512,1024] {
-                let base=match m {4=>4,6=>3,8=>4,_=>0};
+        for rows in [16,32,64,128,144,256,2047,2048,2049,4096,8192] {for cols in [127,128,129,1536,4096,8192] {
+            for m in [1,2,3,4,5,6,7,8,9,16,32,128,512,1024] {
+                let base=match (m,rows,cols) {
+                    (2,2048|4096,128)=>2,(3,2048,128)=>3,(4|8,_,_)=>4,(6,_,_)=>3,_=>0,
+                };
                 assert_eq!(plain_rows_part(m,rows,cols),base,"{rows}x{cols} m={m}");
             }
         }}

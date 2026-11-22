@@ -45,9 +45,12 @@ pub fn mx(rows: usize, cols: usize, tokens: usize, weights: u64, input: u64, out
     // The output head (77,440 x 4,096 a rank): at 3 and 4 tokens `mx_rows_small4` and at 5 to 8 the tile read it faster than the old pair
     // kernel (one Spark, `kernel-bench --mx-small {OLD} {X} head`, us a launch at 3 / 4 / 5 / 8 tokens: pair 1,561 / 1,895 / 2,224 / 2,973;
     // small4 1,428 / 1,435; tile 1,527 / 1,537 at 5 / 8). At 2 tokens and above one 16-token tile the head keeps the old kernels, as before.
-    if rows == mx_rows::HEAD_ROWS && cols == mx_rows::HEAD_COLS && weights & 15 == 0 && input & 15 == 0 && output & 3 == 0 {
-        if matches!(tokens, 3 | 4) { return Mx::Small("mx_rows_small4", 4); }
-        if (5..=mx_rows::TOKENS_PER_BLOCK).contains(&tokens) { return Mx::Tile; }
+    if cols == mx_rows::HEAD_COLS && weights & 15 == 0 && input & 15 == 0 && output & 3 == 0 {
+        match (rows,tokens) {
+            (mx_rows::HEAD_ROWS | mx_rows::QUARTER_HEAD_ROWS,3 | 4)=>return Mx::Small("mx_rows_small4",4),
+            (mx_rows::HEAD_ROWS,5..=mx_rows::TOKENS_PER_BLOCK) | (mx_rows::QUARTER_HEAD_ROWS,5..=8)=>return Mx::Tile,
+            _=>{},
+        }
     }
     if !tile_first && mx_small::admitted(rows, cols, tokens, weights, input, output) { if let Some((entry, per, _)) = mx_small::entry(tokens, cols) { return Mx::Small(entry, per); } }
     if tokens != 1 && mx_rows::admitted(rows, cols, tokens.min(mx_rows::token_limit(rows,cols)), 0, 0, weights, input, output) { return Mx::Tile; }
@@ -124,6 +127,30 @@ mod tests {
     fn project(rows: u32, tokens: usize, cols: u32) -> Shape { let mut s = Shape::new(Op::ProjectRows, tokens).unwrap(); s.rows = rows; s.cols = cols; s }
     fn wrapped(op: crate::causal_ops::Op, tokens: usize) -> Shape { Shape::wrapped(crate::causal_ops::Shape { op, heads: 64, dim: 128, taps: 4, rows: 288, cols: 8, epsilon: 1e-5, bound: -5.0 }, tokens).unwrap() }
     fn step(tokens: usize) -> Shape { let mut s = Shape::new(Op::StepRows, tokens).unwrap(); s.heads = 64; s.dim = 128; s }
+    #[test]
+    fn the_quarter_head_uses_only_the_swept_scalar_row_paths() {
+        let rows=mx_rows::QUARTER_HEAD_ROWS;
+        for tokens in 1..=17 {
+            let expected=match tokens {3|4=>Mx::Small("mx_rows_small4",4),5..=8=>Mx::Tile,_=>Mx::Old};
+            assert_eq!(mx(rows,4096,tokens,16,16,4),expected);
+        }
+        for (r,k,w,x,y) in [(rows-1,4096,16,16,4),(rows,4095,16,16,4),(rows,4096,8,16,4),(rows,4096,16,12,4),(rows,4096,16,16,2)] {
+            assert_eq!(mx(r,k,4,w,x,y),Mx::Old);
+        }
+    }
+    #[test]
+    fn the_quarter_fp8_tables_select_the_proven_short_entries() {
+        for tokens in 2..=8 {
+            let shape=|rows,cols|fp8_rows::Part {rows,cols,block_rows:128,block_cols:128,tokens,weight:16,scales:4};
+            let choose=|fp8:&[fp8_rows::Part],shared_rows:bool|group(&Group {nv:&[],fp8,all_fp8:true,all_nv:false,words:1,
+                cumulative:!shared_rows,shared_rows,input:16}).map(|pick|pick.0);
+            assert_eq!(choose(&[shape(512,4096);2],true),Some("fp8_rows_multi"));
+            for (rows,cols) in [(128,4096),(384,4096),(4096,1536)] {
+                let expected=if tokens==2 || tokens<=4 && rows<=768 {"fp8_rows_small"} else {"fp8_rows_multi"};
+                assert_eq!(choose(&[shape(rows,cols)],false),Some(expected));
+            }
+        }
+    }
     #[test]
     fn packed_mx_grid_covers_every_token_once() {
         for tokens in 1..=65 {

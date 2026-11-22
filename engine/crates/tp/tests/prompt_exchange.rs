@@ -122,31 +122,31 @@ impl Drop for Relay {
 }
 
 #[test]
-fn token_major_packets_cross_two_ranks_in_both_directions() {
-    let parts = 2;
-    for path in [false, true] {
+fn token_major_prompt_packets_keep_every_word_on_two_and_four_ranks() {
+    let heads = 4;
+    for (parts, path) in [(2, false), (2, true), (4, false), (4, true)] {
         loopback::run_ranks(parts, 1, |slot, addresses| {
             Ring::connect_options(slot, parts, addresses[slot], addresses[(slot + 1) % parts], path)
         }, |slot, mut ring| {
-        for tokens in [1, 3, 16, 17, 31, 255, 256, 257, 1024] {
-            for width in [3, 4, 144] {
-                for _ in 0..3 {
-                    let packets = (0..parts).map(|r| payload(r, tokens, width)).collect::<Vec<_>>();
-                    let words = tokens * width;
-                    let mut exchange = vec![f32::NAN; parts * words];
-                    exchange[slot * words..(slot + 1) * words].copy_from_slice(&packets[slot]);
-                    ring.gather_rank_blocks(&mut exchange, parts, 1, words).unwrap();
-                    let shape = Shape::rank_rows(tokens, width, parts, true).unwrap();
-                    let output = prompt_ops::reference(shape, [&exchange, &[], &[], &[], &[]], &[]).unwrap();
-                    let layouts = (0..parts)
-                        .map(|r| Layout::new(parts as u64, 1, width as u64, Topology { rank: r as u32, parts: parts as u32 }).unwrap())
-                        .collect::<Vec<_>>();
-                    let refs = layouts.iter().copied().zip(packets.iter().map(Vec::as_slice)).collect::<Vec<_>>();
-                    let expected = sparse_heads::gather_attended(&refs, tokens).unwrap();
-                    assert!(output.iter().zip(expected).all(|(a, b)| a.to_bits() == b.to_bits()), "slot={slot} tokens={tokens} width={width}");
+            for tokens in [1, 2, 4, 8, 16, 17, 31, 255, 256, 257, 1024] {
+                for width in [3, 4, 144] {
+                    let full = payload(0, tokens, heads * width);
+                    let local_width = heads / parts * width;
+                    let words = tokens * local_width;
+                    let local = full.chunks_exact(heads * width)
+                        .flat_map(|row| &row[slot * local_width..(slot + 1) * local_width]);
+                    let local = local.copied().collect::<Vec<_>>();
+                    for _ in 0..3 {
+                        let mut exchange = vec![f32::NAN; parts * words];
+                        exchange[slot * words..(slot + 1) * words].copy_from_slice(&local);
+                        ring.gather_rank_blocks(&mut exchange, parts, 1, words).unwrap();
+                        let shape = Shape::rank_rows(tokens, local_width, parts, true).unwrap();
+                        let output = prompt_ops::reference(shape, [&exchange, &[], &[], &[], &[]], &[]).unwrap();
+                        assert_eq!(output.len(), full.len());
+                        assert!(output.iter().zip(&full).all(|(a, b)| a.to_bits() == b.to_bits()), "parts={parts} path={path} slot={slot} tokens={tokens} width={width}");
+                    }
                 }
             }
-        }
         });
     }
 }

@@ -9,6 +9,7 @@ const POOL_CHANNELS: u32 = 25;
 #[path = "kernel_stepdirect.rs"] mod stepdirect;
 #[path = "kernel_causalgroup.rs"] mod causalgroup;
 #[path = "kernel_selectioncheck.rs"] mod selectioncheck;
+#[path = "kernel_softmax16.rs"] mod softmax16;
 struct Rng(u64);
 impl Rng {
     fn next(&mut self) -> u64 { self.0 ^= self.0 << 13; self.0 ^= self.0 >> 7; self.0 ^= self.0 << 17; self.0 }
@@ -88,7 +89,7 @@ fn admitted(s: Shape) -> bool {
         MXFP8 | MXFP8_POSITIVE_ZERO => r <= 2 && (matches!(k, 32 | 64 | 96 | 128 | 160 | 1024 | 2048 | 4096 | 8192 | 12288 | 16384) || k % 4096 == 0 && k > 16384 && k <= 1024 * 12288),
         KEY_NORM => matches!(d, 1 | 2 | 5 | 31 | 32 | 33 | 64 | 100 | 127 | 128 | 129 | 255 | 1023 | 1024),
         POOL_SCORES => matches!(d, 1 | 2 | 31 | 32 | 33 | 127 | 128 | 255 | 256) && matches!(h, 1 | 2 | 3 | 31 | 32 | 33 | 63 | 64 | 65 | 100 | 128) && r <= 8192,
-        SOFTMAX => matches!(h, 1 | 2 | 3 | 32 | 33 | 64 | 65 | 100 | 128) && (1..=4096).contains(&r),
+        SOFTMAX => matches!(h, 1 | 2 | 3 | 16 | 32 | 33 | 64 | 65 | 100 | 128) && (1..=4096).contains(&r),
         GATHER => matches!(d, 1 | 3 | 32 | 33 | 512 | 1024) && (1..=32768).contains(&r) && (1..=4096).contains(&k),
         POOL_CHANNELS => swept::POOL_CHANNEL_DIMS.contains(&d) && swept::POOL_CHANNEL_TAPS.contains(&(s.taps as usize)) && (1..=swept::POOL_CHANNEL_ROWS_MAX).contains(&r),
         _ => false,
@@ -137,6 +138,7 @@ pub(crate) fn run(base_path: &str, candidate_path: &str, mode: &str) -> Result<(
     let (base_direct, cand_direct, cand_fast_direct) = (g.function(ma, "causal_operation")?, g.function(mb, "causal_operation")?, g.function(mb, "causal_fast")?);
     let (base_replay, cand_replay, cand_fast_replay) = (g.function(ma, "resident_launch_causal")?, g.function(mb, "resident_launch_causal")?, g.function(mb, "resident_launch_causal_fast")?);
     let started = Instant::now();
+    if mode == "softmax-16" { return softmax16::run(&mut g,base_replay,cand_fast_replay); }
     if mode == "select-check" || mode == "select-check-bytes" {return selectioncheck::run(&mut g,mb,mode=="select-check");}
     if mode == "step-direct" {return stepdirect::run(&mut g,ma,mb);}
     if mode == "group" {return causalgroup::run(&mut g,ma,mb);}
@@ -181,7 +183,7 @@ pub(crate) fn run(base_path: &str, candidate_path: &str, mode: &str) -> Result<(
         for &(h, d, k, t) in &[(2usize, 3usize, 5u32, 1usize), (2, 3, 5, 3), (32, 512, 512, 64)] { let mut s = shape(UNPACK_KV, h, d, t); s.taps = t as u32; s.cols = k; specs.push((s, 0)); }
         // Epsilon and bound variants.
         for &(eps, bound) in &[(1e-6f32, -5.0f32), (1e-3, -0.001), (0.5, -100.0)] { for &(h, d) in &[(64usize, 128usize), (3, 33)] { let mut s = shape(GATED_NORM, h, d, 0); s.epsilon = eps; specs.push((s, 0)); let mut p = shape(PREPARE, h, d, 0); p.bound = bound; specs.push((p, 0)); } }
-        for &h in &[1usize, 2, 3, 32, 33, 64, 65, 100, 128, 129] { for &r in &[1usize, 2, 31, 32, 33, 127, 128, 129, 1000, 2051, 4000, 4096, 4097] {
+        for &h in &[1usize, 2, 3, 16, 32, 33, 64, 65, 100, 128, 129] { for &r in &[1usize, 2, 31, 32, 33, 127, 128, 129, 1000, 2051, 4000, 4096, 4097] {
             for &c in &[0usize, 1, 2, r / 2, r.saturating_sub(1), r] { if c <= r { specs.push((shape(SOFTMAX, h, 128, r), c)); } } } }
         for &r in &[1usize, 5, 128, 2051, 5000, 16384, 16385] { for &d in &[1usize, 3, 32, 33, 512, 1024, 1025] { for &k in &[1usize, 2, 127, 128, 129, 2051, 4096, 4097] {
             if r * d > 1_000_000 && ![1usize, 2051, 4097].contains(&k) { continue; }

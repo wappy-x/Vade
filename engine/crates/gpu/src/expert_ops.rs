@@ -290,7 +290,12 @@ pub const FP8_TILE_SHARED_FLOOR:u32=10*1024;
 #[cfg(not(target_arch="nvptx64"))]
 pub fn fp8_tile_block(jobs:&[Arguments])->(u32,u32) {
     let scale_blocks=|job:&Arguments|job.shape.cols.div_ceil(job.shape.block_cols.max(1));
-    let warps=jobs.iter().map(|job|fp8_row_warps(scale_blocks(job),1,job.shape.role==FP8_QUARTER)).min().unwrap_or(4);
+    let warps=jobs.iter().map(|job| {
+        let s=job.shape;
+        // The decode sweep found that the small rounded matrix benefits from more warps per row tile.
+        if matches!((s.op,s.rows,s.cols,s.block_rows,s.block_cols,s.role),(Op::Fp8Serial,128,4096,128,128,0)) {16}
+        else {fp8_row_warps(scale_blocks(job),1,s.role==FP8_QUARTER)}
+    }).min().unwrap_or(4);
     (32*warps,jobs.iter().map(|job|fp8_row_shared(warps,scale_blocks(job),1,job.shape.role==FP8_QUARTER)).max().unwrap_or(FP8_ROW_JOIN).max(FP8_TILE_SHARED_FLOOR))
 }
 /// The launch shape (blocks, threads, dynamic shared bytes) of these jobs: the shared-memory tile kernel when every
@@ -735,6 +740,17 @@ mod tests {
         assert_eq!(launch_geometry(&[good,weight],77,2).unwrap(),(77,32,0));
         assert_eq!(launch_geometry(&[good,job(Op::Fp8Serial,1024,4100,128,128)],77,2).unwrap(),(77,32,0));
         assert_eq!(launch_geometry(&[],77,0).unwrap(),old);
+    }
+    #[test]
+    fn small_rounded_fp8_projection_uses_its_swept_warp_count() {
+        let swept=job(Op::Fp8Serial,128,4096,128,128);
+        assert_eq!(launch_geometry(&[swept],77,1).unwrap(),(8,512,FP8_TILE_SHARED_FLOOR));
+        assert_eq!(batch_launch_geometry(&[swept],77,1).unwrap(),(false,8,512,FP8_TILE_SHARED_FLOOR));
+        for (rows,cols,br,bc,role) in [(127,4096,128,128,0),(256,4096,128,128,0),(128,2048,128,128,0),
+            (128,4096,64,128,0),(128,4096,128,64,0),(128,4096,128,128,FP8_UNROUNDED),(128,4096,128,128,FP8_QUARTER)] {
+            let mut nearby=job(Op::Fp8Serial,rows,cols,br,bc);nearby.shape.role=role;
+            assert_eq!(fp8_tile_block(&[nearby]).0,256);
+        }
     }
     #[test]
     fn tile_launch_constants_fit_the_default_shared_limit() {

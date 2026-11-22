@@ -61,6 +61,10 @@ impl<V> Verify<V> {
     /// The target's last hidden state of the last kept row, before and after the final norm.
     /// None until a step or a pass has run in this state (a prompt leaves none).
     pub fn hidden(&self)->Option<&[V;2]> {self.hidden.as_ref()}
+    #[cfg(test)]
+    pub(crate) fn predictor_words(&self)->(Option<&PredictorState<V>>,&[(u32,V)]) {
+        (self.predictor.as_ref(),&self.trail)
+    }
     /// Whether the last pass still holds what a verdict would release.
     pub fn has_kept(&self)->bool {self.kept.is_some()}
     /// Rows the next pass computes again before its new rows.

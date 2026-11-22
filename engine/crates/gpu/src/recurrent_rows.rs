@@ -17,7 +17,7 @@ pub struct Shape {
 impl Shape {
     /// The short-row shapes with the same fast Prepare, Conv and GatedNorm controls.
     pub fn admitted(self) -> bool {
-        (2..=MAX_TOKENS).contains(&self.tokens) && matches!(self.heads, 32 | 64)
+        (2..=MAX_TOKENS).contains(&self.tokens) && matches!(self.heads, 16 | 32 | 64)
             && self.bound.is_finite() && self.bound < 0.0
             && self.epsilon.is_finite() && self.epsilon > 0.0
     }

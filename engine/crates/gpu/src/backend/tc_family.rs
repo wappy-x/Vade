@@ -39,7 +39,7 @@ pub(super) struct NvSet<'t,'v,'d> {
 }
 
 /// Entries that live in the second image.
-pub(crate) fn in_tc_image(name:&str)->bool {matches!(name,"fp4_cohort"|"fp4_cohort_t64"|"tc_nv_pack")}
+pub(crate) fn in_tc_image(name:&str)->bool {matches!(name,"fp4_cohort"|"fp4_cohort_t64"|"fp4_cohort_t8"|"tc_nv_pack")}
 /// The product entry and its tokens a block for a word function: one chain runs in the 128-token block; the quarter
 /// chain runs in the 64-token block (its second accumulator set does not fit the 128-token block's registers).
 pub(crate) fn nv_rows_entry(chains:u32)->(&'static str,u32) {if chains==4 {("fp4_cohort_t64",64)} else {("fp4_cohort",NV_ROWS_BLOCK_TOKENS)}}
@@ -286,7 +286,9 @@ impl<'a> Backend<'a> {
         if bytes.len()!=parts*std::mem::size_of::<NvPart>() {return Err("tensor-core part table layout differs".into());}
         self.write_vector_bytes(owner,&bytes)?;
         let mut args=NvRows {table:owner.device_address(),codes:codes.device_address(),scales:scales.device_address(),count,rows:rows as u32,cols:cols as u32,layout:1,skip:1,raw:0,chains,work:0,work_count:0,merge:0,rowmap:0};
-        let (entry,block_tokens)=nv_rows_entry(chains);
+        let (entry,block_tokens)=if sets.len()==1 && crate::nv_rows::short_cohort(rows,cols,most,chains) {
+            ("fp4_cohort_t8",8)
+        } else {nv_rows_entry(chains)};
         self.require_arm_kernels_tc(&[entry])?;if !packs.is_empty() {self.require_arm_kernels_tc(&["tc_nv_pack"])?;}
         crate::prompt_launches::record("fp4_cohort");
         if sets.len()>1 {crate::prompt_launches::record("wide_cohort");}

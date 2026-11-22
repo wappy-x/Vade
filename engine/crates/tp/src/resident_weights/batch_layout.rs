@@ -53,20 +53,42 @@ impl Layout {
     use super::*;
     #[test]
     fn routed_and_held_gather_matches_the_separate_placements() {
-        for rank in 0..2 {
-            let row=Rows {start:rank*1024,count:1024,total:2048,split:true};
+        for parts in [2,4] {for rank in 0..parts {
+            let local=2048/parts;
+            let row=Rows {start:rank*local,count:local,total:2048,split:true};
             for m in 1..=8 {
                 let picks=m*8;
                 let admitted=routed_held_admitted(m,picks,row,[row;2],1<<17);
                 assert_eq!(admitted,(2..=6).contains(&m));
                 if !admitted {continue;}
-                assert!(!routed_held_admitted(m,picks,row,[row;2],10240*m-1));
+                assert!(!routed_held_admitted(m,picks,row,[row;2],local*(picks+2*m)-1));
                 let separate=[Layout::new(&vec![row;picks]).unwrap(),Layout::new(&vec![row;2*m]).unwrap()];
                 let joined=Layout::new(&vec![row;picks+2*m]).unwrap();
                 let mut expected=separate[0].scatter(rank).unwrap();
                 expected.extend(separate[1].scatter(rank).unwrap().into_iter()
                     .map(|[from,to,words]|[from+separate[0].stride,to+separate[0].output_words().unwrap(),words]));
                 assert_eq!(joined.scatter(rank).unwrap(),expected);
+            }
+        }}
+    }
+    #[test]
+    fn drafted_joined_placement_reconstructs_the_same_words_on_two_and_four_ranks() {
+        let values=|i:usize|[0,0x80000000,0x3f800000|(i as u32&0x7fffff)][i%3];
+        for m in [2,3] {
+            let jobs=10*m;
+            let expected=(0..jobs*2048).map(values).collect::<Vec<_>>();
+            for parts in [2,4] {
+                let local=2048/parts;
+                let row=Rows {start:0,count:local,total:2048,split:true};
+                let joined=Layout::new(&vec![row;jobs]).unwrap();
+                let mut actual=vec![0xdeadbeef;expected.len()];
+                for rank in (0..parts).rev() {
+                    let block=(0..jobs).flat_map(|job|(0..local).map(move |word|values(job*2048+rank*local+word))).collect::<Vec<_>>();
+                    for [source,target,words] in joined.scatter(rank).unwrap() {
+                        actual[target..target+words].copy_from_slice(&block[source..source+words]);
+                    }
+                }
+                assert_eq!(actual,expected,"rank count {parts}, verifier rows {m}");
             }
         }
     }

@@ -270,13 +270,14 @@ fn one_fold_launch_of_a_changing_cohort_gives_each_chat_the_bits_of_the_chat_alo
         widths.insert(width);
     }
     assert_eq!(widths.into_iter().collect::<Vec<_>>(),(1..=chats).collect::<Vec<_>>());assert_eq!(total[0],total[1]);
-    // The forms that keep a launch a token: the gathered shared plane, a rank count or a fold the sweep does not hold.
+    // The one launch on a rank of a pair and of four. The forms that keep a launch a token: the gathered shared plane, a rank count or a fold the sweep does not hold.
     let own=|m:usize|Some(m*count);
     for m in 2..=chats {
         assert!(rows_fold::one_launch(local,m,own(m),count).is_some());
         assert!(rows_fold::one_launch(local,m,Some(m*hidden),count).is_none(),"the gathered shared plane holds a token's rows apart");
         assert!(rows_fold::one_launch(Shape {taps:0,..local},m,None,count).is_none() && rows_fold::one_launch(local,m,None,count).is_none());
-        assert!(rows_fold::one_launch(Shape {cols:1024,..local},m,Some(m*1024),1024).is_none(),"a rank of four is not swept");
+        assert!(rows_fold::one_launch(Shape {cols:1024,..local},m,Some(m*1024),1024).is_some(),"a rank of four takes the one launch: its 1,024 rows are swept");
+        assert!(rows_fold::one_launch(Shape {cols:512,..local},m,Some(m*512),512).is_none(),"a rank of eight is not swept");
         assert!(rows_fold::one_launch(Shape {rows:7,..local},m,own(m),count).is_none() && rows_fold::one_launch(local,m,own(m),count+1).is_none());
         assert!(rows_fold::one_launch(Shape {op:Op::Route,..local},m,own(m),count).is_none());
         assert_eq!((rows_fold::launches(true,m),rows_fold::launches(false,m)),(1,m));

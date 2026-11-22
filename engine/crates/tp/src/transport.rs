@@ -1,6 +1,7 @@
 use std::{hint::spin_loop, io::{ErrorKind, Read, Write}, net::{SocketAddr, TcpStream}, time::{Duration, Instant}};
 use crate::{Result, rows};
 use engine_fabric::layout::PeerLayout;
+mod step_links;
 
 pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 /// How long a rank waits at a barrier for the other rank, on the control stream and on the mailbox alike.
@@ -1156,7 +1157,7 @@ impl Ring {
         #[cfg(target_os="linux")]
         {
             let pair = self.link.is_pair().then_some(()).filter(|()| step_barrier_on_mailbox());
-            let Some(mailbox) = pair.and_then(|()| self.mailbox[0].as_mut()) else { return self.barrier(); };
+            let Some(mailbox) = pair.and_then(|()| self.mailbox[0].as_mut()) else { return self.step_barrier_links(); };
             let mut word = [1f32];
             let result = mailbox.reduce(&mut word, crate::rdma::Wait::Barrier)
                 .and_then(|()| word[0].eq(&2.0).then_some(()).ok_or_else(|| "the other rank's barrier word differs".to_string()));
@@ -1216,7 +1217,7 @@ mod tests {
     use std::net::TcpListener;
     mod loopback { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-support/loopback.rs")); }
 
-    fn rings<T: Send>(world: usize, path: bool, run: impl Fn(usize, Ring) -> T + Sync) -> Vec<T> {
+    pub(super) fn rings<T: Send>(world: usize, path: bool, run: impl Fn(usize, Ring) -> T + Sync) -> Vec<T> {
         loopback::run_ranks(world, 1, |rank, addresses| {
             Ring::connect_options(rank, world, addresses[rank], addresses[(rank + 1) % world], path)
         }, run)

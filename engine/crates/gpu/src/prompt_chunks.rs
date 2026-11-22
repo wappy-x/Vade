@@ -103,19 +103,23 @@ mod tests {
             let route=wrapped(Causal::Route,1,1,1,288,8,0.0,2.5,m);let (l,w,_,_)=route.lengths().unwrap();
             same(route,[values(l[0],1),vec![],vec![],vec![],vec![]],&values(w,2));
             // Fold: the 8 routed rows of 4096, their weights and the shared row.
-            let fold=wrapped(Causal::ExpertFold,0,0,1,8,4096,0.0,0.0,m);let (l,w,_,_)=fold.lengths().unwrap();
-            // Ids are small whole numbers; the fold only weights rows, it does not index by id.
-            let ids=(0..l[0]).map(|i|(i%8) as f32).collect::<Vec<_>>();
-            same(fold,[ids,values(l[1],3),values(l[2],4),values(l[3],5),vec![]],&values(w,6));
+            for width in [4096,crate::prompt_admission::FOLD_LOCAL_FOUR] {
+                let fold=wrapped(Causal::ExpertFold,0,0,1,8,width,0.0,0.0,m);let (l,w,_,_)=fold.lengths().unwrap();
+                // Ids are small whole numbers; the fold only weights rows, it does not index by id.
+                let ids=(0..l[0]).map(|i|(i%8) as f32).collect::<Vec<_>>();
+                same(fold,[ids,values(l[1],3),values(l[2],4),values(l[3],5),vec![]],&values(w,6));
+            }
         }
     }
     #[test]
     fn prepare_and_gated_norm_runs_equal_the_whole_operation_on_the_host() {
         let m=300usize;
-        let prepare=wrapped(Causal::Prepare,64,128,0,0,0,1e-6,-5.0,m);let (l,w,_,_)=prepare.lengths().unwrap();
-        same(prepare,[values(l[0],1),values(l[1],2),values(l[2],3),values(l[3],4),vec![]],&values(w,5));
-        let gated=wrapped(Causal::GatedNorm,64,128,0,0,0,1e-6,0.0,m);let (l,w,_,_)=gated.lengths().unwrap();
-        same(gated,[values(l[0],6),values(l[1],7),values(l[2],8),values(l[3],9),vec![]],&values(w,10));
+        for heads in [16,64] {
+            let prepare=wrapped(Causal::Prepare,heads,128,0,0,0,1e-6,-5.0,m);let (l,w,_,_)=prepare.lengths().unwrap();
+            same(prepare,[values(l[0],1),values(l[1],2),values(l[2],3),values(l[3],4),vec![]],&values(w,5));
+            let gated=wrapped(Causal::GatedNorm,heads,128,0,0,0,1e-6,0.0,m);let (l,w,_,_)=gated.lengths().unwrap();
+            same(gated,[values(l[0],6),values(l[1],7),values(l[2],8),values(l[3],9),vec![]],&values(w,10));
+        }
     }
     #[test]
     fn selection_runs_keep_each_token_its_own_context() {

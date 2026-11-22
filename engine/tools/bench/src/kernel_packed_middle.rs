@@ -6,24 +6,25 @@ use std::time::Instant;
 pub(super) fn bytes(g:&mut Gpu,ma:H,mb:H,started:Instant)->Result<()> {
     let (old,new)=(g.function(ma,"nv_quantize_pack")?,g.function(mb,"nv_quantize_pack")?);
     let (base,placed)=(g.function(ma,"prompt_rows")?,g.function(mb,"prompt_place")?);
-    for tokens in [1usize,16,256,1024] {
-        let case=Place {tokens,k:8,experts:288,d:1024,parts:1};
+    for (tokens,d) in [1usize,16,256,1024].into_iter().flat_map(|tokens|[512,1024].map(|d|(tokens,d))) {
+        let case=Place {tokens,k:8,experts:288,d,parts:1};
         place_case(g,base,placed,&case,179,&[(1<<20,1<<20),(2,3)])?;
-        let (mut table,rows)=grouping(&case,179);let source=Buffer::new(g,&bits(rows*1024,91))?;
-        let shape=PShape {op:PLACE_TILE,tokens:1,heads:0,dim:1024,taps:1,rows:rows as u32,cols:1024,first:0,slots:(rows*1024) as u32,inner:empty()};
-        let out=Buffer::new(g,&vec![0.0;rows*1024])?;
+        let (mut table,rows)=grouping(&case,179);let source=Buffer::new(g,&bits(rows*d,91))?;
+        let shape=PShape {op:PLACE_TILE,tokens:1,heads:0,dim:d as u32,taps:1,rows:rows as u32,cols:d as u32,first:0,slots:(rows*d) as u32,inner:empty()};
+        let out=Buffer::new(g,&vec![0.0;rows*d])?;
         let run=|g:&mut Gpu,table:&[f32]|->Result<Vec<u8>> {
             let table=Buffer::new(g,&place_table(table))?;out.poison(g)?;
-            let mut a=args(shape,[source.address,table.address,4,4,4],[rows*1024,4*rows,0,0,0],out.address,rows*1024,1);
-            g.launch(placed,[rows.div_ceil(32) as u32,32,1],256,0,&mut [ptr(&mut a)])?;g.sync()?;out.read(g)
+            let mut a=args(shape,[source.address,table.address,4,4,4],[rows*d,4*rows,0,0,0],out.address,rows*d,1);
+            g.launch(placed,[rows.div_ceil(32) as u32,(d/32) as u32,1],256,0,&mut [ptr(&mut a)])?;g.sync()?;out.read(g)
         };
         let want=run(g,&table)?;
         for i in 0..3 {table.swap(i,i+3);}
         if run(g,&table)?==want {return Err(format!("PACKED MIDDLE PLACE CONTROL DID NOT FAIL tokens={tokens}"));}
-        println!("PACKED MIDDLE place bytes equal tokens={tokens} local=1024 parts=1 wrong_table_control=detected");g.clear()?;
+        println!("PACKED MIDDLE place bytes equal tokens={tokens} local={d} parts=1 wrong_table_control=detected");g.clear()?;
     }
     let mut cases=0;
-    for &(rows,local,parts) in &[(8usize,64usize,2usize),(16,128,4),(24,1024,2),(128,1024,2),(2048,1024,2),(8192,1024,2)] {
+    for &(rows,local,parts) in &[(8usize,64usize,2usize),(16,128,4),(24,1024,2),(128,1024,2),(2048,1024,2),(8192,1024,2),
+        (8,512,4),(16,512,4),(32,512,4),(128,512,4),(2048,512,4),(8192,512,4)] {
         for raw in [false,true] {
             cases+=1;let cols=local*parts;
             let values=if raw {bits(rows*cols,cases)} else {(0..rows*cols).map(|i|if i%37<16 {0.0} else {((i.wrapping_mul(2654435761)>>9)%4001) as f32/173.0-11.5}).collect()};

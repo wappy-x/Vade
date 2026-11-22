@@ -107,7 +107,7 @@ fn check(heads: usize, tokens: usize) {
 
 #[test]
 fn short_rows_match_serial_history_state_and_kept_words() {
-    for heads in [32, 64] {
+    for heads in [16, 32, 64] {
         for tokens in 2..=8 { check(heads, tokens); }
     }
 }
@@ -118,7 +118,7 @@ fn composite_rejects_other_shapes_and_invalid_parameters() {
     assert!(ok.admitted());
     for bad in [
         fused::Shape { tokens: 1, ..ok }, fused::Shape { tokens: 9, ..ok },
-        fused::Shape { heads: 16, ..ok }, fused::Shape { heads: 128, ..ok },
+        fused::Shape { heads: 15, ..ok }, fused::Shape { heads: 17, ..ok }, fused::Shape { heads: 128, ..ok },
         fused::Shape { bound: 0.0, ..ok }, fused::Shape { bound: f32::NEG_INFINITY, ..ok },
         fused::Shape { epsilon: 0.0, ..ok }, fused::Shape { epsilon: f32::NAN, ..ok },
     ] {
@@ -168,7 +168,7 @@ mod device {
             let mut words = 0;
             let queue = b.resident_queue()?;
             b.enable_resident_launches()?;
-            for heads in [32, 64] {
+            for heads in [16, 32, 64] {
                 b.pause_resident_launches(true)?;
                 let mut ready = Vec::new();
                 // Keep all input sets live until the capture starts. Every command

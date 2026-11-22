@@ -45,6 +45,12 @@ pub fn run(args:&[String],checkpoint:CheckpointAdmission,root:&Path,output_setti
     startup::step("rank_connect");
     let _cpu_pin=spark_tp::runtime::defer_cpu_pin();
     let mut ring=Ring::connect(rank,world,listen,next)?;
+    // The small commands of a step go rank to rank on RDMA mailboxes where the ring relays them (`Ring::relays_commands`:
+    // a path of COMMAND_RELAY_RANKS or more ranks with RDMA links), as a pair sends them on its mailbox. Without the relay
+    // every hop is a read of the control stream. Every rank asks the same question at this same point, so all open the
+    // relay or none does. A pair's ring answers no.
+    #[cfg(target_os="linux")]
+    if ring.relays_commands() {ring.open_command_relay()?;eprintln!("TEXT COMMAND RELAY transport=rdma_mailbox");}
     startup::step("rank_records");
     let wire_topology=ring.topology();let mut records=vec![0;world*80];let local=&mut records[rank*80..(rank+1)*80];
     // The top bit of the context word says this rank keeps prompts, so ranks with different choices refuse each other:
@@ -79,24 +85,29 @@ pub fn run(args:&[String],checkpoint:CheckpointAdmission,root:&Path,output_setti
         let mut data_next=next;data_next.set_port(next.port().checked_add(2).ok_or("text data next port exceeds range")?);
         let data=Ring::connect(rank,world,data_listen,data_next)?;
         startup::step("mailbox");
-        let mailbox=backend.tp_mailbox(4<<20)?;
+        // One receive channel for each other rank, with room for a message of 4 MiB (`tp_route::Channels`). For two ranks
+        // this IS the pair's mailbox: `tp_mailbox(4<<20)` is this same call with the links of a pair.
+        let mailbox=backend.tp_mailbox_routed(spark_gpu_probe::tp_route::Channels::new(&spark_gpu_probe::tp_route::Links::new(world,false)?,(4<<20)/4)?)?;
         startup::step("mhc_conductor");
         // The host mHC lane takes the rows of a batch step too (one row a core).
         let conductor=spark_tp::host_conductor::Conductor::with_rows(backend,&checkpoint,3,spark_tp::bounded_decoder::BATCH_ROWS)?;
         startup::step("placement");
         let mut placement=spark_tp::thread_affinity::Placement::new(&mut ring,conductor.as_ref().map_or(0,|conductor|conductor.cores()))?;
         let physical=Topology {rank:topology.rank,parts:mailbox.layout().world.try_into().map_err(|_|"mailbox topology exceeds ABI")?};let compatible=topology.eq(&physical);
-        if !compatible {return Err("diagnostic text service requires exactly 2 Sparks".into());}
+        if !compatible {return Err("diagnostic text service: the mailbox layout and the session topology differ".into());}
         let port=|mut address:SocketAddr|->Result<SocketAddr> {address.set_port(address.port().checked_add(1).ok_or("text wire port exceeds range")?);Ok(address)};
         use spark_gpu_probe::tp_route::{Links,Side};
         let links=Links::new(world,false)?;
         let left=links.neighbor(rank,Side::Left).map(|_|port(data_listen)).transpose()?;
         let right=links.neighbor(rank,Side::Right).map(|_|port(data_next)).transpose()?;let lead=left.is_none();
         startup::step("wire_connect");
-        let (incoming,outgoing)=spark_seqpar::control::connect_peers(left,right,std::time::Instant::now()+Duration::from_secs(300))?;
+        // `connect_peers` gives the link this rank connected (toward the higher rank), then the link it accepted.
+        let (outgoing,incoming)=spark_seqpar::control::connect_peers(left,right,std::time::Instant::now()+Duration::from_secs(300))?;
         startup::step("wire_link");
-        let link=incoming.or(outgoing).ok_or("text resident wire has no peer")?;
-        let wire=spark_tp::tensor_wire::Wire::Write(spark_tp::tensor_wire::WriteLink::new(&link)?);
+        // The links this rank has, left then right. `Wire::bind` gives a pair its write wire; on a longer path the wire
+        // thread writes this rank's messages to both neighbors and relays the others on.
+        let end=|link:Option<std::net::TcpStream>|link.as_ref().map(spark_tp::tensor_wire::WriteLink::new).transpose();
+        let wire=spark_tp::tensor_wire::Wire::Relay([end(incoming)?,end(outgoing)?],links,rank);
         let worker=wire.bind(mailbox.take_host().ok_or("text mailbox endpoint is taken")?,lead,mailbox.layout())?;
         use std::sync::atomic::Ordering;
         let (stop_wire,attached,failed)=(AtomicBool::new(false),AtomicBool::new(false),AtomicBool::new(false));

@@ -106,8 +106,8 @@ fn launch_replaced(g: &Gpu, olds: &[(&str, H)], tile: H, p: &Proj) -> Result<()>
 /// `head`: the output head of one rank (77,440 x 4,096; `mx_rows::HEAD_ROWS`). Bytes: the candidate image's `mx_rows_small4` at 3 and 4
 /// tokens and its tile at 5 to 8 (the host rule of `small_choice::mx`) against the production M kernels, five activation kinds, with a
 /// shifted-rows control. Time: the production kernels, the tile, the small entries and ONE token, at 2 to 8 tokens.
-fn head(g: &mut Gpu, fns: &[(&str, H)], tile: H, smalls: &[(&str, H)]) -> Result<()> {
-    let (rows, cols) = (77440usize, 4096usize); let started = Instant::now();
+fn head(g: &mut Gpu, fns: &[(&str, H)], tile: H, smalls: &[(&str, H)], rows:usize) -> Result<()> {
+    let cols = 4096usize; let started = Instant::now();
     let wa = weights_of(g, rows, cols, 4242)?;
     let (mut comparisons, mut controls) = (0u64, 0u64);
     for tokens in 3..=8usize { for kind in 0..5u32 {
@@ -174,7 +174,10 @@ pub(crate) fn run(base_path: &str, candidate_path: &str, mode: &str) -> Result<(
     // The replaced kernels exist only in a baseline image older than ROWS-MX (one without `mx_rows_small8`).
     let olds: Vec<(&str, H)> = if g.function(ma, "mx_rows_small8").is_ok() { vec![] } else { ["mx_rows_small2", "mx_rows_small4"].iter().map(|n| g.function(ma, n).map(|h| (*n, h))).collect::<Result<_>>()? };
     println!("MXSMALL replaced_kernel_arm={}", if olds.is_empty() { "absent (the baseline image has the new entries)" } else { "present" });
-    if mode == "head" { let tile_b = g.function(mb, "mx_rows_tile")?; return head(&mut g, &fns, tile_b, &smalls); }
+    if matches!(mode,"head"|"head-quarter") {
+        let tile_b=g.function(mb,"mx_rows_tile")?;
+        return head(&mut g,&fns,tile_b,&smalls,if mode=="head-quarter" {38_720} else {77_440});
+    }
     let started = Instant::now();
     if !time {
         let (comparisons, compared, replaced) = (std::cell::Cell::new(0u64), std::cell::Cell::new(0u64), std::cell::Cell::new(0u64));
