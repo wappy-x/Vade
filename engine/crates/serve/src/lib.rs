@@ -289,6 +289,8 @@ pub trait Engine {
     fn shared_prefill_max_tokens(&self) -> usize { usize::MAX }
     /// Canonical independent prompt tiles; zero keeps the serial long path.
     fn shared_prefill_chunk_rows(&self) -> usize { 0 }
+    /// Funded rows and maximum chats for a group of complete, cold prompt reads.
+    fn whole_prefill_cohort_limits(&self) -> (usize, usize) { (0, 0) }
     /// Before one serial prompt slice: pool bytes left after live and retired
     /// states, retained cache and request holds. Zero forbids borrowing.
     /// Return borrowed allocations before the prefill call returns.
@@ -319,6 +321,9 @@ pub trait Engine {
     /// Prompt-only rows may use the model's tensor-core prefill arithmetic.
     fn prefill_batch<'s>(&'s self, rows: &mut [BatchRows<'_, Self::Session<'s>>])
         -> Result<Vec<Predictions>, BatchError> { self.step_batch(rows) }
+    /// Ordinary prompt batch, without an optional whole-group read.
+    fn prefill_independent_batch<'s>(&'s self, rows: &mut [BatchRows<'_, Self::Session<'s>>])
+        -> Result<Vec<Predictions>, BatchError> { self.prefill_batch(rows) }
     fn step_batch<'s>(&'s self, rows: &mut [BatchRows<'_, Self::Session<'s>>])
         -> Result<Vec<Predictions>, BatchError> {
         rows.iter_mut().map(|row| {
@@ -394,6 +399,8 @@ pub struct DraftRows<'s, S> {
 
 #[derive(Clone, Copy)]
 pub enum BatchOutput { All, Last, None }
+/// Minimum width of a complete cold prompt group using the shared workspace.
+pub const MIN_WHOLE_PREFILL_COHORT: usize = 3;
 pub struct BatchRows<'s, S> {
     pub session: &'s mut S, pub tokens: &'s [u32], pub output: BatchOutput, pub greedy: bool,
     /// Zero requests full logits; nonzero is a penalty-free sampling shortlist.

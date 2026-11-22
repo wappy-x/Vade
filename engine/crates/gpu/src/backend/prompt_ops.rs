@@ -174,6 +174,19 @@ impl<'a> Backend<'a> {
     /// The group's peak. The whole run's peak stays true, because the two are joined here.
     pub fn end_group_peak(&self,whole:usize)->usize {let group=self.context.peak_accounted.get();self.context.peak_accounted.set(whole.max(group));group}
     pub fn release_group_spares(&self)->Result<(),String> {self.synchronize()?;self.context.clear_vector_pool();Ok(())}
+    /// Drain pending returns before recording the vector pool's spare capacities.
+    pub fn begin_prompt_cohort(&self)->Result<(),String> {
+        self.synchronize()?;
+        self.context.vector_pool.borrow_mut().begin_prompt_cohort()
+    }
+    /// Return wide scratch and drain dropped values while the cohort owns their cost.
+    pub fn prompt_cohort_chat(&self, chat: Option<usize>) {self.context.vector_pool.borrow_mut().prompt_cohort_chat(chat);}
+    pub fn finish_prompt_cohort(&self)->Result<(usize,usize,usize),String> {
+        self.nv_tc_scratch_return();
+        // A failed drain still ends the ledger, so a later cohort can begin and no later return is counted for this one.
+        if let Err(error) = self.synchronize() {self.context.vector_pool.borrow_mut().abandon_prompt_cohort();return Err(error);}
+        self.context.vector_pool.borrow_mut().finish_prompt_cohort(self.context)
+    }
     /// After a prompt group: drain, then trim the vector pool to leave `room` under its cap,
     /// as each decode token does, instead of releasing every spare. The next group (or the
     /// next session's first group) takes its own buffer sizes back from the pool.

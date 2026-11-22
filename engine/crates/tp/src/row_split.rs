@@ -15,6 +15,7 @@ mod kept_charge;
 #[cfg(all(test,target_os="linux"))] mod sum_refusal_tests;
 /// In the row count of a prompt group command: this group ends its prompt (decode steps follow).
 const LAST_GROUP:u32=1<<31;
+#[path="row_split/prompt_cohort.rs"] mod prompt_cohort;
 /// In the row count of a verify pass command (6): a greedy pass, each row answers with the ID its head picks.
 const PICK_ROWS:u32=1<<31;
 /// Prompts a service keeps on each rank at once (`Session::fork`). As many as it runs chats.
@@ -241,6 +242,9 @@ impl<C:Compute,E:Exchange> Compute for Split<C,E> {
     fn warm_routed_rows(&self,steps:&[engine_model::plan::layer::Step],picks:usize,max_rows:usize)->Result<()> {self.compute.warm_routed_rows(steps,picks,max_rows)}
     fn rows_release(&self)->Result<()> {self.compute.rows_release()}
     fn rows_keep(&self)->Result<()> {self.compute.rows_keep()}
+    fn rows_cohort_spares_begin(&self)->Result<()> {self.compute.rows_cohort_spares_begin()}
+    fn rows_cohort_chat(&self,chat:Option<usize>) {self.compute.rows_cohort_chat(chat);}
+    fn rows_cohort_spares_end(&self)->Result<()> {self.compute.rows_cohort_spares_end()}
     fn rows_return_lease(&self)->Result<()> {self.compute.rows_return_lease()}
     fn rows_phase_end(&self)->Result<()> {self.compute.rows_phase_end()}
     fn rows_unrecorded(&self,p:bool)->Result<bool> {self.compute.rows_unrecorded(p)}
@@ -318,7 +322,7 @@ impl<V> std::ops::Deref for KeptSlot<V> {type Target=crate::bounded_decoder::Par
 /// hidden rows, the fewest groups that hold PROMPT_TRAIL rows) until its first verify pass takes them.
 pub struct Factory<'f,C:Compute,E> {checkpoint:&'f CheckpointAdmission,split:Split<C,E>,context:usize,eos:Vec<u32>,prepared:crate::bounded_decoder::Prepared<'f>,reservation:usize,workspace:usize,resident:usize,memo_admitted:bool,
     /// Rows of the prompt group a chat reads in while no other chat waits. The text service sets it with `with_prompt_group_and_memo`.
-    group:usize,latent_rows:crate::bounded_decoder::LatentRows,lease_extra:[usize;prompt_lease::SIZES.len()],lease_rows:Cell<usize>,lease_bytes:Cell<usize>,active:Cell<usize>,next_id:Cell<u64>,failed:Cell<bool>,failure:RefCell<Option<String>>,predictor:usize,charge_plan:crate::admission_plan::SessionChargePlan,with_layer:Option<crate::admission_plan::StateChargePlan>,tails:RefCell<BTreeMap<u64,Vec<(Vec<u32>,crate::bounded_decoder::OpenRows<C::Value>)>>>,
+    group:usize,group_chats:usize,latent_rows:crate::bounded_decoder::LatentRows,lease_extra:[usize;prompt_lease::SIZES.len()],lease_rows:Cell<usize>,lease_bytes:Cell<usize>,active:Cell<usize>,next_id:Cell<u64>,failed:Cell<bool>,failure:RefCell<Option<String>>,predictor:usize,charge_plan:crate::admission_plan::SessionChargePlan,with_layer:Option<crate::admission_plan::StateChargePlan>,tails:RefCell<BTreeMap<u64,Vec<(Vec<u32>,crate::bounded_decoder::OpenRows<C::Value>)>>>,
     prompt_spares: RefCell<BTreeMap<u64,usize>>,
     /// DEFAULT DRAFTING. `trial_always`: test control. `trial_counts`: trials that started real drafting, real drafting that stopped, trials that gave up.
     /// `answer_marker`: the token that ends an answer's think block; a trial makes its first shadow there (trial.rs).
@@ -349,11 +353,12 @@ impl<'f,C:Compute,E:Exchange> Factory<'f,C,E> {
         let workspace=workspace.checked_add(prepared.fused_boundary_scratch()?.1).ok_or("boundary workspace charge overflow")?;
         if eos.is_empty() || eos.iter().any(|&id|u64::from(id)>=checkpoint.description().vocab) {return Err("service EOS set is invalid".into());}
         let resident=split.memory_bytes().map_or(0,|m|m.0);
-        Ok(Self {checkpoint,split,context,eos,prepared,reservation,workspace,resident,memo_admitted:false,group:crate::bounded_decoder::PROMPT_GROUP,latent_rows:Default::default(),lease_extra:[0;prompt_lease::SIZES.len()],lease_rows:Cell::new(0),lease_bytes:Cell::new(0),active:Cell::new(0),next_id:Cell::new(1),failed:Cell::new(false),batch_ended:Cell::new(None),failure:RefCell::new(None),predictor:0,charge_plan:crate::admission_plan::SessionChargePlan::for_sparse_heads(checkpoint.description(),topology,context)?,with_layer:None,tails:RefCell::new(BTreeMap::new()),prompt_spares:RefCell::new(BTreeMap::new()),trial_always:Cell::new(false),trial_counts:Cell::new([0;3]),answer_marker:Cell::new(None),deep_always:Cell::new(false),pair:RefCell::new(pair::Pair::default()),pair_counts:Cell::new([0;3]),confidence:RefCell::new(Default::default()),confidence_on:Cell::new(true),shared_counts:Cell::new([0;3]),keep:false,#[cfg(test)] kept_tail:kept_charge::Tail::new(checkpoint.description(),topology)?,kept:Cell::new(0),kept_account:Cell::new(None)})
+        Ok(Self {checkpoint,split,context,eos,prepared,reservation,workspace,resident,memo_admitted:false,group:crate::bounded_decoder::PROMPT_GROUP,group_chats:LIVE_SESSIONS,latent_rows:Default::default(),lease_extra:[0;prompt_lease::SIZES.len()],lease_rows:Cell::new(0),lease_bytes:Cell::new(0),active:Cell::new(0),next_id:Cell::new(1),failed:Cell::new(false),batch_ended:Cell::new(None),failure:RefCell::new(None),predictor:0,charge_plan:crate::admission_plan::SessionChargePlan::for_sparse_heads(checkpoint.description(),topology,context)?,with_layer:None,tails:RefCell::new(BTreeMap::new()),prompt_spares:RefCell::new(BTreeMap::new()),trial_always:Cell::new(false),trial_counts:Cell::new([0;3]),answer_marker:Cell::new(None),deep_always:Cell::new(false),pair:RefCell::new(pair::Pair::default()),pair_counts:Cell::new([0;3]),confidence:RefCell::new(Default::default()),confidence_on:Cell::new(true),shared_counts:Cell::new([0;3]),keep:false,#[cfg(test)] kept_tail:kept_charge::Tail::new(checkpoint.description(),topology)?,kept:Cell::new(0),kept_account:Cell::new(None)})
     }
     /// Let the server's prompt cache fork this service's sessions (`Session::fork`). Every rank of the service
     /// makes the same call. Without it a session cannot be forked and no prompt is kept.
     pub fn with_prompt_keep(mut self)->Self {self.keep=true;self}
+
     #[cold] #[inline(never)]
     fn take_account(&self)->Box<KeptAccount> {match self.kept_account.take() {Some(account)=>account,None=>Box::new(KeptAccount::new())}}
     #[cold] #[inline(never)]
@@ -782,6 +787,7 @@ pub fn workspace_reservation_bytes(&self)->usize {self.workspace}
                 })?;},
                 // Command 32: one shared pass of several chats (shared.rs). `token` is the number of chats.
                 shared::SHARED_PASS=>self.worker_shared(&mut sessions,token as usize,id)?,
+                prompt_cohort::PROMPT_COHORT=>self.worker_prompt_cohort(&mut sessions,token as usize,id)?,
                 // Command 33: the proposal chains of several chats in one go (one_pass.rs). `token` is the number of chats.
                 one_pass::GROUP_PROPOSE=>self.worker_propose_group(&mut sessions,token as usize,id)?,
                 // Commands 15 to 17: a kept prompt (`kept_command`). Out of this loop, so the step arms keep their code.
@@ -921,6 +927,15 @@ impl<C:Compute,E:Exchange> spark_serve::Engine for Factory<'_,C,E> {
     // step_batch runs these independent prompts sequentially. Each pass fits the
     // funded group; the row sum bounds scheduler work, not simultaneous scratch.
     fn shared_prefill_rows(&self)->usize {crate::bounded_decoder::BATCH_ROWS*crate::bounded_decoder::PROMPT_GROUP}
+    fn whole_prefill_cohort_limits(&self)->(usize,usize) {if self.group_chats==0 {(0,0)} else {(self.group,self.group_chats)}}
+    fn prefill_batch<'s>(&'s self,rows:&mut [spark_serve::BatchRows<'_,Self::Session<'s>>])->std::result::Result<Vec<spark_serve::Predictions>,spark_serve::BatchError> {
+        let error=|message|spark_serve::BatchError {request:None,message};
+        if self.can_prefill_cohort(rows).map_err(error)? {return self.prefill_cohort(rows).map_err(error);}
+        self.step_batch(rows)
+    }
+    fn prefill_independent_batch<'s>(&'s self,rows:&mut [spark_serve::BatchRows<'_,Self::Session<'s>>])->std::result::Result<Vec<spark_serve::Predictions>,spark_serve::BatchError> {
+        self.step_batch(rows)
+    }
     /// Proposed tokens are verified for one chat, or for two to three drafting chats in one shared pass (pair.rs). More chats decode plain rows.
     fn single_chat_draft(&self)->bool {true}
     fn draft_chat_limit(&self)->usize {pair::PAIR_CHATS}

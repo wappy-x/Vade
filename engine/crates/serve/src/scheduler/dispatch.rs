@@ -50,6 +50,7 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
     // Admission keeps the engine's cache threshold; only scheduling must fit a turn.
     let shared_prefill_limit = shared_prompt_limit.min(shared_prompt_rows);
     let shared_prefill_max_tokens = engine.shared_prefill_max_tokens();
+    let (whole_prefill_rows, whole_prefill_chats) = engine.whole_prefill_cohort_limits();
     let reservation = engine
         .session_reservation_bytes()
         .ok_or("scheduler requires bounded engine sessions")?;
@@ -1191,7 +1192,15 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
         let collecting = preparing > 0 && engine.shared_prefill_batch() && intake_collect()
             && jobs.iter().filter(|j| shared_prompt(j) && j.generation.state.tokens.is_empty())
                 .map(|j| clock_elapsed(&j.admitted)).max().is_some_and(|age| age < Duration::from_millis(100));
-        let prompt_ready = !intake_pending && jobs.iter().any(|j| shared_prompt(j)
+        let whole = whole_prefill_rows != 0 && !intake_pending && !collecting && active.is_empty() && foreground.is_none()
+            && super::prompt_cohort::whole_fits(whole_prefill_rows, whole_prefill_chats, config.active,
+                shared_prefill_limit.min(shared_prefill_max_tokens), jobs.iter().zip(&errors).map(|(j, error)| super::prompt_cohort::WholeJob {
+                    rows: j.ready.prompt.len(), read: j.generation.state.tokens.len(),
+                    open: error.is_none() && !j.done && j.ready.wire.bytes.is_empty() && clock_now() < j.ready.deadline
+                        && j.prefill_rows == 0 && j.long_prefill.is_none(),
+                    serial: serial_prompts.contains(&j.id),
+                }));
+        let prompt_ready = whole && jobs.iter().any(|j| clock_elapsed(&j.admitted) >= min_prompt_age) || !intake_pending && jobs.iter().any(|j| shared_prompt(j)
             && j.generation.state.tokens.len() < j.ready.prompt.len()
             && (!j.generation.state.tokens.is_empty()
                 || (!collecting && clock_elapsed(&j.admitted) >= min_prompt_age)));
@@ -1201,11 +1210,12 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
         let prompt_ready = burst.ready(clock_now(), idle, prompt_ready || !intake_pending && live.iter().any(|j| !shared_prompt(j) && j.ready.wire.bytes.is_empty()), crate::intake_burst::View { oldest, cold: live.len(), room: active.len() + jobs.len() < config.active, arriving: preparing > 0 || !queued.is_empty() || reading.iter().any(|r| r.arriving(burst.window())) }) && prompt_ready;
         if engine.shared_prefill_batch() && prompt_ready {
             plans.iter_mut().for_each(|p| *p = None);
-            let mut prompt_rows = if foreground.is_some() { shared_prefill_limit } else { shared_prompt_rows }; let prompt_cap = super::prompt_cohort::row_cap(prompt_rows, prompt_ready_jobs, !engine.shared_batch(), chunk_rows);
+            let mut prompt_rows = if whole { whole_prefill_rows } else if foreground.is_some() { shared_prefill_limit } else { shared_prompt_rows }; let prompt_cap = super::prompt_cohort::row_cap(prompt_rows, prompt_ready_jobs, !engine.shared_batch(), chunk_rows);
             for (i, job) in jobs.iter_mut().enumerate() {
-                if errors[i].is_some() || job.done || !job.ready.wire.bytes.is_empty() || !shared_prompt(job) { continue; }
+                if errors[i].is_some() || job.done || !job.ready.wire.bytes.is_empty()
+                    || !whole && !shared_prompt(job) { continue; }
                 let remaining = job.ready.prompt.len().saturating_sub(job.generation.state.tokens.len());
-                let count = if chunk_rows == 0 { remaining.min(prompt_cap) } else { remaining.min(chunk_rows) };
+                let count = if whole { remaining } else if chunk_rows == 0 { remaining.min(prompt_cap) } else { remaining.min(chunk_rows) };
                 if count == 0 || count > prompt_rows { continue; }
                 let start = job.generation.state.tokens.len();
                 plans[i] = Some(crate::generation::Work::Prefill {
@@ -1220,7 +1230,8 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
                         greedy: job.key.is_none() && !job.ready.request.kv_checkpoint
                             && spark_engine::draft::plain_greedy(job.ready.request.sampling), top_k: 0 })).collect();
                 let started = clock_now();
-                let result = complete_batch(engine.prefill_batch(&mut rows), rows.len());
+                let result = if whole { engine.prefill_batch(&mut rows) } else { engine.prefill_independent_batch(&mut rows) };
+                let result = complete_batch(result, rows.len());
                 let finished = clock_now(); let cohort_width = rows.len();
                 drop(rows);
                 match result {
@@ -1470,8 +1481,6 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
     Ok(None)
 }
 
-/// A prompt may share cohort chunks when it is short, or when it sits on a
-/// canonical tile boundary and chunked sharing is available.
 /// VADE_INTAKE_COLLECT (default on; 0 = off): a cold prompt's first prefill waits, at most
 /// 100 ms after its admission, while other requests are still in CPU preparation, the same
 /// bound admission uses for a CPU-prepared cohort. Fast admission (pooled session memory)
@@ -1481,16 +1490,7 @@ fn intake_collect() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("VADE_INTAKE_COLLECT").as_deref() != Ok("0"))
 }
-fn prompt_cohort_candidate(remaining: usize, position: usize, limit: usize, chunk_rows: usize) -> bool {
-    remaining <= limit || chunk_rows != 0 && position.is_multiple_of(chunk_rows)
-}
-
-/// Long prompts join the cohort only when grouping is real: a lone long
-/// prompt takes the long-prefill path with its wider grouped passes.
-fn prompt_uses_cohort(remaining: usize, position: usize, limit: usize, chunk_rows: usize, ready: usize) -> bool {
-    prompt_cohort_candidate(remaining, position, limit, chunk_rows)
-        && (remaining <= limit || ready >= 2)
-}
+use super::prompt_cohort::{prompt_cohort_candidate, prompt_uses_cohort};
 /// One event for each prefix fork that failed and fell through to the next candidate or a miss.
 fn fork_failed(kind: &str, prompt_tokens: usize, errors: &[String]) {
     for error in errors {

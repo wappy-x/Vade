@@ -34,6 +34,109 @@ impl Exchange for Solo {
 }
 fn best(v:&[f32])->u32 {(0..v.len()).reduce(|a,b|if v[b]>v[a] {b} else {a}).unwrap() as u32}
 fn bits(v:&[f32])->Vec<u32> {v.iter().map(|v|v.to_bits()).collect()}
+
+#[test]
+fn cold_prefill_cohort_keeps_unequal_prompts_and_predictor_tails_on_both_ranks() {
+    use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+    struct PromptWire(Wire, std::sync::Arc<AtomicUsize>);
+    impl Exchange for PromptWire {
+        fn topology(&self) -> Topology { self.0.topology() }
+        fn gather(&mut self, local: &[f32], rows: usize) -> Result<Vec<f32>> { self.0.gather(local, rows) }
+        fn command(&mut self, bytes: &mut [u8]) -> Result<()> {
+            if bytes.len() == 16 && bytes[..4] == 34u32.to_le_bytes() { self.1.fetch_add(1, Relaxed); }
+            self.0.command(bytes)
+        }
+        fn complete(&mut self) -> Result<()> { self.0.complete() }
+    }
+    let c = fixture::Checkpoint::new_with_predictor(80);
+    let sent = std::sync::Arc::new(AtomicUsize::new(0));
+    let (a_tx, b_rx) = sync_channel(1);
+    let (b_tx, a_rx) = sync_channel(1);
+    std::thread::scope(|scope| {
+        let checkpoint = &c.admission;
+        let worker = scope.spawn(move || {
+            let split = Split::new(Host, Wire { topology: Topology {rank:1,parts:2}, controller:false, tx:b_tx, rx:b_rx }).unwrap();
+            Factory::new(checkpoint, split, 80, vec![0]).unwrap().with_predictor(3).unwrap().worker().unwrap();
+        });
+        let wire = Wire { topology: Topology {rank:0,parts:2}, controller:true, tx:a_tx, rx:a_rx };
+        let engine = Factory::new(checkpoint, Split::new(Host, PromptWire(wire, sent.clone())).unwrap(), 80, vec![0])
+            .unwrap().with_predictor(3).unwrap();
+        let mut limits = spark_tp::row_split::limits(80, 64).unwrap();
+        limits.next_mtp_depth = Some(3);
+        let strict = spark_serve::protocol::parse(
+            br#"{"messages":[{"role":"user","content":"Say hello."}],"max_tokens":48,"draft":"strict","mtp_depth":3}"#,
+            true, &limits,
+        ).unwrap();
+        let prompts: [&[u32]; 3] = [&[3, 5, 1, 7, 2, 6, 1, 0, 2], &[2, 6, 4, 1], &[3, 2, 1, 5, 2]];
+        let mut solo = Vec::new();
+        for (index, prompt) in prompts.iter().enumerate() {
+            let mut session = engine.session().unwrap();
+            if index == 0 { session.configure_request(&strict).unwrap(); } else { session.disable_model_draft(); }
+            let logits = session.prefill(prompt).unwrap();
+            let next = session.step(best(&logits)).unwrap();
+            let proposal = session.draft_target().map(|target| target.propose_model(prompt, best(&next), 3).unwrap().unwrap().tokens);
+            solo.push((bits(&logits), bits(&next), proposal));
+        }
+        {
+            let mut pair = [engine.session().unwrap(), engine.session().unwrap()];
+            let mut rows = pair.iter_mut().zip(prompts).map(|(session, tokens)| BatchRows {
+                session, tokens, output: BatchOutput::Last, greedy: false, top_k: 0,
+            }).collect::<Vec<_>>();
+            assert_eq!(engine.prefill_batch(&mut rows).map_err(|error| error.message).unwrap().len(), 2);
+            assert_eq!(sent.load(Relaxed), 0);
+        }
+        {
+            let mut sessions = [engine.session().unwrap(), engine.session().unwrap(), engine.session().unwrap()];
+            sessions[0].configure_request(&strict).unwrap();
+            sessions[1].disable_model_draft();
+            sessions[2].disable_model_draft();
+            let mut rows = sessions.iter_mut().zip(prompts).map(|(session, tokens)| BatchRows {
+                session, tokens, output: BatchOutput::Last, greedy: false, top_k: 0,
+            }).collect::<Vec<_>>();
+            let output = engine.prefill_independent_batch(&mut rows).map_err(|error| error.message).unwrap();
+            assert_eq!(sent.load(Relaxed), 0);
+            for (result, (head, _, _)) in output.into_iter().zip(&solo) {
+                let Predictions::Logits(logits) = result else { panic!("prompt must return logits"); };
+                assert_eq!(&bits(&logits[0]), head);
+            }
+        }
+        let mut sessions = [engine.session().unwrap(), engine.session().unwrap(), engine.session().unwrap()];
+        sessions[0].configure_request(&strict).unwrap();
+        sessions[1].disable_model_draft();
+        sessions[2].disable_model_draft();
+        let mut rows = sessions.iter_mut().zip(prompts).map(|(session, tokens)| BatchRows {
+            session, tokens, output: BatchOutput::Last, greedy: false, top_k: 0,
+        }).collect::<Vec<_>>();
+        let invalid = [u32::MAX];
+        rows[1].tokens = &invalid;
+        assert!(engine.prefill_batch(&mut rows).is_err());
+        assert_eq!(sent.load(Relaxed), 0);
+        rows[1].tokens = prompts[1];
+        let output = engine.prefill_batch(&mut rows).map_err(|error| error.message).unwrap();
+        drop(rows);
+        assert_eq!(sent.load(Relaxed), 1);
+        for (((session, result), (head, next, proposal)), prompt) in sessions.iter_mut().zip(output).zip(solo).zip(prompts) {
+            let Predictions::Logits(logits) = result else { panic!("prompt must return logits"); };
+            assert_eq!(bits(&logits[0]), head);
+            let step = session.step(best(&logits[0])).unwrap();
+            assert_eq!(bits(&step), next);
+            let made = session.draft_target().map(|target| target.propose_model(prompt, best(&step), 3).unwrap().unwrap().tokens);
+            assert_eq!(made, proposal);
+        }
+        drop(sessions);
+        engine.shutdown().unwrap();
+        worker.join().unwrap();
+    });
+}
+#[test]
+fn prompt_cohort_chats_zero_turns_whole_groups_off() {
+    let c = fixture::Checkpoint::new_with_predictor(80);
+    let made = |chats| Factory::new(&c.admission, Split::new(Host, Solo).unwrap(), 80, vec![0]).unwrap().with_prompt_cohort_chats(chats);
+    // The scheduler's `whole_prefill_rows == 0` exit: no whole group forms.
+    assert_eq!(made(0).unwrap().whole_prefill_cohort_limits(), (0, 0));
+    for chats in [1, 2, 9] { assert!(made(chats).is_err(), "{chats}"); }
+    for chats in [3, 8] { assert_eq!(made(chats).unwrap().whole_prefill_cohort_limits().1, chats); }
+}
 /// A chat alone by plain steps: each token it chooses and the bits of the row that chose it.
 fn alone<E:Engine>(engine:&E,prompt:&[u32],count:usize)->Vec<(u32,Vec<u32>)> {
     let mut session=engine.session().unwrap();let mut logits=session.prefill(prompt).unwrap();let mut plain=Vec::new();

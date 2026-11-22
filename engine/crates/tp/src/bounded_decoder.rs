@@ -414,6 +414,9 @@ pub trait Compute {
     fn rows_keep(&self)->Result<()> {self.rows_release()}
     fn prompt_spare_bytes(&self) -> Option<usize> { None }
     fn return_prompt_spares(&self, _target: usize) -> Result<(usize, usize)> { Ok((0, 0)) }
+    fn rows_cohort_spares_begin(&self)->Result<()> {Ok(())}
+    fn rows_cohort_chat(&self,_chat:Option<usize>) {}
+    fn rows_cohort_spares_end(&self)->Result<()> {Ok(())}
     /// Return a temporary prompt workspace and report actual spare ownership.
     fn rows_return_lease(&self)->Result<()> {self.rows_keep()}
     /// WIDE PHASE: a prompt group above the whole-charged lease sizes ended a mixer run or a layer. Submit what is
@@ -1245,6 +1248,7 @@ impl<'f,C:Compute> Decoder<'f,C> {
 
 }
 #[path="bounded_decoder/rows.rs"] mod rows;
+pub(crate) use rows::{PromptChat,PromptResult,prompt_cohort_fits,prompt_cohort_growth};
 #[path="bounded_decoder/batch.rs"] mod batch;
 pub use batch::{BATCH_ROWS,BATCH_MIN_ROWS,BATCH_PAIR_ROWS,expert_union_counts,chat_attention_layers};
 pub use rows::{absorbed_chat_words,expanded_row_words,group_workspace_bytes_with,LatentRows};

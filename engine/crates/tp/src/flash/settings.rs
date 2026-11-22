@@ -737,7 +737,7 @@ pub fn diagnostic_text(options:&[String])->Result<bool,String> {
     let mut seen=false;let mut options=options.iter();
     while let Some(option)=options.next() {match option.as_str() {
         "--diagnostic-unqualified-text"=>{if seen {return Err("duplicate --diagnostic-unqualified-text".into());}seen=true;},
-        "--mtp"|"--api-key-file"=>{options.next();},
+        "--mtp"|"--api-key-file"|"--prompt-cohort-chats"=>{options.next();},
         _=>{},
     }}Ok(seen)
 }
@@ -760,14 +760,14 @@ fn unqualified_text_never_binds_a_remote_http_listener() {
 }
 /// What the text service takes after REQUESTS. Its refusals print this list.
 /// The largest `--mtp` is `spark_engine::draft::PREDICTOR_DEPTH_MAX`; a test holds this text and that number together.
-pub const TEXT_OPTIONS:&str="the text service takes --diagnostic-unqualified-text, --mtp 0..7, --api-key-file PATH, --diagnostic-serving-trace and one of --prompt-keep (the default) or --no-prompt-keep, each one time";
+pub const TEXT_OPTIONS:&str="the text service takes --diagnostic-unqualified-text, --mtp 0..7, --api-key-file PATH, --diagnostic-serving-trace, --prompt-cohort-chats 0 (whole prompt groups off) or 3..8, and one of --prompt-keep (the default) or --no-prompt-keep, each one time";
 /// Extract the diagnostic served API gate before normal option validation. Option values stay opaque.
 pub fn boundary_gate_options(args:&[String])->Result<(Option<std::path::PathBuf>,Vec<String>),String> {
     let mut gate=None;let mut kept=Vec::new();let mut args=args.iter();
     while let Some(arg)=args.next() {
         if let Some(path)=arg.strip_prefix("--diagnostic-boundary-gate=") {
             if gate.is_some() || path.is_empty() {return Err("boundary gate needs one nonempty output directory".into());}gate=Some(path.into());
-        } else {kept.push(arg.clone());if matches!(arg.as_str(),"--mtp"|"--api-key-file") && let Some(value)=args.next() {kept.push(value.clone());}}
+        } else {kept.push(arg.clone());if matches!(arg.as_str(),"--mtp"|"--api-key-file"|"--prompt-cohort-chats") && let Some(value)=args.next() {kept.push(value.clone());}}
     }Ok((gate,kept))
 }
 #[test]
@@ -779,10 +779,10 @@ fn boundary_gate_option_preserves_values_and_rejects_duplicate_or_empty_paths() 
     assert!(boundary_gate_options(&args(&["--diagnostic-boundary-gate=a","--diagnostic-boundary-gate=b"])).is_err());
     assert!(boundary_gate_options(&args(&["--api-key-file","--diagnostic-boundary-gate=a"])).unwrap().0.is_none());
 }
-/// The text service options after REQUESTS: the API key file, the predictor depth, the serving trace and prompt retention.
+/// Parse the text service options that follow REQUESTS.
 /// An unknown option, or a second copy of one, stops the start with the list of what the service takes.
-pub fn text_options(args:&[String])->Result<(Option<std::path::PathBuf>,Option<usize>,bool,bool),String> {
-    let mut key=None;let mut mtp=None;let mut trace=false;let mut keep=None;let mut options=args.iter();
+pub fn text_options(args:&[String])->Result<(Option<std::path::PathBuf>,Option<usize>,bool,bool,usize),String> {
+    let mut key=None;let mut mtp=None;let mut trace=false;let mut keep=None;let mut cohort_chats=None;let mut options=args.iter();
     while let Some(option)=options.next() {match option.as_str() {
         "--diagnostic-unqualified-text"=>{},
         "--diagnostic-serving-trace" if !trace=>trace=true,
@@ -795,9 +795,16 @@ pub fn text_options(args:&[String])->Result<(Option<std::path::PathBuf>,Option<u
         "--no-prompt-keep" if keep.is_none()=>keep=Some(false),
         "--mtp" if mtp.is_none()=>{let value=options.next().ok_or("--mtp needs a depth")?;let largest=spark_engine::draft::PREDICTOR_DEPTH_MAX;
             mtp=Some(value.parse::<usize>().ok().filter(|depth|*depth<=largest).ok_or_else(||format!("text service --mtp takes a depth of 0 to {largest}"))?);},
+        "--prompt-cohort-chats" if cohort_chats.is_none()=>{
+            let value=options.next().ok_or("--prompt-cohort-chats needs a chat count")?;
+            let (minimum, maximum)=(spark_serve::MIN_WHOLE_PREFILL_COHORT,spark_tp::row_split::LIVE_SESSIONS);
+            // 0: whole prompt groups off (`Engine::whole_prefill_cohort_limits` gives no rows).
+            cohort_chats=Some(value.parse::<usize>().ok().filter(|count|*count==0 || (minimum..=maximum).contains(count))
+                .ok_or_else(||format!("text service --prompt-cohort-chats takes 0 (off) or a count of {minimum} to {maximum}"))?);
+        },
         _=>return Err(format!("unsupported text service option: {option}; {TEXT_OPTIONS}")),
     }}
-    Ok((key,mtp,trace,keep.unwrap_or(true)))
+    Ok((key,mtp,trace,keep.unwrap_or(true),cohort_chats.unwrap_or(spark_tp::row_split::LIVE_SESSIONS)))
 }
 /// THE ROOM OF THE PROMPT CACHE, for the start line. The cache is on by default, and at a large context its byte cap
 /// (the session pool less one full-size chat) can be small or zero: "cache=true" alone would tell a user the cache
@@ -891,10 +898,10 @@ fn the_prompt_cache_is_on_unless_no_prompt_keep_is_given() {
     assert!(parser_code.contains("let mut keep=None;") && parser_code.contains("\"--prompt-keep\" if keep.is_none()=>keep=Some(true),") && parser_code.contains("\"--no-prompt-keep\" if keep.is_none()=>keep=Some(false),"));
     // One place sets the choice on, one sets it off, one gives the default.
     assert_eq!(parser_code.matches("keep=Some(true)").count(),1);assert_eq!(parser_code.matches("keep=Some(false)").count(),1);
-    assert_eq!(parser_code.matches("Ok((key,mtp,trace,keep.unwrap_or(true)))").count(),1);assert_eq!(parser_code.matches("keep.unwrap_or(").count(),1);
+    assert_eq!(parser_code.matches("Ok((key,mtp,trace,keep.unwrap_or(true),").count(),1);assert_eq!(parser_code.matches("keep.unwrap_or(").count(),1);
     let source=include_str!("../bin/flash-serve/text.rs");let code=&source[..source.find("#[cfg(test)]").unwrap()];
     let extract=code.find("let (gate,options)=super::settings::boundary_gate_options(&args[9..])?;").unwrap();
-    let parse=code.find("let (key,mtp,trace,keep)=super::settings::text_options(&options)?;").unwrap();assert!(extract<parse);
+    let parse=code.find("let (key,mtp,trace,keep,cohort_chats)=super::settings::text_options(&options)?;").unwrap();assert!(extract<parse);
     // The service reads no cache size from its environment (the engine takes no new environment read): the off
     // switch is the option, and `vade up` gives it to every rank for a cache size of 0 (cli state.rs engine_args).
     assert!(!code.contains("FLASH_SERVE_KV_BYTES"));
@@ -919,11 +926,11 @@ fn the_prompt_cache_is_on_unless_no_prompt_keep_is_given() {
     assert_eq!(code.matches("if keep ").count(),4);assert_eq!(code.matches("from(keep)").count(),2);assert_eq!(code.matches(":keep,").count(),2);assert_eq!(code.matches("{keep}").count(),1);
 }
 #[test]
-fn text_options_take_the_four_names_and_refuse_the_rest_with_the_list() {
+fn text_options_take_supported_names_and_refuse_the_rest_with_the_list() {
     let values=|v:&[&str]|v.iter().map(|s|(*s).to_owned()).collect::<Vec<_>>();
-    let (key,mtp,trace,keep)=text_options(&values(&["--diagnostic-unqualified-text","--mtp","3","--api-key-file","key.txt","--diagnostic-serving-trace"])).unwrap();
+    let (key,mtp,trace,keep,_)=text_options(&values(&["--diagnostic-unqualified-text","--mtp","3","--api-key-file","key.txt","--diagnostic-serving-trace"])).unwrap();
     assert_eq!((key.as_deref(),mtp,trace,keep),(Some(std::path::Path::new("key.txt")),Some(3),true,true));
-    assert_eq!(text_options(&values(&["--diagnostic-unqualified-text"])).unwrap(),(None,None,false,true));
+    assert_eq!(text_options(&values(&["--diagnostic-unqualified-text"])).unwrap(),(None,None,false,true,spark_tp::row_split::LIVE_SESSIONS));
     assert_eq!(text_options(&values(&["--mtp","0"])).unwrap().1,Some(0));
     // Options of the Flash-Next service, and a second copy of an option, are refused with the list.
     for refused in [&["--allow-remote"][..],&["--fp4-local"],&["--decode-fuse","off"],&["--mtp","1","--mtp","1"],&["--diagnostic-serving-trace","--diagnostic-serving-trace"]] {
@@ -942,9 +949,9 @@ fn text_options_take_the_four_names_and_refuse_the_rest_with_the_list() {
 fn text_options_list_both_prompt_keep_names_and_refuse_two_of_them_with_the_list() {
     let values=|v:&[&str]|v.iter().map(|s|(*s).to_owned()).collect::<Vec<_>>();
     for name in ["--prompt-keep","--no-prompt-keep"] {assert!(TEXT_OPTIONS.contains(&format!(" {name} ")) || TEXT_OPTIONS.contains(&format!(" {name},")),"{name}: {TEXT_OPTIONS}");}
-    let (key,mtp,trace,keep)=text_options(&values(&["--diagnostic-unqualified-text","--prompt-keep","--mtp","2"])).unwrap();
+    let (key,mtp,trace,keep,_)=text_options(&values(&["--diagnostic-unqualified-text","--prompt-keep","--mtp","2"])).unwrap();
     assert_eq!((key,mtp,trace,keep),(None,Some(2),false,true));
-    let (key,mtp,trace,keep)=text_options(&values(&["--diagnostic-unqualified-text","--no-prompt-keep","--mtp","2"])).unwrap();
+    let (key,mtp,trace,keep,_)=text_options(&values(&["--diagnostic-unqualified-text","--no-prompt-keep","--mtp","2"])).unwrap();
     assert_eq!((key,mtp,trace,keep),(None,Some(2),false,false));
     // (the options, the one the refusal names). Both names at once are refused in either order, and so is a second
     // copy of one name: the refusal names the second and ends with the list, which holds both names.
@@ -955,6 +962,19 @@ fn text_options_list_both_prompt_keep_names_and_refuse_two_of_them_with_the_list
         let error=text_options(&values(refused)).unwrap_err();
         assert!(error.starts_with(&format!("unsupported text service option: {named}; ")) && error.ends_with(TEXT_OPTIONS) && error.contains("--prompt-keep (the default) or --no-prompt-keep"),"{refused:?}: {error}");
     }
+}
+#[test]
+fn text_options_bound_the_prompt_cohort_chat_count() {
+    let values=|v:&[&str]|v.iter().map(|s|(*s).to_owned()).collect::<Vec<_>>();
+    for (option, expected) in [("0",0),("3",3),("4",4),("8",8)] {
+        let args=values(&["--prompt-cohort-chats",option,"--no-prompt-keep"]);
+        assert_eq!(text_options(&boundary_gate_options(&args).unwrap().1).unwrap().4,expected);
+    }
+    for args in [&["--prompt-cohort-chats"][..], &["--prompt-cohort-chats","1"], &["--prompt-cohort-chats","2"], &["--prompt-cohort-chats","9"],
+        &["--prompt-cohort-chats","no"], &["--prompt-cohort-chats","3","--prompt-cohort-chats","4"]] {
+        assert!(text_options(&values(args)).is_err(), "{args:?}");
+    }
+    assert!(!diagnostic_text(&values(&["--prompt-cohort-chats","--diagnostic-unqualified-text"])).unwrap());
 }
 /// The drafting words of the text service start line. `default_depth` is the service's default for a request that names
 /// no draft mode: TRIAL_DEPTH when a predictor of at least that depth is loaded, else 0. With it, a greedy request longer

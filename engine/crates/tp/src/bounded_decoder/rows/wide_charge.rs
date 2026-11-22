@@ -11,16 +11,53 @@ pub(super) fn wide_phase_group(group:usize,rows:LatentRows)->bool {
 /// Every routed layer's native route metadata epoch for a group of `group` rows, cut in sets of
 /// `prompt_route::MAX_ROWS`, as `whole_group_workspace` charges it (E).
 fn route_epoch_bytes(c:&CheckpointAdmission,group:usize)->Result<usize> {
+    let chunk=spark_gpu_probe::prompt_route::MAX_ROWS as usize;
+    let sizes=(0..group).step_by(chunk).map(|first|(group-first).min(chunk)).collect::<Vec<_>>();
+    route_epochs_for(c,&sizes)
+}
+fn route_epochs_for(c:&CheckpointAdmission,sizes:&[usize])->Result<usize> {
     let d=c.description();let mut total=0usize;
     for layer in &d.layers {
         if let engine_model::shapes::Ffn::Experts(e)=layer.ffn {
-            let mut left=group;let mut sets=Vec::new();
-            while left>0 {let rows=left.min(spark_gpu_probe::prompt_route::MAX_ROWS as usize);left-=rows;
-                sets.push(spark_gpu_probe::prompt_route::Shape {rows:rows as u32,picks:e.selected as u32,experts:e.count as u32});}
+            let sets=sizes.iter().map(|&rows|spark_gpu_probe::prompt_route::Shape {
+                rows:rows as u32,picks:e.selected as u32,experts:e.count as u32,
+            }).collect::<Vec<_>>();
             if let Some(bytes)=spark_gpu_probe::prompt_route::epoch_workspace_bytes(&sets) {total=total.checked_add(bytes).ok_or("prompt route epoch charge overflow")?;}
         }
     }
     Ok(total)
+}
+/// The cohort drains between mixers and after each routed half. Each request's
+/// reservation funds its old and unpublished state, including append room.
+pub(crate) fn prompt_cohort_fits(c:&CheckpointAdmission,context:usize,funded:usize,latent:LatentRows,sizes:&[usize])->Result<bool> {
+    let total=sizes.iter().sum::<usize>();
+    if sizes.is_empty() || total>funded {return Ok(false);}
+    let (mixer,routed)=prompt_cohort_bounds(c,context,latent,sizes)?;
+    Ok(mixer.max(routed)<=whole_group_workspace(c,context,funded,latent)?)
+}
+/// The cohort's mixer and routed bounds, in bytes. Mixer: the largest over the chats of that chat's mixer half (`member_bound`).
+/// Where a whole group's charge grows by at least 4 T a row between the chats' sizes, it is the largest chat's.
+fn prompt_cohort_bounds(c:&CheckpointAdmission,context:usize,latent:LatentRows,sizes:&[usize])->Result<(usize,usize)> {
+    let total=sizes.iter().sum::<usize>();
+    let epochs=route_epochs_for(c,sizes)?;
+    let tail=wide_tail_words(c)?.checked_mul(4).ok_or("cohort workspace overflow")?;
+    let mut mixer=0usize;
+    for &rows in sizes {mixer=mixer.max(member_bound(c,context,latent,rows,total,tail,epochs)?);}
+    let routed=total.checked_mul(tail).and_then(|n|n.checked_add(epochs)).ok_or("cohort routed workspace overflow")?;
+    Ok((mixer,routed))
+}
+/// One chat's mixer half charged as a whole group of its `rows`, beside the tail of every other row of the cohort
+/// (`total`), and the route epochs of the cohort (`epochs`) that this group's charge does not hold.
+fn member_bound(c:&CheckpointAdmission,context:usize,latent:LatentRows,rows:usize,total:usize,tail:usize,epochs:usize)->Result<usize> {
+    let single_epoch=route_epoch_bytes(c,rows)?;
+    Ok(whole_group_workspace(c,context,rows,latent)?
+        .checked_add((total-rows).checked_mul(tail).ok_or("cohort workspace overflow")?)
+        .and_then(|n|n.checked_add(epochs.saturating_sub(single_epoch))).ok_or("cohort mixer workspace overflow")?)
+}
+/// At service start: the whole-group charge at PROMPT_GROUP - 1 and PROMPT_GROUP rows, and 4 T, in bytes. No charge reads it.
+pub(crate) fn prompt_cohort_growth(c:&CheckpointAdmission,context:usize,latent:LatentRows)->Result<(usize,usize,usize)> {
+    Ok((whole_group_workspace(c,context,PROMPT_GROUP-1,latent)?,whole_group_workspace(c,context,PROMPT_GROUP,latent)?,
+        wide_tail_words(c)?.checked_mul(4).ok_or("cohort workspace overflow")?))
 }
 /// WIDE PHASE: T, the words one row of a wide group can hold while its run is not in a mixer half (EXPC, PR 384).
 /// Between two layers and beside another run's mixer half a row holds its residual or its carry: a pending value
@@ -134,6 +171,49 @@ mod tests {
             // The mixer phase alone: one whole run, and the carry of every other row.
             assert!(mixer>=whole+(4096-PROMPT_GROUP_MAX)*carry*4);
         }
+    }
+    /// The gated head's mixer bound: the largest chat's whole group beside every other row's tail.
+    fn head_mixer(c:&CheckpointAdmission,context:usize,latent:LatentRows,sizes:&[usize])->usize {
+        let (total,largest)=(sizes.iter().sum::<usize>(),*sizes.iter().max().unwrap());
+        let (epochs,single)=(route_epochs_for(c,sizes).unwrap(),route_epoch_bytes(c,largest).unwrap());
+        whole_group_workspace(c,context,largest,latent).unwrap()+(total-largest)*wide_tail_words(c).unwrap()*4+epochs.saturating_sub(single)
+    }
+    fn every_member(c:&CheckpointAdmission,context:usize,latent:LatentRows,sizes:&[usize])->Vec<usize> {
+        let (total,tail,epochs)=(sizes.iter().sum::<usize>(),wide_tail_words(c).unwrap()*4,route_epochs_for(c,sizes).unwrap());
+        sizes.iter().map(|&rows|member_bound(c,context,latent,rows,total,tail,epochs).unwrap()).collect()
+    }
+    /// PROMPT COHORT (a): with one very small and one large chat, the head charged less than the small chat's own bound
+    /// on this checkpoint; the charge now covers every member.
+    #[test] fn a_cohort_mixer_bound_covers_its_smallest_chat() {
+        let c=fixture();let c=&c.admission;let (context,sizes)=(256,[200,1,1]);
+        let members=every_member(c,context,LatentRows::Expanded,&sizes);
+        assert!(head_mixer(c,context,LatentRows::Expanded,&sizes)<members[1],"{members:?}");
+        let (mixer,_)=prompt_cohort_bounds(c,context,LatentRows::Expanded,&sizes).unwrap();
+        assert!(members.iter().all(|&bound|mixer>=bound),"{mixer} {members:?}");
+    }
+    /// PROMPT COHORT (b): over sizes 1 to 256 and 2 to 8 chats the charge is never below the head's, and equals it
+    /// whenever the largest chat gives the largest member bound.
+    #[test] fn a_cohort_mixer_bound_equals_the_head_where_the_largest_chat_decides() {
+        let c=fixture();let c=&c.admission;let mut seed=0x9e37_79b9_7f4a_7c15u64;
+        let mut next=|bound:u64|{seed^=seed<<13;seed^=seed>>7;seed^=seed<<17;(seed%bound) as usize+1};
+        for _ in 0..200 {
+            let (context,latent)=([256,1025,8193][next(3)-1],[LatentRows::Expanded,ABSORBED,LatentRows::Absorbed {draft:true}][next(3)-1]);
+            let sizes=(0..next(7)+1).map(|_|next(256)).collect::<Vec<_>>();
+            let (head,(mixer,_))=(head_mixer(c,context,latent,&sizes),prompt_cohort_bounds(c,context,latent,&sizes).unwrap());
+            let largest=sizes.iter().position(|rows|rows==sizes.iter().max().unwrap()).unwrap();
+            let members=every_member(c,context,latent,&sizes);
+            assert!(mixer>=head && members[largest]==head,"{sizes:?}");
+            if members.iter().all(|&bound|bound<=members[largest]) {assert_eq!(mixer,head,"{sizes:?}");}
+        }
+    }
+    /// PROMPT COHORT (c): the growth of a whole group's charge a row beside 4 T on this checkpoint, printed.
+    #[test] fn print_the_whole_group_charge_growth_beside_one_tail() {
+        let c=fixture();let c=&c.admission;
+        for context in [256usize,8193] {for latent in [LatentRows::Expanded,ABSORBED] {
+            let (before,at,tail)=prompt_cohort_growth(c,context,latent).unwrap();
+            let first=whole_group_workspace(c,context,2,latent).unwrap() as i128-whole_group_workspace(c,context,1,latent).unwrap() as i128;
+            println!("PROMPT COHORT GROWTH context={context} {latent:?} 1_to_2={first} 255_to_256={} tail_bytes={tail}",at as i128-before as i128);
+        }}
     }
     /// WIDE PHASE: a row count whose charge does not fit a word is an error, before any route set is listed.
     #[test] fn a_phase_charge_that_overflows_is_refused() {

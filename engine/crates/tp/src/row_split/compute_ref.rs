@@ -120,6 +120,9 @@ impl<C:Compute> Compute for &C {
     fn rows_keep(&self)->Result<()> {(**self).rows_keep()}
     fn prompt_spare_bytes(&self) -> Option<usize> { (**self).prompt_spare_bytes() }
     fn return_prompt_spares(&self, target: usize) -> Result<(usize, usize)> { (**self).return_prompt_spares(target) }
+    fn rows_cohort_spares_begin(&self)->Result<()> {(**self).rows_cohort_spares_begin()}
+    fn rows_cohort_chat(&self,chat:Option<usize>) {(**self).rows_cohort_chat(chat);}
+    fn rows_cohort_spares_end(&self)->Result<()> {(**self).rows_cohort_spares_end()}
     fn rows_return_lease(&self)->Result<()> {(**self).rows_return_lease()}
     fn rows_phase_end(&self)->Result<()> {(**self).rows_phase_end()}
     fn rows_unrecorded(&self,p:bool)->Result<bool> {(**self).rows_unrecorded(p)}

@@ -43,7 +43,10 @@ fn site(name: &str, needle: &str) -> String {
 
 // Adapt the existing fake, without its deliberate per-token sleep. Keep its
 // history-dependent logits so a wrong row, order or prompt slice changes IDs.
-struct Counted(Model, Arc<Mutex<Coverage>>);
+struct Counted(Model, Arc<Mutex<Coverage>>, Option<RefCell<Vec<PrefillCall>>>);
+#[derive(Debug, PartialEq, Eq)]
+enum PrefillCall { Whole(Vec<usize>), Independent(Vec<usize>) }
+enum CohortProbe { Background, Foreground }
 struct CountedKv(Kv, bool, bool);
 impl Drop for CountedKv {
     fn drop(&mut self) {
@@ -77,19 +80,34 @@ impl Coverage {
 impl Engine for Counted {
     type Session<'a> = CountedKv;
     fn session(&self) -> Result<CountedKv, String> {
-        assert!((self.0.live.load(Ordering::Relaxed) + 1) * 16384 <= FUNDED_BYTES, "unfunded session creation");
-        let normal = DRIVER.with_borrow(|d| d.as_ref().unwrap().case.cancel.is_none());
+        let (funded_bytes, normal) = DRIVER.with_borrow(|d| {
+            let driver = d.as_ref().unwrap();
+            (driver.funded_bytes, driver.case.cancel.is_none())
+        });
+        assert!((self.0.live.load(Ordering::Relaxed) + 1) * 16384 <= funded_bytes, "unfunded session creation");
         self.0.session().map(|kv| CountedKv(kv, false, normal))
     }
     fn shared_prefill_batch(&self) -> bool { true }
-    fn shared_prefill_limit(&self) -> usize { SLICE }
-    fn shared_prefill_rows(&self) -> usize { 4 * SLICE }
-    fn shared_prefill_max_tokens(&self) -> usize { 9 }
+    fn shared_prefill_limit(&self) -> usize { if self.2.is_some() { 256 } else { SLICE } }
+    fn shared_prefill_rows(&self) -> usize { if self.2.is_some() { 2048 } else { 4 * SLICE } }
+    fn shared_prefill_max_tokens(&self) -> usize { if self.2.is_some() { 256 } else { 9 } }
+    fn whole_prefill_cohort_limits(&self) -> (usize, usize) { if self.2.is_some() { (1024, 8) } else { (0, 0) } }
     fn shared_decode_rows(&self) -> usize { 4 }
     fn shared_decode_min(&self) -> usize { 2 }
     fn prefill_batch(&self, rows: &mut [crate::BatchRows<'_, CountedKv>]) -> Result<Vec<crate::Predictions>, crate::BatchError> {
+        if let Some(calls) = &self.2 {
+            calls.borrow_mut().push(PrefillCall::Whole(rows.iter().map(|r| r.tokens.len()).collect()));
+        }
         self.1.lock().unwrap().prompt_group |= rows.len() > 1;
         self.step_batch(rows)
+    }
+    fn prefill_independent_batch(&self, rows: &mut [crate::BatchRows<'_, CountedKv>]) -> Result<Vec<crate::Predictions>, crate::BatchError> {
+        if let Some(calls) = &self.2 {
+            calls.borrow_mut().push(PrefillCall::Independent(rows.iter().map(|r| r.tokens.len()).collect()));
+            self.step_batch(rows)
+        } else {
+            self.prefill_batch(rows)
+        }
     }
     fn step_batch(&self, rows: &mut [crate::BatchRows<'_, CountedKv>]) -> Result<Vec<crate::Predictions>, crate::BatchError> {
         if rows.len() == 2 && rows.iter().all(|r| matches!(r.output, crate::BatchOutput::All)) {
@@ -118,6 +136,7 @@ struct Peer {
 struct Driver {
     case: Case, pending: Vec<Option<Ready>>, peers: Vec<Peer>, turn: usize,
     fault: Option<String>, coverage: Coverage, max_wait: usize, max_reserved: usize,
+    funded_bytes: usize, prefill_calls: Vec<PrefillCall>,
 }
 thread_local! { static DRIVER: RefCell<Option<Driver>> = const { RefCell::new(None) }; }
 pub(super) fn driving() -> bool { DRIVER.with(|d| d.borrow().is_some()) }
@@ -151,7 +170,7 @@ impl Driver {
         let reserved = active.iter().map(|j| j.generation.state.reserved_session_bytes).sum::<usize>()
             + retired.iter().map(|j| j.state.reserved_session_bytes).sum::<usize>() + cache_bytes;
         self.max_reserved = self.max_reserved.max(reserved);
-        if reserved > FUNDED_BYTES { return Err(format!("reservation {reserved} exceeds pool {FUNDED_BYTES}")); }
+        if reserved > self.funded_bytes { return Err(format!("reservation {reserved} exceeds pool {}", self.funded_bytes)); }
         if active.iter().any(|j| j.generation.state.reserved_session_bytes != 16384)
             || retired.iter().any(|j| j.state.reserved_session_bytes != 16384) {
             return Err("session reservation differs from the fake allocation".into());
@@ -236,11 +255,16 @@ impl Driver {
 
 // Never print response bodies: they contain runtime cancellation capabilities.
 fn run(listener: &TcpListener, case: Case, alone: &[Vec<Vec<u32>>]) -> Result<Driver, String> {
+    run_case(listener, case, alone, None)
+}
+fn run_case(listener: &TcpListener, case: Case, alone: &[Vec<Vec<u32>>], cohort: Option<CohortProbe>) -> Result<Driver, String> {
     let _clock = ClockGuard::new();
+    let (slots, funded_bytes) = if cohort.is_some() { (8, 8 * 16384) } else { (4, FUNDED_BYTES) };
     let limits = Limits { intake_burst: Duration::ZERO, generation_timeout: Duration::from_secs(3600),
         write_timeout: Duration::from_secs(3600), ..Limits::default() };
     let mut driver = Driver { case: case.clone(), pending: Vec::new(), peers: Vec::new(), turn: 0,
-        fault: None, coverage: Coverage::default(), max_wait: 0, max_reserved: 0 };
+        fault: None, coverage: Coverage::default(), max_wait: 0, max_reserved: 0,
+        funded_bytes, prefill_calls: Vec::new() };
     for (i, spec) in case.requests.iter().enumerate() {
         let (server, client) = UnixStream::pair().unwrap(); client.set_nonblocking(true).unwrap();
         let prompt = vec![1; spec.prompt];
@@ -249,8 +273,11 @@ fn run(listener: &TcpListener, case: Case, alone: &[Vec<Vec<u32>>]) -> Result<Dr
         let mut wire = Wire::new(Socket::Admin(server)).unwrap(); wire.received -= Duration::from_secs(1);
         let prepared = prepare::<NoCodec>(input, wire, None, &limits, "model-test", 1024, 8, &[7])
             .map_err(|(_, error)| format!("prepare request {i}: {error}"))?;
-        let Prepared::Generation(ready) = prepared else { unreachable!() };
-        let expected = alone[match spec.prompt { 1 => 0, 4 => 1, 9 => 2, _ => unreachable!() }][spec.output - 1].clone();
+        let Prepared::Generation(mut ready) = prepared else { unreachable!() };
+        if matches!(cohort, Some(CohortProbe::Foreground)) && i == 0 { ready.request.priority = 255; }
+        let expected = if cohort.is_some() { solo_ids(spec.prompt, spec.output) } else {
+            alone[match spec.prompt { 1 => 0, 4 => 1, 9 => 2, _ => unreachable!() }][spec.output - 1].clone()
+        };
         driver.peers.push(Peer { socket: client, reply: String::new(), key: ready.cancel, expected,
             terminal: None, cancelled: false, progress: (0, 0), wait: 0 });
         driver.pending.push(Some(ready));
@@ -259,9 +286,10 @@ fn run(listener: &TcpListener, case: Case, alone: &[Vec<Vec<u32>>]) -> Result<Dr
     let calls = Arc::new(AtomicUsize::new(0));
     let coverage = Arc::new(Mutex::new(Coverage::default()));
     let engine = Counted(Model { ab: None, cohort: None, live: live.clone(), calls: calls.clone(),
-        heads: Arc::new(AtomicUsize::new(0)), order: Default::default(), opt_in: false, retention_extra: 0 }, coverage.clone());
-    let config = Config { active: 4, connections: 4, prefill_chunk: SLICE, active_bytes: FUNDED_BYTES,
-        session_budget_bytes: FUNDED_BYTES, prefix_cache: false, mtp_depth: 0, foreground_rows: 4, background_rows: 4,
+        heads: Arc::new(AtomicUsize::new(0)), order: Default::default(), opt_in: false, retention_extra: 0 },
+        coverage.clone(), cohort.map(|_| RefCell::new(Vec::new())));
+    let config = Config { active: slots, connections: slots, prefill_chunk: SLICE, active_bytes: funded_bytes,
+        session_budget_bytes: funded_bytes, prefix_cache: false, mtp_depth: 0, foreground_rows: 4, background_rows: 4,
         draft: protocol::DraftMode::Plain, draft_global_bank: false, sharing: Sharing::default() };
     let cache = CacheLimits { entries: 1, retained_bytes: 0, tokens_per_entry: 1024, logits_per_entry: 8, idle_ttl: Duration::from_secs(1) };
     let (tx, _rx) = mpsc::sync_channel(1); let (_tx, rx) = mpsc::sync_channel(1);
@@ -276,6 +304,7 @@ fn run(listener: &TcpListener, case: Case, alone: &[Vec<Vec<u32>>]) -> Result<Dr
         return Err(format!("{case:?}: repeated engine work; dispatch.rs plans"));
     }
     driver.coverage.merge(*coverage.lock().unwrap());
+    if let Some(calls) = engine.2 { driver.prefill_calls = calls.into_inner(); }
     Ok(driver)
 }
 struct NoCodec;
@@ -292,13 +321,37 @@ impl Tokenizer for NoCodec {
 }
 
 fn oracle() -> Vec<Vec<Vec<u32>>> {
-    [1, 4, 9].into_iter().map(|prompt| (1..=3).map(|output| {
-        let mut history = vec![1; prompt];
-        (0..output).map(|_| {
-            let token = history.iter().fold(0, |h, &t| (h * 17 + t + 1) % 7);
-            history.push(token); token
-        }).collect()
-    }).collect()).collect()
+    [1, 4, 9].into_iter().map(|prompt| (1..=3).map(|output| solo_ids(prompt, output)).collect()).collect()
+}
+fn solo_ids(prompt: usize, output: usize) -> Vec<u32> {
+    let mut history = vec![1; prompt];
+    (0..output).map(|_| {
+        let token = history.iter().fold(0, |h, &t| (h * 17 + t + 1) % 7);
+        history.push(token); token
+    }).collect()
+}
+
+#[test]
+fn scheduler_whole_prompt_group_requires_full_background_slots() {
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let rows = [105, 105, 105, 104, 114, 114, 91, 91];
+    let requests: Vec<_> = rows.into_iter().map(|prompt| Spec { arrival: 0, prompt, output: 1 }).collect();
+    let full = run_case(&listener, Case { requests: requests.clone(), cancel: None }, &[], Some(CohortProbe::Background)).unwrap();
+    let [PrefillCall::Whole(group)] = full.prefill_calls.as_slice() else { panic!("{:?}", full.prefill_calls) };
+    let mut recorded = group.clone();
+    recorded.sort_unstable();
+    let mut expected = rows;
+    expected.sort_unstable();
+    assert_eq!(recorded, expected);
+
+    let partial = run_case(&listener, Case { requests: requests[..7].to_vec(), cancel: None }, &[], Some(CohortProbe::Background)).unwrap();
+    assert!(matches!(partial.prefill_calls.as_slice(), [PrefillCall::Independent(rows)] if rows.len() == 7));
+
+    let mut requests = requests;
+    requests[0].prompt = 20;
+    let priority = run_case(&listener, Case { requests, cancel: None }, &[], Some(CohortProbe::Foreground)).unwrap();
+    assert!(priority.prefill_calls.iter().all(|call| matches!(call, PrefillCall::Independent(_))));
+    assert!(matches!(priority.prefill_calls.first(), Some(PrefillCall::Independent(rows)) if rows == &[20, 32, 32, 32, 32, 32, 32, 32]));
 }
 
 #[test]

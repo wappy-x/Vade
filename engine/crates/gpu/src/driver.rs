@@ -468,7 +468,9 @@ impl<'a> Buffer<'a> {
         let capacity=if bucketed {crate::reserve_policy::vector_capacity(bytes,context.budget.get().saturating_sub(context.accounted_bytes()))} else {bytes};
         let mut buffer = Self::new(context, capacity)?;
         buffer.reuse = reuse;
-        context.vector_pool.borrow_mut().allocated(capacity);
+        let mut pool = context.vector_pool.borrow_mut();
+        pool.allocated(capacity);
+        pool.prompt_cohort_checkout(buffer.address, capacity);
         Ok(buffer)
     }
     fn allocate(context: &'a Context, bytes: usize, managed: bool) -> Result<Self, String> {

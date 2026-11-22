@@ -1128,6 +1128,15 @@ if start==0 && v.pending.as_ref().and_then(|p|p.borrow().state_prefix)==Some(len
     fn rows_follow(&self,follows:bool) {self.group_follows.set(follows);}
     fn prompt_spare_bytes(&self) -> Option<usize> { Some(self.backend.prompt_spare_bytes()) }
     fn return_prompt_spares(&self, target: usize) -> Result<(usize, usize)> { self.backend.return_prompt_spares(target) }
+    fn rows_cohort_spares_begin(&self)->Result<()> {self.backend.begin_prompt_cohort()}
+    fn rows_cohort_chat(&self,chat:Option<usize>) {self.backend.prompt_cohort_chat(chat);}
+    fn rows_cohort_spares_end(&self)->Result<()> {
+        let started = std::time::Instant::now();
+        let (spares, bytes, kept) = self.backend.finish_prompt_cohort()?;
+        eprintln!("PROMPT COHORT CLEANUP rank={} spares={spares} bytes={bytes} kept={kept} seconds={:.9}",
+            self.sparse_topology().rank, started.elapsed().as_secs_f64());
+        Ok(())
+    }
     fn rows_settle(&self)->Result<()> {if self.spares_kept.take() {self.backend.keep_group_spares(super::POOL_ROOM)} else {Ok(())}}
     fn rows_return_lease(&self)->Result<()> {
         // WIDE COHORT: the operand scratch a wide group grew goes back with the lease, before the pool is trimmed.

@@ -42,13 +42,15 @@ pub(super) struct Reserve {
     /// The vector pool's byte cap while a large prompt group runs (0: no group), and the device
     /// bytes the group's extra spares may not pass (usize::MAX: not given). See `group_cap`.
     group: usize, ceiling: usize,
+    prompt_cohort_spares: Option<crate::reserve_policy::PromptCohortSpares>,
 }
 impl Default for Reserve {
     fn default() -> Self {
         Self { label: "kv_reserve", pages: Vec::new(), mapped: Vec::new(), bytes: 0, policy: Default::default(),
             next_poll: Instant::now(),
             reused: 0, released: 0, reported: (0, 0, 0, false, Default::default()), stats: Default::default(),
-            pages_held: 0, pages_plan: 0, trim_samples: 0, trim_peak: 0, scale: 0, group: 0, ceiling: usize::MAX }
+            pages_held: 0, pages_plan: 0, trim_samples: 0, trim_peak: 0, scale: 0, group: 0, ceiling: usize::MAX,
+            prompt_cohort_spares: None }
     }
 }
 impl Reserve {
@@ -111,10 +113,61 @@ impl Reserve {
     /// pool's own cap then stays until the next group's `group_cap`, a trim, a clear, the device budget (`make_room`) or
     /// the pressure rule releases it; a return that finds the pool full is freed (`keep`).
     pub(super) fn end_group(&mut self) { self.group = 0; self.ceiling = usize::MAX; }
+    /// Remember the normal pool's spare capacities in their original order.
+    pub(super) fn begin_prompt_cohort(&mut self) -> Result<(), String> {
+        if self.prompt_cohort_spares.is_some() { return Err("prompt cohort reserve already active".into()); }
+        let entry = self.pages.iter().filter(|spare| !spare.segment).map(|spare| spare.bytes).collect();
+        self.prompt_cohort_spares = Some(crate::reserve_policy::PromptCohortSpares::new(entry));
+        Ok(())
+    }
+    /// A cohort whose end failed: drop its ledger and move no spare.
+    pub(super) fn abandon_prompt_cohort(&mut self) {
+        self.prompt_cohort_spares = None;
+    }
+    pub(super) fn prompt_cohort_chat(&mut self, chat: Option<usize>) {
+        if let Some(spares) = &mut self.prompt_cohort_spares { spares.chat(chat); }
+    }
+    pub(super) fn prompt_cohort_checkout(&mut self, handle: u64, bytes: usize) {
+        if let Some(spares) = &mut self.prompt_cohort_spares { spares.check_out(handle, bytes); }
+    }
+    /// A prompt cohort pays for the spares it adds. Put the surviving capacity
+    /// classes back in order for the next allocation or trim.
+    pub(super) fn finish_prompt_cohort(&mut self, context: &Context) -> Result<(usize, usize, usize), String> {
+        let (capacities, mut needed) = self.prompt_cohort_spares.take().ok_or("prompt cohort reserve is absent")?.inventory();
+        self.end_group();
+        let mut by_capacity = std::collections::BTreeMap::<usize, Vec<Spare>>::new();
+        for spare in std::mem::take(&mut self.pages) {
+            if spare.segment {
+                self.pages.push(spare);
+            } else {
+                by_capacity.entry(spare.bytes).or_default().push(spare);
+            }
+        }
+        for capacity in capacities {
+            if let Some(spare) = by_capacity.get_mut(&capacity).and_then(Vec::pop) {
+                if let Some(count) = needed.get_mut(&capacity) { *count = count.saturating_sub(1); }
+                self.pages.push(spare);
+            }
+        }
+        let mut released = (0, 0, 0);
+        for (capacity, mut spares) in by_capacity {
+            let keep = needed.get(&capacity).copied().unwrap_or(0).min(spares.len());
+            self.pages.extend(spares.drain(..keep));
+            released.2 += keep;
+            for spare in spares {
+                self.bytes -= spare.bytes;
+                released.0 += 1;
+                released.1 += spare.bytes;
+                self.release(context, spare);
+            }
+        }
+        Ok(released)
+    }
     /// A plain return. No group: `keep` as it is, so a full pool refuses it. In a group: the
     /// pressure rule still decides, a return larger than the whole cap is still refused, and
     /// otherwise spares leave from the front, as in `trim`, until the return fits.
     pub(super) fn keep_newest(&mut self, context: &Context, handle: u64, bytes: usize) -> bool {
+        if let Some(spares) = &mut self.prompt_cohort_spares { spares.check_in(handle); }
         if self.group != 0 && bytes <= self.limit() && self.policy.keeps(self.funded()) { self.release_front(context, bytes); }
         self.keep(handle, bytes, false)
     }
@@ -164,6 +217,7 @@ impl Reserve {
         if !segment {
             self.stats.reused_count = self.stats.reused_count.saturating_add(1);
             self.stats.reused_bytes = self.stats.reused_bytes.saturating_add(bytes);
+            self.prompt_cohort_checkout(page.handle, bytes);
         }
         Some(page.handle)
     }

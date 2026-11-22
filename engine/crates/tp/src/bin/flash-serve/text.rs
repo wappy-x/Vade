@@ -16,7 +16,8 @@ pub fn run(args:&[String],checkpoint:CheckpointAdmission,root:&Path,output_setti
     let context=args[6].parse::<usize>().map_err(|e|e.to_string())?;let bind=args[7].parse::<SocketAddr>().map_err(|e|e.to_string())?;
     let requests=args[8].parse::<usize>().map_err(|e|e.to_string())?;
     let (gate,options)=super::settings::boundary_gate_options(&args[9..])?;
-    let (key,mtp,trace,keep)=super::settings::text_options(&options)?;
+    let (key,mtp,trace,keep,cohort_chats)=super::settings::text_options(&options)?;
+    if context>u32::MAX as usize {return Err("text context exceeds token position range".into());}
     if gate.is_some() && (!diagnostic || mtp!=Some(3)) {return Err("boundary gate requires --diagnostic-unqualified-text and --mtp 3".into());}
     // One line for a hand start that sets a cache size of 0 and still keeps prompts. Nothing else follows from it.
     if let Some(notice)=super::settings::text_cache_size_notice(keep,spark_tp::flash_pool::Request::from_env().ok().and_then(|request|request.cache_bytes)) {eprintln!("TEXT PROMPT KEEP rank={rank} {notice}");}
@@ -52,10 +53,12 @@ pub fn run(args:&[String],checkpoint:CheckpointAdmission,root:&Path,output_setti
     // that word keeps prompts with bit 62 clear, so it and this build refuse each other here, not at a first resume.
     // Bit 61 identifies the lossless BF16 prompt packet format. A mixed build
     // must fail here, before either rank posts a differently sized collective.
-    local[..64].copy_from_slice(identity.fingerprint().as_bytes());local[64..72].copy_from_slice(&(context as u64|u64::from(keep)<<63|u64::from(keep)<<62|1<<61).to_le_bytes());local[72..].copy_from_slice(&(budget as u64).to_le_bytes());
+    // Bits 57 through 60 carry the agreed maximum chats in a prompt cohort.
+    let context_word=(context as u64|u64::from(keep)<<63|u64::from(keep)<<62|1<<61)|(cohort_chats as u64)<<57;
+    local[..64].copy_from_slice(identity.fingerprint().as_bytes());local[64..72].copy_from_slice(&context_word.to_le_bytes());local[72..].copy_from_slice(&(budget as u64).to_le_bytes());
     ring.all_gather(&mut records,80)?;
     for record in records.as_chunks::<80>().0 {
-        if record[..72]!=records[..72] {return Err("text service rank metadata, wire format, context or prompt keep choice differs: start every rank from one build with the same options (prompts are kept unless --no-prompt-keep is given)".into());}
+        if record[..72]!=records[..72] {return Err("text service rank metadata, wire format, context, prompt cohort limit or prompt keep choice differs: start every rank from one build with the same options (prompts are kept unless --no-prompt-keep is given)".into());}
         budget=budget.min(u64::from_le_bytes(record[72..].try_into().unwrap()).try_into().map_err(|_|"rank budget exceeds address space")?);
     }
     // The driver compiles a kernel image that is new to this box, one time, for about 40 s. A warm load takes 0.35 s. The log names the wait after 3 s, so nobody stops the rank in the middle of a compile.
@@ -124,6 +127,7 @@ pub fn run(args:&[String],checkpoint:CheckpointAdmission,root:&Path,output_setti
         // The largest prompt group this budget funds, agreed by the ranks; its buffers are in the workspace below.
         // Before the group is chosen: a server whose latent layers are all absorbed is not charged the expanded rows it never makes.
         let (engine,floor,predicted)=engine.with_absorbed_charges()?.with_prompt_group_and_memo(budget)?;
+        let engine=engine.with_prompt_cohort_chats(cohort_chats)?;
         startup::step("memory_admission");
         let resident=backend.accounted_bytes();let workspace=engine.workspace_reservation_bytes();
         let local=budget.saturating_sub(resident).saturating_sub(workspace);
@@ -132,6 +136,14 @@ pub fn run(args:&[String],checkpoint:CheckpointAdmission,root:&Path,output_setti
         eprintln!("TEXT PROMPT GROUP rank={rank} rows={} shared_workspace_bytes={workspace}",engine.prompt_group_rows());
         eprintln!("TEXT PROMPT GROUP FLOOR rank={rank} rows={} floor_bytes={floor} predicted_pool_bytes={predicted} local_pool_bytes={local}",engine.prompt_group_rows());
         if local!=predicted {eprintln!("TEXT PROMPT GROUP FLOOR WARNING predicted and admitted pool differ rank={rank} predicted_pool_bytes={predicted} local_pool_bytes={local}");}
+        eprintln!("TEXT PROMPT COHORT CAP rank={rank} chats={cohort_chats}");
+        if cohort_chats<spark_tp::row_split::LIVE_SESSIONS {
+            eprintln!("TEXT PROMPT COHORT WARNING rank={rank} --prompt-cohort-chats={cohort_chats} slots={} disables whole prompt groups",spark_tp::row_split::LIVE_SESSIONS);
+        }
+        match engine.prompt_cohort_growth() {
+            Ok((before,at,tail))=>eprintln!("TEXT PROMPT COHORT BOUND rank={rank} row_growth_bytes={} tail_bytes={tail}",at as i128-before as i128),
+            Err(error)=>eprintln!("TEXT PROMPT COHORT BOUND rank={rank} error={error}"),
+        }
         if spark_tp::row_split::admit_service_memory(resident,workspace,budget).is_err() || reservation>pool {
             return Err(format!("text service memory refusal: CONTEXT={context}; budget={budget}; resident={resident}; shared_workspace={workspace}; session_pool={pool}; full_session={reservation}; reduce CONTEXT"));
         }

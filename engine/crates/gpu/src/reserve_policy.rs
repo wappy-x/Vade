@@ -1,6 +1,52 @@
 //! Host-testable bounds and pressure decisions for returned device arenas.
 use std::time::{Duration, Instant};
 
+#[cfg(any(target_os = "linux", test))]
+use std::collections::BTreeMap;
+
+/// Spare sizes that one independent prompt path can use, even when that path
+/// runs between the other members of a cohort.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) struct PromptCohortSpares {
+    entry: Vec<usize>,
+    chat: Option<usize>,
+    owners: BTreeMap<u64, (usize, usize)>,
+    live: BTreeMap<(usize, usize), usize>,
+    peak: BTreeMap<usize, usize>,
+}
+
+#[cfg(any(target_os = "linux", test))]
+impl PromptCohortSpares {
+    pub(crate) fn new(entry: Vec<usize>) -> Self {
+        Self { entry, chat: None, owners: BTreeMap::new(), live: BTreeMap::new(), peak: BTreeMap::new() }
+    }
+
+    pub(crate) fn chat(&mut self, chat: Option<usize>) {
+        self.chat = chat;
+    }
+
+    pub(crate) fn check_out(&mut self, handle: u64, bytes: usize) {
+        let Some(chat) = self.chat else { return; };
+        let key = (chat, bytes);
+        let prior = self.owners.insert(handle, key);
+        debug_assert!(prior.is_none());
+        let count = self.live.entry(key).or_default();
+        *count += 1;
+        let peak = self.peak.entry(bytes).or_default();
+        *peak = (*peak).max(*count);
+    }
+
+    pub(crate) fn check_in(&mut self, handle: u64) {
+        if let Some(key) = self.owners.remove(&handle) {
+            *self.live.get_mut(&key).expect("checked-out prompt spare") -= 1;
+        }
+    }
+
+    pub(crate) fn inventory(self) -> (Vec<usize>, BTreeMap<usize, usize>) {
+        (self.entry, self.peak)
+    }
+}
+
 /// Idle time after which a reserve releases its spares (a funded one only under pressure).
 pub(crate) const IDLE_RELEASE: Duration = Duration::from_secs(30);
 pub(crate) fn vector_capacity(bytes:usize,available:usize)->usize {
@@ -108,6 +154,24 @@ impl ReservePolicy {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn prompt_spares_use_one_chats_peak_rather_than_summing_chats() {
+        let mut spares = super::PromptCohortSpares::new(vec![16, 4, 4]);
+        spares.chat(Some(0));
+        for handle in 1..=3 { spares.check_out(handle, 4); }
+        spares.chat(Some(1));
+        for handle in 4..=5 { spares.check_out(handle, 4); }
+        spares.check_in(2);
+        spares.chat(Some(0));
+        spares.check_out(2, 4);
+        spares.check_out(6, 16);
+        spares.chat(None);
+        spares.check_out(7, 32);
+        spares.check_in(4);
+        let (entry, peak) = spares.inventory();
+        assert_eq!(entry, [16, 4, 4]);
+        assert_eq!(peak.into_iter().collect::<Vec<_>>(), [(4, 3), (16, 1)]);
+    }
     #[test]
     fn vector_capacity_preserves_extents_without_overflow() {
         for bytes in [0,1,4,32,255,256,4095,4096,4097,16383,16384,619520,usize::MAX-4096,usize::MAX] {

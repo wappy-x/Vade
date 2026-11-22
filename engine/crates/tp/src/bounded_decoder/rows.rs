@@ -9,7 +9,10 @@ pub(super) use seed::seed_steps;
 #[path="rows/solo.rs"] mod solo;
 #[path="rows/shared.rs"] mod shared; #[path="rows/recurrent.rs"] mod recurrent;
 #[path="rows/wide_charge.rs"] mod wide_charge;
+#[path="rows/prompt_cohort.rs"] mod prompt_cohort;
 use wide_charge::{wide_phase_group,wide_phase_workspace};
+pub(crate) use wide_charge::{prompt_cohort_fits,prompt_cohort_growth};
+pub(crate) use prompt_cohort::{PromptChat,PromptResult};
 #[cfg(test)] pub(crate) use wide_charge::wide_cut_layers;
 pub use shared::SharedRows;
 /// ROWS FOLD: what ONE layer of a row pass holds between its routed down step and that step's fold. It lies on the
@@ -670,27 +673,31 @@ impl<'f,C:Compute> Decoder<'f,C> {
         }
         let next=before.ok_or("wide prompt group has no rows")?;
         let Some((cut,carry))=cut else {return Ok((made,next,held));};
-        // The routed half: the values of each run (first the one value its mixer half handed over).
-        let mut runs:Vec<(usize,BTreeMap<String,C::Value>)>=made.into_iter().map(|(n,middle)|{let mut values=BTreeMap::new();values.insert(carry.to_owned(),middle);(n,values)}).collect();
         let last=state.position+m as u64;
         let plan={let mut schedules=self.schedules.borrow_mut();schedules.get_mut(layer).ok_or("prompt layer is outside the recipe")?.at(last).cloned().map_err(|e|e.to_string())?};
+        let outputs=self.layer_routed_runs(layer,made,&plan,cut,carry,false)?;
+        if m>PROMPT_GROUP_LEASE[1] {self.compute.rows_phase_end()?;}
+        Ok((outputs,next,held))
+    }
+    fn layer_routed_runs(&self,layer:usize,made:Vec<(usize,C::Value)>,plan:&LayerPlan,cut:usize,carry:&str,cohort:bool)->Result<Vec<(usize,C::Value)>> {
+        // Each run brings only the value its mixer handed over.
+        let mut runs:Vec<(usize,BTreeMap<String,C::Value>)>=made.into_iter().map(|(n,middle)|{let mut values=BTreeMap::new();values.insert(carry.to_owned(),middle);(n,values)}).collect();
         let mut passes:Vec<BTreeMap<String,C::Pass>>=runs.iter().map(|_|BTreeMap::new()).collect();
         let mut folds:Vec<RowsFold<C::Value>>=runs.iter().map(|_|RowsFold::of_group()).collect();
         // Steps a run has already done with an earlier step (`rows_stateless`: Some(n)).
         let mut skips=vec![0usize;runs.len()];
         for index in cut..plan.steps.len() {
+            if cohort {self.compute.rows_cohort_chat(None);}
             // WIDE COHORT: the routed expert products of every run in one launch a list, when every run is at this step.
-            if skips.iter().all(|&skip|skip==0) && let Some(done)=self.experts_wide(layer,index,&plan,&mut runs,&mut folds)? {skips.fill(done);continue;}
+            if skips.iter().all(|&skip|skip==0) && let Some(done)=self.experts_wide(layer,index,plan,&mut runs,&mut folds)? {skips.fill(done);continue;}
             for (slot,(n,values)) in runs.iter_mut().enumerate() {
                 if skips[slot]>0 {skips[slot]-=1;continue;}
-                skips[slot]=self.rows_stateless(layer,index,&plan,*n,values,&mut passes[slot],&mut folds[slot])?.ok_or_else(||format!("{}: wide prompt group step reads history",plan.steps[index].id))?;
+                if cohort {self.compute.rows_cohort_chat(Some(slot));}
+                skips[slot]=self.rows_stateless(layer,index,plan,*n,values,&mut passes[slot],&mut folds[slot])?.ok_or_else(||format!("{}: wide prompt group step reads history",plan.steps[index].id))?;
             }
         }
-        let outputs=runs.into_iter().map(|(n,mut values)|Ok((n,values.remove("output").ok_or("prompt layer has no output")?))).collect::<Result<Vec<_>>>()?;
-        // WIDE PHASE: the layer's end. Every value of the routed half but each run's output is dropped here (the
-        // maps above, the passes, the folds); drain, so the next layer's first mixer run starts with none charged.
-        if m>PROMPT_GROUP_LEASE[1] {drop(passes);drop(folds);self.compute.rows_phase_end()?;}
-        Ok((outputs,next,held))
+        if cohort {self.compute.rows_cohort_chat(None);}
+        runs.into_iter().map(|(n,mut values)|Ok((n,values.remove("output").ok_or("prompt layer has no output")?))).collect()
     }
     /// The fold shape sent to both the middle's producer and its sole reader.
     fn expert_fold_shape(&self,plan:&LayerPlan,step:&engine_model::plan::layer::Step)->Result<Shape> {
