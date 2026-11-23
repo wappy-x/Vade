@@ -14,6 +14,18 @@ pub fn number(c: char) -> bool {
     in_ranges(c as u32, data::NUMBERS)
 }
 pub fn mark(c: char) -> bool { #[cfg(test)] crate::work_counts::add(); in_ranges(c as u32, data::MARKS) }
+/// A letter of general category Ll.
+pub fn lowercase(c: char) -> bool {
+    #[cfg(test)] crate::work_counts::add();
+    if c.is_ascii() { return c.is_ascii_lowercase(); }
+    in_ranges(c as u32, data::LOWERCASE_LETTERS)
+}
+/// A letter of general category Lu or Lt.
+pub fn uppercase_or_titlecase(c: char) -> bool {
+    #[cfg(test)] crate::work_counts::add();
+    if c.is_ascii() { return c.is_ascii_uppercase(); }
+    in_ranges(c as u32, data::UPPERCASE_LETTERS) || in_ranges(c as u32, data::TITLECASE_LETTERS)
+}
 fn in_ranges(c: u32, ranges: &[(u32, u32)]) -> bool {
     let i = ranges.partition_point(|&(lo, _)| lo <= c);
     i > 0 && c <= ranges[i - 1].1

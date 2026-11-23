@@ -48,7 +48,7 @@ fn first_arithmetic(calls:&[Call])->Option<Kind> {calls.iter().map(|call|call.gr
 /// from the moment they fuse. A grouped launch is one command the same way: the member it absorbs is not counted again.
 fn arithmetic(kind:Kind)->bool {
     matches!(kind,Kind::AbsorbDense|Kind::AbsorbAttention
-        |Kind::Causal|Kind::Expert|Kind::Plain|Kind::PlainBf16|Kind::Mx|Kind::Mixed|Kind::MixedBf16|Kind::PlainBatch|Kind::NvStream|Kind::CausalFast|Kind::CausalChain|Kind::CausalGroup
+        |Kind::Causal|Kind::BlockArms|Kind::BlockRows|Kind::PlainStaged|Kind::PlainStagedRows|Kind::Expert|Kind::Plain|Kind::PlainBf16|Kind::PlainPacked|Kind::PlainPackedGroup|Kind::PlainPackedPicked|Kind::Mx|Kind::Mixed|Kind::MixedBf16|Kind::PlainBatch|Kind::NvStream|Kind::CausalFast|Kind::CausalChain|Kind::CausalGroup
         |Kind::NvTile|Kind::Fp8Tile|Kind::DeviceRoute|Kind::NvQuarters|Kind::MxRows2|Kind::MxRows4|Kind::MxRows8|Kind::MxRows8w|Kind::MxRowsTile
         |Kind::MixedRows|Kind::FoldRows|Kind::FoldRowsF32|Kind::Fp8RowsSmall|Kind::Fp8RowsMulti|Kind::Fp8RowsFew|Kind::Fp8RowsShare|Kind::PlainRowsSmall|Kind::DeviceRouteRows|Kind::RowRecurrent)
 }
@@ -341,6 +341,13 @@ impl<'a> Backend<'a> {
         self.note_zero_fill(0,(table.len()-rows.len()) as u128,table[rows.len()..].iter().map(|r|r.2 as usize).sum());
         Ok(true)
     }
+    /// Record one launch of the Inkling block arms (`resident_launch_block_arms`) when recording runs. False: the caller
+    /// launches it at once. The caller has checked every extent the command names (`resident_causal_into`).
+    pub(super) fn record_resident_block(&self,kind:Kind,command:Command,grid:[u32;5])->Result<bool,String> {
+        if let Some(error)=self.fatal_error() {return Err(error);}
+        if !self.resident_launches_active() {return Ok(false);}
+        self.append_resident(kind,command,grid)?;Ok(true)
+    }
     /// Called only with the original checked kernel ABI at the GPU boundary.
     #[allow(clippy::needless_range_loop)] // index loops keep the arithmetic order.
     pub(super) unsafe fn record_resident_launch(&self,name:&str,grid:[u32;5],args:&[*mut c_void])->Result<bool,String> {
@@ -446,6 +453,45 @@ impl<'a> Backend<'a> {
         self.append_resident(Kind::RmsPartials,encode::rms(rms,Kind::RmsPartials),[crate::launch_blocks(width.div_ceil(128)*32,128)?,rms.rows,1,128,0])?;
         let mut command=encode::rms(rms,Kind::NormTail);command.put(64,&encode::elementwise(scale).payload[..core::mem::size_of::<crate::kernel_params::ModelElementwise>()]);
         self.append_resident(Kind::NormTail,command,[crate::launch_blocks(width,128)?,rms.rows,1,128,0])?;Ok(true)
+    }
+    /// The packed row product (`Kind::PlainPacked`, Ruling R6h): its five words and the launch geometry of its tile.
+    /// Only `Backend::project_packed_into` calls this, after its check of every extent and alignment.
+    /// False: recording is off and nothing was recorded; the body has no direct entry.
+    pub(super) fn record_resident_packed(&self,unit:u64,input:u64,output:u64,rows:u32,cols:u32)->Result<bool,String> {
+        if let Some(error)=self.fatal_error() {return Err(error);}
+        if !self.resident_launches_active() {return Ok(false);}
+        let mut command=Command::new(Kind::PlainPacked);
+        for (index,word) in [unit,input,output,u64::from(rows),u64::from(cols)].into_iter().enumerate() {command.word(index,word);}
+        let (blocks,threads)=crate::packed_product::geometry(rows as usize);
+        self.append_resident(Kind::PlainPacked,command,[blocks,1,1,threads,0])?;Ok(true)
+    }
+    /// The packed row products of a group (`Kind::PlainPackedGroup`): six words, then the unit address of each matrix
+    /// from word `packed_product::GROUP_UNITS_AT`. Block row `e` of the grid takes matrix `e`.
+    /// Only `Backend::project_packed_group_into` calls this, after its check of every extent and alignment.
+    #[allow(clippy::too_many_arguments, reason = "the six words of the command and the units")]
+    pub(super) fn record_resident_packed_group(&self,units:&[u64],input:u64,output:u64,rows:u32,cols:u32,input_words:u32)->Result<bool,String> {
+        if let Some(error)=self.fatal_error() {return Err(error);}
+        if !self.resident_launches_active() {return Ok(false);}
+        if units.is_empty() || units.len()>crate::packed_product::GROUP_MAX {return Err("packed group: the matrices of a group are 1 to 32".into());}
+        let mut command=Command::new(Kind::PlainPackedGroup);
+        for (index,word) in [input,output,u64::from(rows),u64::from(cols),units.len() as u64,u64::from(input_words)].into_iter().enumerate() {command.word(index,word);}
+        for (e,&unit) in units.iter().enumerate() {command.word(crate::packed_product::GROUP_UNITS_AT+e,unit);}
+        let (blocks,threads)=crate::packed_product::geometry(rows as usize);
+        self.append_resident(Kind::PlainPackedGroup,command,[blocks,units.len() as u32,1,threads,0])?;Ok(true)
+    }
+    /// The packed row products of the experts the route picked on the device (`Kind::PlainPackedPicked`): ten words
+    /// (input, output, rows, column word, picks, input words, stack, ids, experts, unit bytes). Block row `e` of the
+    /// grid takes the expert whose number is word `e` of `ids`. Only `Backend::project_packed_picked_into` calls
+    /// this, after its check of every extent and alignment (`packed_product::check_picked`).
+    #[allow(clippy::too_many_arguments, reason = "the ten words of the command")]
+    pub(super) fn record_resident_packed_picked(&self,stack:u64,unit_bytes:u64,experts:u32,ids:u64,picks:usize,input:u64,output:u64,rows:u32,cols:u32,input_words:u32)->Result<bool,String> {
+        if let Some(error)=self.fatal_error() {return Err(error);}
+        if !self.resident_launches_active() {return Ok(false);}
+        if picks==0 || picks>crate::packed_product::GROUP_MAX {return Err("packed picks: the picks of a launch are 1 to 32".into());}
+        let mut command=Command::new(Kind::PlainPackedPicked);
+        for (index,word) in [input,output,u64::from(rows),u64::from(cols),picks as u64,u64::from(input_words),stack,ids,u64::from(experts),unit_bytes].into_iter().enumerate() {command.word(index,word);}
+        let (blocks,threads)=crate::packed_product::geometry(rows as usize);
+        self.append_resident(Kind::PlainPackedPicked,command,[blocks,picks as u32,1,threads,0])?;Ok(true)
     }
     pub(super) fn record_resident_copy(&self,source:u64,target:u64,words:usize)->Result<bool,String> {
         if let Some(error)=self.fatal_error() {return Err(error);}
@@ -556,7 +602,7 @@ impl<'a> Backend<'a> {
                     if g.kind==Kind::ShadowSide {
                         let side=side.ok_or("resident side stream is absent")?;
                         let fork=Event::record(&self.stream)?;check(cuStreamWaitEvent(side,fork.raw,0),"resident side fork")?;
-                        let function=self.module.function(g.kind.kernel())?;self.context.receipt_launch(function,g.threads,g.shared)?;
+                        let function=self.module_for(g.kind.kernel())?.function(g.kind.kernel())?;self.context.receipt_launch(function,g.threads,g.shared)?;
                         self.context.check_execution(launch_kernel(false,function,[g.blocks,g.rows,g.planes],g.threads,g.shared,side,[parameter(&mut address),parameter(&mut index)].as_mut_ptr()),"resident side launch")?;
                         let done=Event::record_raw(self.context,side)?;events.borrow_mut().push(fork);events.borrow_mut().push(done);continue;
                     }

@@ -1,6 +1,7 @@
 //! Owned shared BPE implementation for Qwen3 and Gemma 4 tokenizer artifacts.
 //! No inference runtime or third-party tokenizer implementation is linked.
 pub mod chat;
+mod cased_split;
 mod unicode;
 use engine_model::json::{self, Value, field};
 use std::{
@@ -87,7 +88,12 @@ pub struct Tokenizer {
     limits: Limits,
     hybrid_text: bool,
     hybrid_template: chat::HybridTemplate,
+    /// The artifact's split pattern is `CASED_PATTERN`.
+    cased_words: bool,
 }
+/// Words split where the letter case changes. Numbers are in groups of 1 to 3.
+/// The split rule for this pattern is in `cased_split.rs`.
+const CASED_PATTERN: &str = r"[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?|[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+[\p{Ll}\p{Lm}\p{Lo}\p{M}]*(?i:'s|'t|'re|'ve|'m|'ll|'d)?|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n/]*|\s*[\r\n]+|\s+(?!\S)|\s+";
 const PATTERN: &str = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
 const HYBRID_PATTERN: &str = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+|\p{N}| ?[^\s\p{L}\p{M}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
 impl Tokenizer {
@@ -150,7 +156,7 @@ impl Tokenizer {
     /// all shared special IDs must agree; the target verifies every proposal.
     pub fn shares_token_ids(&self, draft: &Self) -> bool {
         self.byte_ids == draft.byte_ids && self.pairs == draft.pairs && self.hybrid_text == draft.hybrid_text
-            && self.phi == draft.phi && self.llama == draft.llama
+            && self.cased_words == draft.cased_words && self.phi == draft.phi && self.llama == draft.llama
             && self.nfc == draft.nfc && self.digits == draft.digits && self.direct_tokens == draft.direct_tokens
             && (0..self.tokens.len().max(draft.tokens.len())).all(|id| {
                 match (self.tokens.get(id).and_then(Option::as_ref), draft.tokens.get(id).and_then(Option::as_ref)) {
@@ -201,6 +207,7 @@ impl Tokenizer {
         // Keep the digit groups used by artifacts that loaded before this codec.
         let mut digits = if phi || llama { 3 } else { 1 };
         let mut hybrid_text = false;
+        let mut cased_words = false;
         if gemma {
             for (key, expected) in [
                 (
@@ -241,8 +248,10 @@ impl Tokenizer {
             hybrid_text = pattern == HYBRID_PATTERN;
             let grouped_pattern = PATTERN.replace(r"\p{N}|", r"\p{N}{1,3}|");
             if pattern == grouped_pattern { digits = 3; }
+            // The case-aware rule is checked only for byte-level artifacts.
+            cased_words = byte_level && pattern == CASED_PATTERN;
             if field(split, "type")?.string()? != "Split"
-                || (pattern != PATTERN && !hybrid_text && pattern != grouped_pattern)
+                || (pattern != PATTERN && !hybrid_text && pattern != grouped_pattern && !cased_words)
                 || field(split, "behavior")?.string()? != if phi { "Removed" } else { "Isolated" }
                 || field(split, "invert")?.boolean()? != phi
             {
@@ -477,6 +486,7 @@ impl Tokenizer {
             limits,
             hybrid_text,
             hybrid_template: chat::HybridTemplate::EFFORT,
+            cased_words,
         })
     }
     /// Encode with the artifact's added-token recognition (including control markers).
@@ -648,7 +658,8 @@ impl Tokenizer {
         // Repeated words in long prompts need one merge pass each. Borrow
         // keys from this span and reuse output ranges; retain no caller text.
         let mut pieces = HashMap::<&str, std::ops::Range<usize>>::new();
-        for piece in split_pattern(&normalized, self.hybrid_text, self.digits) {
+        let split = if self.cased_words { cased_split::split(&normalized) } else { split_pattern(&normalized, self.hybrid_text, self.digits) };
+        for piece in split {
             #[cfg(test)] work_counts::add();
             if let Some(range) = pieces.get(piece) {
                 if out
@@ -1022,7 +1033,7 @@ mod tests {
             added: Vec::new(),
             special: HashSet::new(),
             limits: Limits::default(),
-            hybrid_text: false, hybrid_template: chat::HybridTemplate::PRESERVE,
+            hybrid_text: false, hybrid_template: chat::HybridTemplate::PRESERVE, cased_words: false,
         }
     }
     #[test]

@@ -126,6 +126,7 @@ impl WeightSource for Checkpoint {
                         scales
                     },
                     ScaleEncoding::Csf => return Err(invalid("legacy CSF is outside this reference tool")),
+                    ScaleEncoding::AmaxDenominator => return Err(invalid("amax and denominator scales are outside this reference tool")),
                 };
                 let mut out=vec![0.0;count]; nvfp4::dequantize(&bytes,&scales,global[0],&mut out)?;
                 let mut max_error=0f64; let mut max_relative=0f64; let mut max_ulp=0f64;

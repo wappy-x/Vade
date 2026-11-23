@@ -50,8 +50,9 @@ impl<R: Runner> App<R> {
             None => text::random_hex(32)?,
         };
         let mut session = Session::new(&self.config, &options, &manifest, token)?;
-        // Two FP4-Local Sparks run the tensor split, which needs RDMA. Refuse TCP here, before any
-        // remote call or ownership write. FP8 pairs keep their ring and may use TCP.
+        // Two FP4-Local Sparks run the tensor split, which needs RDMA. Refuse TCP here, before a
+        // start or an ownership write. A diagnostic start may already have asked the checkpoint plan.
+        // FP8 pairs keep their ring and may use TCP.
         if session.two_sparks() && !rdma {
             return Err("Two FP4-Local Sparks run the tensor split, which needs RDMA. Unset SEQPAR_RDMA, then run vade up.".into());
         }
@@ -106,6 +107,45 @@ impl<R: Runner> App<R> {
         session.launch_fingerprint = Some(crate::sha256::sha(text::encode(&fields).as_bytes()));
         Ok(session)
     }
+
+    /// Ask one Spark which text service its checkpoint declares. An older helper
+    /// has no such operation and is read as the two-Spark wire, so a current-family
+    /// start keeps working until `vade install`.
+    pub(super) fn remote_text_service(&mut self, machine: &Machine, worker: &str) -> Result<Option<crate::text_service::TextService>, String> {
+        let mut exec = runner::ssh(
+            &machine.ssh,
+            format!("exec {} __worker", remote_path(worker)),
+            &format!("{} text service", machine.name),
+        );
+        exec.stdin = text::encode(&Fields::from([
+            ("op".into(), "text-service".into()),
+            ("model_path".into(), machine.model_path.clone()),
+        ])).into_bytes();
+        exec.timeout = std::time::Duration::from_secs(90);
+        let output = self.runner.run(&exec).map_err(|error| format!("Transport: {}: {error}", machine.name))?;
+        // The real dry runner prints the command and returns success with empty
+        // output. That is not a report and not an old helper.
+        if self.dry && output.success && output.stdout.trim().is_empty() {
+            return Ok(None);
+        }
+        if !output.success && output.stdout.trim().is_empty() {
+            return Err(format!("Transport: {} did not reply to the text-service check. Nothing started.", machine.name));
+        }
+        let fields = text::parse(&output.stdout).map_err(|_| "The text-service reply was not a record. Nothing started.".to_string())?;
+        if let Some(error) = fields.get("error") {
+            if error.contains("Unknown machine operation. Reinstall vade.") {
+                return Ok(Some(crate::text_service::TextService::pair()));
+            }
+            return Err(format!("{error} Nothing started."));
+        }
+        if !output.success {
+            return Err("The text-service check failed. Nothing started.".into());
+        }
+        if !fields.contains_key("text_sparks") {
+            return Ok(Some(crate::text_service::TextService::pair()));
+        }
+        crate::text_service::TextService::from_report(&fields).map(Some)
+    }
 }
 
 pub(super) fn recorded_options(session: &Session) -> UpOptions {
@@ -137,6 +177,8 @@ pub(super) fn recorded_options(session: &Session) -> UpOptions {
         cache_bytes: session.cache_bytes,
         decode_fuse: Some(session.decode_fuse),
         diagnostic_unqualified_text: session.diagnostic_unqualified_text,
+        checkpoint_service: None,
+        text_width_unread: false,
         draft_fall: session.draft_fall,
     }
 }

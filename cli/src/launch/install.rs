@@ -54,7 +54,8 @@ fn inspect(root: &Path) -> Result<Installed, String> {
     Ok(Installed::Ready(fields))
 }
 
-pub(super) fn ensure<R: Runner>(root: &Path, runner: &mut R) -> Result<Fields, String> {
+/// `loop_kernels`: the located checkpoint is a looped one, so the build adds its own kernel image (see [`refresh`]).
+pub(super) fn ensure<R: Runner>(root: &Path, runner: &mut R, loop_kernels: bool) -> Result<Fields, String> {
     match inspect(root)? {
         Installed::Ready(installed) => {
             super::progress("Install", crate::style::Token::Dim, format_args!("using the saved local artifacts"))?;
@@ -64,7 +65,7 @@ pub(super) fn ensure<R: Runner>(root: &Path, runner: &mut R) -> Result<Fields, S
             "staged {name} is missing or changed since it was installed; replacing the staged files"))?,
         Installed::Missing => (),
     }
-    refresh(root, runner)
+    refresh(root, runner, loop_kernels)
 }
 
 /// Whether `installed` is not what this vade installs: its hashes differ from
@@ -99,8 +100,8 @@ pub(super) fn changed_source<R: Runner>(installed: &Fields, runner: &mut R) -> R
 }
 
 /// Install this checkout or bundle over an outdated install, then name the new generation.
-pub(super) fn rebuild<R: Runner>(root: &Path, runner: &mut R) -> Result<Fields, String> {
-    let fields = refresh(root, runner)?;
+pub(super) fn rebuild<R: Runner>(root: &Path, runner: &mut R, loop_kernels: bool) -> Result<Fields, String> {
+    let fields = refresh(root, runner, loop_kernels)?;
     let generation = fields.get("generation").map_or("", |id| &id[..id.len().min(12)]);
     let source = fields.get("source_revision").map_or_else(|| "from the bundle".to_owned(), |id| format!("built from {}", &id[..id.len().min(12)]));
     super::progress("Install", crate::style::Token::Ok, format_args!("generation {generation} is now installed, {source}"))?;
@@ -108,7 +109,9 @@ pub(super) fn rebuild<R: Runner>(root: &Path, runner: &mut R) -> Result<Fields, 
 }
 
 /// Publish a fresh generation only after all replacement artifacts pass verification.
-pub(super) fn refresh<R: Runner>(root: &Path, runner: &mut R) -> Result<Fields, String> {
+/// With `loop_kernels` (the located checkpoint is a looped one) the build adds the Inkling kernel image;
+/// every other install runs the same three build steps as before that family.
+pub(super) fn refresh<R: Runner>(root: &Path, runner: &mut R, loop_kernels: bool) -> Result<Fields, String> {
     let bundle = bundle_path()?;
     let stage = root.join("stage");
     text::private_dir(&stage)?;
@@ -127,6 +130,11 @@ pub(super) fn refresh<R: Runner>(root: &Path, runner: &mut R) -> Result<Fields, 
     // The kernel builder intentionally uses engine/target even when the host
     // target directory is overridden. Both live in the private install stage.
     build(root, runner, &snapshot.join("engine"), &target, "Build GPU kernels", &["kernels"])?;
+    // The Inkling family has its own kernel image; the engine build embeds it when it is there, and a start of that
+    // family refuses every request without it. Only a looped checkpoint needs it.
+    if loop_kernels {
+        build(root, runner, &snapshot.join("engine"), &target, "Build Inkling GPU kernels", &["kernels-inkling"])?;
+    }
     build(root, runner, &snapshot.join("engine"), &target, "Build engine", &[
         "build", "--release", "--offline", "-p", "spark-tp", "--bin", "flash-serve",
     ])?;
@@ -884,12 +892,12 @@ mod tests {
             "offline-bundle" => {
                 let bundle = bundle_path().unwrap().unwrap();
                 let home = root.join("installed");
-                let installed = ensure(&home, &mut GitSource(None)).unwrap();
+                let installed = ensure(&home, &mut GitSource(None), false).unwrap();
                 assert_eq!(load(&home).unwrap(), Some(installed.clone()));
                 for (key, name) in FILES {
                     assert_eq!(fs::read(&installed[key]).unwrap(), fs::read(bundle.join(name)).unwrap());
                 }
-                assert_eq!(ensure(&home, &mut GitSource(None)).unwrap(), installed);
+                assert_eq!(ensure(&home, &mut GitSource(None), false).unwrap(), installed);
             }
             _ => panic!("unexpected install child mode"),
         }

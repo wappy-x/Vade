@@ -34,6 +34,11 @@ pub mod host_prep;
 pub mod ordered_projection;
 #[allow(clippy::manual_is_multiple_of)] // Shared with the NVPTX crate; fix it with the kernels.
 pub mod plain_admission;
+/// The staged BF16 products of the Inkling image (Ruling R6h): rules and host checks, shared by path with `kernels-inkling`.
+#[allow(clippy::manual_is_multiple_of)] // Shared with the NVPTX crate; fix it with the kernels.
+pub mod staged_product;
+#[allow(clippy::manual_is_multiple_of)] // Shared with the NVPTX crate; fix it with the kernels.
+pub mod packed_product;
 pub mod select_admission;
 #[allow(clippy::erasing_op, clippy::identity_op, clippy::manual_is_multiple_of, clippy::too_many_arguments)] // Shared with the NVPTX crate; fix it with the kernels.
 pub mod prompt_admission;
@@ -80,10 +85,25 @@ pub mod text_reference;
 pub mod dynamic_mxfp8;
 pub mod mxfp8_quantize;
 #[allow(clippy::manual_range_patterns)] // Shared with the NVPTX crate; fix it with the kernels.
-pub mod causal_ops;
+// The host view of the shared file: private main's `causal_ops.rs` plus the marked lines of the Inkling arms.
+#[path = "causal_ops_host.rs"] pub mod causal_ops;
+pub mod block_check;
+pub mod inkling_launch;
 #[allow(clippy::needless_range_loop)] // Shared with the NVPTX crate; fix it with the kernels.
 pub mod latent_ops;
 pub mod latent_absorb;
+/// The Inkling block arms: safe shared code. The Inkling kernel crate (`kernels-inkling`) includes the same files by path.
+pub mod block_ops;
+pub mod block_rows;
+pub mod block_attention;
+pub mod block_stream;
+pub mod block_experts;
+#[cfg(test)]
+mod block_attention_tests;
+#[cfg(test)]
+mod block_stream_tests;
+#[cfg(test)]
+mod block_experts_tests;
 pub mod absorb_tc;
 pub mod latent_absorb_rows;
 #[allow(clippy::chunks_exact_to_as_chunks, clippy::eq_op, clippy::manual_is_multiple_of, clippy::manual_range_contains, clippy::manual_swap, clippy::mut_range_bound, clippy::needless_range_loop, clippy::suspicious_assignment_formatting)] // Shared with the NVPTX crate; fix it with the kernels.
@@ -127,6 +147,10 @@ pub mod gdn_params;
 pub mod next_params;
 #[allow(clippy::excessive_precision, clippy::manual_clamp, clippy::useless_vec)] // Shared with the NVPTX crate; fix it with the kernels.
 pub mod next_math;
+/// Fixed FP32 math in safe code only. The model crate includes the same file by path.
+pub mod fixed_math;
+#[cfg(test)]
+mod fixed_math_tests;
 pub mod compact;
 #[cfg(any(target_os = "linux", test))]
 mod reserve_policy;
@@ -180,6 +204,12 @@ pub fn layer_ptx() -> Result<&'static std::ffi::CStr, String> {
 /// The embedded second image (the tensor-core family, `sm_121a`), when this build has one.
 pub fn tc_ptx() -> Option<&'static std::ffi::CStr> {
     let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/tc.ptx"));
+    if bytes.len() <= 1 { None } else { std::ffi::CStr::from_bytes_with_nul(bytes).ok() }
+}
+
+/// The embedded third image (Inkling 2 Mini's own kernels, `sm_121a`), when this build has one.
+pub fn inkling_ptx() -> Option<&'static std::ffi::CStr> {
+    let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/inkling.ptx"));
     if bytes.len() <= 1 { None } else { std::ffi::CStr::from_bytes_with_nul(bytes).ok() }
 }
 
@@ -506,7 +536,8 @@ mod ab_tests;
 pub mod head_bound;
 
 pub mod resident_program;
-pub mod resident_launch;
+// The host view of the shared ABI file: private main's `resident_launch.rs` plus the marked Inkling kinds.
+#[path = "resident_launch_host.rs"] pub mod resident_launch;
 #[cfg_attr(not(target_os="linux"),allow(dead_code))]
 mod resident_launch_encode;
 #[cfg_attr(not(target_os="linux"),allow(dead_code))]
@@ -515,3 +546,21 @@ mod resident_pointwise;
 mod resident_causal_chain;
 #[cfg_attr(not(target_os="linux"),allow(dead_code))]
 mod resident_causal_group;
+
+/// The host views keep private main's files: drop the lines marked ` // INKLING`, put back the `//INKLING-MAIN: `
+/// lines, and the text is the main file byte for byte (`causal_ops.rs`, `resident_launch.rs`, which the general
+/// kernel image builds from).
+#[cfg(test)] mod host_views {
+    fn main_of(view:&str)->String {
+        let mut out=Vec::new();
+        for line in view.split('\n') {
+            if line.ends_with(" // INKLING") {continue;}
+            out.push(line.strip_prefix("//INKLING-MAIN: ").unwrap_or(line));
+        }
+        out.join("\n")
+    }
+    #[test] fn the_host_views_are_main_plus_marked_lines() {
+        assert_eq!(main_of(include_str!("causal_ops_host.rs")),include_str!("causal_ops.rs"));
+        assert_eq!(main_of(include_str!("resident_launch_host.rs")),include_str!("resident_launch.rs"));
+    }
+}

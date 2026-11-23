@@ -6,6 +6,8 @@
 #[path = "chat_output/gemma4.rs"]
 mod gemma4;
 mod glm;
+mod inkling;
+pub use inkling::{ChannelIds, Channels};
 use engine_model::json;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -90,6 +92,7 @@ pub struct Parser {
     xml: Option<BTreeMap<String, BTreeSet<String>>>,
     gemma: Option<gemma4::Parser>,
     glm: Option<glm::Parser>,
+    channels: Option<inkling::Parser>,
     mode: Mode,
     marker: String,
     initial: bool,
@@ -127,6 +130,7 @@ impl Parser {
             xml: None,
             gemma: None,
             glm: None,
+            channels: None,
             mode: Mode::Content,
             marker: String::new(),
             initial: true,
@@ -158,6 +162,11 @@ impl Parser {
     /// Calls are emitted only after the complete tagged object is valid.
     pub fn glm(mut self, thinking_open: bool, json_parameters: BTreeMap<String, BTreeSet<String>>) -> Self {
         self.glm = Some(glm::Parser::new(thinking_open, json_parameters));
+        self
+    }
+    /// The decoder split the reply by control token ID (`Channels`). The text holds its marks.
+    pub fn token_channels(mut self) -> Self {
+        self.channels = Some(inkling::Parser::default());
         self
     }
     pub fn tool_policy(mut self, prefix: &str, forced: bool, single_call: bool) -> Result<Self, String> {
@@ -238,6 +247,7 @@ impl Parser {
         Ok(())
     }
     fn character(&mut self, ch: char, events: &mut Vec<Event>) -> Result<(), String> {
+        if let Some(parser) = &mut self.channels { return parser.push(ch, &self.limits, &self.declared, events); }
         if let Some(parser) = &mut self.glm {
             return parser.push(ch, &self.limits, &mut self.declared, events);
         }
@@ -373,6 +383,10 @@ impl Parser {
             return Err("incomplete UTF-8 in chat output".into());
         }
         let mut events = std::mem::take(&mut self.pending);
+        if let Some(parser) = &mut self.channels {
+            parser.finish(&self.limits, &self.declared, &mut events)?;
+            return Ok(events);
+        }
         if let Some(parser) = &mut self.glm {
             parser.finish(&mut events);
             return Ok(events);

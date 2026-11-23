@@ -177,6 +177,7 @@ impl TextDescription {
                                 }
                             },
                             ScaleEncoding::Csf => return Err(invalid("legacy CSF header admission is not supported by this description")),
+                            ScaleEncoding::AmaxDenominator => return Err(invalid("amax and denominator scales have no header admission in this description")),
                         }
                         check(format!("{module}.weight_scale_2"),&[Dtype::F32],Some(vec![]))?;
                         if activation_scale { check(format!("{module}.input_scale"),&[Dtype::F32],Some(vec![]))?; }

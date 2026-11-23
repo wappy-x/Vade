@@ -5,6 +5,7 @@
 | File | What it does (from its own summary comment) |
 | --- | --- |
 | [`gemma4.rs`](gemma4.rs) | Google's pinned response_template: thought channels and repeated function calls with raw <|"|>-delimited strings and unquoted object keys. |
+| [`inkling.rs`](inkling.rs) | Reply grammar of the message markup: a state machine on token IDs at the decoder, and the parser of its marks. Answer text, reasoning, tool calls and stop. |
 
 **Why a folder:** Rust keeps one module per file; this folder groups the modules that belong to `chat_output`.
 

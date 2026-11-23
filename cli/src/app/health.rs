@@ -185,6 +185,12 @@ pub(super) const TEXT_REFUSAL: &str = "text service refused:";
 /// What to tell the person when a start met that refusal, or `None` for any other stop.
 /// The engine's own words name internal approvals; these words name the one way to start.
 pub(super) fn text_refusal_hint(log: &str) -> Option<&'static str> {
+    // The loop service prints this sentence as `FAIL ...` (`loop_decoder/service/start.rs`).
+    // It has no "text service refused:" prefix. The qualification sentence in that file is
+    // not on a normal start: flash-serve returns before it when the diagnostic flag is absent.
+    if log.contains("this text service has no transport between Sparks") {
+        return Some("Vade has not qualified this text checkpoint, so a normal start refuses it.\nIt starts only as unqualified diagnostics on one Spark: vade up --sparks 1 --diagnostic-unqualified-text");
+    }
     log.contains(TEXT_REFUSAL).then_some("Vade has not qualified this text checkpoint, so a normal start refuses it.\nIt starts only as unqualified diagnostics on two Sparks: vade up --sparks 2 --diagnostic-unqualified-text")
 }
 

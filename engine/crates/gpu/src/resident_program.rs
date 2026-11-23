@@ -8,6 +8,8 @@ impl Program {
         if self.nodes.is_empty() || self.nodes.len()>128 || self.inputs.iter().any(|&n|n==0 || n>u32::MAX as usize) {return Err("resident program geometry exceeds limits".into());}
         let mut slots=self.inputs.clone();
         for node in &self.nodes {
+            // The Inkling block arms run in their own kernel entry; their launch table could not live until a replay.
+            if crate::block_ops::is_block(node.shape.op) {return Err("a block arm never runs in a resident program".into());}
             let (lengths,_,units,words)=node.shape.lengths().ok_or("resident program operation shape differs")?;
             for (slot,words) in node.inputs.iter().zip(lengths) {match slot {
                 Some(i) if words>0 && slots.get(*i)==Some(&words)=>{},None if words==0=>{},_=>return Err("resident program input does not name an earlier exact slot".into()),
@@ -28,6 +30,14 @@ impl Program {
 }
 #[cfg(test)] mod tests {
     use super::*;
+    /// Review REVUNSAFE, HIGH body 1: a program with a block-arm node is refused, as an error.
+    #[test] fn a_block_arm_is_refused_in_a_resident_program() {
+        let norm=Shape {op:Op::RoundedNorm,heads:1,dim:64,taps:0,rows:0,cols:0,epsilon:1.0e-6,bound:0.0};
+        assert!(norm.lengths().is_some());
+        assert!(Program::operation(norm).is_err_and(|e|e.contains("block arm")));
+        let program=Program {inputs:vec![64],nodes:vec![Node {shape:norm,inputs:[Some(0),None,None,None]}]};
+        assert!(program.validate().is_err_and(|e|e.contains("block arm")));
+    }
     fn shape(op:Op)->Shape {Shape {op,heads:2,dim:4,taps:3,rows:4,cols:4,epsilon:1e-6,bound:-1.0}}
     #[test] fn expanded_chains_keep_original_extents() {
         for op in [Op::Step,Op::Conv,Op::Pool] {let s=shape(op);let p=Program::operation(s).unwrap();let slots=p.validate().unwrap();let (_,_,u,w)=s.lengths().unwrap();assert_eq!(slots.last(),Some(&(u*w)));assert_eq!(p.nodes.len(),2);}

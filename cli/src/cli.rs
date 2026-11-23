@@ -188,6 +188,12 @@ pub struct UpOptions {
     /// The engine's decode_fuse option: Some(true) runs one Spark's decode steps as a chain.
     pub decode_fuse: Option<bool>,
     pub diagnostic_unqualified_text: bool,
+    /// Never set by a flag. The checkpoint plan, read before the session is built.
+    /// `None` means that plan has not been read yet.
+    pub checkpoint_service: Option<crate::text_service::TextService>,
+    /// Never set by a flag. A dry run sets it when the checkpoint is on the Spark
+    /// and the preview got no text-service reply. The Spark count is not refused.
+    pub text_width_unread: bool,
     /// Never set by a flag. `vade up` sets it for a second start, after the text service's default depth met a
     /// model folder with no drafting layer or too little free memory: this start runs at depth 0, and the record
     /// says that nobody asked for 0.
@@ -217,6 +223,8 @@ impl Default for UpOptions {
             cache_bytes: None,
             decode_fuse: None,
             diagnostic_unqualified_text: false,
+            checkpoint_service: None,
+            text_width_unread: false,
             draft_fall: None,
         }
     }

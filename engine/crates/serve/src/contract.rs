@@ -168,17 +168,21 @@ impl Identity {
             json::field(fields, "chat_template").and_then(Value::string)
                 .map_err(|e| e.to_string())?.to_owned()
         };
+        // The Inkling renderer and reply reader are part of the identity of the Inkling template only, in the places
+        // they had; every other template hashes the list it hashed before they existed.
+        let inkling = template.contains(crate::tokenizer::inkling::STOP);
         fields.insert("chat_template".into(), Value::String(normalize_template(&template).into()));
         // Include the authored renderer/translator as well as checkpoint framing.
         let mut renderer = protocol::stringify(&config).into_bytes();
-        for source in [include_bytes!("../../tokenizer/src/chat.rs").as_slice(),
-            include_bytes!("../../tokenizer/src/chat/llama.rs").as_slice(),
-            include_bytes!("../../tokenizer/src/chat/gemma4.rs").as_slice(),
-            include_bytes!("../../tokenizer/src/lib.rs").as_slice(),
-            include_bytes!("tokenizer/glm.rs").as_slice(),
-            include_bytes!("tokenizer.rs").as_slice(), include_bytes!("protocol.rs").as_slice(),
-            include_bytes!("chat_output.rs").as_slice(), include_bytes!("chat_output/glm.rs").as_slice(),
-            include_bytes!("responses.rs").as_slice(), include_bytes!("anthropic.rs").as_slice()] {
+        let only = |source: &'static [u8]| inkling.then_some(source);
+        for source in [Some(include_bytes!("../../tokenizer/src/chat.rs").as_slice()),
+            Some(include_bytes!("../../tokenizer/src/chat/llama.rs").as_slice()),
+            Some(include_bytes!("../../tokenizer/src/chat/gemma4.rs").as_slice()),
+            Some(include_bytes!("../../tokenizer/src/lib.rs").as_slice()),
+            Some(include_bytes!("tokenizer/glm.rs").as_slice()), only(include_bytes!("tokenizer/inkling.rs").as_slice()),
+            Some(include_bytes!("tokenizer.rs").as_slice()), Some(include_bytes!("protocol.rs").as_slice()),
+            Some(include_bytes!("chat_output.rs").as_slice()), Some(include_bytes!("chat_output/glm.rs").as_slice()), only(include_bytes!("chat_output/inkling.rs").as_slice()),
+            Some(include_bytes!("responses.rs").as_slice()), Some(include_bytes!("anthropic.rs").as_slice())].into_iter().flatten() {
             renderer.extend_from_slice(&(source.len() as u64).to_le_bytes());
             renderer.extend_from_slice(source);
         }
@@ -254,4 +258,57 @@ pub(crate) fn admission<T: Tokenizer>(body: &[u8], context: usize, vocab: usize,
         protocol::quote(VERSION), protocol::quote(model), prompt.len(), context.min(limits.context_tokens),
         limits.input_tokens, limits.output_limit(context), error.is_none(),
         error.as_deref().map(protocol::quote).unwrap_or_else(|| "null".into())))
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+    /// A folder with the files the identity reads: a config of `kind`, one weight file, a tokenizer and a template.
+    fn folder(name: &str, kind: &str, template: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("vade-identity-{name}-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&root);
+        std::fs::write(root.join("config.json"), format!(r#"{{"model_type":"{kind}"}}"#)).unwrap();
+        let header = b"{}";
+        let mut weights = (header.len() as u64).to_le_bytes().to_vec();weights.extend_from_slice(header);weights.extend_from_slice(&[0; 8]);
+        std::fs::write(root.join("model.safetensors"), weights).unwrap();
+        std::fs::write(root.join("tokenizer.json"), b"{}").unwrap();
+        std::fs::write(root.join("tokenizer_config.json"), format!(r#"{{"chat_template":{}}}"#, protocol::quote(template))).unwrap();
+        root
+    }
+    /// Review REVSHARED finding 7: the template fingerprint of a template that is not Inkling's hashes the list of
+    /// renderer files it hashed before the Inkling files existed, in that order; the Inkling files are in the
+    /// fingerprint of the Inkling template only. The lines `TEMPLATE_FINGERPRINT` are the receipt of the values.
+    #[test]
+    fn the_template_fingerprint_reads_the_inkling_files_for_the_inkling_template_only() {
+        let main_list: [&[u8]; 11] = [include_bytes!("../../tokenizer/src/chat.rs"), include_bytes!("../../tokenizer/src/chat/llama.rs"),
+            include_bytes!("../../tokenizer/src/chat/gemma4.rs"), include_bytes!("../../tokenizer/src/lib.rs"), include_bytes!("tokenizer/glm.rs"),
+            include_bytes!("tokenizer.rs"), include_bytes!("protocol.rs"), include_bytes!("chat_output.rs"), include_bytes!("chat_output/glm.rs"),
+            include_bytes!("responses.rs"), include_bytes!("anthropic.rs")];
+        let digest = |config: &[u8], sources: &[&[u8]]| {
+            let mut config = json::parse(config, json::Limits { bytes: 4 << 20, ..Default::default() }).unwrap();
+            let Value::Object(ref mut fields) = config else { panic!("no object") };
+            let template = fields["chat_template"].string().unwrap().to_owned();
+            fields.insert("chat_template".into(), Value::String(normalize_template(&template).into()));
+            let mut renderer = protocol::stringify(&config).into_bytes();
+            eprintln!("TEMPLATE_CONFIG {}", protocol::stringify(&config));
+            for source in sources { renderer.extend_from_slice(&(source.len() as u64).to_le_bytes()); renderer.extend_from_slice(source); }
+            sha256::digest(&renderer)
+        };
+        for (name, kind, template) in [("glm", "glm5_next", "[gMASK]<sop>{% for m in messages %}<|{{ m.role }}|>{{ m.content }}{% endfor %}<|assistant|>"),
+            ("qwen", "qwen3", "{% for m in messages %}<|im_start|>{{ m.role }}\n{{ m.content }}<|im_end|>\n{% endfor %}<|im_start|>assistant\n")] {
+            let root = folder(name, kind, template);
+            let identity = Identity::load(&root).unwrap();
+            let expected = digest(&std::fs::read(root.join("tokenizer_config.json")).unwrap(), &main_list);
+            eprintln!("TEMPLATE_FINGERPRINT {name} sha256:{}", identity.template);
+            assert_eq!(identity.template, expected, "{name}: the fingerprint must hash the renderer files of before the Inkling files");
+            let _ = std::fs::remove_dir_all(&root);
+        }
+        // The Inkling template keeps its two files in the places they had.
+        let root = folder("inkling", "inkling2_loop", crate::tokenizer::inkling::TEMPLATE);
+        let identity = Identity::load(&root).unwrap();
+        let mut with: Vec<&[u8]> = main_list.to_vec();
+        with.insert(5, include_bytes!("tokenizer/inkling.rs"));with.insert(10, include_bytes!("chat_output/inkling.rs"));
+        assert_eq!(identity.template, digest(&std::fs::read(root.join("tokenizer_config.json")).unwrap(), &with));
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

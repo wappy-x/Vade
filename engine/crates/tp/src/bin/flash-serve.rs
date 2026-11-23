@@ -2,6 +2,9 @@
 #[cfg(target_os = "linux")]
 #[path = "flash-serve/text.rs"]
 mod text;
+#[cfg(target_os = "linux")]
+#[path = "flash-serve/loop_text.rs"]
+mod loop_text;
 #[cfg(all(test,not(target_os="linux")))]
 #[path="flash-serve/boundary_gate.rs"] mod boundary_gate;
 #[cfg(target_os = "linux")]
@@ -58,6 +61,15 @@ fn advise_checkpoint_cache(root: &std::path::Path, checkpoint: &engine_model::fl
 fn prepare_model_for_install(root: &std::path::Path) -> Result<(), String> {
     use engine_model::flash::{Checkpoint, WeightFormat, manifest};
     let started = std::time::Instant::now();
+    // The looped block family: the served start hands it to its own text service (loop_text::run, decided by the
+    // config). Its install check is the plan's binding of every stored name from the config, the storage sidecar,
+    // the index and the shard headers; no weight payload is read.
+    let config = engine_model::safetensors::read_bounded(&root.join("config.json"), engine_model::shapes::CONFIG_BYTES).map_err(|e| e.to_string())?;
+    if engine_model::plan::description::LoopTextDescription::from_config(&config).is_ok() {
+        engine_model::plan::inkling_index::inspect(root).map_err(|e| format!("This engine cannot load this model: {e}."))?;
+        println!("model_header_admission=pass\nmodel_payload_verified=false\nmodel_verify_ms={:.3}",started.elapsed().as_secs_f64()*1000.0);
+        return Ok(());
+    }
     if engine_model::cartridge::Cartridge::resident_text(root).map_err(|e|e.to_string())?.is_some() {
         println!("model_header_admission=pass\nmodel_payload_verified=false\nmodel_verify_ms={:.3}",started.elapsed().as_secs_f64()*1000.0);
         return Ok(());
@@ -113,13 +125,15 @@ fn run() -> Result<(), String> {
     let context_explicit = raw_args.get(6).is_some_and(|arg| arg.parse::<SocketAddr>().is_err());
     let args = settings::startup_args(raw_args);
     if args.len() < 9 {
-        return Err(format!("usage: flash-serve RANK WORLD LISTEN NEXT PTX MODEL [CONTEXT] BIND REQUESTS (0=continuous) [--allow-remote] [--api-key-file PATH] [--mtp 0..3] [--decode-fuse off|on (default on for world 1, off otherwise)] [--nvfp4] [--verify-full] [--fp4-local] [--indexer sparse|dense] [--tensor-map PATH]; FP4-Local defaults to context 32768, output cap 16384, up to sixteen memory-admitted chats with automatic local prompt tiles (pipeline default 2048 rows) and sparse indexing; mixed directories auto-select NextModel; world 1 strict MTP 3 plus lookup, world 2 the FP4-Local tensor split over the layer pipeline's links with the world-1 engine's MTP, the only 2-Spark path (both ranks split the routed experts, the projections and the linear-attention heads, one-sided RDMA writes carry the exchanges, and one greedy chat's verify head is split by vocabulary halves; it needs RDMA, so SEQPAR_RDMA=0 and --tensor-map are refused there; more ranks over RDMA run the split in parts when every width cuts into whole parts and the mailbox has room (world 4 for the shipped checkpoint), other worlds run the layer chain; FP8 keeps its ring), world 4 rank path plain only with --tensor-map PATH; FP8 defaults to context 131072, output cap min(65536, context), strict MTP 2 (the FP8 rank path: one chat chooses its depth each cycle up to 7; VADE_FLASH_MTP_DEPTH=1..7 sets that ceiling, VADE_MTP_ADAPT=0 or --mtp keeps the fixed depth; its drafts read an MXFP8 head copy, VADE_FP8_DRAFT_MX8=0 keeps the BF16 head); data transport uses LISTEN/NEXT ports + 1; world-1 Flash-Next defaults to C8 cohort control and healthy capture fallback (VADE_MTP_COHORT=wide, the guarded two-/four-stage pipelines' default and opt-in on world 1: 5-8 chats draft depth 3 in one 32-row verify tick, cohort control opt-in; VADE_MTP_COHORT=off restores the 16-row controller tick); all three VADE_MTP_C8/VADE_MTP_COHORT_ADAPT/VADE_POOL_GRAPH_FALLBACK=0 restore the prior automatic policy; explicit VADE_MTP_BATCH retains its table; the two- and four-stage pipelines always use guarded Auto8 and cohort control; explicit cohort=1 requires Auto8 and a supported route; other pipeline sizes and native ranks retain their prior defaults; invalid switch values fail at startup; VADE_C8_GUARD_ROBUST unset/1 stays on draft unless plain is 8% cheaper per token, 0 keeps the live 2% latch; a GLM text checkpoint is served by the two-Spark text service, which has its own option list: {}",settings::TEXT_OPTIONS));
+        return Err(format!("usage: flash-serve RANK WORLD LISTEN NEXT PTX MODEL [CONTEXT] BIND REQUESTS (0=continuous) [--allow-remote] [--api-key-file PATH] [--mtp 0..3] [--decode-fuse off|on (default on for world 1, off otherwise)] [--nvfp4] [--verify-full] [--fp4-local] [--indexer sparse|dense] [--tensor-map PATH]; FP4-Local defaults to context 32768, output cap 16384, up to sixteen memory-admitted chats with automatic local prompt tiles (pipeline default 2048 rows) and sparse indexing; mixed directories auto-select NextModel; world 1 strict MTP 3 plus lookup, world 2 the FP4-Local tensor split over the layer pipeline's links with the world-1 engine's MTP, the only 2-Spark path (both ranks split the routed experts, the projections and the linear-attention heads, one-sided RDMA writes carry the exchanges, and one greedy chat's verify head is split by vocabulary halves; it needs RDMA, so SEQPAR_RDMA=0 and --tensor-map are refused there; more ranks over RDMA run the split in parts when every width cuts into whole parts and the mailbox has room (world 4 for the shipped checkpoint), other worlds run the layer chain; FP8 keeps its ring), world 4 rank path plain only with --tensor-map PATH; FP8 defaults to context 131072, output cap min(65536, context), strict MTP 2 (the FP8 rank path: one chat chooses its depth each cycle up to 7; VADE_FLASH_MTP_DEPTH=1..7 sets that ceiling, VADE_MTP_ADAPT=0 or --mtp keeps the fixed depth; its drafts read an MXFP8 head copy, VADE_FP8_DRAFT_MX8=0 keeps the BF16 head); data transport uses LISTEN/NEXT ports + 1; world-1 Flash-Next defaults to C8 cohort control and healthy capture fallback (VADE_MTP_COHORT=wide, the guarded two-/four-stage pipelines' default and opt-in on world 1: 5-8 chats draft depth 3 in one 32-row verify tick, cohort control opt-in; VADE_MTP_COHORT=off restores the 16-row controller tick); all three VADE_MTP_C8/VADE_MTP_COHORT_ADAPT/VADE_POOL_GRAPH_FALLBACK=0 restore the prior automatic policy; explicit VADE_MTP_BATCH retains its table; the two- and four-stage pipelines always use guarded Auto8 and cohort control; explicit cohort=1 requires Auto8 and a supported route; other pipeline sizes and native ranks retain their prior defaults; invalid switch values fail at startup; VADE_C8_GUARD_ROBUST unset/1 stays on draft unless plain is 8% cheaper per token, 0 keeps the live 2% latch; a GLM text checkpoint is served by the two-Spark text service, which has its own option list: {}; a family whose plan declares one Spark is served on RANK 0 of WORLD 1 behind --diagnostic-unqualified-text, with its own option list: {}",settings::TEXT_OPTIONS,spark_tp::loop_decoder::service::start::OPTIONS));
     }
     let root = if let Some(path) = args[5].strip_prefix("~/") {
         PathBuf::from(std::env::var_os("HOME").ok_or("missing home directory")?).join(path)
     } else { PathBuf::from(&args[5]) };
     let output_setting=std::env::var("FLASH_SERVE_OUTPUT_TOKENS");
     let memory_setting=std::env::var("SEQPAR_MEMORY_BYTES");
+    // The looped block family starts its own text service when the start gives the diagnostic option.
+    if let Some(served)=loop_text::run(&args,&root,output_setting.clone().ok(),memory_setting.clone().ok(),started) {return served.inspect_err(|error|spark_tp::startup::failed(error));}
     if let Some(checkpoint)=engine_model::cartridge::Cartridge::resident_text(&root).map_err(|e|e.to_string())? {
         return text::run(&args,checkpoint,&root,output_setting.ok(),memory_setting.ok(),started).inspect_err(|error|spark_tp::startup::failed(error));
     }

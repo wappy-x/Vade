@@ -6,3 +6,5 @@ license = "Apache-2.0"
 publish = false
 repository = "https://github.com/wappy-x/vade"
 rust-version = "1.99"
+# `cargo kernels` runs the general tool; `cargo kernels-inkling` runs src/bin/inkling.rs.
+default-run = "spark-build-kernels"

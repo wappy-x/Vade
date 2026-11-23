@@ -55,6 +55,10 @@ impl Compute for Host {
     fn round(&self,x:&Vec<f32>)->Result<Vec<f32>> {Ok(x.iter().copied().map(spark_gpu_probe::bf16::rounded).collect())}
     fn mean(&self,x:&Vec<f32>,streams:u32,hidden:u32)->Result<Vec<f32>> {let mut s=shape(Op::StreamMean);s.heads=streams;s.dim=hidden;self.operation(s,[Some(x),None,None,None],&[])}
     fn prompt(&self,s:spark_gpu_probe::prompt_ops::Shape,x:[Option<&Vec<f32>>;5],w:&[f32])->Result<Vec<f32>> {spark_gpu_probe::prompt_ops::reference(s,x.map(|v|v.map_or(&[][..],Vec::as_slice)),w)}
+    /// The host words of the rows entry of the arms: the arm of each row in turn (`block_rows::reference`).
+    fn block_rows(&self,s:Shape,rows:usize,shared:u32,x:[Option<&Vec<f32>>;4],w:&[f32])->Result<Option<Vec<f32>>> {
+        spark_gpu_probe::block_rows::reference(s,rows,shared,x.map(|v|v.map_or(&[][..],Vec::as_slice)),w).map(Some)
+    }
     fn rows_norm(&self,_:&str,s:NormShape,x:&Vec<f32>,m:usize,w:&[f32])->Result<Vec<f32>> {
         let width=x.len()/m;Ok(x.chunks_exact(width).flat_map(|row|causal_layer::norm(s,row,w)).collect())
     }

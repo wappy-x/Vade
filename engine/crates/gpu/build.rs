@@ -1,6 +1,8 @@
 use std::{env, fs, path::PathBuf};
 #[allow(dead_code)] // Kernel-builder methods share the variant definition.
 mod ptx_stamp;
+#[allow(dead_code)] // The build tool uses the build constants; this script only verifies.
+mod inkling_stamp;
 mod cubin;
 
 fn main() {
@@ -48,5 +50,23 @@ fn run() -> Result<(), String> {
         _ => return Err(format!("missing or empty tensor-core PTX at {}; run `cargo kernels --tc` first", tc.display())),
     };
     tc_bytes.push(0);
-    fs::write(out.join("tc.ptx"), tc_bytes).map_err(|error| format!("write embedded tensor-core PTX: {error}"))
+    fs::write(out.join("tc.ptx"), tc_bytes).map_err(|error| format!("write embedded tensor-core PTX: {error}"))?;
+    // The third image: Inkling 2 Mini's own kernels (`cargo kernels-inkling`, a second command, Ruling R6h). It may be
+    // absent: then the host refuses every Inkling block arm with an error (`Backend::inkling_module`) and no other
+    // model is touched. A stale one is treated as absent, with a build warning: it must not fail a GLM or Qwen build
+    // (REVSHARED finding 6), and a stale image is never embedded.
+    let inkling = inkling_stamp::ptx_path(&manifest, true);
+    println!("cargo:rerun-if-changed={}", inkling.display());
+    let mut inkling_bytes = match fs::read(&inkling) {
+        Ok(bytes) if !bytes.is_empty() => match inkling_stamp::verify(&manifest, &inkling, &bytes) {
+            Ok(()) => bytes,
+            Err(error) => {
+                println!("cargo:warning=Inkling PTX not embedded: {error}; an Inkling start refuses until `{}` runs again", inkling_stamp::BUILD_COMMAND);
+                Vec::new()
+            }
+        },
+        _ => Vec::new(),
+    };
+    inkling_bytes.push(0);
+    fs::write(out.join("inkling.ptx"), inkling_bytes).map_err(|error| format!("write embedded Inkling PTX: {error}"))
 }

@@ -2455,3 +2455,38 @@ engine/crates/gpu/kernels	src/latent_rows.rs	fn:latent_rows_attention	block:1	ru
 # Recurrent short rows and their deferred launch, approved after the byte and owner proofs.
 engine/crates/gpu	src/backend/prompt_ops.rs	impl:Backend::fn:recurrent_rows	block:1	ruling 2026-11-17 23:13
 engine/crates/gpu/kernels	src/recurrent_rows.rs	fn:body	block:1	ruling 2026-11-17 23:13
+# Inkling's own kernel image (Ruling R6h, owner 2026-11-22 18:21): crate kernels-inkling, its panic handler and the one block of its replay.
+engine/crates/gpu/kernels-inkling	src/lib.rs	fn:panic	block:1	ruling 2026-11-22 18:21
+engine/crates/gpu/kernels-inkling	src/lib.rs	fn:run	block:1	ruling 2026-11-22 18:21
+# The two entries and run declared unsafe like the tensor-core entry (review REVIMAGE finding 4, lead 2026-11-22 19:22).
+engine/crates/gpu/kernels-inkling	src/lib.rs	fn:resident_launch_block_arms	fn:1	ruling 2026-11-22 18:21
+engine/crates/gpu/kernels-inkling	src/lib.rs	fn:resident_launch_block_rows	fn:1	ruling 2026-11-22 18:21
+engine/crates/gpu/kernels-inkling	src/lib.rs	fn:run	fn:1	ruling 2026-11-22 18:21
+# Ruling R6h rule 1 (lead 2026-11-22 19:22): the host launch of the Inkling entries in Inkling's own host file.
+engine/crates/gpu	src/backend/inkling_family.rs	impl:Backend::fn:block_arm	block:1	ruling 2026-11-22 19:22
+engine/crates/gpu	src/backend/inkling_family.rs	mod:tests::fn:an_arm_inside_each_graph_capture_is_refused	block:1	ruling 2026-11-22 19:22
+# Inkling image, seat INKLOAD (Ruling R6h, owner 2026-11-22 18:21): the staged BF16 row product (its replay block and its warp tile) and its rows tile (its replay block).
+engine/crates/gpu/kernels-inkling	src/plain_staged.rs	fn:replay	block:1	ruling 2026-11-22 18:21
+engine/crates/gpu/kernels-inkling	src/plain_staged.rs	fn:warp	fn:1	ruling 2026-11-22 18:21
+engine/crates/gpu/kernels-inkling	src/plain_staged_rows.rs	fn:replay	block:1	ruling 2026-11-22 18:21
+# Inkling image, seat INKLOAD: the entries of the two staged products declared unsafe like the others (INKFAST 19:44).
+engine/crates/gpu/kernels-inkling	src/lib.rs	fn:resident_launch_plain_staged	fn:1	ruling 2026-11-22 18:21
+engine/crates/gpu/kernels-inkling	src/lib.rs	fn:resident_launch_plain_staged_rows	fn:1	ruling 2026-11-22 18:21
+# Seat INKLOAD, review REVPROD findings 3 and 4 (lead 2026-11-22 20:19): both replays declared unsafe fn; the device test that each graph capture refuses a staged product.
+engine/crates/gpu/kernels-inkling	src/plain_staged.rs	fn:replay	fn:1	ruling 2026-11-22 18:21
+engine/crates/gpu/kernels-inkling	src/plain_staged_rows.rs	fn:replay	fn:1	ruling 2026-11-22 18:21
+engine/crates/gpu	src/backend/staged.rs	mod:tests::fn:a_staged_product_inside_each_graph_capture_is_refused	block:1	ruling 2026-11-22 19:22
+# Seat INKPACK (Ruling R6h, owner 2026-11-22 18:21): the packed row product in the Inkling image: its replay (an unsafe fn with its block), its entry and the four unsafe fns of its body, each with its SAFETY note. each with its SAFETY note.
+engine/crates/gpu/kernels-inkling	src/lib.rs	fn:run_packed	block:1	ruling 2026-11-22 18:21
+engine/crates/gpu/kernels-inkling	src/plain_packed.rs	fn:issue	fn:1	ruling 2026-11-22 18:21
+engine/crates/gpu/kernels-inkling	src/plain_packed.rs	fn:narrow	fn:1	ruling 2026-11-22 18:21
+engine/crates/gpu/kernels-inkling	src/plain_packed.rs	fn:tile	fn:1	ruling 2026-11-22 18:21
+engine/crates/gpu/kernels-inkling	src/plain_packed.rs	fn:wide	fn:1	ruling 2026-11-22 18:21
+engine/crates/gpu/kernels-inkling	src/lib.rs	fn:run_packed	fn:1	ruling 2026-11-22 18:21
+engine/crates/gpu/kernels-inkling	src/lib.rs	fn:resident_launch_plain_packed	fn:1	ruling 2026-11-22 18:21
+engine/crates/gpu/kernels-inkling	src/lib.rs	fn:run_packed_group	block:1	ruling 2026-11-22 18:21
+engine/crates/gpu/kernels-inkling	src/lib.rs	fn:run_packed_group	fn:1	ruling 2026-11-22 18:21
+engine/crates/gpu/kernels-inkling	src/lib.rs	fn:resident_launch_plain_packed_group	fn:1	ruling 2026-11-22 18:21
+engine/crates/gpu/kernels-inkling	src/lib.rs	fn:run_packed_picked	block:1	ruling 2026-11-22 18:21
+engine/crates/gpu/kernels-inkling	src/lib.rs	fn:run_packed_picked	fn:1	ruling 2026-11-22 18:21
+engine/crates/gpu/kernels-inkling	src/lib.rs	fn:resident_launch_plain_packed_picked	fn:1	ruling 2026-11-22 18:21

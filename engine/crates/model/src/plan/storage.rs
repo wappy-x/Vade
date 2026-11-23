@@ -3,7 +3,11 @@ use crate::{Result, invalid, json::{Value, field}, shapes::CONFIG_BYTES};
 use std::collections::BTreeMap;
 type Object = BTreeMap<String, Value>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ScaleEncoding { Direct, Csf, Csf32 }
+pub enum ScaleEncoding {
+    Direct, Csf, Csf32,
+    /// Direct block scales, then one factor for each expert of a stack: `amax[expert] / denominator`.
+    AmaxDenominator,
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WeightStorage {
     Plain,

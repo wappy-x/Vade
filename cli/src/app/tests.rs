@@ -13,6 +13,8 @@ mod groups;
 mod pairs;
 #[path = "tests/pair_draft.rs"]
 mod pair_draft;
+#[path = "tests/one_spark_text.rs"]
+mod one_spark_text;
 #[path = "tests/local_rank.rs"]
 mod local_rank;
 #[path = "tests/fake_hosts.rs"]

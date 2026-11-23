@@ -24,8 +24,10 @@ mod config;
 mod install;
 mod model;
 #[cfg(test)]
-pub(crate) use model::{test_checkpoint, test_config, test_mixed_config};
+pub(crate) use model::{test_checkpoint, test_config, test_mixed_config, test_write_unserved_checkpoint};
 pub(crate) use model::serving_format;
+#[cfg(test)]
+pub(crate) use model::LOOP_TEXT_ONLY;
 pub(crate) use model::read_prompt_line;
 mod status;
 mod doctor;
@@ -58,6 +60,25 @@ pub fn root() -> Result<PathBuf, String> {
     }
     text::reject_symlinks(&path)?;
     Ok(path)
+}
+
+/// The engine arguments of the local one-Spark start, and the line the start prints. FP4-Local: `--fp4-local` and
+/// the decode fuse, no line. A looped block checkpoint: its text service, which starts only behind
+/// `--diagnostic-unqualified-text` and takes no draft depth; whenever the start adds that option it also says so in
+/// plain words (`model::loop_preview_line`), and with no such line it does not add the option.
+pub(crate) fn local_start(ptx: &str, model: &Path, context: u32, port: &str, decode_fuse: bool, loop_text: bool) -> Result<(Vec<String>, Option<String>), String> {
+    let note = if loop_text { Some(model::loop_preview_line(model).ok_or("This engine cannot bind this looped checkpoint for a preview start.")?) } else { None };
+    Ok((local_engine_args(ptx, &model.to_string_lossy(), context, port, decode_fuse, note.is_some()), note))
+}
+fn local_engine_args(ptx: &str, model: &str, context: u32, port: &str, decode_fuse: bool, loop_text: bool) -> Vec<String> {
+    let mut args: Vec<String> = vec!["0".into(), "1".into(), "127.0.0.1:0".into(), "127.0.0.1:0".into(), ptx.into(), model.into(),
+        context.to_string(), format!("127.0.0.1:{port}"), "0".into()];
+    if loop_text {
+        args.extend(["--diagnostic-unqualified-text".into(), "--mtp".into(), "0".into()]);
+    } else {
+        args.extend(["--fp4-local".into(), "--decode-fuse".into(), if decode_fuse { "on" } else { "off" }.into()]);
+    }
+    args
 }
 
 fn owner_home() -> Result<PathBuf, String> {
@@ -409,7 +430,7 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
                         done("Config", configured_phase)?;
                         (config, chosen)
                     };
-                    let (artifacts, fresh) = self.install_files(installed, command == Command::Install && prior.is_none())?;
+                    let (artifacts, fresh) = self.install_files(installed, command == Command::Install && prior.is_none(), model::loop_text(&config.model))?;
                     let record = if command == Command::Install {
                         if prior.is_none() { self.prepare(Some(&config.model), &artifacts, "install")?; }
                         None
@@ -510,7 +531,7 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
                 let config = Config::load(&self.root)?.ok_or("No local setup yet; run vade launch first.")?;
                 let (model, identity) = self.detection(Some(&config), INSTALL_SPACE)?;
                 config.check_resources(&model, &identity)?;
-                install::refresh(&self.root, &mut self.runner)?;
+                install::refresh(&self.root, &mut self.runner, model::loop_text(&config.model))?;
                 output::line(format_args!("Local engine and chat updated. Start: {}", text::command("up")))
             }
             Command::Status | Command::Menu => {
@@ -543,16 +564,17 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
     /// The Install phase: reuse the installed files, or build and stage them.
     /// With `check_source`, files from another checkout or bundle are replaced.
     /// Returns the files and whether they are new.
-    fn install_files(&mut self, installed: Option<Fields>, check_source: bool) -> Result<(Fields, bool), String> {
+    /// `loop_kernels`: the located checkpoint is a looped one, so a build adds its kernel image.
+    fn install_files(&mut self, installed: Option<Fields>, check_source: bool, loop_kernels: bool) -> Result<(Fields, bool), String> {
         // vade install from a new checkout or bundle must not keep an engine from another one.
         let outdated = check_source
             && installed.as_ref().map_or(Ok(false), |files| install::outdated(files, &mut self.runner))?;
         let start = phase("Install", if installed.is_some() && !outdated { "reuse installed files" } else { "prepare local engine and chat" })?;
         let fresh = installed.is_none() || outdated;
         let artifacts = match installed {
-            Some(_) if outdated => install::rebuild(&self.root, &mut self.runner)?,
+            Some(_) if outdated => install::rebuild(&self.root, &mut self.runner, loop_kernels)?,
             Some(files) => files,
-            None => install::ensure(&self.root, &mut self.runner)?,
+            None => install::ensure(&self.root, &mut self.runner, loop_kernels)?,
         };
         done("Install", start)?;
         Ok((artifacts, fresh))
@@ -573,7 +595,7 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
             output::line(format_args!("Model: {reason} The install goes on without it; vade launch needs the model."))?;
         }
         done("Detect", start)?;
-        let (artifacts, _) = self.install_files(installed, true)?;
+        let (artifacts, _) = self.install_files(installed, true, false)?;
         self.prepare(None, &artifacts, "install")?;
         output::line(format_args!("Installed without a model, so no local defaults were saved yet.\n{}\nThen start the engine and open chat: {}",
             model::MODEL_HELP, text::command("launch")))
@@ -596,7 +618,8 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
     /// an FP4-Local checkpoint, and room for it.
     fn identify(&mut self, model: &model::Model, install_space: u64) -> Result<detect::Identity, String> {
         let identity = self.detector.detect(&self.root, &model.path)?;
-        if !model.fp4_local {
+        // A looped block checkpoint is the one-Spark text service; its plan was read at discovery.
+        if !model.fp4_local && !model.loop_text {
             return Err("Local launch needs nvidia/Qwen3.8-Flash-Next-FP4-Local. Set VADE_MODELS to that checkpoint and choose a fresh VADE_HOME before vade launch if defaults were already saved. FP8 needs 2, 4, or 6 machines: set VADE_CONFIG and use vade up --fp8.".into());
         }
         identity.check_resources(model.bytes, install_space)?;
@@ -706,6 +729,10 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
     fn up_admitted(&mut self, config: &mut Config, options: &UpOptions, artifacts: &Fields,
         prior: Option<Fields>, retry: &str) -> Result<Fields, String> {
         let explicit = options.supplied_options.contains("--context");
+        // The plan in config.json decides: a looped block checkpoint is the one-Spark text service, which the engine
+        // starts only behind the diagnostic option. The start adds that option itself, with the preview line
+        // (local_start); the user types no option.
+        let loop_text = model::loop_text(&config.model);
         let (first, first_output) = (config.context, config.output);
         let mut refused = Vec::new();
         if prior.is_none() {
@@ -713,7 +740,7 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
         }
         loop {
             let mut refusal = None;
-            let error = match self.up(config, artifacts, prior.clone(), retry, &mut refusal) {
+            let error = match self.up(config, artifacts, prior.clone(), retry, &mut refusal, loop_text) {
                 Ok(record) => {
                     if !refused.is_empty() {
                         // Saved only after the lowered start succeeded; a total failure keeps the original.
@@ -745,6 +772,7 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
         prior: Option<Fields>,
         retry: &str,
         refusal: &mut Option<String>,
+        loop_text: bool,
     ) -> Result<Fields, String> {
         if let Some(record) = prior {
             config.check_running_limits(&record)?;
@@ -822,20 +850,10 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
                 );
             }
             config.engine_env(&mut request);
-            let args = vec![
-                "0".into(),
-                "1".into(),
-                "127.0.0.1:0".into(),
-                "127.0.0.1:0".into(),
-                required(artifacts, "ptx")?.into(),
-                config.model.to_string_lossy().into_owned(),
-                config.context.to_string(),
-                format!("127.0.0.1:{}", config.port),
-                "0".into(),
-                "--fp4-local".into(),
-            ];
-            let args = args.into_iter().chain(["--decode-fuse".to_string(), if config.decode_fuse() { "on" } else { "off" }.to_string()]);
-            for (index, value) in args.enumerate() {
+            let (args, note) = local_start(required(artifacts, "ptx")?, &config.model, config.context,
+                &config.port.to_string(), config.decode_fuse(), loop_text)?;
+            if let Some(note) = note { output::line(format_args!("{note}"))?; }
+            for (index, value) in args.into_iter().enumerate() {
                 request.insert(format!("arg.{index}"), value);
             }
             self.worker(&record, "start", request, false)?;

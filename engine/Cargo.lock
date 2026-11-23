@@ -51,6 +51,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "spark-inkling-kernels"
+version = "0.1.0"
+
+[[package]]
 name = "spark-rust-kernels"
 version = "0.1.0"
 

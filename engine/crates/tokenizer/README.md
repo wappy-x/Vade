@@ -174,6 +174,25 @@ A null normalizer keeps the input bytes. A ByteLevel
 post-processor changes offsets only. It does not add a space to the text.
 Direct vocabulary lookup stays inside each piece from the pre-tokenizer.
 
+### The case-aware split pattern
+
+A byte-level artifact can carry a split pattern that cuts words where the
+letter case changes. `HelloWorld` gives `Hello` and `World`. `HTTPServer`
+stays one piece. A contraction such as `'s` stays with its word. Numbers are
+in groups of 1 to 3. A symbol run takes the line breaks and slashes that
+follow it.
+
+The loader selects this rule when the pattern text of the artifact equals
+`CASED_PATTERN` in `src/lib.rs`. It reads no model name and no folder name.
+The rule is in `src/cased_split.rs`. Another pattern is refused with
+`unsupported split pattern`. The same pattern in an artifact that is not
+byte-level is refused too, because the rule was checked for the byte-level
+form only.
+
+An artifact with this pattern is text-only here: `encode`, `encode_ordinary`,
+`decode` and streaming decode. A renderer must send caller text through
+`encode_ordinary`. Then a control spelling in caller text stays plain text.
+
 `from_directory` records the path to `generation_config.json`.
 `eos_token_ids()` reads its `eos_token_id` field on first access and caches the
 result. The value can be an ID or a nonempty list. Each ID must exist in the
@@ -314,6 +333,8 @@ recorded case.**
   official tooling on 12 tokenization, 8 chat and 4 decoding cases, plus one
   Qwen regression case.
 - **Qwen3.8.** No separate tokenizer case count is recorded.
+- **The case-aware split pattern.** No mismatch against the `tokenizers`
+  0.23.3 library. The counts are in the details below.
 
 These checks cover the tokenizer and template only. They say nothing about
 model quality or serving.
@@ -329,6 +350,39 @@ model quality or serving.
 | Chat-template formatting | 23 |
 
 The decoding cases ran in both special-token modes and streamed.
+
+</details>
+
+<details>
+<summary><b>The case counts of the case-aware split pattern</b></summary>
+
+The checkpoint was Inkling 2 Mini. The SHA-256 of its `tokenizer.json` starts
+with `7f332727f9a3`. The reference was the `tokenizers` 0.23.3 library with
+the same file. The checks ran on 2026-11-22.
+
+| Check | Cases | Equal |
+| --- | ---: | ---: |
+| Token IDs and decode, program text and prose | 2,493 | 2,493 |
+| Token IDs and decode, strings built from pattern edges | 20,000 | 20,000 |
+| Split pieces of the 20,000 edge strings | 123,096 | 123,096 |
+| Control spellings kept as text by `encode_ordinary` | 60 | 60 |
+| Character class of each code point above U+007F | 1,111,936 | 1,111,936 |
+
+- The first, second and fourth rows are the `PARITY` line that the ignored
+  test `tests/inkling_host.rs` prints. The test reads the tokenizer file and
+  the corpus from the ignored folder `.local/cased-tokenizer/`. They are not
+  in the repository.
+- The third row came from the unit test `pieces_equal_the_reference_vectors`
+  in `src/cased_split.rs`, run once with the large set in place of its
+  fixture. The fixture in the repository has 1,135 strings and 2,967 pieces.
+- The fifth row compared the cuts of the reference library on five probe
+  strings for each code point with the class from `UnicodeData-16.0.0.txt`.
+  The unit test `class_tables_cover_every_code_point` pins the tables to
+  that file.
+
+Token IDs alone do not prove a split rule. In one trial a wrong word rule
+gave the reference IDs on all 22,493 strings. The comparison of the pieces
+found it.
 
 </details>
 

@@ -73,7 +73,7 @@ fn run() -> Result<(), String> {
                         .collect(),
                     tools: Vec::new(),
                     enable_thinking: false, thinking_off_requested: false,
-                    reasoning_effort: Default::default(),
+                    reasoning_effort: Default::default(), effort_ask: Default::default(),
                     tool_choice: Default::default(), parallel_tool_calls: true,
                 };
                 let formatted = spark_serve::tokenizer::format_chat(&input, 1 << 20)?;

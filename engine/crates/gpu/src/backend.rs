@@ -1,5 +1,5 @@
 //! Scoped GB10 backend. Persistent buffers and one ordered decode stream.
-use super::*; #[path = "backend/causal_ops.rs"] mod causal_ops; #[path = "backend/expert_ops.rs"] mod expert_ops; #[path = "backend/prompt_ops.rs"] mod prompt_ops; #[path="backend/device_route.rs"] mod device_route; pub use device_route::DeviceRouteTable;
+use super::*; #[path = "backend/causal_ops.rs"] mod causal_ops; #[path = "backend/packed.rs"] mod packed; #[path = "backend/expert_ops.rs"] mod expert_ops; #[path = "backend/prompt_ops.rs"] mod prompt_ops; #[path="backend/device_route.rs"] mod device_route; pub use device_route::DeviceRouteTable;
 #[path = "next_profile.rs"] mod next_profile;
 #[path = "frontend_stream.rs"] mod frontend_stream;
 #[path = "verify_segment.rs"] mod verify_segment;
@@ -21,7 +21,7 @@ pub use fp8::{Fp8GroupedScratch, Fp8RoutingFlag};
 #[path = "backend/dense_tile.rs"] mod dense_tile;
 #[path = "backend/fill_skip.rs"] mod fill_skip; #[path = "backend/dense.rs"] mod dense; #[path = "backend/resident_program.rs"] mod resident_program; pub use resident_program::ResidentProgram; #[path = "backend/resident_views.rs"] mod resident_views; #[path = "backend/resident_launch.rs"] mod resident_launch; #[path = "backend/resident_queue.rs"] mod resident_queue; pub use resident_queue::ResidentQueue;
 #[path = "backend/mhc.rs"] mod mhc; pub use mhc::{Bf16Vector,ResidentMhc,MhcPass}; use kernels::AbKernels; #[path = "backend/mhc_boundary.rs"] mod mhc_boundary; pub use mhc_boundary::{ResidentMhcBoundary,MhcBoundaryPass,MhcHostLink,Shadow,ShadowRange,GpuMark,fused_launches as mhc_fused_launches,fused_row_launches as mhc_fused_row_launches};
-#[path = "backend/tc_family.rs"] mod tc_family; #[cfg(feature="kernel-bench")] #[path = "backend/launch_split.rs"] mod launch_split; #[path = "backend/pair_split.rs"] mod pair_split;
+#[path = "backend/tc_family.rs"] mod tc_family; #[path = "backend/inkling_family.rs"] mod inkling_family; #[path = "backend/staged.rs"] mod staged; #[cfg(feature="kernel-bench")] #[path = "backend/launch_split.rs"] mod launch_split; #[path = "backend/pair_split.rs"] mod pair_split;
 #[path = "backend/nv_capture.rs"] pub(crate) mod nv_capture;
 #[path = "backend/prompt_route.rs"] mod prompt_route; pub use prompt_route::PromptRoute;
 #[path = "backend/prompt_native.rs"] mod prompt_native; pub use prompt_native::{PromptExpertTable,PromptRowScales,PromptNativeBatch,PromptNativeKeep,PromptOperandSource,PromptPacked};
@@ -350,6 +350,7 @@ pub struct Backend<'a> {
     ab: RefCell<Option<AbKernels<'a>>>, arm_x: Cell<bool>,
     context: &'a Context, module: Module<'a>, mode: MatvecMode,
     tc: tc_family::TcState<'a>, // the second kernel image (tensor-core family) and its kept state
+    inkling: inkling_family::InklingState<'a>, // the third kernel image (Inkling 2 Mini's own kernels)
     profiling: Cell<bool>, profile_kind: Cell<Option<usize>>, stats: RefCell<BackendStats>,
     stream: Stream<'a>, matvec_function: Cell<Handle>, layers: Result<LayerKernels<'a>, String>,
     timings: RefCell<Vec<(usize, Option<usize>, Event<'a>, Event<'a>)>>,
@@ -492,7 +493,9 @@ impl<'a> Backend<'a> {
             return Err(error);
         }
         let profiling = self.profiling.replace(false);
+        let marked = self.mark_graph_capture(true);
         let result = run();
+        self.mark_graph_capture(marked);
         self.profiling.set(profiling);
         let mut graph = ptr::null_mut();
         let ended = unsafe { check(cuStreamEndCapture(self.stream.raw, &mut graph), "cuStreamEndCapture") };
@@ -1091,7 +1094,7 @@ impl<'a> Backend<'a> {
     /// # Safety
     /// As [`Self::launch_flash`].
     pub unsafe fn launch_flash_grid(&self, name: &str, blocks: u32, rows: u32, planes: u32, threads: u32, shared: u32, args: &mut [*mut c_void]) -> Result<(), String> {
-        #[cfg(feature="kernel-bench")] let _split=self.split_timed(name)?; #[cfg(feature="kernel-bench")] let (blocks,threads)=self.fixture_launch_dimensions(name,blocks,threads)?; if self.record_resident_launch(name,[blocks,rows,planes,threads,shared],args)? {self.count_projection_entry(name);return Ok(());} let module = if tc_family::in_tc_image(name) { self.tc_module()? } else { &self.module }; let function = if shared == 0 {
+        #[cfg(feature="kernel-bench")] let _split=self.split_timed(name)?; #[cfg(feature="kernel-bench")] let (blocks,threads)=self.fixture_launch_dimensions(name,blocks,threads)?; if self.record_resident_launch(name,[blocks,rows,planes,threads,shared],args)? {self.count_projection_entry(name);return Ok(());} let module = self.module_for(name)?; let function = if shared == 0 {
             module.function(name)?
         } else {
             module.function_with_shared(name, shared)?

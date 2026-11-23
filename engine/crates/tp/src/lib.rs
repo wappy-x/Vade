@@ -44,6 +44,8 @@ pub mod mxfp8_projection;
 pub mod dynamic_projection;
 pub mod causal_layer;
 pub mod bounded_decoder;
+/// The decode driver of the block family with a loop. Its host run is the byte reference of its device run.
+pub mod loop_decoder;
 #[cfg(target_os="linux")]
 pub mod host_conductor;
 pub mod row_split;

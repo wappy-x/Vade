@@ -294,7 +294,8 @@ const BARE_TEXT: [&str; 3] = ["--sparks", "2", "--diagnostic-unqualified-text"];
 /// One `vade up` of the text service against an engine that fails its next starts with `logs`, in turn.
 /// Returns the result, what was printed, every rank start as (label, context, depth) and the app. The app holds
 /// the fixture, whose folder keeps the session record: it lives as long as the app does.
-fn text_up(extra: &[&str], logs: &[&'static str]) -> (Result<(), String>, String, Vec<(String, String, String)>, TextApp) {
+type TextStart = (Result<(), String>, String, Vec<(String, String, String)>, TextApp);
+fn text_up(extra: &[&str], logs: &[&'static str]) -> TextStart {
     let mut f = Fixture::fp4(2, false);
     let mut app = App { config: f.app.config.clone(), dry: false, runner: RefusesInTurn { inner: std::mem::take(&mut f.app.runner), logs: logs.iter().copied().collect(), now: None } };
     let capture = crate::output::testing::Capture::default();

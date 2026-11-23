@@ -1,0 +1,23 @@
+# Register table of the Inkling image (Ruling R6h). Checked by `cargo kernels --inkling` (and plain `cargo kernels`)
+# wherever ptxas exists, with the rules of kernels-tc/REGISTERS.txt, plus a fifth column: the stack bytes an entry may
+# use (the arms keep the 32 sum parts of a row and their input slices on the stack). Spill bytes are never allowed.
+# entry                        threads  max_registers  max_shared_bytes  max_stack_bytes
+# Measured on pair two, rank 0, 2026-11-22 (CUDA 13.0 ptxas, run H3): block_arms 82 registers, 128 shared, 576 stack;
+# block_rows 84 registers, 0 shared, 384 stack; no spill. Each row = the measured registers plus 4, the measured bytes.
+# block_arms shared: 128 bytes of sum parts + 4,096 bytes of RowDots tiles (2 x DOT_TILE words), 2026-11-22 ink-dots.
+# block_arms stack 576 -> 608 bytes (measured, pair four rank 1, run W2): the staged SinkSoftmax and WindowValues forms.
+resident_launch_block_arms     128      86             4224              608
+resident_launch_block_rows     128      88             0                 384
+# The staged BF16 products (seat INKLOAD), measured in the macro form on pair one, rank 1 (CUDA 13.0 ptxas): row product
+# 80 registers, 38,912 shared, 0 stack (launched with 32 or 128 threads; the row is for 128); rows tile 62 registers,
+# 36,864 shared, 0 stack. Each row = the measured registers plus 4, the measured bytes. The rows tile with index rows
+# (kind 92, two row tables): 78 registers, 36,864 shared, 0 stack, still 2 blocks a multiprocessor (pair one, rank 1).
+resident_launch_plain_staged   128      84             38912             0
+resident_launch_plain_staged_rows 256   82             36864             0
+# resident_launch_plain_packed (seat INKPACK): measured in the general image 68 registers, 37,376 shared (static), 0 stack.
+resident_launch_plain_packed   160      72             37376             0
+# resident_launch_plain_packed_group (seat INKPACK): the same body as plain_packed; not yet measured, the row of the single entry.
+resident_launch_plain_packed_group 160    76             37376             0
+# resident_launch_plain_packed_picked (seat INKPACK): measured 89 registers (seat INKDRV1's box build, 22:06), 0 stack; row = measured plus 4.
+# Occupancy stays bound by shared memory (37,376 bytes a block), not by 89 x 160 registers a block.
+resident_launch_plain_packed_picked 160   93             37376             0

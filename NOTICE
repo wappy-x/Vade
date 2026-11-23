@@ -173,3 +173,27 @@ The same inventory is maintained in engine/NOTICE.
              Token IDs, added tokens, and tokenizer settings are unchanged.
              The source tokenizer SHA256 is 19e773648cb4e65de8660ea6365e10acca112d42a854923df93db4a6f333a82d.
    License:  The checkpoint card names the NVIDIA Open Model Agreement.
+
+16. Inkling 2 Mini chat template and reply grammar
+   By:       Thinking Machines Lab, Inc.
+   Use:      Kept as model configuration. The template selects the chat renderer by its bytes.
+   Files:    crates/serve/templates/inkling2-mini.jinja
+             crates/serve/templates/inkling2-mini-response.json
+   Source:   https://huggingface.co/thinkingmachines/Inkling-2-Mini/tree/b85c3cfa615fc413cc9af3379f491b963f3b586a
+   SHA256:   53a9035f3255945704b5857657cfb00c1165090c0641c4f782a0cbf268cc16dc (chat_template.jinja)
+   Changes:  The template is unchanged. The reply grammar is the response_template field
+             of tokenizer_config.json, written with one-space indents.
+   License:  The model card of that revision names Apache-2.0.
+   Text:     LICENSE
+
+17. Inkling 2 Mini reference token IDs and token bytes
+   By:       Thinking Machines Lab, Inc.
+   Files:    crates/serve/tests/fixtures/inkling-chat/reference-prompts.jsonl
+             crates/serve/tests/fixtures/inkling-chat/reference-replies.jsonl
+             crates/serve/tests/fixtures/inkling-chat/vocabulary.tsv
+   Source:   thinkingmachines/Inkling-2-Mini at b85c3cfa615fc413cc9af3379f491b963f3b586a
+   Changes:  Select the bytes of 695 token IDs from tokenizer.json. The prompt token IDs come from
+             the template and the tokenizer of the checkpoint. The replies are outputs of the checkpoint.
+   License:  The model card of that revision names Apache-2.0.
+   Text:     LICENSE
+   Record:   crates/serve/tests/fixtures/inkling-chat/README.md

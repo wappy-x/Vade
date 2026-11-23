@@ -12,7 +12,7 @@
 | [`Phi-4-MIT.txt`](Phi-4-MIT.txt) | Microsoft Phi-4 MIT License for `crates/tokenizer/templates/phi4.jinja`. |
 | [`Contributor-Covenant-CC-BY-4.0.txt`](Contributor-Covenant-CC-BY-4.0.txt) | Creative Commons Attribution 4.0 International for the repository’s Contributor Covenant 2.1 `CODE_OF_CONDUCT.md`. |
 | [`../crates/tokenizer/UNICODE-NOTICE.txt`](../crates/tokenizer/UNICODE-NOTICE.txt) | Unicode License V3 and attribution for the generated Unicode character tables. |
-| [`../LICENSE`](../LICENSE) | Apache-2.0 text for the Gemma 4 chat template, as identified by its recorded official model source. |
+| [`../LICENSE`](../LICENSE) | Apache-2.0 text for the Gemma 4 chat template, as identified by its recorded official model source. The same text covers the Inkling 2 Mini chat template, its reply grammar and its reference token files, as the model card of their revision identifies. |
 
 **How it fits:** [`NOTICE`](../NOTICE) lists every third-party item and its license text; [Provenance](../docs/provenance.md) records hashes. The Llama and Phi-4 templates are embedded by the Rust tokenizer and retained for that use.
 

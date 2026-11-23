@@ -1,9 +1,9 @@
 //! Owned single-token operation outputs. Borrowed inputs live through completion.
 use super::*;
 use crate::causal_ops::{Shape,Arguments};
-pub struct CausalInputs<'s,'d> {slots:[Option<&'s DeviceVector<'d>>;4],checked_rows:bool,bf16:bool}
+pub struct CausalInputs<'s,'d> {slots:[Option<&'s DeviceVector<'d>>;4],checked_rows:bool,bf16:bool,rows:Option<(usize,u32)>}
 impl<'s,'d> From<[Option<&'s DeviceVector<'d>>;4]> for CausalInputs<'s,'d> {
-    fn from(slots:[Option<&'s DeviceVector<'d>>;4])->Self {Self {slots,checked_rows:false,bf16:false}}
+    fn from(slots:[Option<&'s DeviceVector<'d>>;4])->Self {Self {slots,checked_rows:false,bf16:false,rows:None}}
 }
 impl<'a> Backend<'a> {
     #[cfg(feature="kernel-bench")]
@@ -29,29 +29,42 @@ impl<'a> Backend<'a> {
         if keys.len()!=shape.taps as usize*4 {return Err("fixture live rows differ".into());}
         let keys=self.upload_vector(&keys)?;let values=self.upload_vector(&values)?;
         let mut scores=self.vector(shape.heads as usize*shape.rows as usize)?;
-        self.resident_causal_into(Shape {op:Op::ScoresTable,..shape},CausalInputs {slots:[Some(query),Some(&keys),None,None],checked_rows:true,bf16:false},None,&mut scores)?;
+        self.resident_causal_into(Shape {op:Op::ScoresTable,..shape},CausalInputs {slots:[Some(query),Some(&keys),None,None],checked_rows:true,bf16:false,rows:None},None,&mut scores)?;
         let count=self.upload_vector(&[shape.taps as f32])?;
         let probabilities=self.causal_operation(Shape {op:Op::Softmax,taps:0,cols:0,..shape},[Some(&scores),Some(&count),None,None],None)?;
         let mut output=self.vector(shape.heads as usize*shape.cols as usize)?;
-        self.resident_causal_into(Shape {op:Op::ValuesTable,dim:shape.cols,cols:shape.dim,..shape},CausalInputs {slots:[Some(&probabilities),Some(&values),None,None],checked_rows:true,bf16:false},None,&mut output)?;
+        self.resident_causal_into(Shape {op:Op::ValuesTable,dim:shape.cols,cols:shape.dim,..shape},CausalInputs {slots:[Some(&probabilities),Some(&values),None,None],checked_rows:true,bf16:false,rows:None},None,&mut output)?;
         Ok([scores,probabilities,output])
     }
     pub fn causal_operation(&self,shape:Shape,input:[Option<&DeviceVector<'_>>;4],weight:Option<&DeviceVector<'_>>)->Result<DeviceVector<'a>,String> {
         let (_,_,units,words)=shape.lengths().ok_or("invalid causal operation shape")?;
         let mut output=self.vector(units*words)?;self.resident_causal_into(shape,input,weight,&mut output)?;Ok(output)
     }
+    /// Many rows of one Inkling block arm in one launch (`block_rows`, entry `resident_launch_block_rows`): row `r`
+    /// runs the arm on its own slice of each input, or on the whole input when bit `n` of `shared` is set. The output
+    /// holds `rows` times the arm's words, the rows in order. The counts and the refusals are `block_rows::lengths`.
+    pub fn block_rows_into<'s,'d:'s>(&self,shape:Shape,rows:usize,shared:u32,input:[Option<&'s DeviceVector<'d>>;4],weight:Option<&DeviceVector<'_>>,output:&mut DeviceVector<'_>)->Result<(),String> {
+        self.resident_causal_into(shape,CausalInputs {slots:input,checked_rows:false,bf16:false,rows:Some((rows,shared))},weight,output)
+    }
     /// Caller-owned stable storage for an ordered graph piece. Inputs and
     /// weights may alias each other, but the private output cannot alias either.
     pub fn resident_causal_into<'s,'d:'s>(&self,shape:Shape,input:impl Into<CausalInputs<'s,'d>>,weight:Option<&DeviceVector<'_>>,output:&mut DeviceVector<'_>)->Result<(),String> {
         // `bf16` (only `project_bf16_into` sets it): the Project weight is rows x cols BF16 patterns packed two to a word (half the words) and
         // `project_bf16_ordered` runs instead of `project_f32_ordered`.
-        let CausalInputs {slots:input,checked_rows,bf16}=input.into();
+        let CausalInputs {slots:input,checked_rows,bf16,rows:row_launch}=input.into();
         self.require_resident_stream()?;
+        // A block arm inside any stream capture: refused before anything is allocated, cleared or launched.
+        if crate::block_ops::is_block(shape.op) && self.arm_capture() {return Err("a block arm is never launched inside a stream capture".into());}
         use crate::causal_ops::Op;
         let table_form=matches!(shape.op,Op::ScoresTable|Op::ValuesTable|Op::ScoresPacked|Op::ValuesPacked);
         if matches!(shape.op,Op::ScoresIndirect|Op::ValuesIndirect|Op::ScoresTable|Op::ValuesTable|Op::ScoresPacked|Op::ValuesPacked) && !checked_rows {return Err("indirect attention requires checked row owners".into());}
         if table_form && !crate::causal_ops::attention_table_proven(shape) {return Err("attention table shape is outside the byte-proven family".into());}
-        let (lengths,weights,units,words)=shape.lengths().ok_or("invalid causal operation shape")?;
+        // Many rows of one block arm (`block_rows`): their own counts, and only the arms take them.
+        let (lengths,weights,units,words)=match row_launch {
+            Some((count,shared)) if crate::block_ops::is_block(shape.op)=>crate::block_rows::lengths(shape,count,shared).ok_or("invalid block rows shape")?,
+            Some(_)=>return Err("rows of one launch are for the block arms only".into()),
+            None=>shape.lengths().ok_or("invalid causal operation shape")?,
+        };
         if bf16 && (shape.op!=Op::Project || weights%2!=0) {return Err("the BF16 form is the plain Project only".into());}
         let weights=if bf16 {weights/2} else {weights};
         let mut addresses=[4u64;4];
@@ -67,7 +80,7 @@ impl<'a> Backend<'a> {
         if matches!(shape.op,Op::StepPlanar|Op::ConvParts) && !fast {return Err("planar causal operation is outside the byte-swept family".into());}
         // The generic unit is the fold alone: the fold that rounds its rows (`causal_ops::FOLD_ROUNDS`) exists as the device version only.
         if shape.op==Op::ExpertFold && shape.dim==crate::causal_ops::FOLD_ROUNDS && !fast {return Err("the fold that rounds its rows is outside the byte-swept family".into());}
-        self.require_arm_kernels(&[if shape.op==Op::AbsorbScores {"latent_absorption_scores"} else if shape.op==Op::AbsorbValues {"latent_absorption_values"} else if crate::latent_absorb::is_absorb(shape.op) {"latent_absorption"} else if fast {"causal_fast"} else {"causal_operation"},if bf16 {"project_bf16_ordered"} else {"project_f32_ordered"}])?;
+        self.require_arm_kernels(&[if shape.op==Op::AbsorbScores {"latent_absorption_scores"} else if shape.op==Op::AbsorbValues {"latent_absorption_values"} else if crate::latent_absorb::is_absorb(shape.op) {"latent_absorption"} else if row_launch.is_some() {"resident_launch_block_rows"} else if crate::block_ops::is_block(shape.op) {"resident_launch_block_arms"} else if fast {"causal_fast"} else {"causal_operation"},if bf16 {"project_bf16_ordered"} else {"project_f32_ordered"}])?;
         self.check_vector(output,units*words)?;
         if output.is_segmented() || !output.writable_from(0) {return Err("resident output requires private contiguous storage".into());}
         let start=output.device_address();let end=start+output.len() as u64*4;
@@ -79,6 +92,11 @@ impl<'a> Backend<'a> {
         let mut args=Arguments {input:addresses,weight:address,output:output.device_address(),shape};
         let (mut w,mut x,mut y)=(address,addresses[0],output.device_address());
         let (mut rows,mut cols)=(shape.rows,shape.cols);
+        // The Inkling block arms run in their own kernel entry (Ruling R6g): one command of their own kind, recorded when
+        // recording runs, else uploaded here as a table of one command for a launch at once. Every extent the command
+        // names is checked above.
+        // Recorded, or launched at once with its table kept here through completion (`block_arm`, Inkling's host file).
+        let block=if crate::block_ops::is_block(shape.op) {Some(self.block_arm(shape,row_launch,input,weight,output,units,args)?)} else {None};
         // SAFETY: Shape bounds every indexed read and output unit. check_vector
         // checks all nonempty owners, contexts, and exact lengths. Inputs are
         // read-only. The private output is initialized, disjoint, and contiguous. Empty spans
@@ -91,7 +109,8 @@ impl<'a> Backend<'a> {
         // The table form has separate key/value entries with a checked head
         // stride. Its query and row bases are 16-byte aligned. The proven
         // shape supplies each kernel's complete native launch geometry.
-        let launched=unsafe {if shape.op==crate::causal_ops::Op::Project {
+        // A block arm was recorded or launched by `block_arm` above; `block` keeps its table alive until completion.
+        let launched=if block.is_some() {Ok(())} else {unsafe {if shape.op==crate::causal_ops::Op::Project {
             // This resident-only operation keeps separate RN FP32 products and
             // ascending adds. The complete row and weight extents are checked above.
             // The BF16 entry keeps the geometry it was swept in; the FP32 entry takes the fold and short-row rules of plain_geometry.
@@ -100,7 +119,7 @@ impl<'a> Backend<'a> {
         } else if table_form {
             let threads=if matches!(shape.op,Op::ScoresTable|Op::ScoresPacked) {crate::causal_ops::ATTENTION_TABLE_SCORES_THREADS} else {crate::causal_ops::ATTENTION_TABLE_VALUES_THREADS};
             self.launch_flash("causal_operation",crate::causal_ops::attention_table_blocks(shape),threads,&mut [parameter(&mut args)])
-        } else {let (blocks,threads)=if crate::latent_absorb::is_absorb(shape.op) {crate::prompt_launches::record("absorb_step");(crate::causal_ops::absorb_blocks(shape).ok_or("absorbed step grid exceeds its ABI")?,crate::absorb_tc::THREADS)} else {crate::causal_ops::geometry(shape,units)};self.launch_flash(if shape.op==Op::AbsorbScores {"latent_absorption_scores"} else if shape.op==Op::AbsorbValues {"latent_absorption_values"} else if crate::latent_absorb::is_absorb(shape.op) {"latent_absorption"} else if fast {"causal_fast"} else {"causal_operation"},blocks,threads,&mut [parameter(&mut args)])}};
+        } else {let (blocks,threads)=if crate::latent_absorb::is_absorb(shape.op) {crate::prompt_launches::record("absorb_step");(crate::causal_ops::absorb_blocks(shape).ok_or("absorbed step grid exceeds its ABI")?,crate::absorb_tc::THREADS)} else {crate::causal_ops::geometry(shape,units)};self.launch_flash(if shape.op==Op::AbsorbScores {"latent_absorption_scores"} else if shape.op==Op::AbsorbValues {"latent_absorption_values"} else if crate::latent_absorb::is_absorb(shape.op) {"latent_absorption"} else if fast {"causal_fast"} else {"causal_operation"},blocks,threads,&mut [parameter(&mut args)])}}};
         let completed=self.resident_completion();let result=launched.and(completed);
         #[cfg(feature="kernel-bench")]
         if result.is_ok() && table_form {let slot=usize::from(matches!(shape.op,Op::ValuesTable|Op::ValuesPacked));self.stats.borrow_mut().attention_dispatches[slot]+=1;}
@@ -117,7 +136,16 @@ impl<'a> Backend<'a> {
         if rows==0 || cols==0 || !cols.is_multiple_of(8) {return Err("BF16 projection needs rows and columns that are a multiple of 8".into());}
         if !crate::plain_admission::bf16_listed(rows,cols) {return Err("BF16 projection shape is outside the listed step shapes".into());}
         let shape=Shape {op:Op::Project,heads:0,dim:0,taps:0,rows:u32::try_from(rows).map_err(|_|"BF16 projection rows exceed the ABI")?,cols:u32::try_from(cols).map_err(|_|"BF16 projection columns exceed the ABI")?,epsilon:0.0,bound:0.0};
-        self.resident_causal_into(shape,CausalInputs {slots:[Some(input),None,None,None],checked_rows:false,bf16:true},Some(weight),output)
+        self.resident_causal_into(shape,CausalInputs {slots:[Some(input),None,None,None],checked_rows:false,bf16:true,rows:None},Some(weight),output)
+    }
+    /// `project_bf16_into` for a matrix of any shape with columns in whole 8. A shape outside the listed step shapes runs
+    /// the scalar chain of the same entry, one thread a row (`project_bf16_ordered`: "Any other shape takes the scalar
+    /// chain"). The words are the same chain: rising columns from 0.0, each product rounded before its add.
+    pub fn project_bf16_chain_into(&self,rows:usize,cols:usize,input:&DeviceVector<'_>,weight:&DeviceVector<'_>,output:&mut DeviceVector<'_>)->Result<(),String> {
+        use crate::causal_ops::Op;
+        if rows==0 || cols==0 || !cols.is_multiple_of(8) {return Err("BF16 projection needs rows and columns that are a multiple of 8".into());}
+        let shape=Shape {op:Op::Project,heads:0,dim:0,taps:0,rows:u32::try_from(rows).map_err(|_|"BF16 projection rows exceed the ABI")?,cols:u32::try_from(cols).map_err(|_|"BF16 projection columns exceed the ABI")?,epsilon:0.0,bound:0.0};
+        self.resident_causal_into(shape,CausalInputs {slots:[Some(input),None,None,None],checked_rows:false,bf16:true,rows:None},Some(weight),output)
     }
     pub fn resident_row_attention(&self,shape:Shape,parts:&[&DeviceVector<'_>],query:&DeviceVector<'_>)->Result<[DeviceVector<'a>;3],String> {
         use crate::causal_ops::Op;
@@ -153,12 +181,12 @@ impl<'a> Backend<'a> {
         let count=tables.resident_range(count_at..count_at+1)?;
         let mut scores=self.vector(units)?;
         let scores_shape=Shape {op:if table_form {Op::ScoresTable} else {Op::ScoresIndirect},..shape};
-        self.resident_causal_into(scores_shape,CausalInputs {slots:[Some(query),table.as_ref(),None,None],checked_rows:true,bf16:false},None,&mut scores)?;
+        self.resident_causal_into(scores_shape,CausalInputs {slots:[Some(query),table.as_ref(),None,None],checked_rows:true,bf16:false,rows:None},None,&mut scores)?;
         let softmax=Shape {op:Op::Softmax,taps:0,cols:0,..shape};
         let probabilities=self.causal_operation(softmax,[Some(&scores),Some(&count),None,None],None)?;
         let values=Shape {op:if table_form {Op::ValuesTable} else {Op::ValuesIndirect},dim:shape.cols,cols:shape.dim,..shape};
         let mut output=self.vector(shape.heads as usize*shape.cols as usize)?;
-        self.resident_causal_into(values,CausalInputs {slots:[Some(&probabilities),value_table.as_ref().or(table.as_ref()),None,None],checked_rows:true,bf16:false},None,&mut output)?;
+        self.resident_causal_into(values,CausalInputs {slots:[Some(&probabilities),value_table.as_ref().or(table.as_ref()),None,None],checked_rows:true,bf16:false,rows:None},None,&mut output)?;
         Ok([scores,probabilities,output])
     }
     /// Attention over expanded rows stored packed two BF16 patterns a word (`Op::PackBf16` at the producer). Each
@@ -191,10 +219,10 @@ impl<'a> Backend<'a> {
         let tables=self.upload_vector(&addresses)?.into_resident_shared()?;
         let table=Some(tables.resident_range(0..count_at)?);let count=tables.resident_range(count_at..count_at+1)?;
         let mut scores=self.vector(units)?;
-        self.resident_causal_into(Shape {op:Op::ScoresPacked,..shape},CausalInputs {slots:[Some(query),table.as_ref(),None,None],checked_rows:true,bf16:false},None,&mut scores)?;
+        self.resident_causal_into(Shape {op:Op::ScoresPacked,..shape},CausalInputs {slots:[Some(query),table.as_ref(),None,None],checked_rows:true,bf16:false,rows:None},None,&mut scores)?;
         let probabilities=self.causal_operation(Shape {op:Op::Softmax,taps:0,cols:0,..shape},[Some(&scores),Some(&count),None,None],None)?;
         let mut output=self.vector(shape.heads as usize*shape.cols as usize)?;
-        self.resident_causal_into(Shape {op:Op::ValuesPacked,dim:shape.cols,cols:shape.dim,..shape},CausalInputs {slots:[Some(&probabilities),table.as_ref(),None,None],checked_rows:true,bf16:false},None,&mut output)?;
+        self.resident_causal_into(Shape {op:Op::ValuesPacked,dim:shape.cols,cols:shape.dim,..shape},CausalInputs {slots:[Some(&probabilities),table.as_ref(),None,None],checked_rows:true,bf16:false,rows:None},None,&mut output)?;
         Ok([scores,probabilities,output])
     }
 }

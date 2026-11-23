@@ -4,6 +4,7 @@
 //!
 //! - `process`: process identity, safe signalling and failed-launch rollback.
 //! - `model`: shard presence checks and their inventory cache.
+//! - `text-service`: the checkpoint plan's text service, as three numbers. The config stays on the Spark.
 //! - `logs`: bounded engine-log tails and credential redaction.
 //! - `gpu`: idle-GPU checks before start and after stop.
 //! - `prepare`: install preparation without a resident owner.
@@ -285,6 +286,21 @@ fn handle(request: &Fields) -> Result<Fields, String> {
             model::cached(&path, &expanded_path(stamp)?)?
         } else { check_model(&path)?; false };
         return Ok(fields(&[("weights", "present"), ("inventory_cache", if cached { "hit" } else { "checked" })]));
+    }
+    // The checkpoint plan names the text service. The reply is three numbers, not the config.
+    if operation == "text-service" {
+        let path = expanded_path(required(request, "model_path")?)?;
+        let bytes = engine_model::safetensors::read_bounded(&path.join("config.json"), engine_model::shapes::CONFIG_BYTES)
+            .map_err(|error| format!("Cannot read the checkpoint config. {error}"))?;
+        let service = crate::text_service::from_config_bytes(&bytes);
+        let sparks = service.sparks.to_string();
+        let default_depth = service.default_depth.to_string();
+        let max_depth = service.max_depth.to_string();
+        return Ok(fields(&[
+            ("text_sparks", &sparks),
+            ("text_draft_default", &default_depth),
+            ("text_draft_max", &max_depth),
+        ]));
     }
     // Use the same expansion as engine argv, without creating ownership state.
     if operation == "paths" {

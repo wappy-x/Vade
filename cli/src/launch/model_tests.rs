@@ -660,3 +660,61 @@ fn large_checkpoint_index_fits_the_bound_and_oversized_index_refuses() {
             .contains("exceeds its size limit")
     );
 }
+
+#[test]
+fn a_looped_block_checkpoint_passes_detect_as_the_one_spark_text_service() {
+    let f = Fixture::new();
+    let path = f.0.join("models/org/read-only");
+    test_write_unserved_checkpoint(&path, None);
+    // The plan in config.json decides: the folder name says nothing.
+    let model = inspect(&path).unwrap();
+    assert!(model.loop_text && !model.fp4_local && model.bytes > 0 && model.context_limit >= 64, "{model:?}");
+    // Discovery finds it, as install's Detect does.
+    assert_eq!(find(&f.0).unwrap().path, fs::canonicalize(&path).unwrap());
+    // `vade launch` and `vade models` do not offer it: it is a diagnostic start only.
+    assert_eq!(serving_format(&path).unwrap_err(), LOOP_TEXT_ONLY);
+    assert!(loop_text(&path) && !loop_text(&f.0.join("models/org/none")));
+    // The local start hands it to the engine's loop text service, with no draft depth and none of FP4-Local's
+    // options, and whenever it adds the diagnostic option it prints the preview line built from the plan's binding.
+    let (args, note) = crate::launch::local_start("k.ptx", &path, 32768, "18080", true, true).unwrap();
+    let shown = path.to_string_lossy();
+    assert_eq!(args, ["0", "1", "127.0.0.1:0", "127.0.0.1:0", "k.ptx", &*shown, "32768", "127.0.0.1:18080", "0", "--diagnostic-unqualified-text", "--mtp", "0"]);
+    assert_eq!(note.as_deref(), Some("read only starts as a preview: text only. Image input and the draft model are not built yet. It has not been through qualification."));
+    let (args, note) = crate::launch::local_start("k.ptx", &path, 32768, "18080", false, false).unwrap();
+    assert_eq!((&args[9..], note), (&["--fp4-local".to_string(), "--decode-fuse".into(), "off".into()][..], None));
+    for loop_text in [false, true] {
+        let (args, note) = crate::launch::local_start("k.ptx", &path, 32768, "18080", false, loop_text).unwrap();
+        assert_eq!(args.iter().any(|a| a == "--diagnostic-unqualified-text"), note.is_some());
+    }
+    // A folder the plan cannot bind gets no silent diagnostic start.
+    assert!(crate::launch::local_start("k.ptx", &f.0.join("models/org/none"), 32768, "18080", false, true).is_err());
+    // An unknown value in a field names the field and the value.
+    let sidecar = include_str!("../../../engine/crates/model/tests/fixtures/inkling-index/hf_quant_config.json");
+    test_write_unserved_checkpoint(&path, Some(&sidecar.replace("\"inkling2\"", "\"other_method\"")));
+    assert_eq!(inspect(&path).unwrap_err(), "This engine cannot load this model. Model type inkling2_loop: hf_quant_config.json: unsupported sidecar quant_method other_method.");
+    // A control character in a field value cannot reach the terminal as a new line.
+    test_write_unserved_checkpoint(&path, Some(&sidecar.replace("\"inkling2\"", "\"a\\nb\"")));
+    assert_eq!(inspect(&path).unwrap_err(), "This engine cannot load this model. Model type inkling2_loop: hf_quant_config.json: unsupported sidecar quant_method a b.");
+}
+
+#[test]
+fn a_current_family_checkpoint_beside_a_looped_preview_is_chosen_as_on_main() {
+    // REVSHARED finding 5: VADE_MODELS=~/models holding a Qwen folder and an Inkling folder picks the Qwen one.
+    let f = Fixture::new();
+    let models = f.0.join("models");
+    let preview = models.join("org/looped");
+    test_write_unserved_checkpoint(&preview, None);
+    // Alone, the preview is found.
+    assert_eq!(locate(&models).unwrap().path, fs::canonicalize(&preview).unwrap());
+    let current = f.model("models/org/current");
+    let found = locate(&models).unwrap();
+    assert_eq!(found.path, fs::canonicalize(&current).unwrap());
+    assert!(!found.loop_text);
+    // Named, the preview is taken.
+    assert!(locate(&preview).unwrap().loop_text);
+    // Two previews and no current-family checkpoint: the owner chooses, as for two of any family.
+    let other = f.0.join("previews");
+    test_write_unserved_checkpoint(&other.join("a"), None);
+    test_write_unserved_checkpoint(&other.join("b"), None);
+    assert!(locate(&other).unwrap_err().contains("More than one model"));
+}

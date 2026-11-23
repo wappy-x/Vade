@@ -22,23 +22,25 @@ Options:
                        to override what Vade reads
   --hosts a,b          Machines of your config, in cable order; this never
                        changes the setup
-  --replicas N         2..16 independent one-Spark FP4-Local servers behind a
+  --replicas N         2..16 independent one-Spark servers (FP4-Local, or a
+                       diagnostic text plan that declares one Spark) behind a
                        local gateway
   --pairs              With --replicas 2..12: N two-Spark tensor-split servers
                        on 2N Sparks instead
   --mtp N              Drafting depth 0..3; 0 turns drafting off. Unset: the
                        engine chooses, and controller FP8 passes 2. From a
-                       controller, the GLM text service
-                       (--diagnostic-unqualified-text) takes 0..7 and loads 3
-                       when this and MTP are unset
+                       controller with --diagnostic-unqualified-text, a
+                       two-Spark text service takes 0..7 and loads 3 when this
+                       and MTP are unset; a plan that declares one Spark uses 0
   --context N          Context window in tokens, 4096..262144 (default 32768)
   --output N           Output limit in tokens, 1024..16384 (default 8192, or the
                        context if smaller)
   --chats N            Concurrent FP8 chats, 1..32 (controller)
   --memory-bytes N     Memory budget per rank, in bytes
   --cache-bytes N      FP8 retained prompt cache, in bytes; 0 disables it. Local
-                       FP4 and --diagnostic-unqualified-text (whose prompt cache
-                       is on by default) accept only 0, which turns it off
+                       FP4 and --diagnostic-unqualified-text accept only 0. A
+                       two-Spark text service keeps prompts unless this is 0; a
+                       plan that declares one Spark keeps none
   --decode-fuse MODE   on for one Spark by default; off disables the decode
                        kernel chain
   --diagnostic-unqualified-text
@@ -76,7 +78,7 @@ Notes:
   - Controller FP4 checks and passes on --chats and --cache-bytes, but its
     engine does not use them: it admits chats from memory and uses its own
     prefix cache setting.
-  - The GLM text service (vade up --sparks 2 --diagnostic-unqualified-text)
+  - A two-Spark text service (vade up --sparks 2 --diagnostic-unqualified-text)
     loads the predictor at depth 3 unless --mtp or MTP is set. When the model
     has no drafting layer, or free memory is too small for drafting, that start
     runs without drafting and says so. At loaded depth 3 or more, a greedy
@@ -88,6 +90,11 @@ Notes:
     FP4 Spark leaves the depth to the engine. Controller FP8 passes --mtp 2 when
     unset. A request with draft=plain turns drafting off for that request;
     draft=strict asks for it when a predictor is loaded.
+  - A diagnostic text plan that declares one Spark (vade up --sparks 1
+    --diagnostic-unqualified-text) runs on one Spark with no transport, passes
+    --mtp 0 when --mtp is unset, refuses a depth above its plan's max, and keeps
+    no prompt cache. With --replicas N, each replica is one Spark; --replicas
+    with --pairs is refused.
   - Two FP4-Local Sparks run the tensor split, the only two-Spark path for
     FP4-Local: both Sparks work on every token. It needs RDMA, so vade up
     refuses SEQPAR_RDMA=0 (TCP) for two FP4-Local Sparks. FP8 on two Sparks

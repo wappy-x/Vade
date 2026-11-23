@@ -21,7 +21,13 @@ pub(super) struct Model {
     pub bytes: u64,
     pub context_limit: u32,
     pub fp4_local: bool,
+    /// The checkpoint's plan is the looped block family: it runs only as the
+    /// one-Spark text service, a preview start (`vade up --sparks 1`).
+    pub loop_text: bool,
 }
+
+/// Why `vade launch` and `vade models` do not offer a looped block checkpoint.
+pub(crate) const LOOP_TEXT_ONLY: &str = "This checkpoint's text service runs on one Spark only, as an unqualified preview. Start it as: vade up --sparks 1.";
 
 pub(super) fn discover(home: &Path, saved: Option<&Path>) -> Result<Model, String> {
     discover_with(
@@ -198,14 +204,20 @@ fn locate(root: &Path) -> Result<Model, String> {
     }
     let mut pending = vec![(root.clone(), 0usize, false)];
     let mut candidates = BTreeMap::new();
+    // Looped preview checkpoints are kept apart: a current-family checkpoint beside one is chosen as before that
+    // family existed. A preview is taken when it is the only checkpoint found, or the folder named.
+    let mut previews = BTreeMap::new();
     let mut first_error = None;
     let mut entries_seen = 0usize;
     while let Some((directory, depth, linked_checkpoint)) = pending.pop() {
-        if candidates.contains_key(&directory) {
+        if candidates.contains_key(&directory) || previews.contains_key(&directory) {
             continue;
         }
         if directory.join("config.json").is_file() {
             match inspect(&directory) {
+                Ok(model) if model.loop_text => {
+                    previews.insert(model.path.clone(), model);
+                }
                 Ok(model) => {
                     candidates.insert(model.path.clone(), model);
                 }
@@ -253,8 +265,15 @@ fn locate(root: &Path) -> Result<Model, String> {
             }
         }
     }
+    if candidates.is_empty() && previews.len() > 1 {
+        return Err(format!(
+            "More than one model is available in {}; choose a checkpoint folder.",
+            display(&root)
+        ));
+    }
     candidates
         .pop_first()
+        .or_else(|| previews.pop_first())
         .map(|(_, model)| model)
         .ok_or_else(|| {
             first_error
@@ -265,7 +284,32 @@ fn locate(root: &Path) -> Result<Model, String> {
 /// Whether launch would serve the checkpoint in `path`: `Ok(true)` for
 /// FP4-Local, `Ok(false)` for the legacy FP8 format, else the refusal. Reads
 /// metadata only, never weight payloads.
-pub(crate) fn serving_format(path: &Path) -> Result<bool, String> { inspect(path).map(|model| model.fp4_local) }
+/// The line a start prints when it hands a looped block checkpoint to the engine's diagnostic text service, built
+/// from the plan's binding of the checkpoint: what it is called on disk, that only text runs, which stored parts are
+/// not run, and that it has not been qualified. `None` when the plan cannot bind it.
+pub(crate) fn loop_preview_line(path: &Path) -> Option<String> {
+    let counts = engine_model::plan::inkling_index::inspect(path).ok()?.counts();
+    let name = path.file_name()?.to_string_lossy().replace(['-', '_'], " ");
+    let mut missing = Vec::new();
+    if counts.unused > 0 { missing.push("Image input"); }
+    if counts.draft_stored > 0 { missing.push(if missing.is_empty() { "The draft model" } else { "the draft model" }); }
+    let missing = match missing.len() {
+        0 => String::new(),
+        1 => format!(" {} is not built yet.", missing[0]),
+        _ => format!(" {} are not built yet.", missing.join(" and ")),
+    };
+    Some(crate::text::terminal_text(&format!("{name} starts as a preview: text only.{missing} It has not been through qualification.")).into_owned())
+}
+
+/// Whether the checkpoint in `path` is the looped block family, by the plan in its config.json.
+pub(super) fn loop_text(path: &Path) -> bool {
+    metadata(&path.join("config.json"), 1024 * 1024).is_ok_and(|config|
+        matches!(engine_model::plan::ConfigPlan::from_config(config.as_bytes()), Ok(engine_model::plan::ConfigPlan::Loop(_))))
+}
+
+pub(crate) fn serving_format(path: &Path) -> Result<bool, String> {
+    inspect(path).and_then(|model| if model.loop_text { Err(LOOP_TEXT_ONLY.into()) } else { Ok(model.fp4_local) })
+}
 
 fn inspect(path: &Path) -> Result<Model, String> {
     let path = fs::canonicalize(path)
@@ -276,6 +320,11 @@ fn inspect(path: &Path) -> Result<Model, String> {
     let config = metadata(&path.join("config.json"), 1024 * 1024)?;
     if !crate::json::valid(&config) {
         return Err("Model config.json is not valid JSON.".into());
+    }
+    // The plan in config.json decides the family, never the folder name: a
+    // looped block checkpoint goes to the loop text service's own checks.
+    if matches!(engine_model::plan::ConfigPlan::from_config(config.as_bytes()), Ok(engine_model::plan::ConfigPlan::Loop(_))) {
+        return loop_model(path, &config);
     }
     let layout = compatible(&path, &config)?;
     let limits = engine_model::flash::checkpoint_limits(layout.format, layout.mixed.is_some());
@@ -338,13 +387,44 @@ fn inspect(path: &Path) -> Result<Model, String> {
             .ok_or("Model size is too large.")?;
     }
     serving_metadata(&path, &layout)?;
+    Ok(Model {
+        path,
+        bytes,
+        context_limit: context_limit(&config)?,
+        fp4_local: layout.mixed.is_some(),
+        loop_text: false,
+    })
+}
+
+/// A looped block checkpoint: the plan binds every stored name from the config,
+/// the storage sidecar, the index and the shard headers (no weight payload), as
+/// the engine's loop text service does before it loads. A refusal is the
+/// engine's own text.
+fn loop_model(path: PathBuf, config: &str) -> Result<Model, String> {
+    let bound = engine_model::plan::inkling_index::inspect(&path).map_err(|error| {
+        engine_model::plan::unserved_reason(&path, config.as_bytes())
+            .filter(|reason| reason.starts_with("This engine cannot load"))
+            .unwrap_or_else(|| format!("This engine cannot load this model: {error}."))
+            .replace(['\r', '\n'], " ")
+    })?;
+    let counts = bound.counts();
+    Ok(Model {
+        path,
+        bytes: counts.stored_bytes.checked_add(counts.draft_bytes).ok_or("Model size is too large.")?,
+        context_limit: context_limit(config)?,
+        fp4_local: false,
+        loop_text: true,
+    })
+}
+
+fn context_limit(config: &str) -> Result<u32, String> {
     let mut limit = 32768.0;
     for keys in [
         &["text_config", "max_position_embeddings"][..],
         &["max_position_embeddings"][..],
     ] {
-        if crate::json::path_exists(&config, keys) {
-            limit = crate::json::path_number(&config, keys)
+        if crate::json::path_exists(config, keys) {
+            limit = crate::json::path_number(config, keys)
                 .ok_or("Model context limit must be a number in config.json.")?;
             break;
         }
@@ -352,18 +432,18 @@ fn inspect(path: &Path) -> Result<Model, String> {
     if limit < 64.0 || limit.fract() != 0.0 || limit > u32::MAX as f64 {
         return Err("Model context limit is invalid in config.json.".into());
     }
-    Ok(Model {
-        path,
-        bytes,
-        context_limit: limit as u32,
-        fp4_local: layout.mixed.is_some(),
-    })
+    Ok(limit as u32)
 }
 
 // Use the engine's metadata parser so architecture, dimensions and quantization
 // cannot drift from flash-serve's accepted formats. No weights are loaded here.
 fn compatible(path: &Path, config: &str) -> Result<engine_model::flash::Config, String> {
     let parsed = engine_model::flash::Config::parse(config.as_bytes()).map_err(|error| {
+        // A family that the engine reads but cannot run gives its own reason:
+        // what it read and what is not built yet.
+        if let Some(reason) = engine_model::plan::unserved_reason(path, config.as_bytes()) {
+            return reason.replace(['\r', '\n'], " ");
+        }
         format!(
             "This engine cannot load this model: {}.",
             error.to_string().replace(['\r', '\n'], " ")
@@ -691,6 +771,31 @@ pub(crate) fn test_checkpoint() -> Vec<(&'static str, Vec<u8>)> {
     vec![("config.json", test_config(8192).into()), ("generation_config.json", test_generation_config().into()),
         ("tokenizer_config.json", test_tokenizer_config().into()), ("tokenizer.json", test_tokenizer_json().into()),
         ("model.safetensors", vec![0; 16]), ("model.safetensors.index.json", test_index().into())]
+}
+
+/// A checkpoint of a family that the engine reads but cannot run: the config,
+/// the storage sidecar, the index and two tensor files with a header and a
+/// hole in place of the payload. `sidecar` replaces the storage sidecar.
+#[cfg(test)]
+pub(crate) fn test_write_unserved_checkpoint(path: &Path, sidecar: Option<&str>) {
+    const SHARD: &str = "model-00001-of-00001.safetensors";
+    let header = include_str!("../../../engine/crates/model/tests/fixtures/inkling-index/header.json");
+    let ends = |header: &str| {
+        let doc = engine_model::json::parse(header.as_bytes(), engine_model::json::Limits::default()).unwrap();
+        doc.object().unwrap().iter().map(|(name, t)| (name.clone(), t.object().unwrap()["data_offsets"].array().unwrap()[1].u64().unwrap())).collect::<Vec<_>>()
+    };
+    let tensor_file = |name: &str, header: &str| {
+        let file = fs::File::create(path.join(name)).unwrap();
+        (&file).write_all(&[&(header.len() as u64).to_le_bytes()[..], header.as_bytes()].concat()).unwrap();
+        file.set_len(8 + header.len() as u64 + ends(header).iter().map(|(_, end)| *end).max().unwrap()).unwrap();
+    };
+    fs::create_dir_all(path).unwrap();
+    fs::write(path.join("config.json"), include_str!("../../../engine/crates/model/tests/fixtures/inkling-index/config.json")).unwrap();
+    fs::write(path.join("hf_quant_config.json"), sidecar.unwrap_or(include_str!("../../../engine/crates/model/tests/fixtures/inkling-index/hf_quant_config.json"))).unwrap();
+    let map = ends(header).iter().map(|(name, _)| format!("{name:?}:{SHARD:?}")).collect::<Vec<_>>().join(",");
+    fs::write(path.join("model.safetensors.index.json"), format!(r#"{{"metadata":{{}},"weight_map":{{{map}}}}}"#)).unwrap();
+    tensor_file(SHARD, header);
+    tensor_file("mtp.safetensors", include_str!("../../../engine/crates/model/tests/fixtures/inkling-index/draft-header.json"));
 }
 
 #[cfg(test)]

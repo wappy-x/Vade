@@ -12,6 +12,12 @@ The [external fixture test](glm_external_tests.rs) compares published vLLM
 prompt bytes. Its [source record](../../tests/fixtures/glm-upstream/README.md)
 names the scope and exclusions. It does not run an upstream tokenizer.
 
+The [message markup renderer](inkling.rs) follows the
+[checked template copy](../../templates/inkling2-mini.jinja). It handles
+text, reasoning in the history, the tool list, function calls, tool results
+and the effort message. Its [tests](inkling_tests.rs) cite the template lines
+and compare the [reference token IDs](../../tests/fixtures/inkling-chat/README.md).
+
 Back: [source map](../README.md).
 
 The [published prompt check](glm_external_tests.rs) compares retained external

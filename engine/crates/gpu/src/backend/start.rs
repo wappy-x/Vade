@@ -10,7 +10,7 @@ impl<'a> Backend<'a> {
         let requested_vec8 = mode == MatvecMode::Vec8;
         let vec8 = module.function("matvec_bf16_f32_vec8").ok();
         if requested_vec8 && vec8.is_none() { return Err("PTX has no vec8 kernel".into()); }
-        let backend = Backend { context, module, mode, tc: tc_family::TcState::new(), vec8: Cell::new(vec8), ab: RefCell::new(None), arm_x: Cell::new(false), use_vec8: Cell::new(requested_vec8), batch: RefCell::new(None), multi: RefCell::new(None),
+        let backend = Backend { context, module, mode, tc: tc_family::TcState::new(), inkling: inkling_family::InklingState::new(), vec8: Cell::new(vec8), ab: RefCell::new(None), arm_x: Cell::new(false), use_vec8: Cell::new(requested_vec8), batch: RefCell::new(None), multi: RefCell::new(None),
             moe: RefCell::new(None), fp8: RefCell::new(None), fp4: RefCell::new(None), decode_partials: RefCell::new(None),
             flash_input: RefCell::new(None), flash_mixed: RefCell::new(None), dense_offer: Cell::new(None),
             uploads: RefCell::new(UploadStaging { buffer: Pinned::new(context, crate::staging::UPLOAD_BYTES)?, capacity: crate::staging::UPLOAD_BYTES, used: 0 }),

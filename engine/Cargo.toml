@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/base", "crates/fabric", "crates/hash", "crates/model", "crates/gpu", "crates/gpu/kernels", "crates/gpu/kernels-tc", "crates/gpu/build-kernels", "crates/engine", "crates/tokenizer", "crates/serve", "crates/tp", "crates/seqpar", "tools/export"]
+members = ["crates/base", "crates/fabric", "crates/hash", "crates/model", "crates/gpu", "crates/gpu/kernels", "crates/gpu/kernels-tc", "crates/gpu/kernels-inkling", "crates/gpu/build-kernels", "crates/engine", "crates/tokenizer", "crates/serve", "crates/tp", "crates/seqpar", "tools/export"]
 default-members = ["crates/base", "crates/fabric", "crates/model", "crates/gpu", "crates/engine", "crates/tokenizer", "crates/serve", "crates/tp"]
 resolver = "2"
 

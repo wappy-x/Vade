@@ -109,7 +109,7 @@ impl<'a> Backend<'a> {
 
     /// Arm declarations resolve only active functions; PTX and launch arithmetic are unchanged.
     pub fn require_arm_kernels(&self, names: &[&str]) -> Result<(), String> {
-        for name in names { self.module.function(name)?; }
+        for name in names { self.module_for(name)?.function(name)?; }
         Ok(())
     }
     pub fn require_layer_kernels(&self) -> Result<(), String> {

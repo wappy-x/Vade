@@ -732,6 +732,21 @@ fn support_names_the_route_or_the_reason() {
 }
 
 #[test]
+fn models_says_a_looped_block_checkpoint_is_the_one_spark_diagnostic_start() {
+    let f = Fixture::new(Behavior::default());
+    let folder = f.root.join("models/org/read-only");
+    crate::launch::test_write_unserved_checkpoint(&folder, None);
+    let support = models::support(&folder, None);
+    assert_eq!((support.route.clone(), support.state()), (models::Route::Unsupported, "Not supported yet"));
+    assert_eq!(support.text(), crate::launch::LOOP_TEXT_ONLY);
+    // `vade models` prints the state and that reason for the folder.
+    let (rows, table) = models::tests_list(&f.root.join("models"));
+    assert_eq!((rows.len(), rows[0].0.as_str(), &rows[0].4), (1, "org/read-only", &support));
+    assert!(table.contains("Not supported yet") && table.contains(crate::launch::LOOP_TEXT_ONLY), "{table}");
+    assert_eq!(support.json()["reason"].as_str(), Some(crate::launch::LOOP_TEXT_ONLY));
+}
+
+#[test]
 fn hostile_listings_and_local_files_cannot_escape_block_or_panic() {
     let f = Fixture::new(Behavior::default());
     // --include '*' takes the extra files, but never a path with a dot part.

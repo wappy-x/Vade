@@ -11,7 +11,13 @@
 | [`error.rs`](error.rs) | Typed failures while reading, validating and reconciling a model plan. |
 | [`glm.rs`](glm.rs) | Translate the GLM text schema into operation data for host inspection. |
 | [`glm_index.rs`](glm_index.rs) | Bind index names to tensor roles and scale components. |
+| [`inkling.rs`](inkling.rs) | Translate the looped text schema into operation data. This is host metadata only. |
+| [`inkling_index.rs`](inkling_index.rs) | Give each stored tensor name of the looped text family a role, a type and a shape. |
 | [`layer.rs`](layer.rs) | Logical decoder order, kernel targets, buffers, and tensor splits. |
+| [`loop_load.rs`](loop_load.rs) | The load plan of the looped text family: what each device tensor is made from. Host metadata only. |
+| [`loop_state.rs`](loop_state.rs) | State of one chat of the looped text family, for each layer visit, and the byte ledger of one device. |
+| [`loop_widen.rs`](loop_widen.rs) | Turn stored 4-bit and 8-bit expert matrices into BF16 at load. Host arithmetic only. |
+| [`loop_packed.rs`](loop_packed.rs) | The contract and the host twin of an expert product that reads the stored 4-bit and 8-bit codes. Host arithmetic only. |
 | [`decoder_reference.rs`](decoder_reference.rs) | Causal scalar stack, text logits, saved state, and failure rollback. See the [reference contract](../../DECODER-REFERENCE.md). |
 | [`layer/`](layer/README.md) | Independent scalar forward and program replay. |
 | [`ffn_tests.rs`](ffn_tests.rs) | Deferred FFN tests for the shared host schedule builder. |
@@ -19,6 +25,7 @@
 | [`profile.rs`](profile.rs) | Count logical compulsory reads from model geometry. |
 | [`runtime.rs`](runtime.rs) | Hybrid runtime geometry and tensor roles, including draft layers. |
 | [`storage.rs`](storage.rs) | Read mixed storage recipes without device admission. |
+| [`storage_groups.rs`](storage_groups.rs) | Storage groups of a quantization sidecar that lists tensor names. Host metadata only. |
 | [`admission.rs`](admission.rs) | Header inventory checks and device upload byte views for deferred text. |
 | [`state.rs`](state.rs) | Checked host state byte layouts, capacity, and saved boundaries. |
 | [`tensors.rs`](tensors.rs) | Expected tensor names, storage, roles and header reconciliation. |
@@ -86,6 +93,77 @@ executable schemas reject that storage until a binding is available.
 The appended draft count is metadata. The local public source does not define
 the full `eh_proj`, `enorm`, `hnorm` and `shared_head.norm` semantics. Those
 tensors stay unmapped. No `mtp.*` alias is inferred from their names.
+
+## Looped text plans
+
+`description::ConfigPlan` has a third arm, `Loop(LoopTextDescription)`, for
+`inkling2_loop` and `inkling2_loop_text`. [`inkling.rs`](inkling.rs) reads the
+field names of the released config only. It refuses an unknown field and an
+unknown value, and it names the field. The description gives the attention
+data of each stored layer, the block mix, the loop range, the router, the
+soft caps and the visit list. The visit list is the run order for one token.
+A stored layer in the loop range occurs one time for each pass.
+
+`LoopTextDescription` is a sibling of `TextDescription`. The text service and
+`Cartridge::resident_text` do not receive it. `into_model_plan` always
+refuses it. A parsed config is not support.
+
+[`storage_groups.rs`](storage_groups.rs) reads `hf_quant_config.json`. This
+sidecar lists tensor names in groups, and each group names one stored format.
+`StorageGroups::storage_map` cross-checks the groups with `config.json` and
+returns a `StorageMap` whose keys are full tensor names. A scale tensor is
+not listed. `GroupKind::companions` gives its name, type and shape from the
+stored shape of the listed tensor. `ScaleEncoding::AmaxDenominator` in
+[`storage.rs`](storage.rs) marks 4-bit storage with one `amax` for each
+matrix of a stack and one denominator. Header admission in
+[`admission.rs`](admission.rs) refuses that encoding.
+
+[`loop_plan.rs`](../../tests/loop_plan.rs) holds the host tests. The
+[fixture notes](../../tests/fixtures/loop-plan/README.md) describe its data. Four layout facts
+are named constants, and no run has checked them yet: `FIXED_TAP_ORDER`,
+`TOKEN_TAP_ORDER` and `TOKEN_TAP_INDEX` in `inkling.rs`, and `NVFP4_NIBBLES`
+and `GATE_UP_ROWS` in `storage_groups.rs`.
+
+[`inkling_index.rs`](inkling_index.rs) gives each stored tensor name of this schema a role, a type and a
+shape. `IndexInput::from_description` takes the sizes from `LoopTextDescription` and the stored form of each
+listed name from `StorageGroups`. `IndexInput::bind` checks the header of the main file and, when it is
+present, the header of the draft file `mtp.safetensors`. A name with no role, a missing name, a wrong type
+and a wrong shape are refusals, so a bound index has no name without a role. The draft names are bound as
+"not run". `model.visual.*` names are bound as not used. The index works out the scale tensors of an expert
+stack from the config, and `GroupKind::companions` works them out from the stored shape. A test holds the
+two equal.
+
+A bound index is metadata. `BoundIndex::require_execution` and `BoundIndex::require_image_input` always
+refuse. `plan::unserved_reason` gives the text that the launcher, `vade models` and
+`Cartridge::resident_text` print for this schema: what was read and what is not built. It returns `None`
+for every other schema. [`inkling_index.rs`](../../tests/inkling_index.rs) holds the host tests, and the
+[fixture notes](../../tests/fixtures/inkling-index/README.md) describe their data.
+
+[`loop_load.rs`](loop_load.rs) makes the load plan from a bound index and the headers of the weight files.
+A device tensor has one of three forms. `Stored` keeps the bytes of one stored tensor. `LeadingRows` keeps
+the first rows of the output head, because the head stores padded rows that no token uses.
+`WidenedExperts` is one stack of expert matrices as BF16. A stack is made from its stored codes, its block
+scales and, for 4-bit storage, the factor of each expert. A matrix that holds gate rows and up rows is
+un-mixed: all gate rows, then all up rows. The image tower is not loaded. `expert_tensor` is the one place
+that decides the device form of the experts.
+
+[`loop_widen.rs`](loop_widen.rs) holds the arithmetic of the widen step. A 4-bit weight is the code value
+times the block scale times the factor of the expert, rounded to BF16 one time. The factor is `amax`
+divided by the denominator, and both are rounded to BF16 before the division, as the reference loader
+does. An 8-bit weight is the stored value times a power of two, which is exact in BF16. This is the form
+that the reference code runs. It is not the stored precision.
+
+[`loop_packed.rs`](loop_packed.rs) holds the contract of an expert product that reads the stored codes and
+their block scales, and its host twin. The product gives the words of the BF16 row product on the widened
+matrix, so a change to this form moves no token ID. No GPU kernel reads this form yet.
+
+[`loop_state.rs`](loop_state.rs) plans the state of one chat for each layer visit. A window visit keeps a
+ring of `sliding_window_size` key rows and value rows. A visit that sees every earlier token keeps one row
+for each token of the context, in whole launch buckets. Each visit keeps four convolution rings.
+`LoopLedger` sums the device bytes of the weights and of one chat. `context_limit` gives the largest
+context that fits in a byte budget, and `LoopLedger::admit` refuses a context that does not fit, with the
+fields of the memory refusal of the text service. [`loop_load.rs`](../../tests/loop_load.rs) holds the host
+tests of the three files. No service loads this family yet: these plans admit no execution.
 
 ## Text edges
 

@@ -9,6 +9,8 @@
 | [`text_checkpoint.rs`](text_checkpoint.rs) | Original tensor bytes and retained files for resident text edges. |
 | [`support/glm_tokenizer_evidence.rs`](support/glm_tokenizer_evidence.rs) | Complete source row inventory and fixed publisher delimiter checks. See the [evidence note](fixtures/glm-tokenizer/README.md). |
 | [`fixtures/glm-upstream/`](fixtures/glm-upstream/README.md) | Published external prompt vectors and their proof limits. |
+| [`inkling_output.rs`](inkling_output.rs) | The reply state machine on token IDs and its parser, at every chunk cut. See the [reference files](fixtures/inkling-chat/README.md). |
+| [`inkling_text_contract.rs`](inkling_text_contract.rs) | Ignored by default: prompt token IDs and reply text on the public tokenizer files. |
 | [`scheduler.rs`](scheduler.rs) | Integration tests for this crate. |
 | [`support/scheduler_engine.rs`](support/scheduler_engine.rs) | Shared host fake with history-based token IDs and ownership counts. |
 | [`support/scheduler_model.rs`](support/scheduler_model.rs) | Bounded enumeration through the production scheduler. Built as scheduler unit tests. |

@@ -136,6 +136,10 @@ pub enum Worker<'m> {
     Write(TpMailboxHost<'m>, WriteLink, bool),
     #[cfg(target_os = "linux")]
     Relay(TpMailboxHost<'m>, [Option<WriteLink>; 2], Links, Channels, usize),
+    /// A mailbox with no receive channel and no link: no message leaves this rank and none arrives. The worker
+    /// keeps the endpoint.
+    #[cfg(target_os = "linux")]
+    Alone(TpMailboxHost<'m>),
 }
 /// The longest a rank waits for its peer to attach its mailbox (both ranks load their models first).
 #[cfg(target_os = "linux")]
@@ -160,7 +164,13 @@ impl Wire {
                 // ONE PATH for any number of ranks: the caller hands over the links it has and the mailbox layout says
                 // which worker serves them. A layout with no relayed slot and one neighbor is the pair, and the pair's
                 // worker is the write wire, as when the caller names it. Every other layout takes the relay.
+                // A mailbox that ends where its first receive channel would start has no receive channel: no other
+                // rank writes to it, so there is no peer to attach. With no link either, the worker attaches at once
+                // (`Worker::Alone`). The layout and the links say so, as for the pair; nothing here asks how many
+                // ranks there are. A mailbox that has a receive channel and comes with no link still goes to the
+                // relay, which refuses it as before.
                 Wire::Relay(links, route, rank) => match (layout.relayed(), links) {
+                    (false, [None, None]) if layout.words() == layout.recv_slot(0, 0) => Ok(Worker::Alone(host)),
                     (false, [Some(link), None] | [None, Some(link)]) => Ok(Worker::Write(host, link, lead)),
                     (_, links) => Ok(Worker::Relay(host, links, route, layout, rank)),
                 },
@@ -236,6 +246,14 @@ impl Worker<'_> {
                 let result = relay.run([left.as_mut().map(|w| w as &mut dyn TpDoorbell), right.as_mut().map(|w| w as &mut dyn TpDoorbell)], stop, timing);
                 if let Err(error) = &result { eprintln!("flashnext tp relay: {error}"); }
                 result
+            }
+            // No peer to attach: the rank may serve at once. The thread owns the endpoint until `stop` and
+            // rechecks it every REST, as a parked doorbell does. It reads and writes no mailbox word.
+            #[cfg(target_os = "linux")]
+            Worker::Alone(_endpoint) => {
+                attached.store(true, Ordering::Release);
+                while !stop.load(Ordering::Relaxed) { std::thread::park_timeout(REST); }
+                Ok(())
             }
         }
     }
@@ -338,6 +356,55 @@ mod tests {
             assert_eq!(wait_attached(&attached, &up), Ok(()));
             stop.store(true, Ordering::Relaxed);
         });
+    }
+    /// The one rank of a path of one has no neighbor, so its mailbox has no receive channel and it brings no link.
+    /// It binds a worker that attaches at once, touches no mailbox word and ends at `stop`: the service of one rank
+    /// starts. The mailbox layout decides: a mailbox with a receive channel (a pair's) that comes with no link is
+    /// still refused, and its service does not start.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_mailbox_with_no_receive_channel_attaches_at_once_and_a_missing_link_is_still_refused() {
+        use spark_gpu_probe::tp_mailbox_host::ERROR;
+        use std::sync::atomic::AtomicU32;
+        let mailbox = |route: &Links| {
+            let layout = Channels::new(route, 64).unwrap();
+            (layout, (0..layout.words()).map(|_| AtomicU32::new(0)).collect::<Vec<_>>())
+        };
+        // No neighbor on either side: the mailbox is its header and its send slots, and there is nothing to attach.
+        let route = Links::new(1, false).unwrap();
+        assert!([Side::Left, Side::Right].iter().all(|&side| route.neighbor(0, side).is_none()));
+        let (layout, words) = mailbox(&route);
+        assert_eq!((layout.relayed(), layout.words()), (false, layout.recv_slot(0, 0)));
+        let worker = Wire::Relay([None, None], route, 0).bind(TpMailboxHost::new(&words, layout.slot_words), true, layout).unwrap();
+        assert!(matches!(worker, Worker::Alone(_)));
+        let before: Vec<u32> = words.iter().map(|word| word.load(Ordering::Relaxed)).collect();
+        let (stop, attached, failed) = (AtomicBool::new(false), AtomicBool::new(false), AtomicBool::new(false));
+        std::thread::scope(|scope| {
+            let handle = spawn(scope, worker, &stop, &attached, &failed).unwrap();
+            assert_eq!(wait_attached(&attached, &handle), Ok(()));
+            assert!(!handle.is_finished(), "the worker holds its endpoint until the service stops");
+            stop.store(true, Ordering::Release);
+            assert_eq!(handle.join().unwrap(), Ok(()));
+        });
+        assert!(!failed.load(Ordering::Acquire));
+        assert_eq!(words.iter().map(|word| word.load(Ordering::Relaxed)).collect::<Vec<_>>(), before);
+        // A pair's mailbox has a receive channel. Either end that brings no link goes to the relay, which refuses it,
+        // as before this worker existed.
+        let route = Links::new(2, false).unwrap();
+        let (layout, words) = mailbox(&route);
+        assert!(layout.words() > layout.recv_slot(0, 0));
+        for (end, lead) in [(0, true), (1, false)] {
+            let worker = Wire::Relay([None, None], route, end).bind(TpMailboxHost::new(&words, layout.slot_words), lead, layout).unwrap();
+            assert!(matches!(worker, Worker::Relay(..)));
+            let (stop, attached, failed) = (AtomicBool::new(false), AtomicBool::new(false), AtomicBool::new(false));
+            std::thread::scope(|scope| {
+                let handle = spawn(scope, worker, &stop, &attached, &failed).unwrap();
+                assert_eq!(wait_attached(&attached, &handle), Err("the tensor split wire failed to attach".into()));
+                assert!(handle.join().unwrap().is_err());
+            });
+            assert!(failed.load(Ordering::Acquire) && !attached.load(Ordering::Acquire));
+            assert_eq!(words[ERROR].load(Ordering::Acquire), 1);
+        }
     }
     /// Every rank swaps its links in attach_order, one swap at a time, and a swap runs once both of
     /// its ranks reach it. On paths and rings of 2 to 8 ranks every link comes up (no rank waits

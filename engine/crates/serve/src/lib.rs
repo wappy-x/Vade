@@ -428,6 +428,12 @@ pub trait Tokenizer: Sync {
     fn chat_decoder(&self) -> Self::Decoder<'_> { self.decoder() }
     fn gemma_chat(&self) -> bool { false }
     fn glm_chat(&self) -> bool { false }
+    /// The thinking switch and the effort word that the chat template renders for `input`, when the template has a
+    /// rule of its own for a request without those fields. `None`: the request log reports the resolved fields.
+    fn rendered_effort(&self, _input: &crate::protocol::ChatInput) -> Option<(bool, &'static str)> { None }
+    /// `chat_decoder` reads control token IDs and marks each channel of the reply
+    /// for the output parser (`chat_output::Parser::token_channels`).
+    fn token_channels(&self) -> bool { false }
     fn chat_thinking_open(&self, _prompt: &[u32]) -> bool { false }
     fn has_token(&self, token: u32) -> bool;
     /// A checkpoint stop set that the backend must match before generation.

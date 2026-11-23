@@ -181,9 +181,9 @@ impl<R: Runner> App<R> {
         self.sync_source(&cli_source, machine, &remote_cli, "CLI")?;
         // The remote CLI build resolves its `../harness` path dependency here.
         self.sync_source(&harness_source, machine, &format!("{remote_revision}/harness"), "harness")?;
-        Ok((Staged::Build(SourceBuild { machine: machine.clone(), borrowed, storage, remote_engine, remote_cli,
+        Ok((Staged::Build(Box::new(SourceBuild { machine: machine.clone(), borrowed, storage, remote_engine, remote_cli,
             build: format!("{}/builds/{engine_sha}-{cli_sha}-{install_id}", machine.stage_dir),
-            engine_sha: engine_sha.into(), warm_ptx, prepare_model }), present))
+            engine_sha: engine_sha.into(), warm_ptx, prepare_model })), present))
     }
 
     fn build_machine(&mut self, job: &SourceBuild) -> Result<(Artifact, bool), String> {
@@ -446,7 +446,7 @@ sha256sum "$destination/flash-serve" "$destination/flash.ptx" "$destination/vade
             weights_present &= present;
             match staged {
                 Staged::Ready(artifact) => { manifest.artifacts.insert(machine.name.clone(), artifact); }
-                Staged::Build(build) => builds.push(build),
+                Staged::Build(build) => builds.push(*build),
             }
         }
         // Every source copy is staged; the machines now compile at once.
@@ -941,7 +941,7 @@ impl RankStep for Stage<'_> {
 }
 
 /// A machine after its stage step: ready to use, or ready to compile.
-enum Staged { Ready(Artifact), Build(SourceBuild) }
+enum Staged { Ready(Artifact), Build(Box<SourceBuild>) }
 
 /// One machine whose engine and CLI sources are staged and ready to compile.
 struct SourceBuild { machine: Machine, borrowed: bool, storage: String, remote_engine: String, remote_cli: String, build: String,

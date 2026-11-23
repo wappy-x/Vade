@@ -423,6 +423,7 @@ pub(crate) fn render_request<T: Tokenizer>(http: &HttpRequest, context: usize, t
     if let Some(codec) = tokenizer.filter(|t| t.gemma_chat()) {
         parser = parser.map(|p| p.gemma4(codec.chat_thinking_open(&prompt)));
     }
+    if tokenizer.is_some_and(|t| t.token_channels()) { parser = parser.map(chat_output::Parser::token_channels); }
     if profile {
         eprintln!("request_prepare_profile prompt_tokens={} parse_ms={:.3} tokenize_ms={:.3} validate_ms={:.3}",
             prompt.len(), parsed.as_secs_f64()*1000.0, encoded.as_secs_f64()*1000.0,

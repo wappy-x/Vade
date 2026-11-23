@@ -233,7 +233,7 @@ impl Session {
         {
             return Err("Memory must be positive and cache must be smaller than memory.".into());
         }
-        // The two-Spark text service keeps prompts by default and sizes that cache itself. 0 is its off switch
+        // The diagnostic text service keeps prompts by default and sizes that cache itself. 0 is its off switch
         // (`engine_args`); a size above 0 would be saved and shown but never used, so it is refused.
         if options.diagnostic_unqualified_text && cache_bytes.is_some_and(|bytes| bytes > 0) {
             return Err("With --diagnostic-unqualified-text the prompt cache sizes itself: use --cache-bytes 0 (or FLASH_SERVE_KV_BYTES=0) to turn it off, or give no cache size.".into());
@@ -241,9 +241,35 @@ impl Session {
         let machines = config.selected(options)?;
         // Each group of Sparks serves one model: every machine, or one replica.
         let group = if options.replicas { options.replica_sparks.max(1) } else { machines.len() };
-        // The engine's text service is a two-Spark wire. Refuse any other group here, before a remote start.
-        if options.diagnostic_unqualified_text && group != 2 {
-            return Err("--diagnostic-unqualified-text runs on exactly two Sparks. Start it as: vade up --sparks 2 --diagnostic-unqualified-text.".into());
+        // A group of two Sparks takes main's steps: the two-Spark wire, its default depth, no plan read. Only a
+        // looped checkpoint whose config is on this computer is refused here; on a Spark the engine refuses it.
+        // Any other group reads the checkpoint plan. A plan that is not here yet stays the two-Spark wire.
+        // A dry run that got no reply leaves the plan unread: do not invent that wire, and do not refuse a
+        // Spark count for it. Refuse any other known group here, before a remote start.
+        use crate::text_service::TextService;
+        let service = if !options.diagnostic_unqualified_text {
+            None
+        } else if group == 2 {
+            if options.checkpoint_service == Some(TextService::alone()) || crate::text_service::any_local_alone(&machines) {
+                return Err(TextService::alone().group_refusal());
+            }
+            Some(TextService::pair())
+        } else if group != 1 {
+            // Main's refusal, byte for byte, with no plan read, also in a dry run (REVSHARED-2 item a).
+            return Err(TextService::pair().group_refusal());
+        } else {
+            let read = match options.checkpoint_service {
+                Some(service) => Some(service),
+                None => crate::text_service::from_local(&machines)?,
+            };
+            if options.text_width_unread { read } else { Some(read.unwrap_or_else(TextService::pair)) }
+        };
+        if let Some(service) = service && group != service.sparks {
+            return Err(service.group_refusal());
+        }
+        // A pair's depth is checked where main checks it (cli.rs); only the one-Spark service refuses a depth here.
+        if let Some(service) = service && service == TextService::alone() && options.mtp_explicit && options.mtp > service.max_depth {
+            return Err(service.draft_refusal());
         }
         if machines.len() % group != 0 {
             return Err("Each pair needs two machines. Give --replicas N --pairs 2N machines.".into());
@@ -337,8 +363,8 @@ impl Session {
             build: manifest.engine_sha.clone(),
             cli_build: manifest.cli_sha.clone(),
             supports_output: manifest.supports_output,
-            mtp: if options.diagnostic_unqualified_text && !options.mtp_explicit { if options.draft_fall.is_some() {0} else {TEXT_DRAFT_DEPTH} } else {options.mtp},
-            mtp_explicit: options.mtp_explicit || !options.fp4_local || options.diagnostic_unqualified_text,
+            mtp: if options.diagnostic_unqualified_text && !options.mtp_explicit { if options.draft_fall.is_some() {0} else {service.map(|item| item.default_depth).unwrap_or(options.mtp)} } else {options.mtp},
+            mtp_explicit: options.mtp_explicit || !options.fp4_local || (options.diagnostic_unqualified_text && service.is_some()),
             fp4_local: options.fp4_local,
             context: options.context,
             output: options.output,
@@ -643,7 +669,7 @@ impl Session {
             || (session.replicas && (!session.fp4_local || usize::from(u16::MAX - session.local_port) < session.ranks.len()))
             || session.replica_sparks == 0
             || (session.replica_sparks > 1 && (!session.replicas || !session.ranks.len().is_multiple_of(session.replica_sparks)))
-            || session.mtp > if session.diagnostic_unqualified_text {7} else {3}
+            || session.mtp > if session.diagnostic_unqualified_text { crate::text_service::TextService::pair().max_depth } else { 3 }
             || !(4096..=262144).contains(&session.context)
             || !((if session.diagnostic_unqualified_text {1} else {1024})..=session.context).contains(&session.output)
             || [session.chats, session.admitted_chats].into_iter().flatten().any(|chats| !(1..=32).contains(&chats))
@@ -659,11 +685,18 @@ impl Session {
     }
 }
 
-/// Concurrent chats from the engine's last ready line (FP4-Local `flashnext
-/// ready ... active=N`); None when the log does not report it.
+/// Concurrent chats from the engine's last ready line.
+/// FP4-Local prints `flashnext ready ... active=N`.
+/// The one-Spark loop text service prints `text_service ... ready ... path=loop_driver ... max_chats=N`
+/// (`loop_decoder/service/start.rs`). The two-Spark text service's `max_chats` is not read, as on main.
+/// None when that count is missing or outside 1..=32.
 pub fn admitted_chats(log: &str) -> Option<usize> {
-    let line = log.lines().rev().find(|line| line.contains("flashnext ready "))?;
-    line.split_whitespace().find_map(|word| word.strip_prefix("active="))?
+    let line = log.lines().rev().find(|line| {
+        line.contains("flashnext ready ")
+            || (line.contains("text_service ") && line.split_whitespace().any(|word| word == "path=loop_driver") && line.contains(" max_chats="))
+    })?;
+    let key = if line.contains("flashnext ready ") { "active=" } else { "max_chats=" };
+    line.split_whitespace().find_map(|word| word.strip_prefix(key))?
         .parse().ok().filter(|chats| (1..=32).contains(chats))
 }
 

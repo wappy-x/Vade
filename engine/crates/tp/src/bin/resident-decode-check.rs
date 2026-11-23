@@ -44,6 +44,10 @@ use spark_tp::Result;
 #[path="resident-decode-check/exchange_stage.rs"] mod exchange_stage;
 #[cfg(target_os="linux")]
 #[path="resident-decode-check/routed_fold.rs"] mod routed_fold;
+#[path="resident-decode-check/block_arms.rs"] mod block_arms;
+#[path="resident-decode-check/loop_token.rs"] mod loop_token;
+#[path="resident-decode-check/loop_token_time.rs"] mod loop_token_time;
+#[path="resident-decode-check/loop_rows.rs"] mod loop_rows;
 #[cfg(target_os="linux")]
 #[path="resident-decode-check/bus_shadow.rs"] mod bus_shadow;
 #[cfg(target_os="linux")]
@@ -933,6 +937,44 @@ fn main() {
         [mode,out] if mode=="exchange-stage"=>exchange_stage::run(Path::new(out)),
         #[cfg(target_os="linux")]
         [mode,out] if mode=="routed-fold"=>routed_fold::run(Path::new(out)),
+        #[cfg(target_os="linux")]
+        [mode,out] if mode=="block-arms"=>block_arms::run(Path::new(out)),
+        [mode,out] if mode=="block-arms-host"=>block_arms::host(Path::new(out)),
+        #[cfg(target_os="linux")]
+        [mode,out] if mode=="block-arms-entries"=>block_arms::entries(Path::new(out)),
+        #[cfg(target_os="linux")]
+        [mode,out,list] if mode=="block-arms-time"=>block_arms::time(Path::new(out),Path::new(list)),
+        #[cfg(target_os="linux")]
+        [mode,model,trace,out] if mode=="loop-token"=>loop_token::run(Path::new(model),Path::new(trace),Path::new(out),loop_token::Job::Trace),
+        #[cfg(target_os="linux")]
+        [mode,model,trace,out] if mode=="loop-token-pooled"=>loop_token::run_with_pool(Path::new(model),Path::new(trace),Path::new(out),loop_token::Job::Trace,true),
+        #[cfg(target_os="linux")]
+        [mode,model,trace,out] if mode=="loop-token-driver"=>loop_token::run(Path::new(model),Path::new(trace),Path::new(out),loop_token::Job::Driver),
+        #[cfg(target_os="linux")]
+        [mode,model,trace,out,steps] if mode=="loop-token-rate"=>loop_token::run_rate(Path::new(model),Path::new(trace),Path::new(out),steps,false),
+        #[cfg(target_os="linux")]
+        [mode,model,trace,out,steps] if mode=="loop-token-rate-pooled"=>loop_token::run_rate(Path::new(model),Path::new(trace),Path::new(out),steps,true),
+        #[cfg(target_os="linux")]
+        [mode,out] if mode=="loop-token-fixture"=>loop_token::fixtures_device(Path::new(out)),
+        [mode,out] if mode=="loop-token-fixture-host"=>loop_token::fixtures(&spark_tp::bounded_decoder::Host,Path::new(out),"host"),
+        #[cfg(target_os="linux")]
+        [mode,model,trace,out,new] if mode=="loop-token-time"=>loop_token_time::run(Path::new(model),Path::new(trace),Path::new(out),new),
+        #[cfg(target_os="linux")]
+        [mode,model,trace,out,new] if mode=="loop-token-time-pooled"=>loop_token_time::run_pooled(Path::new(model),Path::new(trace),Path::new(out),new),
+        #[cfg(target_os="linux")]
+        [mode,out] if mode=="loop-read-ceiling"=>loop_token_time::run_ceiling(Path::new(out)),
+        #[cfg(target_os="linux")]
+        [mode,model,folder,out,rows,positions,new] if mode=="loop-rows-time"=>loop_token_time::run_rows(Path::new(model),Path::new(folder),Path::new(out),rows,positions,new),
+        #[cfg(target_os="linux")]
+        [mode,model,folder,out,prefixes,rows,profile,repeats] if mode=="loop-rows-price"=>loop_token_time::run_price(Path::new(model),Path::new(folder),Path::new(out),prefixes,rows,profile,repeats),
+        [mode,out] if mode=="loop-token-time-host"=>loop_token_time::fixtures(Path::new(out)),
+        #[cfg(target_os="linux")]
+        [mode,model,trace,out,rows,prompt] if mode=="loop-rows"=>loop_rows::run(Path::new(model),Path::new(trace),Path::new(out),rows,prompt,false),
+        #[cfg(target_os="linux")]
+        [mode,model,reference,out,rows,positions] if mode=="loop-rows-long"=>loop_rows::run(Path::new(model),Path::new(reference),Path::new(out),rows,positions,true),
+        #[cfg(target_os="linux")]
+        [mode,out] if mode=="loop-rows-fixture"=>loop_rows::fixtures_device(Path::new(out)),
+        [mode,out] if mode=="loop-rows-fixture-host"=>loop_rows::fixtures(&spark_tp::bounded_decoder::Host,Path::new(out),"host"),
         #[cfg(target_os="linux")]
         [mode,out] if mode=="pair-split-stage"=>pair_split::run(Path::new(out)),
         #[cfg(target_os="linux")]

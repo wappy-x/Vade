@@ -118,6 +118,47 @@ pub(crate) fn selection_read(i:&engine_model::plan::description::PoolIndexerDesc
 pub type ChatGather<'a,V>=(Shape,[Option<&'a V>;4],f32);
 /// The recurrent layer outputs and the operands needed for prefix acceptance.
 pub struct RecurrentRows<V> {pub history:V,pub state:V,pub gated:V,pub saved:Option<(V,V)>}
+/// A value set for one call: `set(new)` at once, and `set(old)` when the guard drops, on every path (a good return,
+/// an error return, a panic). The device sets its row pass flag for one launch with it (`Compute::dot_rows`).
+/// Built where a user of it is: the device (Linux) and the tests.
+#[cfg(any(target_os="linux",test))]
+pub(crate) struct Restore<T:Copy,F:FnMut(T)> {old:T,set:F}
+#[cfg(any(target_os="linux",test))]
+impl<T:Copy,F:FnMut(T)> Restore<T,F> {pub(crate) fn new(old:T,new:T,mut set:F)->Self {set(new);Self {old,set}}}
+#[cfg(any(target_os="linux",test))]
+impl<T:Copy,F:FnMut(T)> Drop for Restore<T,F> {fn drop(&mut self) {(self.set)(self.old)}}
+#[cfg(test)]
+mod restore_tests {
+    use super::{Restore,Result};
+    use std::cell::Cell;
+    /// The flag has its old value after the call on the good path, after a refused launch, and after a panic.
+    #[test]
+    fn a_flag_set_for_one_call_has_its_old_value_after_it_on_every_path() {
+        for old in [false,true] {
+            let (flag,sets)=(Cell::new(old),Cell::new(0));
+            let call=|refuse:bool|->Result<u32> {
+                let guard=Restore::new(flag.get(),true,|on:bool|{flag.set(on);sets.set(sets.get()+1);});
+                assert!(flag.get());
+                let launch:Result<u32>=if refuse {Err("the launch is refused".into())} else {Ok(7)};
+                drop(guard);launch
+            };
+            assert_eq!(call(false),Ok(7));assert_eq!(flag.get(),old);
+            assert!(call(true).is_err());assert_eq!(flag.get(),old);
+            let early=||->Result<u32> {let _guard=Restore::new(flag.get(),true,|on:bool|flag.set(on));Err("refused before the end".into())};
+            assert!(early().is_err());assert_eq!(flag.get(),old);
+            let panicked=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||{let _guard=Restore::new(flag.get(),true,|on:bool|flag.set(on));panic!("a launch panics")}));
+            assert!(panicked.is_err());assert_eq!(flag.get(),old);
+            assert_eq!(sets.get(),4);
+        }
+    }
+}
+/// The shape of one launch of arm `RowDots` for `Compute::dot_rows`: `words` query words of rows of `width`, `count`
+/// stack rows.
+pub fn row_dots_shape(words:usize,count:usize,width:usize)->Result<Shape> {
+    let number=|n:usize|u32::try_from(n).map_err(|_|"row dots exceed the operation ABI".to_owned());
+    if width==0 || words==0 || !words.is_multiple_of(width) || count==0 {return Err("row dots need whole query rows and a stack row".into());}
+    Ok(Shape {op:Op::RowDots,heads:number(count)?,dim:0,taps:0,rows:number(words/width)?,cols:number(width)?,epsilon:0.0,bound:0.0})
+}
 pub trait Compute {
     /// One ordered execution owns temporary buffers through state publication.
     fn work<T>(&self,run:impl FnOnce()->Result<T>)->Result<T> {run()}
@@ -169,6 +210,19 @@ pub trait Compute {
     /// tie, a logit that is not finite refused (the pick of `greedy_logits`). None: this backend has no such form and the caller
     /// reads the logits. No default body: a wrapper must hand this on.
     fn rows_greedy(&self,logits:&Self::Value,rows:usize)->Result<Option<Vec<u32>>>;
+    /// The dots of each query row of `queries` (host words, `[queries][width]`) with each of the `count` rows of `stack`
+    /// (`[count][width]`): `[queries][count]`, query then stack row. Each dot is one chain over the width in rising order
+    /// from +0.0, each product rounded before its add. The body here is one launch of arm `RowDots` (`row_dots_shape`).
+    /// A backend may run another launch with the same words.
+    fn dot_rows(&self,queries:&[f32],stack:&Self::Value,count:usize,width:usize)->Result<Self::Value> {
+        self.operation(row_dots_shape(queries.len(),count,width)?,[Some(stack),None,None,None],queries)
+    }
+    /// `rows` rows of one block arm in one launch: the rows entry of the arms (`spark_gpu_probe::block_rows`, kernel
+    /// entry `resident_launch_block_rows`; Ruling R6g: Inkling's arms never run in an entry that other families
+    /// launch). Row `r` runs `operation(s, ..)` on its own part of each input, or on the whole input where bit `n` of
+    /// `shared` is set; the output holds the output of each row in turn. The counts are `block_rows::lengths`.
+    /// None: this backend has no such launch, and the caller runs one launch a row (the same words).
+    fn block_rows(&self,_:Shape,_:usize,_:u32,_:[Option<&Self::Value>;4],_:&[f32])->Result<Option<Self::Value>> {Ok(None)}
     fn greedy_projection(&self,c:&CheckpointAdmission,name:&str,x:&Self::Value)->Result<u32> {
         let head=Mxfp8Projection::matrix(c,name,WeightType::F32)?;let values=self.mx(&head,x)?;
         greedy_logits(&self.read(&values)?,head.shape().rows())
@@ -233,6 +287,9 @@ pub trait Compute {
     /// `upload` of words the host keeps: a later `read` of the whole value answers from the
     /// host's copy, with no wait for the device. The words on the device are the same.
     fn upload_known(&self,v:&[f32])->Result<Self::Value> {self.upload(v)}
+    /// `upload` of words that no call writes after: a step word, a position factor. The compute may give one value
+    /// for equal words, so a later call with the same words uploads nothing. The words on the device are the same.
+    fn upload_constant(&self,v:&[f32])->Result<Self::Value> {self.upload(v)}
     fn read(&self,v:&Self::Value)->Result<Vec<f32>>;
     fn read_pair(&self,first:&Self::Value,second:&Self::Value)->Result<(Vec<f32>,Vec<f32>)> {Ok((self.read(first)?,self.read(second)?))}
     /// `row` is the whole selection output, known without its bytes (select_admission::known_selection).
@@ -464,6 +521,10 @@ pub trait Compute {
         all.get_mut(offset..offset+part.len()).ok_or("prompt fill exceeds its value")?.copy_from_slice(&part);
         *target=self.upload(&all)?;Ok(())
     }
+    /// Write `part` at `offset` in a value only this caller holds, in stream order and with no wait for the
+    /// device: a launch queued before it reads the old words, a launch queued after it reads the new ones. For a
+    /// state that a decoder writes in place. The body here is `rows_fill`.
+    fn state_fill(&self,target:&mut Self::Value,offset:usize,part:&Self::Value)->Result<()> {let words=self.words(part);self.rows_fill(target,offset,part,words)}
     /// Earlier expanded rows plus these.
     fn rows_append(&self,held:Option<&Self::Value>,_:usize,new:&Self::Value,_:usize)->Result<Self::Value> {
         match held {Some(old)=>self.join(&[old,new]),None=>self.range(new,0,self.read(new)?.len())}

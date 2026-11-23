@@ -273,3 +273,26 @@ fn a_child_with_a_copy_of_the_lock_file_does_not_keep_the_store() {
     assert!(running, "the child must still hold its copy");
     assert!(again.is_ok(), "the copy in a child kept the lock");
 }
+
+#[test]
+fn text_service_op_reads_the_checkpoint_plan() {
+    let root = Path::new("target").join(format!("vade-text-service-{}", crate::text::random_hex(8).unwrap()));
+    fs::create_dir_all(&root).unwrap();
+    let root = fs::canonicalize(&root).unwrap();
+    let loop_dir = root.join("checkpoint");
+    fs::create_dir(&loop_dir).unwrap();
+    fs::write(loop_dir.join("config.json"), crate::text_service::LOOP_CONFIG).unwrap();
+    let reply = handle(&fields(&[("op", "text-service"), ("model_path", loop_dir.to_str().unwrap())])).unwrap();
+    assert_eq!((reply["text_sparks"].as_str(), reply["text_draft_default"].as_str(), reply["text_draft_max"].as_str()), ("1", "0", "0"));
+    let other = root.join("notes");
+    fs::create_dir(&other).unwrap();
+    fs::write(other.join("config.json"), r#"{"model_type":"other","architectures":["Inkling2LoopForConditionalGeneration"]}"#).unwrap();
+    let reply = handle(&fields(&[("op", "text-service"), ("model_path", other.to_str().unwrap())])).unwrap();
+    assert_eq!(reply["text_sparks"], "2");
+    assert_eq!(reply["text_draft_default"], crate::state::TEXT_DRAFT_DEPTH.to_string());
+    assert_eq!(reply["text_draft_max"], "7");
+    let missing = root.join("absent");
+    fs::create_dir(&missing).unwrap();
+    assert!(handle(&fields(&[("op", "text-service"), ("model_path", missing.to_str().unwrap())])).unwrap_err().contains("Cannot read the checkpoint config"));
+    fs::remove_dir_all(root).unwrap();
+}

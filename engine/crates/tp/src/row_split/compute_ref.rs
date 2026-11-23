@@ -21,6 +21,8 @@ impl<C:Compute> Compute for &C {
     fn mhc_row_launches(&self)->u64 {(**self).mhc_row_launches()}
     fn projects_complete_rows(&self)->bool {(**self).projects_complete_rows()}
     fn rows_greedy(&self,logits:&C::Value,rows:usize)->Result<Option<Vec<u32>>> {(**self).rows_greedy(logits,rows)}
+    fn dot_rows(&self,queries:&[f32],stack:&C::Value,count:usize,width:usize)->Result<C::Value> {(**self).dot_rows(queries,stack,count,width)}
+    fn block_rows(&self,s:spark_gpu_probe::causal_ops::Shape,rows:usize,shared:u32,x:[Option<&C::Value>;4],w:&[f32])->Result<Option<C::Value>> {(**self).block_rows(s,rows,shared,x,w)}
     fn greedy_projection(&self,c:&engine_model::plan::admission::CheckpointAdmission,name:&str,x:&C::Value)->Result<u32> {(**self).greedy_projection(c,name,x)}
     fn greedy_projection_mass(&self,c:&engine_model::plan::admission::CheckpointAdmission,name:&str,x:&C::Value)->Result<(u32,Option<f32>)> {(**self).greedy_projection_mass(c,name,x)}
     fn greedy_projection_mass_rows(&self,c:&engine_model::plan::admission::CheckpointAdmission,name:&str,x:&C::Value,rows:usize)->Result<Option<Vec<(u32,Option<f32>)>>> {(**self).greedy_projection_mass_rows(c,name,x,rows)}

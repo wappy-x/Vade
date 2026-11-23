@@ -258,6 +258,7 @@ impl Runner for MockRunner {
                     fs::create_dir_all(ptx.parent().unwrap()).unwrap();
                     fs::write(ptx, ".version 8.0\n").unwrap();
                 }
+                "Build Inkling GPU kernels" => assert_eq!(exec.args.last().map(String::as_str), Some("kernels-inkling")),
                 "Build engine" => fake_elf(&target.join("release/flash-serve")),
                 "Build chat" => fake_elf(&target.join("release/vade-harness")),
                 _ => panic!("Unexpected build {}", exec.label),
@@ -637,6 +638,8 @@ fn source_install_fixture_child() {
             .count(),
         3
     );
+    // A checkpoint that is not a looped one builds what main builds: no Inkling kernel image.
+    assert!(launch.runner.calls.iter().all(|e| e.label != "Build Inkling GPU kernels"));
     // The first launch prepares both startup caches before the engine starts.
     assert_eq!(
         launch.runner.worker_ops(),

@@ -13,9 +13,22 @@ pub struct ChatInput {
     /// thinking-off form refuse only explicit asks.
     pub thinking_off_requested: bool,
     pub reasoning_effort: ReasoningEffort,
+    /// The effort as the client wrote it. A renderer whose template has its own
+    /// word table or takes a number reads this field. The other renderers read
+    /// `reasoning_effort` and refuse a number.
+    pub effort_ask: EffortAsk,
     pub tool_choice: ToolChoice,
     pub parallel_tool_calls: bool,
 }
+/// `Off` is an explicit `enable_thinking` false, which wins over an effort value.
+/// `OffWithNumber` is that same ask in a request that also wrote a number for the
+/// effort. A template that takes a number reads it as `Off`. Every other renderer
+/// refuses the number, whatever `enable_thinking` says.
+/// `WordWithNumber` is a word for the effort in a request that wrote a number in the other place (top level or
+/// `chat_template_kwargs`). A template that takes a number reads it as `Word`. Every other renderer refuses it.
+/// `Unset` leaves the level to `enable_thinking` and the template default.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum EffortAsk { #[default] Unset, Off, OffWithNumber, Word(String), WordWithNumber(String), Number(f64) }
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum ToolChoice { #[default] Auto, None, Required, Named(String) }
 /// Keep the requested high effort for templates that distinguish high from max.
@@ -165,6 +178,13 @@ impl SamplingEcho {
     pub fn with_glm_thinking(mut self, input: &ChatInput) -> Self {
         self.thinking = true;
         self.reasoning_effort = Some(input.reasoning_effort.glm());
+        self
+    }
+    /// A template with its own rule for a request without thinking fields (`Tokenizer::rendered_effort`): report
+    /// what was rendered, not the server default of the fields.
+    pub fn with_rendered_thinking(mut self, (thinking, effort): (bool, &'static str)) -> Self {
+        self.thinking = thinking;
+        self.reasoning_effort = Some(effort);
         self
     }
     /// Owns a snapshot of the counts: every serialization of this echo prints the same events.
@@ -385,6 +405,8 @@ pub(crate) fn parse_with_reservation(body: &[u8], chat: bool, limits: &Limits, m
             .map(Value::object).transpose().map_err(|e| e.to_string())?;
         let effort = reasoning_effort(object)?;
         let effort = kwargs.map(reasoning_effort).transpose()?.flatten().or(effort);
+        let effort_field = kwargs.and_then(|o| present(o, "reasoning_effort")).or_else(|| present(object, "reasoning_effort"));
+        let effort_number = [kwargs, Some(object)].into_iter().flatten().any(|o| matches!(present(o, "reasoning_effort"), Some(Value::Number(_))));
         let thinking_field = kwargs.and_then(|o| present(o, "enable_thinking"))
             .or_else(|| get("enable_thinking"))
             .map(Value::boolean).transpose().map_err(|e| e.to_string())?;
@@ -425,6 +447,15 @@ pub(crate) fn parse_with_reservation(body: &[u8], chat: bool, limits: &Limits, m
             enable_thinking: enable_thinking && !forced_tool_choice,
             thinking_off_requested,
             reasoning_effort: effort.map(|e| e.1).unwrap_or_default(),
+            // A number written in either place is refused by every template that takes none, as before numbers.
+            effort_ask: match (thinking_field, effort_field) {
+                (Some(false), _) if effort_number => EffortAsk::OffWithNumber,
+                (Some(false), _) => EffortAsk::Off,
+                (_, Some(Value::String(word))) if effort_number => EffortAsk::WordWithNumber(word.clone()),
+                (_, Some(Value::String(word))) => EffortAsk::Word(word.clone()),
+                (_, Some(Value::Number(number))) => EffortAsk::Number(number.parse().map_err(|_| EFFORT_VALUES)?),
+                _ => EffortAsk::Unset,
+            },
             tool_choice,
             parallel_tool_calls,
         })
@@ -619,15 +650,27 @@ fn reasoning_effort(object: &std::collections::BTreeMap<String, Value>) -> Resul
     use ReasoningEffort::{Low, Medium, High, XHigh};
     let Some(effort) = present(object, "reasoning_effort") else { return Ok(None);
     };
+    // A number is for a template that takes one. Zero is that template's lowest level.
+    // Every other renderer refuses a number when it reads the request.
+    if let Value::Number(number) = effort {
+        let number: f64 = number.parse().map_err(|_| EFFORT_VALUES)?;
+        if !number.is_finite() { return Err(EFFORT_VALUES.into()); }
+        return Ok(Some((number != 0.0, XHigh)));
+    }
     match effort.string() {
         Ok("none" | "minimal") => Ok(Some((false, XHigh))),
         Ok("low") => Ok(Some((true, Low))),
         Ok("medium") => Ok(Some((true, Medium))),
         Ok("high") => Ok(Some((true, High))),
         Ok("xhigh" | "max" | "ultra") => Ok(Some((true, XHigh))),
-        _ => Err("reasoning effort must be none, minimal, low, medium, high, xhigh, max or ultra".into()),
+        _ => Err(EFFORT_VALUES.into()),
     }
 }
+/// The text of a refused effort, byte for byte the text before numbers were taken.
+const EFFORT_VALUES: &str = "reasoning effort must be none, minimal, low, medium, high, xhigh, max or ultra";
+/// The refusal of a renderer whose template has no number form of the effort: the same text as a refused word, so a
+/// client of such a template reads what it read before numbers were taken.
+pub(crate) const EFFORT_NUMBER_UNSUPPORTED: &str = EFFORT_VALUES;
 
 /// Retain only a suffix that could complete a stop string in the next chunk.
 #[derive(Default)]

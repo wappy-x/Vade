@@ -21,6 +21,8 @@ impl Cartridge {
     /// its decoder, row transport, tokenizer and session memory before listening.
     pub fn resident_text(root:&Path)->Result<Option<crate::plan::admission::CheckpointAdmission>> {
         let bytes=safetensors::read_bounded(&root.join("config.json"),crate::shapes::CONFIG_BYTES)?;
+        // A schema that this engine reads but cannot run is refused here with what was read and what is not built.
+        if let Some(reason)=crate::plan::unserved_reason(root,&bytes) {return Err(invalid(reason));}
         let doc=json::parse(&bytes,json::Limits {bytes:crate::shapes::CONFIG_BYTES,..Default::default()})?;
         let Some(d)=crate::plan::description::deferred_description(&doc).map_err(|e|invalid(e.to_string()))? else {return Ok(None);};
         let sidecar=root.join("hf_quant_config.json");

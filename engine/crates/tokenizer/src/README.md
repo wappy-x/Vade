@@ -4,6 +4,7 @@
 
 | File | What it does (from its own summary comment) |
 | --- | --- |
+| [`cased_split.rs`](cased_split.rs) | Split rule for the case-aware pattern (`CASED_PATTERN` in lib.rs). |
 | [`chat.rs`](chat.rs) | Qwen3 chat formatting authored from the official tokenizer configuration. |
 | [`lib.rs`](lib.rs) | Owned shared BPE implementation for Qwen3 and Gemma 4 tokenizer artifacts. |
 | [`unicode.rs`](unicode.rs) | Independently authored Unicode normalization and category lookup. |

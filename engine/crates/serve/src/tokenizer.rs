@@ -4,18 +4,35 @@ use engine_model::json::{self, Value, field};
 use engine_tokenizer::chat::{self, Message, Role, ToolCall};
 use std::collections::BTreeMap;
 pub mod glm;
+pub mod inkling;
 #[cfg(test)] mod glm_external_tests;
 #[cfg(test)] mod edge_tests;
 
 /// Select the authored renderer from checkpoint template data.
 /// Other templates retain the tokenizer crate's own validation and rendering.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ChatTemplate { Checkpoint, Glm }
+pub enum ChatTemplate { Checkpoint, Glm, Inkling }
 impl ChatTemplate {
     pub fn from_config(config: &Value, separate: Option<&str>) -> Result<Self, String> {
         let fields = config.object().map_err(|e| e.to_string())?;
         let embedded = fields.get("chat_template").and_then(|v| v.string().ok());
         let normalize = crate::contract::normalize_template;
+        // The bytes of the template select this renderer. A template with the same
+        // end-of-turn control and other bytes is refused here by its difference.
+        if embedded.into_iter().chain(separate).any(|t| t.contains(inkling::STOP)) {
+            if fields.contains_key("chat_template") && embedded.is_none() { return Err("chat_template must be a string".into()); }
+            for template in embedded.into_iter().chain(separate) {
+                if normalize(template) != normalize(inkling::TEMPLATE) {
+                    return Err("unsupported chat template: its bytes differ from the checked copy templates/inkling2-mini.jinja".into());
+                }
+            }
+            // The reply grammar of the checkpoint, when the file gives one, must be the checked one too.
+            if let Some(grammar) = fields.get("response_template")
+                && Some(grammar) != object(inkling::RESPONSE_TEMPLATE, 1 << 20).ok().as_ref() {
+                    return Err("unsupported response_template: it differs from the checked copy templates/inkling2-mini-response.json".into());
+                }
+            return Ok(Self::Inkling);
+        }
         if embedded.into_iter().chain(separate).any(|t| t.trim_start().starts_with("[gMASK]")) {
             if fields.contains_key("chat_template") && embedded.is_none() { return Err("GLM chat_template must be a string".into()); }
             for template in embedded.into_iter().chain(separate) {
@@ -27,7 +44,9 @@ impl ChatTemplate {
 }
 /// Checkpoint tokenizer with a renderer selected from its template artifacts.
 /// GLM tokenization stays in the tokenizer crate. This bridge owns its prompt.
-pub struct ModelTokenizer { inner: engine_tokenizer::Tokenizer, template: ChatTemplate, checkpoint_eos: Option<Vec<u32>>, limits: engine_tokenizer::Limits }
+pub struct ModelTokenizer { inner: engine_tokenizer::Tokenizer, template: ChatTemplate, checkpoint_eos: Option<Vec<u32>>, limits: engine_tokenizer::Limits,
+    /// Control token IDs of a template whose reply is split by token ID.
+    channels: Option<crate::chat_output::ChannelIds> }
 impl std::ops::Deref for ModelTokenizer {
     type Target = engine_tokenizer::Tokenizer;
     fn deref(&self) -> &Self::Target { &self.inner }
@@ -45,6 +64,7 @@ impl ModelTokenizer {
         };
         let template = ChatTemplate::from_config(&config, separate.as_deref())?;
         let inner = engine_tokenizer::Tokenizer::from_directory(path).map_err(|e| e.to_string())?;
+        let mut channels = None;
         let checkpoint_eos = if template == ChatTemplate::Glm {
             glm::validate_tokens(&inner)?;
             let eos = inner.eos_token_ids().map_err(|e| e.to_string())?;
@@ -52,18 +72,29 @@ impl ModelTokenizer {
                 return Err("chat checkpoint requires a generation EOS list".into());
             }
             Some(eos.to_vec())
+        } else if template == ChatTemplate::Inkling {
+            let stop = inkling::validate_tokens(&inner)?;
+            let ids = crate::chat_output::ChannelIds::from_tokenizer(&inner)?;
+            let eos = inner.eos_token_ids().map_err(|e| e.to_string())?;
+            // The end of one message is not the end of the turn: the model goes on with its next message.
+            if !eos.contains(&stop) || eos.contains(&ids.end_message) {
+                return Err("the generation EOS list must hold the end-of-turn token of the chat template and must not hold its end-of-message token".into());
+            }
+            channels = Some(ids);
+            Some(eos.to_vec())
         } else { None };
-        Ok(Self { inner, template, checkpoint_eos, limits: Default::default() })
+        Ok(Self { inner, template, checkpoint_eos, limits: Default::default(), channels })
     }
     pub fn set_limits(&mut self, limits: engine_tokenizer::Limits) -> Result<(), String> {
         self.inner.set_limits(limits).map_err(|e| e.to_string())?;
         self.limits = limits; Ok(())
     }
     pub fn format_chat_input(&self, input: &ChatInput, max_bytes: usize) -> Result<String, String> {
-        let messages = parse_messages_with_roles(input, max_bytes, self.inner.is_gemma4(), self.template == ChatTemplate::Glm)?;
+        let messages = || parse_messages_with_roles(input, max_bytes, self.inner.is_gemma4(), self.template == ChatTemplate::Glm);
         match self.template {
-            ChatTemplate::Glm => glm::format(&messages, &glm_options(input, max_bytes)?),
-            ChatTemplate::Checkpoint => self.inner.format_chat(&messages, &chat_options(input, max_bytes, self.inner.is_hybrid_text())).map_err(|e| e.to_string()),
+            ChatTemplate::Glm => glm::format(&messages()?, &glm_options(input, max_bytes)?),
+            ChatTemplate::Inkling => inkling::format(input, max_bytes),
+            ChatTemplate::Checkpoint => self.inner.format_chat(&messages()?, &chat_options(input, max_bytes, self.inner.is_hybrid_text())).map_err(|e| e.to_string()),
         }
     }
 }
@@ -84,13 +115,48 @@ fn glm_options(input: &ChatInput, max_bytes: usize) -> Result<glm::Options, Stri
     Ok(glm::Options { reasoning_effort: input.reasoning_effort.glm().into(),
         tools: input.callable_tools().to_vec(), max_bytes, ..Default::default() })
 }
+/// The decoder of a reply. With `channels` it reads control token IDs and marks the
+/// channel of each text for the output parser. Without, it is the tokenizer's decoder.
+pub struct ChatDecoder<'a> { inner: engine_tokenizer::Decoder<'a>, channels: Option<crate::chat_output::Channels> }
+impl ChatDecoder<'_> {
+    /// The two methods of the tokenizer's own decoder, with its forms, on the type itself:
+    /// code that holds this decoder calls them with no trait in scope.
+    pub fn push(&mut self, token: u32) -> Result<String, String> {
+        let Self { inner, channels } = self;
+        match channels {
+            Some(channels) => channels.push(token, |token| match token {
+                Some(token) => inner.push(token).map_err(|e| e.to_string()),
+                None => Ok(inner.finish()),
+            }),
+            None => inner.push(token).map_err(|e| e.to_string()),
+        }
+    }
+    pub fn finish(&mut self) -> String {
+        let tail = self.inner.finish();
+        match &mut self.channels { Some(channels) => channels.finish(tail), None => tail }
+    }
+}
+impl crate::Decoder for ChatDecoder<'_> {
+    fn push(&mut self, token: u32) -> Result<String, String> { ChatDecoder::push(self, token) }
+    fn finish(&mut self) -> Result<String, String> { Ok(ChatDecoder::finish(self)) }
+}
 impl crate::Tokenizer for ModelTokenizer {
-    type Decoder<'a> = engine_tokenizer::Decoder<'a>;
+    type Decoder<'a> = ChatDecoder<'a>;
     fn encode(&self, text: &str) -> Result<Vec<u32>, String> { crate::Tokenizer::encode(&self.inner, text) }
-    fn decoder(&self) -> Self::Decoder<'_> { crate::Tokenizer::decoder(&self.inner) }
-    fn chat_decoder(&self) -> Self::Decoder<'_> { crate::Tokenizer::chat_decoder(&self.inner) }
+    fn decoder(&self) -> Self::Decoder<'_> { ChatDecoder { inner: crate::Tokenizer::decoder(&self.inner), channels: None } }
+    fn chat_decoder(&self) -> Self::Decoder<'_> {
+        match &self.channels {
+            // The inner decoder shows no special token: a control token in a body adds no text.
+            Some(ids) => ChatDecoder { inner: self.inner.stream_decoder(true), channels: Some(crate::chat_output::Channels::new(ids.clone())) },
+            None => ChatDecoder { inner: crate::Tokenizer::chat_decoder(&self.inner), channels: None },
+        }
+    }
+    fn token_channels(&self) -> bool { self.channels.is_some() }
     fn gemma_chat(&self) -> bool { crate::Tokenizer::gemma_chat(&self.inner) }
     fn glm_chat(&self) -> bool { self.template == ChatTemplate::Glm }
+    fn rendered_effort(&self, input: &ChatInput) -> Option<(bool, &'static str)> {
+        (self.template == ChatTemplate::Inkling).then(|| inkling::rendered_effort(input))
+    }
     fn hybrid_chat(&self) -> bool { crate::Tokenizer::hybrid_chat(&self.inner) }
     fn has_token(&self, token: u32) -> bool { crate::Tokenizer::has_token(&self.inner, token) }
     fn checkpoint_eos_token_ids(&self) -> Result<Option<&[u32]>, String> {
@@ -105,6 +171,7 @@ impl crate::Tokenizer for ModelTokenizer {
         match self.template {
             ChatTemplate::Checkpoint => crate::Tokenizer::encode_chat(&self.inner, input, max_bytes),
             ChatTemplate::Glm => glm::encode(&self.inner, &parse_messages_with_roles(input, max_bytes, false, true)?, &glm_options(input, max_bytes)?, self.limits),
+            ChatTemplate::Inkling => inkling::encode(&self.inner, input, max_bytes, self.limits),
         }
     }
 }
@@ -182,6 +249,8 @@ fn parse_messages(input: &ChatInput, max_bytes: usize, gemma: bool) -> Result<Ve
     parse_messages_with_roles(input, max_bytes, gemma, false)
 }
 fn parse_messages_with_roles(input: &ChatInput, max_bytes: usize, gemma: bool, template_roles: bool) -> Result<Vec<Message>, String> {
+    // A number for the effort is refused here with or without an explicit thinking-off field.
+    if matches!(input.effort_ask, crate::protocol::EffortAsk::Number(_) | crate::protocol::EffortAsk::OffWithNumber | crate::protocol::EffortAsk::WordWithNumber(_)) { return Err(crate::protocol::EFFORT_NUMBER_UNSUPPORTED.into()); }
     let mut messages = Vec::new();
     for source in &input.messages {
         let root = object(source, max_bytes)?;
@@ -366,7 +435,7 @@ mod tests {
     }
     #[test]
     fn qwen_hybrid_bytes_stay_equal() {
-        let model = ModelTokenizer { inner: codec(true), template: ChatTemplate::Checkpoint, checkpoint_eos: None, limits: Default::default() };
+        let model = ModelTokenizer { inner: codec(true), template: ChatTemplate::Checkpoint, checkpoint_eos: None, limits: Default::default(), channels: None };
         assert!(model.inner.is_hybrid_text());
         let input = chat(r#"{"messages":[{"role":"system","content":" s "},{"role":"user","content":" u "},{"role":"assistant","content":" a ","reasoning_content":" old "},{"role":"user","content":" next "}],"enable_thinking":false}"#);
         let expected = "<|im_start|>system\ns<|im_end|>\n<|im_start|>user\nu<|im_end|>\n<|im_start|>assistant\n<think>\nold\n</think>\n\na<|im_end|>\n<|im_start|>user\nnext<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
@@ -384,8 +453,77 @@ mod tests {
         }
     }
     #[test]
+    fn glm_and_qwen_refuse_a_number_in_either_place_with_the_text_they_read_before_numbers() {
+        // Review REVSHARED finding 1: a number for the effort in EITHER place (top level or chat_template_kwargs) is
+        // refused by every template that takes no number, also when the other place holds a word, and the text a
+        // GLM or Qwen client reads is byte for byte the text from before numbers were taken (main).
+        const MAIN: &str = "reasoning effort must be none, minimal, low, medium, high, xhigh, max or ultra";
+        let limits = crate::Limits::default();
+        let qwen = ModelTokenizer { inner: codec(true), template: ChatTemplate::Checkpoint, checkpoint_eos: None, limits: Default::default(), channels: None };
+        let glm = ModelTokenizer { inner: codec(false), template: ChatTemplate::Glm, checkpoint_eos: None, limits: Default::default(), channels: None };
+        let hi = r#""messages":[{"role":"user","content":"Hi"}]"#;
+        for fields in [r#""reasoning_effort":0.5,"chat_template_kwargs":{"reasoning_effort":"high"}"#,
+            r#""reasoning_effort":"high","chat_template_kwargs":{"reasoning_effort":0.5}"#,
+            r#""reasoning_effort":0.5"#, r#""chat_template_kwargs":{"reasoning_effort":0.5}"#,
+            r#""reasoning_effort":0.5,"chat_template_kwargs":{"reasoning_effort":"low","enable_thinking":false}"#,
+            r#""reasoning_effort":0,"enable_thinking":true,"chat_template_kwargs":{"reasoning_effort":"xhigh"}"#] {
+            let body = format!("{{{hi},{fields}}}");
+            let request = crate::protocol::parse(body.as_bytes(), true, &limits).unwrap();
+            let crate::protocol::Prompt::Chat(input) = &request.prompt else { panic!("{fields}: not a chat") };
+            for (name, model) in [("qwen", &qwen), ("glm", &glm)] {
+                assert_eq!(crate::Tokenizer::encode_chat(model, input, 8192).unwrap_err(), MAIN, "{name} {fields}");
+                assert_eq!(model.format_chat_input(input, 8192).unwrap_err(), MAIN, "{name} {fields}");
+            }
+        }
+        // A word that is no effort is refused when the request is read, for every template, with the same text.
+        for fields in [r#""reasoning_effort":"bogus""#, r#""chat_template_kwargs":{"reasoning_effort":"bogus"}"#] {
+            let body = format!("{{{hi},{fields}}}");
+            assert_eq!(crate::protocol::parse(body.as_bytes(), true, &limits).err().as_deref(), Some(MAIN), "{fields}");
+        }
+        // Two words, or a word alone, are taken as before.
+        let words = chat(r#"{"messages":[{"role":"user","content":"Hi"}],"reasoning_effort":"low","chat_template_kwargs":{"reasoning_effort":"high"}}"#);
+        assert_eq!(qwen.format_chat_input(&words, 8192).map(|_| ()), Ok(()));
+        assert_eq!(glm.format_chat_input(&words, 8192).map(|_| ()), Ok(()));
+    }
+    #[test]
+    fn a_number_effort_is_refused_with_thinking_off_too() {
+        // A renderer whose template takes no number refuses a number for the effort, whatever enable_thinking says:
+        // the checkpoint renderer (Qwen) and the GLM renderer, in the chat form and in the responses form.
+        let limits = crate::Limits::default();
+        let qwen = ModelTokenizer { inner: codec(true), template: ChatTemplate::Checkpoint, checkpoint_eos: None, limits: Default::default(), channels: None };
+        let glm = ModelTokenizer { inner: codec(false), template: ChatTemplate::Glm, checkpoint_eos: None, limits: Default::default(), channels: None };
+        let mut refused = 0;
+        for number in ["999", "0.5", "-1"] {
+            for thinking in [r#","enable_thinking":false"#, r#","chat_template_kwargs":{"enable_thinking":false}"#, r#","enable_thinking":true"#, ""] {
+                let chat_form = format!(r#"{{"messages":[{{"role":"user","content":"Hello"}}],"reasoning_effort":{number}{thinking}}}"#);
+                let responses_form = format!(r#"{{"input":"Hello","reasoning":{{"effort":{number}}}{thinking}}}"#);
+                let requests = [crate::protocol::parse(chat_form.as_bytes(), true, &limits).unwrap(),
+                    crate::responses::parse(responses_form.as_bytes(), &limits, "loaded", None).unwrap().0];
+                for (form, request) in ["chat", "responses"].into_iter().zip(requests) {
+                    let crate::protocol::Prompt::Chat(input) = &request.prompt else { panic!("{form}: not a chat") };
+                    let note = format!("{form} {number} {thinking}");
+                    assert_eq!(format_chat(input, 8192).unwrap_err(), crate::protocol::EFFORT_NUMBER_UNSUPPORTED, "{note}");
+                    for model in [&qwen, &glm] {
+                        assert_eq!(model.format_chat_input(input, 8192).unwrap_err(), crate::protocol::EFFORT_NUMBER_UNSUPPORTED, "{note}");
+                        assert_eq!(crate::Tokenizer::encode_chat(model, input, 8192).unwrap_err(), crate::protocol::EFFORT_NUMBER_UNSUPPORTED, "{note}");
+                    }
+                    refused += 1;
+                }
+            }
+        }
+        assert_eq!(refused, 24);
+        // The refusal names every word the word list takes.
+        assert_eq!(crate::protocol::EFFORT_NUMBER_UNSUPPORTED, "reasoning effort must be none, minimal, low, medium, high, xhigh, max or ultra");
+        // A word is no number. The checkpoint renderer takes it with thinking off, and both take it alone.
+        let word = chat(r#"{"messages":[{"role":"user","content":"Hello"}],"reasoning_effort":"high","enable_thinking":false}"#);
+        assert_eq!(qwen.format_chat_input(&word, 8192).map(|_| ()), Ok(()));
+        let word = chat(r#"{"messages":[{"role":"user","content":"Hello"}],"reasoning_effort":"high"}"#);
+        assert_eq!(qwen.format_chat_input(&word, 8192).map(|_| ()), Ok(()));
+        assert_eq!(glm.format_chat_input(&word, 8192).map(|_| ()), Ok(()));
+    }
+    #[test]
     fn glm_bridge_retains_high_and_template_thinking() {
-        let model = ModelTokenizer { inner: codec(false), template: ChatTemplate::Glm, checkpoint_eos: None, limits: Default::default() };
+        let model = ModelTokenizer { inner: codec(false), template: ChatTemplate::Glm, checkpoint_eos: None, limits: Default::default(), channels: None };
         assert!(crate::Tokenizer::glm_chat(&model));
         // Hand-derived from glm.jinja lines 2-3, 139, 260. enable_thinking
         // is not a template input and cannot change its generation prompt.
@@ -400,7 +538,7 @@ mod tests {
     }
     #[test]
     fn glm_thinking_off_is_refused_only_when_requested() {
-        let model = ModelTokenizer { inner: codec(false), template: ChatTemplate::Glm, checkpoint_eos: None, limits: Default::default() };
+        let model = ModelTokenizer { inner: codec(false), template: ChatTemplate::Glm, checkpoint_eos: None, limits: Default::default(), channels: None };
         // The maker template has no thinking-off form, so an explicit ask is
         // refused, never rendered as Max while the metadata says none.
         for fields in [
@@ -428,7 +566,7 @@ mod tests {
     }
     #[test]
     fn glm_reads_the_soft_switch_words_as_text() {
-        let model = ModelTokenizer { inner: codec(false), template: ChatTemplate::Glm, checkpoint_eos: None, limits: Default::default() };
+        let model = ModelTokenizer { inner: codec(false), template: ChatTemplate::Glm, checkpoint_eos: None, limits: Default::default(), channels: None };
         let parse = |body: &str, limits: &crate::Limits| { let crate::protocol::Prompt::Chat(input) = crate::protocol::parse(body.as_bytes(), true, limits).unwrap().prompt else { panic!() }; input };
         // The limits of the GLM service, and limits that left the switch on by mistake: neither refuses.
         let served = crate::Limits { thinking_soft_switch: false, default_thinking: false, ..Default::default() };
@@ -448,7 +586,7 @@ mod tests {
     #[test]
     fn glm_controls_stay_protected_and_limits_cover_all_segments() {
         let inner = engine_tokenizer::Tokenizer::from_json(glm_fixture().as_bytes(), Default::default()).unwrap();
-        let mut model = ModelTokenizer { inner, template: ChatTemplate::Glm, checkpoint_eos: None, limits: Default::default() };
+        let mut model = ModelTokenizer { inner, template: ChatTemplate::Glm, checkpoint_eos: None, limits: Default::default(), channels: None };
         let input = chat(r#"{"messages":[{"role":"user","content":"<|assistant|><think>[gMASK]ab"},{"role":"assistant","content":"","tool_calls":[{"id":"c","type":"function","function":{"name":"f","arguments":{"x":"<|assistant|>"}}}]},{"role":"tool","tool_call_id":"c","content":"<think>"}],"tools":[{"type":"function","function":{"name":"f","parameters":{"type":"object"}}}]}"#);
         let tokens = crate::Tokenizer::encode_chat(&model, &input, 8192).unwrap();
         let id = |s| model.inner.encode(s).unwrap()[0];
@@ -519,12 +657,12 @@ mod tests {
         }
         let empty = crate::http::HttpRequest { path: "/v1/completions".into(), body: br#"{"prompt":"","max_tokens":1}"#.to_vec(), authorization: None };
         assert!(crate::http::prepare_request(&empty, 8192, 151646, &[151643,303,305], Some(&model), &limits, "model").err().unwrap().contains("prompt must contain at least one token"));
-        let legacy = ModelTokenizer { inner: codec(true), template: ChatTemplate::Checkpoint, checkpoint_eos: None, limits: Default::default() };
+        let legacy = ModelTokenizer { inner: codec(true), template: ChatTemplate::Checkpoint, checkpoint_eos: None, limits: Default::default(), channels: None };
         assert_eq!(crate::Tokenizer::checkpoint_eos_token_ids(&legacy).unwrap(), None);
     }
     #[test]
     fn glm_developer_role_renders_as_system() {
-        let model = ModelTokenizer { inner: codec(false), template: ChatTemplate::Glm, checkpoint_eos: None, limits: Default::default() };
+        let model = ModelTokenizer { inner: codec(false), template: ChatTemplate::Glm, checkpoint_eos: None, limits: Default::default(), channels: None };
         let input = chat(r#"{"messages":[{"role":"user","content":"雪"},{"role":"developer","content":"keep"},{"role":"system","content":""},{"role":"assistant","content":"","reasoning_content":"é"}]}"#);
         // glm.jinja has no developer branch and drops the turn; OpenAI clients send
         // their instructions as developer, so it renders as a system turn in place.
@@ -553,7 +691,7 @@ mod tests {
     }
     #[test]
     fn glm_tool_result_id_fallback_keeps_call_order() {
-        let model = ModelTokenizer { inner: codec(false), template: ChatTemplate::Glm, checkpoint_eos: None, limits: Default::default() };
+        let model = ModelTokenizer { inner: codec(false), template: ChatTemplate::Glm, checkpoint_eos: None, limits: Default::default(), channels: None };
         let input = chat(r#"{"messages":[{"role":"assistant","tool_calls":[{"id":"a","function":{"name":"a","arguments":{}}},{"id":"b","function":{"name":"b","arguments":{}}}]},{"role":"tool","id":"b","content":"B"},{"role":"tool","id":"a","content":"A"}]}"#);
         // glm.jinja lines 99-105 use id when tool_call_id is absent.
         // Lines 225-248 then render results in the call order.
@@ -566,7 +704,7 @@ mod tests {
             for followup in ["", r#",{"role":"user","content":"continue"}"#] {
                 let mut expected = ChatInput { messages: vec![r#"{"role":"user","content":"go"}"#.into(),
                     format!(r#"{{"role":"assistant","content":"","reasoning_content":{thought:?}}}"#)],
-                    tools: vec![], enable_thinking: true, thinking_off_requested: false, reasoning_effort: Default::default(), tool_choice: Default::default(), parallel_tool_calls: true };
+                    tools: vec![], enable_thinking: true, thinking_off_requested: false, reasoning_effort: Default::default(), effort_ask: Default::default(), tool_choice: Default::default(), parallel_tool_calls: true };
                 if !followup.is_empty() { expected.messages.push(followup[1..].into()); }
                 for content in [r#", "content":"""#, r#", "content":null"#, ""] {
                     for responses in [false, true] {
@@ -611,7 +749,7 @@ mod tests {
                 messages: vec![message.into()],
                 tools: vec![],
                 enable_thinking: true, thinking_off_requested: false,
-                reasoning_effort: Default::default(),
+                reasoning_effort: Default::default(), effort_ask: Default::default(),
                 tool_choice: Default::default(), parallel_tool_calls: true,
             };
             assert!(format_chat(&input, 8192).is_err());

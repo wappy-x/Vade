@@ -32,3 +32,25 @@ fn encode_scaling_three_sizes() {
         }
     }
 }
+/// The case-aware rule scans a run of letters, and it can give characters
+/// back. Each case here is a text that makes one of its scans long.
+#[test]
+fn cased_split_scaling_three_sizes() {
+    let in_json = |pattern: &str| pattern.replace('\\', "\\\\");
+    let json = include_str!("../glm-tokenizer-slice.json").replacen(&in_json(&PATTERN.replace(r"\p{N}|", r"\p{N}{1,3}|")), &in_json(CASED_PATTERN), 1);
+    let t = Tokenizer::from_json(json.as_bytes(), Limits::default()).unwrap();
+    assert!(t.cased_words);
+    for (case,unit) in [("lower","a"),("upper","A"),("upper-lower","Aa"),("lower-upper","aA"),("uncased","中"),("mark-upper","\u{301}A"),("upper-mark","A\u{301}"),("uncased-upper","中A"),
+        ("contraction","a's"),("digits","1"),("spaces"," "),("space-newline"," \n"),("symbols","!/"),("space-symbol"," !"),("special","<|user|>")] {
+        let mut previous = None;
+        for n in [4096,16384,65536] {
+            let text = unit.repeat(n); begin(100 * text.len() as u64);
+            let ids = t.encode(&text).unwrap(); let work = take();
+            assert!(!ids.is_empty(), "empty output: {case}/{n}");
+            assert!(work > 0 && work <= 100 * text.len() as u64, "work bound: {case}/{n} count={work}");
+            if let Some(old) = previous { assert!(work <= 6 * old + 64, "scaling: {case}/{n} previous={old} count={work}"); }
+            eprintln!("WORK profile=cased case={case} repeats={n} bytes={} count={work}",text.len());
+            previous = Some(work);
+        }
+    }
+}

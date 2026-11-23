@@ -3,17 +3,24 @@ use super::*;
 use spark_gpu_probe::driver::{Backend,BackendStats,DeviceVector,MhcBoundaryPass,MhcHostLink,ResidentMhcBoundary};
 use std::{cell::{Cell,RefCell},rc::Rc};
 use super::lineage::Lineage;
+#[path="device/loop_product.rs"] mod loop_product;
+#[path="device/loop_packed.rs"] mod loop_packed;
 pub struct Device<'b,'d> {pub backend:&'b Backend<'d>,weights:Rc<RefCell<crate::resident_weights::Weights<'b,'d>>>,
     memo_bound:Rc<crate::projection_memo::Bound>,
     #[cfg(feature="kernel-bench")] pub(super) probe:Rc<RefCell<Option<super::projection_probe::Probe>>>,
     #[cfg(feature="kernel-bench")] attention_calls:Rc<Cell<u64>>,
     parameters:Rc<RefCell<parameters::ParameterCache<DeviceVector<'d>>>>,
+    /// The latest `CONSTANTS` vectors that `upload_constant` made, by their words: read only, shared by the clones.
+    constants:Rc<RefCell<std::collections::VecDeque<(Vec<u32>,Rc<DeviceVector<'d>>)>>>,
     norms:Rc<RefCell<BTreeMap<String,spark_gpu_probe::driver::ResidentNorm<'b,'d>>>>,
     blocks:Rc<RefCell<BTreeMap<(usize,usize),ResidentMhcBoundary<'b,'d>>>>,mhc_host:Option<MhcHostLink<'b,'d>>,
     /// D1: one-row decode boundaries as one GPU launch (with_mhc_fused).
     mhc_fused:bool,
     stages:Rc<RefCell<[[u128;2];4]>>,cost:Rc<crate::resident_profile::Cost>,memo:RefCell<Memo<'d>>,copies:RefCell<Option<DeviceVector<'d>>>,selection_checks:RefCell<Vec<(Rc<DeviceVector<'d>>,f32)>>,sum_checks:RefCell<Vec<SumCheck<'d>>>,selection_read:RefCell<Option<(std::rc::Weak<DeviceVector<'d>>,Vec<f32>)>>,gathered:RefCell<Option<Gathered<'d>>>,ahead:RefCell<Option<Ahead<'b,'d>>>,asked:RefCell<BTreeMap<String,super::asked::Asked<DeviceVector<'d>>>>,memo_epoch:Cell<u64>,ahead_counts:Cell<[u64;2]>,selection_counts:Cell<[u64;2]>,selection_shortcut:Cell<bool>,first_step:Cell<bool>,memo_share:Cell<bool>,asked_by_output:Cell<bool>,asked_counts:Cell<[u64;2]>,screen_nan:Cell<Option<u32>>,screen_keep:Cell<bool>,source:Rc<Cell<u64>>,programs:RefCell<BTreeMap<(Vec<u32>,u64),spark_gpu_probe::driver::ResidentProgram<'b,'d>>>,
     row_workspace:RefCell<Option<DeviceVector<'d>>>,small_rows:Cell<bool>,
+    /// The row pass flag of the backend as this device and its siblings last set it (`set_row_pass`): the backend has
+    /// no read of it. Only `dot_rows` reads it, to give the old value back.
+    row_pass:Rc<Cell<bool>>,
     serving:Option<RefCell<Option<(u64,std::time::Instant,BackendStats)>> >,state_copies:Cell<usize>,
     /// Bytes the next small-group trim keeps above its usual room: set by `batch_rows`, used once.
     batch_keep:Cell<usize>,
@@ -95,8 +102,8 @@ impl<'d> Slab<'d> {
 // code clones after startup: flash-serve moves its one device into `Split::new`. Only check tools and
 // `ResidentFactory`, which no server uses, clone a device.
 impl Clone for Device<'_,'_> {
-    fn clone(&self)->Self {Self {backend:self.backend,weights:self.weights.clone(),parameters:self.parameters.clone(),norms:self.norms.clone(),
-        memo_bound:self.memo_bound.clone(),
+    fn clone(&self)->Self {Self {backend:self.backend,weights:self.weights.clone(),parameters:self.parameters.clone(),constants:self.constants.clone(),norms:self.norms.clone(),
+        memo_bound:self.memo_bound.clone(),row_pass:self.row_pass.clone(),
         #[cfg(feature="kernel-bench")] probe:self.probe.clone(),
         #[cfg(feature="kernel-bench")] attention_calls:self.attention_calls.clone(),
         blocks:self.blocks.clone(),mhc_host:self.mhc_host.clone(),mhc_fused:self.mhc_fused,stages:self.stages.clone(),cost:self.cost.clone(),memo:RefCell::new(Memo {limit:self.memo_bound.plan().map_or(0,|p|p.bytes()),..Memo::default()}),copies:RefCell::new(None),selection_checks:RefCell::new(Vec::new()),sum_checks:RefCell::new(Vec::new()),selection_read:RefCell::new(None),gathered:RefCell::new(None),ahead:RefCell::new(None),asked:RefCell::new(BTreeMap::new()),memo_epoch:Cell::new(0),ahead_counts:Cell::new([0;2]),selection_counts:Cell::new([0;2]),selection_shortcut:Cell::new(true),first_step:Cell::new(true),memo_share:Cell::new(true),asked_by_output:Cell::new(false),asked_counts:Cell::new([0;2]),screen_nan:Cell::new(None),screen_keep:Cell::new(false),row_workspace:RefCell::new(None),small_rows:Cell::new(false),source:self.source.clone(),programs:RefCell::new(BTreeMap::new()),serving:self.serving.as_ref().map(|_|RefCell::new(None)),state_copies:Cell::new(0),batch_keep:Cell::new(0),batch_route:Cell::new(0),group_charge:Cell::new(self.group_charge.get()),verify_route:Cell::new(false),group_follows:Cell::new(false),spares_kept:Cell::new(false),held_stage:RefCell::new(None)}}
@@ -140,7 +147,7 @@ impl<'b,'d> Device<'b,'d> {
         self.backend.synchronize()?;
         self.probe.borrow_mut().take();self.row_workspace.borrow_mut().take();self.small_rows.set(false);
         self.programs.borrow_mut().clear();*self.memo.borrow_mut()=Memo {limit:self.memo_bound.plan().map_or(0,|p|p.bytes()),..Memo::default()};self.copies.borrow_mut().take();self.selection_read.borrow_mut().take();self.memo_changed();self.asked.borrow_mut().clear();self.gathered.borrow_mut().take();
-        self.norms.borrow_mut().clear();self.blocks.borrow_mut().clear();self.parameters.borrow_mut().clear();
+        self.norms.borrow_mut().clear();self.blocks.borrow_mut().clear();self.constants.borrow_mut().clear();self.parameters.borrow_mut().clear();
         self.backend.fixture_reset_resident()
     }
     #[cfg(feature="kernel-bench")]
@@ -149,8 +156,8 @@ impl<'b,'d> Device<'b,'d> {
     pub fn with_ring(backend:&'b Backend<'d>,ring:Option<crate::transport::Ring>)->Self {Self::with_ring_profiled(backend,ring,false)}
     /// Diagnostic runner counters. Normal construction keeps them disabled.
     pub fn with_ring_profiled(backend:&'b Backend<'d>,ring:Option<crate::transport::Ring>,cost:bool)->Self {
-        Self {backend,weights:Rc::new(RefCell::new(crate::resident_weights::Weights::new(ring,cost))),parameters:Rc::new(RefCell::new(parameters::ParameterCache::default())),
-            memo_bound:Rc::new(crate::projection_memo::Bound::default()),
+        Self {backend,weights:Rc::new(RefCell::new(crate::resident_weights::Weights::new(ring,cost))),parameters:Rc::new(RefCell::new(parameters::ParameterCache::default())),constants:Rc::new(RefCell::new(std::collections::VecDeque::new())),
+            memo_bound:Rc::new(crate::projection_memo::Bound::default()),row_pass:Rc::new(Cell::new(false)),
             #[cfg(feature="kernel-bench")] probe:Rc::new(RefCell::new(None)),
             #[cfg(feature="kernel-bench")] attention_calls:Rc::new(Cell::new(0)),
             norms:Rc::new(RefCell::new(BTreeMap::new())),blocks:Rc::new(RefCell::new(BTreeMap::new())),mhc_host:None,mhc_fused:false,stages:Rc::new(RefCell::new([[0;2];4])),cost:Rc::new(crate::resident_profile::Cost::new(cost)),memo:RefCell::new(Memo::default()),copies:RefCell::new(None),selection_checks:RefCell::new(Vec::new()),sum_checks:RefCell::new(Vec::new()),selection_read:RefCell::new(None),gathered:RefCell::new(None),ahead:RefCell::new(None),asked:RefCell::new(BTreeMap::new()),memo_epoch:Cell::new(0),ahead_counts:Cell::new([0;2]),selection_counts:Cell::new([0;2]),selection_shortcut:Cell::new(true),first_step:Cell::new(true),memo_share:Cell::new(true),asked_by_output:Cell::new(false),asked_counts:Cell::new([0;2]),screen_nan:Cell::new(None),screen_keep:Cell::new(false),row_workspace:RefCell::new(None),small_rows:Cell::new(false),source:Rc::new(Cell::new(0)),programs:RefCell::new(BTreeMap::new()),serving:None,state_copies:Cell::new(0),batch_keep:Cell::new(0),batch_route:Cell::new(0),group_charge:Cell::new(usize::MAX),verify_route:Cell::new(false),group_follows:Cell::new(false),spares_kept:Cell::new(false),held_stage:RefCell::new(None)}
@@ -185,6 +192,9 @@ impl<'b,'d> Device<'b,'d> {
     // Device consumers share the backend's ordered stream. Readback waits, and
     // Buffer::drop drains pending work before a source or destination is freed.
     // Keep owners here; a value wrapper needs no separate completion barrier.
+    /// Set the row pass flag of the backend (`Backend::resident_row_pass`) and keep its value in `row_pass`. Every set of
+    /// the flag in this crate goes through here.
+    fn set_row_pass(&self,rows:usize) {self.backend.resident_row_pass(rows);self.row_pass.set(rows>1);}
     fn value(&self,vector:DeviceVector<'d>,words:usize)->Result<Value<'b,'d>> {self.shared_value(Rc::new(vector.into_resident_shared()?),words)}
     fn shared_value(&self,vector:Rc<DeviceVector<'d>>,words:usize)->Result<Value<'b,'d>> {let source=self.source.get().checked_add(1).ok_or("immutable source identity exhausted")?;self.source.set(source);
         Ok(Value {vector,words,lineage:Lineage::fresh(source,words),known:RefCell::new(None),assumed:Cell::new(false),pending:None,held:None,prompt_middle:None})}
@@ -326,7 +336,7 @@ impl<'b,'d> Device<'b,'d> {
 impl<'b,'d> Compute for Device<'b,'d> {
     fn work<T>(&self,run:impl FnOnce()->Result<T>)->Result<T> {
         let queue=self.backend.resident_queue()?;self.backend.enable_resident_launches()?;
-        self.backend.resident_row_pass(1);
+        self.set_row_pass(1);
         let result=run();
         // A scope may end with no real read. Its known selections are still checked. A failed scope still checks its residual
         // sums, so a sum the host form refuses refuses first, with the host form's error, as its add did on the host.
@@ -650,7 +660,7 @@ impl<'b,'d> Compute for Device<'b,'d> {
         let words=result.len();let output=self.value(result,words)?;self.cost.record(||"attention_piece".into(),stamp,self.backend,0);Ok(Some(output))
     }
     fn embedding(&self,token:u32,streams:usize)->Result<Option<Value<'b,'d>>> {
-        self.backend.resident_row_pass(1);
+        self.set_row_pass(1);
         let stamp=self.cost.start(self.backend);let out=self.weights.borrow().embedding(self.backend,token,streams)?;let words=out.len();let value=self.value(out,words)?;self.cost.record(||"embedding".into(),stamp,self.backend,0);Ok(Some(value))
     }
     fn projection(&self,_:&CheckpointAdmission,name:&str,x:&Value<'b,'d>,round:bool)->Result<Option<Value<'b,'d>>> {
@@ -699,6 +709,19 @@ impl<'b,'d> Compute for Device<'b,'d> {
     }
     fn upload(&self,v:&[f32])->Result<Value<'b,'d>> {if v.is_empty() {return self.zeros(0);}let stamp=self.cost.start(self.backend);let out=self.value(self.backend.upload_vector(v)?,v.len())?;self.cost.record(||"upload".into(),stamp,self.backend,0);Ok(out)}
     fn upload_known(&self,v:&[f32])->Result<Value<'b,'d>> {let value=self.upload(v)?;if !v.is_empty() {*value.known.borrow_mut()=Some(v.to_vec());}Ok(value)}
+    /// The latest `CONSTANTS` constant vectors are kept by their words: a hit shares the vector and uploads nothing,
+    /// so the recorded launches are not cut by an upload. A miss uploads, keeps the vector and drops the oldest one
+    /// (its values stay alive while a value holds them). The cache is read only: no call writes a constant.
+    fn upload_constant(&self,v:&[f32])->Result<Value<'b,'d>> {
+        const CONSTANTS:usize=64;
+        if v.is_empty() || v.len()>16 {return self.upload_known(v);}
+        let key=v.iter().map(|x|x.to_bits()).collect::<Vec<_>>();
+        let hit=self.constants.borrow().iter().find(|(words,_)|*words==key).map(|(_,vector)|vector.clone());
+        let vector=match hit {Some(vector)=>vector,None=>{
+            let vector=Rc::new(self.backend.upload_vector(v)?.into_resident_shared()?);
+            let mut kept=self.constants.borrow_mut();if kept.len()==CONSTANTS {kept.pop_front();}kept.push_back((key,vector.clone()));vector}};
+        let value=self.shared_value(vector,v.len())?;*value.known.borrow_mut()=Some(v.to_vec());Ok(value)
+    }
     fn read(&self,v:&Value<'b,'d>)->Result<Vec<f32>> {
         self.ready(v)?;
         self.weights.borrow().check_exchange()?;if let Some(error)=self.backend.fatal_error() {return Err(error);}
@@ -849,6 +872,30 @@ if start==0 && v.pending.as_ref().and_then(|p|p.borrow().state_prefix)==Some(len
     }
     /// One launch pair for every row (the plain step's argmax kernels over a grid of rows), then one read of three words a row
     /// with the checks every `read` makes: the value, the ID and the finite flag. The logits stay on the device.
+    /// FOLD DOTS: one query row and 2 to 16 stack rows (the block mixes of a loop token) run on the FP32 fold-rows entry
+    /// (`Backend::resident_projection_fold_rows`): the query is the one weight row, the stack rows are its source rows,
+    /// and the output `[count][1]` is the `[1][count]` of `RowDots`. Each word is the same chain: `mul.rn.f32` of weight and
+    /// input, then `add.rn.f32` in rising column order from +0.0 (`plain_warp::rows_fold_rows`), as `RowDots` makes it.
+    /// The query words are kept on the device by `parameters`, as an operation keeps its weight. The entry is recorded
+    /// as kind `FoldRowsF32` only in a row pass, so the pass flag is set for this one launch and its old value comes back
+    /// after it on every path (`Restore`). Any other shape, or a stack outside the fold envelope, runs `RowDots`.
+    fn dot_rows(&self,queries:&[f32],stack:&Value<'b,'d>,count:usize,width:usize)->Result<Value<'b,'d>> {
+        let shape=super::row_dots_shape(queries.len(),count,width)?;
+        if queries.len()==width && (2..=spark_gpu_probe::plain_admission::FOLD_ROWS_MAX_TOKENS).contains(&count) && stack.words==count*width {
+            self.ready(stack)?;
+            let weight=self.parameters.borrow_mut().resolve(queries,None,|values|self.backend.upload_vector(values)?.into_resident_shared())?.ok_or("row dots have no query")?;
+            if !weight.is_segmented() && !stack.vector.is_segmented()
+                && spark_gpu_probe::plain_admission::fold_rows_admitted(1,width,weight.device_address() as usize,stack.vector.device_address() as usize,count) {
+                let stamp=self.cost.start(self.backend);let mut out=self.backend.vector(count)?;
+                // The old flag comes back when the guard drops: after the launch, and on its error.
+                let pass=super::Restore::new(self.row_pass.get(),true,|on:bool|self.set_row_pass(if on {2} else {1}));
+                let done=self.backend.resident_projection_fold_rows(&[spark_gpu_probe::driver::ResidentProjection::Plain {rows:1,cols:width,weight:&weight,input:&stack.vector}],&mut out,false,count);
+                drop(pass);done?;
+                let value=self.value(out,count)?;self.cost.record(||"dot_rows_fold".into(),stamp,self.backend,0);return Ok(value);
+            }
+        }
+        self.operation(shape,[Some(stack),None,None,None],queries)
+    }
     fn rows_greedy(&self,logits:&Value<'b,'d>,rows:usize)->Result<Option<Vec<u32>>> {
         self.ready(logits)?;need(rows>0 && logits.words>0 && logits.words.is_multiple_of(rows),"row greedy extent differs")?;
         let count=(logits.words/rows).div_ceil(1024);let mut partials=self.backend.vector(rows*count*3)?;let mut result=self.backend.vector(rows*3)?;
@@ -896,6 +943,19 @@ if start==0 && v.pending.as_ref().and_then(|p|p.borrow().state_prefix)==Some(len
         let value=self.value(sum,x.words)?;self.cost.record(||"bf16_sum".into(),stamp,self.backend,0);Ok(value)
     }
     fn mean(&self,x:&Value<'b,'d>,streams:u32,hidden:u32)->Result<Value<'b,'d>> {let mut s=shape(Op::StreamMean);s.heads=streams;s.dim=hidden;self.operation(s,[Some(x),None,None,None],&[])}
+    /// The rows entry of the arms (`Backend::block_rows_into`, kernel entry `resident_launch_block_rows`).
+    fn block_rows(&self,s:Shape,rows:usize,shared:u32,x:[Option<&Value<'b,'d>>;4],w:&[f32])->Result<Option<Value<'b,'d>>> {
+        for value in x.iter().flatten() {self.ready(value)?;}
+        let stamp=self.cost.start(self.backend);
+        let (lengths,_,units,words)=spark_gpu_probe::block_rows::lengths(s,rows,shared).ok_or("invalid block rows shape")?;
+        for (v,count) in x.iter().zip(lengths) {need(v.map_or(0,|v|v.words)==count,"block rows input extent differs")?;}
+        let weight=self.parameters.borrow_mut().resolve(w,None,|values|self.backend.upload_vector(values)?.into_resident_shared())?;
+        let input=x.map(|v|v.filter(|v|v.words>0).map(|v|&*v.vector));
+        let mut output=self.backend.vector(units*words)?;
+        self.backend.block_rows_into(s,rows,shared,input,weight.as_deref(),&mut output)?;
+        let value=self.value(output,units*words)?;
+        self.cost.record(||format!("rows_{:?}",s.op),stamp,self.backend,w.len()*4);Ok(Some(value))
+    }
     fn prompt(&self,s:spark_gpu_probe::prompt_ops::Shape,x:[Option<&Value<'b,'d>>;5],w:&[f32])->Result<Value<'b,'d>> {
         let mut x=x;let poisoned;
         if s.op==spark_gpu_probe::prompt_ops::Op::SelectRows&& let Some(left)=self.screen_nan.get() {
@@ -923,7 +983,7 @@ if start==0 && v.pending.as_ref().and_then(|p|p.borrow().state_prefix)==Some(len
         Ok(made)
     }
     fn rows_embedding(&self,tokens:&[u32],streams:usize)->Result<Option<Value<'b,'d>>> {
-        self.backend.resident_row_pass(tokens.len());
+        self.set_row_pass(tokens.len());
         // Prompt work: its vectors come from the vector pool and return to it, never the decode reserve.
         self.backend.decode_phase(false);
         self.batch_route.set(if self.batch_route.get()==1 {2} else {0});
@@ -939,7 +999,7 @@ if start==0 && v.pending.as_ref().and_then(|p|p.borrow().state_prefix)==Some(len
         let stamp=self.cost.start(self.backend);let out=self.weights.borrow().embedding_rows(self.backend,tokens,streams)?;let words=out.len();let value=self.value(out,words)?;self.cost.record(||"rows_embedding".into(),stamp,self.backend,0);Ok(Some(value))
     }
     fn draft_embeddings(&self,tokens:&[u32])->Result<Option<Value<'b,'d>>> {
-        self.backend.resident_row_pass(tokens.len());
+        self.set_row_pass(tokens.len());
         self.batch_route.set(2);
         let out=self.weights.borrow().embedding_rows(self.backend,tokens,1)?;
         let words=out.len();
@@ -1177,6 +1237,15 @@ if start==0 && v.pending.as_ref().and_then(|p|p.borrow().state_prefix)==Some(len
         self.backend.synchronize()?;self.ready(part)?;
         need(part.words==expected && offset.checked_add(expected).is_some_and(|end|end<=target.words),"prompt fill extent differs")?;
         let vector=Rc::get_mut(&mut target.vector).ok_or("prompt fill target is shared")?;
+        self.backend.copy_range(&part.vector,vector,0,offset,part.words)
+    }
+    // No wait: `Backend::copy_range` records the copy among the recorded launches, or puts it on the stream after
+    // flushing them, so it runs after every launch queued before it, as a launch does. A dropped value is freed
+    // only at a drain, so `part` lives until the copy has run.
+    fn state_fill(&self,target:&mut Value<'b,'d>,offset:usize,part:&Value<'b,'d>)->Result<()> {
+        self.ready(part)?;
+        need(offset.checked_add(part.words).is_some_and(|end|end<=target.words),"state fill extent differs")?;
+        let vector=Rc::get_mut(&mut target.vector).ok_or("state fill target is shared")?;
         self.backend.copy_range(&part.vector,vector,0,offset,part.words)
     }
     fn rows_append(&self,held:Option<&Value<'b,'d>>,rows:usize,new:&Value<'b,'d>,width:usize)->Result<Value<'b,'d>> {

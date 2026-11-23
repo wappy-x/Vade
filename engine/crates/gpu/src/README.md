@@ -6,7 +6,12 @@
 | --- | --- |
 | [`backend.rs`](backend.rs) | Scoped GB10 backend. |
 | [`batch.rs`](batch.rs) | Batched forward launches; weight loading remains in backend.rs. |
+| [`block_attention.rs`](block_attention.rs) | Block arms of attention with a window, a relative position term and a sink. |
+| [`block_experts.rs`](block_experts.rs) | Block arms of the routed experts and of the output. |
+| [`block_ops.rs`](block_ops.rs) | The block arms of the general kernel `causal_operation`: safe shared code, one source for the host and the GPU. |
+| [`block_stream.rs`](block_stream.rs) | Block arms of the stream. |
 | [`driver.rs`](driver.rs) | Minimal, manually declared NVIDIA CUDA Driver API ABI (not CUDA Runtime API). |
+| [`fixed_math.rs`](fixed_math.rs) | Fixed FP32 math for host forms and GPU arms: `exp`, `sigmoid`, `tanh`, `ln` and the BF16 round. |
 | [`fp4.rs`](fp4.rs) | Explicit W4A16 dispatch; the default FP8 path never selects these kernels. |
 | [`fp4_abi.rs`](fp4_abi.rs) | Opt-in NVFP4 weights with BF16 operands. |
 | [`fp8.rs`](fp8.rs) | Resident E4M3 projections use checkpoint-declared dynamic W8A8 math. |

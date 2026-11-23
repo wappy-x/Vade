@@ -774,8 +774,8 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
             generation.seed_draft(draft_bank.propose(ready.handle_scope.as_deref(), ready.request.session, config.draft_global_bank, &ready.prompt));
             let decoder = tokenizer.map(|t| if ready.parser.is_some() { t.chat_decoder() } else { t.decoder() });
             let mut echo = protocol::SamplingEcho::new(&ready.request, mode, if mode == protocol::DraftMode::Plain && engine.greedy_draft_only() {0} else {generation.mtp_depth.or(ready.request.mtp_depth).unwrap_or(config.mtp_depth)}).with_metadata(limits);
-            if tokenizer.is_some_and(|t| t.glm_chat()) && let protocol::Prompt::Chat(input) = &ready.request.prompt {
-                echo = echo.with_glm_thinking(input);
+            if let protocol::Prompt::Chat(input) = &ready.request.prompt {
+                echo = if tokenizer.is_some_and(|t| t.glm_chat()) { echo.with_glm_thinking(input) } else if let Some(rendered) = tokenizer.and_then(|t| t.rendered_effort(input)) { echo.with_rendered_thinking(rendered) } else { echo };
             }
             if reused > 0 { prefill.cache_restore = Some(clock_elapsed(&cache_started)); }
             if reused == ready.prompt.len() {

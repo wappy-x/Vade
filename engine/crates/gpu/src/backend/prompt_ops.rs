@@ -14,6 +14,8 @@ impl<'a> Backend<'a> {
     pub fn prompt_operation_output(&self,shape:Shape,input:[Option<&DeviceVector<'_>>;5],weight:Option<&DeviceVector<'_>>,destination:Option<DeviceVector<'a>>)->Result<DeviceVector<'a>,String> {
         self.require_resident_stream()?;
         let (lengths,weights,units,words)=shape.lengths().ok_or("invalid prompt row shape")?;
+        // The Inkling block arms run in their own kernel entry (Ruling R6g), never in the general prompt rows.
+        if shape.op==crate::prompt_ops::Op::Wrapped && crate::block_ops::is_block(shape.inner.op) {return Err("a block arm runs in its own entry, not in prompt rows".into());}
         // No prompt kernel reads the round mark of a fold (`causal_ops::FOLD_ROUNDS`): a wrapped fold is the fold alone.
         if shape.op==crate::prompt_ops::Op::Wrapped && shape.inner.op==crate::causal_ops::Op::ExpertFold && shape.inner.dim==crate::causal_ops::FOLD_ROUNDS {return Err("a wrapped fold does not round its rows".into());}
         let mut addresses=[4u64;5];

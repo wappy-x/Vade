@@ -5,6 +5,7 @@
 | File | What it does (from its own summary comment) |
 | --- | --- |
 | [`flash-serve.rs`](flash-serve.rs) | Flash-Next rank service: authenticated HTTP on rank zero, command workers elsewhere. |
+| [`loop-load-check.rs`](loop-load-check.rs) | Load check of the looped text family on one device: the weights of the load plan and the state of one chat. With `--products`: every weight name of the driver, and each device product against the host chain. With `--product-rows`: the products for many input rows against one product a row. |
 | [`session-state-bytes.rs`](session-state-bytes.rs) | Device allocation and opaque state-copy gate. No checkpoint or model arithmetic. |
 | [`session-plan-check.rs`](session-plan-check.rs) | Conditional physical allocation and continuation gate at deferred plan dimensions. |
 | [`tp-bench.rs`](tp-bench.rs) | TP throughput, strict verification and rollback using the real model. |

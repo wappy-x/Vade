@@ -55,6 +55,7 @@ mod status;
 mod style;
 mod test_gate;
 mod text;
+mod text_service;
 mod topology;
 mod unix_file;
 mod unix_flags;

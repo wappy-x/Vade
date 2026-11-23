@@ -34,6 +34,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut letters = Vec::new();
     let mut numbers = Vec::new();
     let mut marks = Vec::new();
+    // The three cased letter subclasses. Lm and Lo are the letters outside them.
+    let (mut lower, mut upper, mut title) = (Vec::new(), Vec::new(), Vec::new());
     let mut first = None;
     for line in sources[0].lines() {
         let row: Vec<_> = line.split(';').collect();
@@ -54,6 +56,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             Some(b'L') => add_range(&mut letters, start, n),
             Some(b'N') => add_range(&mut numbers, start, n),
             Some(b'M') => add_range(&mut marks, start, n),
+            _ => {}
+        }
+        match row[2] {
+            "Ll" => add_range(&mut lower, start, n),
+            "Lu" => add_range(&mut upper, start, n),
+            "Lt" => add_range(&mut title, start, n),
             _ => {}
         }
         first = None;
@@ -111,13 +119,18 @@ fn main() -> Result<(), Box<dyn Error>> {
             name
         )?;
     }
-    for (name, ranges) in [("LETTERS", letters), ("NUMBERS", numbers), ("MARKS", marks)] {
-        writeln!(out, "pub static {name}: &[(u32,u32)] = &[")?;
-        for (start, end) in ranges {
-            writeln!(out, "({start},{end}),")?;
+    // Table order follows the committed file: the later tables are appended.
+    let ranges = |out: &mut BufWriter<File>, tables: Vec<(&str, Vec<(u32, u32)>)>| -> std::io::Result<()> {
+        for (name, ranges) in tables {
+            writeln!(out, "pub static {name}: &[(u32,u32)] = &[")?;
+            for (start, end) in ranges {
+                writeln!(out, "({start},{end}),")?;
+            }
+            writeln!(out, "];")?;
         }
-        writeln!(out, "];")?;
-    }
+        Ok(())
+    };
+    ranges(&mut out, vec![("LETTERS", letters), ("NUMBERS", numbers)])?;
     writeln!(out, "pub static CCC: &[(u32,u8)] = &[")?;
     for (n, class) in ccc {
         writeln!(out, "({n},{class}),")?;
@@ -132,6 +145,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         writeln!(out, "({n},&[{}]),", values.join(","))?;
     }
     writeln!(out, "];")?;
+    ranges(&mut out, vec![("MARKS", marks), ("LOWERCASE_LETTERS", lower), ("UPPERCASE_LETTERS", upper), ("TITLECASE_LETTERS", title)])?;
     out.flush()?;
     Ok(())
 }

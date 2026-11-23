@@ -160,9 +160,54 @@ impl<R: Runner> App<R> {
         // A text service that runs without drafting after a fall of the default depth (no drafting layer, or too
         // little memory at its start): a start that names no depth asks for that same running engine again, not for
         // a change of depth. The running engine keeps its depth, as it keeps a context that fell.
-        let same_fall = existing.as_ref().and_then(|session| session.draft_fall).filter(|_| options.diagnostic_unqualified_text && !options.mtp_explicit)
-            .map(|fall| UpOptions { draft_fall: Some(fall), ..options.clone() });
-        let options = same_fall.as_ref().unwrap_or(options);
+        let mut owned = options.clone();
+        if let Some(fall) = existing.as_ref().and_then(|session| session.draft_fall).filter(|_| owned.diagnostic_unqualified_text && !owned.mtp_explicit) {
+            owned.draft_fall = Some(fall);
+        }
+        // The plan is read before the session. The helper is verified before it runs: a stopped
+        // SSH fails here, with the hash check's fix line, and the helper does not start.
+        // Every selected machine is asked. Replicas can point at different checkpoints, and
+        // from_local already refuses that when the files are on this computer. A local
+        // config.json is read here, including on a dry run. The real dry runner only prints
+        // the command and returns empty output, so that reply is not a width: say so, and
+        // refuse nothing on that ground. The hash recorded here is not run again below.
+        // Only a group of one Spark reads the plan here. Two Sparks take main's steps (no plan read and no extra SSH
+        // before same_launch); any other group is refused with main's text in Session::new, also in a dry run.
+        let mut hashed = Vec::new();
+        if owned.diagnostic_unqualified_text && owned.checkpoint_service.is_none() {
+            let machines = self.config.selected(&owned)?;
+            let group = if owned.replicas { owned.replica_sparks.max(1) } else { machines.len() };
+            if group == 1 && crate::text_service::from_local(&machines)?.is_none() {
+                let manifest = self.manifest()?;
+                let mut found = None;
+                for machine in &machines {
+                    let artifact = manifest.artifacts.get(&machine.name).cloned()
+                        .ok_or_else(|| format!("{} has no staged build. Run vade install.", machine.name))?;
+                    self.verify_staged(machine, &artifact)?;
+                    hashed.push(machine.name.clone());
+                    let Some(service) = self.remote_text_service(machine, &artifact.worker)? else {
+                        owned.text_width_unread = true;
+                        found = None;
+                        continue;
+                    };
+                    if owned.text_width_unread {
+                        continue;
+                    }
+                    if let Some(previous) = found && previous != service {
+                        return Err(crate::text_service::DIFFERENT_SERVICES.into());
+                    }
+                    found = Some(service);
+                }
+                if !owned.text_width_unread && let Some(service) = found {
+                    owned.checkpoint_service = Some(service);
+                }
+            }
+        }
+        if owned.text_width_unread {
+            crate::output::line(format_args!("The checkpoint is on the Spark, so this dry run does not know the text-service width. A Spark count is not refused on that ground."))?;
+            crate::output::line(format_args!("The drafting depth is not known in this dry run."))?;
+        }
+        let options = &owned;
         let mut session = self.requested_session(options, existing.as_ref(), rdma)?;
         if let Some(existing) = existing {
             if !resident::same_launch(&existing, &session) {
@@ -186,7 +231,7 @@ impl<R: Runner> App<R> {
             ("Machines", session.ranks.iter().map(|rank| rank.machine.name.as_str()).collect::<Vec<_>>().join(", ")),
             ("Context", format!("{} tokens", session.context)),
             ("Output limit", format!("{} tokens", session.output)),
-            ("Drafting request", session.drafting_plan()),
+            ("Drafting request", if options.text_width_unread { "The drafting depth is not known in this dry run.".into() } else { session.drafting_plan() }),
             ("Concurrent chats", session.chats.map_or_else(|| "engine-admitted".into(), |count| count.to_string())),
             ("Transport", transport.clone()),
             ("Endpoint", format!("{}/v1", session.endpoint())),
@@ -202,7 +247,9 @@ impl<R: Runner> App<R> {
         // Verify helpers before executing them, then check paths and every GPU
         // before committing launch intent.
         for rank in &session.ranks {
-            self.verify_artifacts(rank)?;
+            if !hashed.iter().any(|name| name == &rank.machine.name) {
+                self.verify_artifacts(rank)?;
+            }
         }
         self.resolve_rank_paths(&mut session)?;
         for rank in &session.ranks {
@@ -248,7 +295,12 @@ impl<R: Runner> App<R> {
                 request.insert("ptx_path".into(), rank.artifact.ptx.clone());
                 request.insert("ptx_sha256".into(), rank.artifact.ptx_sha256.clone());
                 request.insert("model_path".into(), rank.machine.model_path.clone());
-                let args = session.engine_args(index);
+                let mut args = session.engine_args(index);
+                // An unread dry run does not know whether the real start passes --mtp 0 or 3, or refuses a named depth.
+                // Leave that argument out of the preview. The plan line says the depth is not known.
+                if options.text_width_unread && let Some(at) = args.iter().position(|arg| arg == "--mtp") {
+                    args.drain(at..at + 2);
+                }
                 for (i, arg) in args.iter().enumerate() {
                     request.insert(format!("arg.{i}"), arg.clone());
                 }
