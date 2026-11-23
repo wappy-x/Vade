@@ -70,7 +70,7 @@ fn check_archive_times(path: &Path, epoch: u64) {
 
 struct Fixture { temp: Temp, repo: PathBuf, payload: PathBuf, cli: PathBuf, home: PathBuf, revision: String, ptx: PathBuf }
 // `stamp` is what the engine build leaves in flash-serve when it embeds a cubin.
-fn fixture(stamp: &str) -> Fixture {
+fn fixture(stamp: &str, has_inkling_image: bool) -> Fixture {
     let temp = Temp::new("make-bundle");
     let (repo, payload, cli, home) = (temp.0.join("repo"), temp.0.join("payload"), temp.0.join("cli"), temp.0.join("home"));
     fs::create_dir_all(&home).unwrap();
@@ -95,7 +95,8 @@ fn fixture(stamp: &str) -> Fixture {
     fs::write(payload.join("source.tar"), tar.stdout).unwrap();
     let engine = payload.join("artifacts/engine/target/release/flash-serve");
     let ptx = payload.join("artifacts/engine/target/nvptx64-nvidia-cuda/release/spark_layer_kernels.ptx");
-    write(&engine, &elf(&format!("libcuda.so.1\0GLIBC_2.17\0GLIBC_2.39\0{stamp}\0")), 0o755);
+    let inkling_ptx = if has_inkling_image { ".visible .entry resident_launch_block_arms(" } else { "" };
+    write(&engine, &elf(&format!("libcuda.so.1\0GLIBC_2.17\0GLIBC_2.39\0{stamp}\0{inkling_ptx}\0")), 0o755);
     write(&ptx, b"//\n.version 8.8\n.target sm_121a\n.address_size 64\n", 0o644);
     write(&payload.join("build.json"), format!("{{\n  \"sha\": \"{revision}\",\n  \"binary_sha256\": \"{}\",\n  \"ptx_sha256\": \"{}\"\n}}\n",
         sha256(&engine), sha256(&ptx)).as_bytes(), 0o644);
@@ -116,7 +117,7 @@ impl Fixture {
 
 #[test]
 fn from_payload_gives_the_same_bytes_twice_and_one_checked_folder() {
-    let fixture = fixture("");
+    let fixture = fixture("", true);
     let (temp, revision) = (&fixture.temp, &fixture.revision);
     let stem = format!("vade-0.1.0-{}-linux-aarch64-gb10", &revision[..7]);
     let epoch = run(Command::new("git").arg("-C").arg(&fixture.repo).args(["show", "-s", "--format=%ct", revision])).trim().parse().unwrap();
@@ -150,6 +151,16 @@ fn from_payload_gives_the_same_bytes_twice_and_one_checked_folder() {
     assert!(!refused.status.success() && String::from_utf8_lossy(&refused.stderr).contains("output already exists"));
 }
 
+#[test]
+fn from_payload_refuses_an_engine_without_the_inkling_image() {
+    let fixture = fixture("", false);
+    let out = fixture.temp.0.join("without-inkling");
+    let output = fixture.command(&[out.as_os_str()]).output().unwrap();
+    assert!(!output.status.success() && String::from_utf8_lossy(&output.stderr).contains("flash-serve does not embed the Inkling image"),
+        "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(!out.exists());
+}
+
 const PTXAS: &str = "ptxas_version=13.0.88\nptxas_sha256=a1941a04ca4fd233b2fbe50c625b1e72b3d5f79ebe80209a272c85482dfbb487\nptxas_args=--gpu-name=sm_121a -m64 -O3\n";
 // The three files make-cubin.sh writes, for the PTX at `ptx`.
 fn cubin(folder: &Path, ptx: &Path, image: &[u8]) -> String {
@@ -168,7 +179,7 @@ fn from_payload_lists_the_cubin_and_refuses_a_cubin_that_is_not_bound() {
     let scratch = Temp::new("make-bundle-digest");
     write(&scratch.0.join("image"), b"compiled image", 0o644);
     let image = sha256(&scratch.0.join("image"));
-    let fixture = fixture(&format!("cubin_sha256={image}"));
+    let fixture = fixture(&format!("cubin_sha256={image}"), true);
     let (temp, ptx, revision) = (&fixture.temp, &fixture.ptx, &fixture.revision);
     let folder = temp.0.join("cubin");
     assert_eq!(cubin(&folder, ptx, b"compiled image"), image);

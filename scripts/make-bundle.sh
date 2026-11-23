@@ -4,6 +4,12 @@
 set -eu
 
 fail() { printf '%s\n' "bundle: $*" >&2; exit 1; }
+check_inkling_image() {
+    # The PTX entry declaration is embedded as data, unlike a host symbol name.
+    grep -aEq '[.]entry[[:space:]]+resident_launch_block_arms[[:space:]]*[(]' "$1" ||
+        fail 'flash-serve does not embed the Inkling image'
+    printf '%s\n' 'Inkling image check: PASS'
+}
 if [ "${1-}" = --help ]; then
     printf '%s\n' 'Usage: sh scripts/make-bundle.sh [OUTPUT_DIR]' \
         'Build committed HEAD for Linux aarch64; OUTPUT_DIR must not exist (default: .local/bundles).' \
@@ -121,6 +127,7 @@ if [ "${1-}" = --from-payload ]; then
         done
     done
     grep -aFq libcuda.so.1 "$stage/flash-serve" || fail 'engine does not reference the installed CUDA driver SONAME'
+    check_inkling_image "$stage/flash-serve"
     glibc=$(grep -aho 'GLIBC_2\.[0-9][0-9.]*' "$stage/flash-serve" "$stage/vade" "$stage/vade-harness" |
         sed 's/^GLIBC_//' | sort -u -t . -k1,1n -k2,2n -k3,3n | tail -n 1)
     [ -n "$glibc" ] || fail 'cannot read the glibc version the binaries need'
@@ -294,6 +301,9 @@ ptxas_archive=${VADE_PTXAS_ARCHIVE:-"$work/ptxas/archive.tar.xz"}
 # The first build-std may fetch Rust compiler components. Set
 # CARGO_NET_OFFLINE=true when these are already cached (as on a Spark).
 PATH="$work/ptxas/bin:$PATH" cargo +1.99.0 kernels
+# The portable wrapper embeds a manifest path relative to the snapshot root.
+cargo +1.99.0 build --offline --locked -p spark-build-kernels --bin inkling
+(cd "$source" && "$CARGO_TARGET_DIR/debug/inkling" --ptxas "$work/ptxas/bin/ptxas")
 # Compile the exact PTX before the engine build. SPARK_CUBIN goes to this one build
 # command only: it binds the image to the PTX that the engine embeds (gpu/cubin.rs).
 sh "$source/scripts/make-cubin.sh" "$source/engine/target/nvptx64-nvidia-cuda/release/spark_layer_kernels.ptx" \
@@ -313,6 +323,7 @@ cp "$work/cubin/flash.cubin.conf" "$payload/flash.cubin.conf"
 cmp -s "$work/cubin/flash.ptx" "$payload/flash.ptx" || fail 'the cubin was compiled from other PTX bytes'
 grep -aFq "cubin_sha256=$(sha256sum "$work/cubin/flash.cubin" | cut -d ' ' -f 1)" "$payload/flash-serve" ||
     fail 'flash-serve does not embed the cubin'
+check_inkling_image "$payload/flash-serve"
 chmod 755 "$payload/flash-serve" "$payload/vade" "$payload/vade-harness"
 chmod 644 "$payload/flash.ptx" "$payload/flash.cubin.conf"
 cp "$source/LICENSE" "$source/NOTICE" "$payload/"

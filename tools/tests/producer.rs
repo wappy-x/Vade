@@ -63,7 +63,7 @@ impl Producer {
     }
 }
 #[test] fn refusals_and_failure_cleanup() {
-    for mode in ["dirty","build-fails","interrupt","path-leak","remapped-path-leak","wrong-arch","rpath","no-cubin-in-engine"] {
+    for mode in ["dirty","build-fails","interrupt","path-leak","remapped-path-leak","wrong-arch","rpath","no-cubin-in-engine","no-inkling-image"] {
         let p = Producer::new(); p.produce(mode,false); assert!(!p.output.exists(),"{mode}");
     }
 }

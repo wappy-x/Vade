@@ -1,6 +1,6 @@
 //! Simulated build tools for the real shell bundle producer's regression tests.
 #![forbid(unsafe_code)]
-use std::{env,fs,path::{Path,PathBuf},process::{Command,ExitCode},io::Write};
+use std::{env,fs,path::{Path,PathBuf},process::{Command,ExitCode},io::Write,os::unix::fs::PermissionsExt};
 use vade_tools::{Result,sha256};
 fn variable(key: &str) -> String { env::var(key).unwrap() }
 fn write(path: &Path, data: impl AsRef<[u8]>) -> Result<()> { fs::create_dir_all(path.parent().unwrap())?; fs::write(path,data)?; Ok(()) }
@@ -21,6 +21,20 @@ fn tool(name: &str, args: &[String]) -> Result<()> {
             if mode == "interrupt" {
                 let parent = String::from_utf8(vade_tools::output(Command::new("ps").args(["-o","ppid=","-p",&std::process::id().to_string()]))?)?;
                 vade_tools::output(Command::new("kill").args(["-TERM",parent.trim()]))?; return Ok(());
+            }
+            if args.windows(2).any(|pair| pair == ["--bin", "inkling"]) {
+                let builder = PathBuf::from(variable("CARGO_TARGET_DIR")).join("debug/inkling");
+                write(&builder, r#"#!/bin/sh
+set -eu
+test "$PWD" = "$VADE_BUNDLE_SOURCE"
+test "$#" = 2
+test "$1" = --ptxas
+test "$2" = "$VADE_BUNDLE_BUILD/ptxas/bin/ptxas"
+"$2" --version | grep -q 'V13[.]0[.]88$'
+touch engine/inkling-fixture-ready
+"#)?;
+                fs::set_permissions(&builder,fs::Permissions::from_mode(0o755))?;
+                return Ok(());
             }
             let target = if args.iter().any(|s| s == "kernels") {
                 let version = String::from_utf8(vade_tools::output(Command::new("ptxas").arg("--version"))?)?;
@@ -50,6 +64,8 @@ fn tool(name: &str, args: &[String]) -> Result<()> {
             if artifact.ends_with(".ptx") { data.push_str("\n.target sm_121a\n"); }
             if let Ok(image) = env::var("SPARK_CUBIN") {
                 assert!(artifact.ends_with("/flash-serve"),"SPARK_CUBIN reached {artifact}");
+                assert!(Path::new(&source).join("engine/inkling-fixture-ready").is_file(),"Inkling builder did not run");
+                if mode != "no-inkling-image" { data.push_str("\n.visible .entry resident_launch_block_arms(\n"); }
                 if mode != "no-cubin-in-engine" { data.push_str(&format!(" cubin_sha256={}",sha256::digest_reader(fs::File::open(image)?)?)); }
             }
             write(Path::new(&artifact),data)?;
