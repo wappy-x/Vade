@@ -1002,12 +1002,10 @@ fn the_next_step_names_the_checkpoint_launch_serves() {
     assert_eq!(fp4.next(&saved, &empty, home).unwrap(), ("vade up".into(), None));
     assert_eq!(fp4.next(&other, &empty, home).unwrap(), (format!("VADE_MODELS={} vade up", other.display()), None));
     assert_eq!(fp4.next(&saved, &root, home).unwrap(), ("vade up".into(), None));
-    // A valid saved checkpoint comes before VADE_MODELS, so the step uses a new home.
-    // The suggested home names the org and skips a home that is already there.
-    fs::create_dir_all(home.join(".vade-nvidia-new")).unwrap();
+    // VADE_MODELS selects over a valid saved checkpoint in the same home, and the note names the one it replaces.
     let (next, note) = fp4.next(&other, &root, home).unwrap();
-    assert_eq!(next, format!("VADE_HOME={} VADE_MODELS={} vade up", home.join(".vade-nvidia-new-2").display(), other.display()));
-    assert_eq!(note.unwrap(), format!("vade up serves its saved checkpoint {} first, so this step uses a new, unused Vade home.", saved.display()));
+    assert_eq!(next, format!("VADE_MODELS={} vade up", other.display()));
+    assert_eq!(note.unwrap(), format!("vade up then serves this checkpoint in place of the saved {}, and saves it.", saved.display()));
     // Each command is one valid shell line, also with a path that needs quotes.
     let spaced = f.root.join("models/nvidia/new model (2)");
     fs::create_dir_all(&spaced).unwrap();

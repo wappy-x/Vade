@@ -95,10 +95,11 @@ pub(crate) fn saved_model(root: &Path) -> Option<PathBuf> {
     serving_format(&model).is_ok().then_some(model)
 }
 
-/// The checkpoint `vade up` selects before local defaults are saved.
-pub(crate) fn default_model(root: &Path, home: &Path) -> Option<PathBuf> {
-    if Config::load(root).ok()?.is_some() { return None; }
-    model::discover_existing(home, None).ok().map(|model| model.path)
+/// The checkpoint a stopped `vade up` selects now, without a prompt (model::start_saved). `None` when that choice
+/// fails or the saved defaults cannot be read.
+pub(crate) fn served_model(root: &Path, home: &Path) -> Option<PathBuf> {
+    let saved = Config::load(root).ok()?.map(|config| config.model);
+    model::discover_existing(home, model::start_saved(home, saved.as_deref())).ok().map(|model| model.path)
 }
 
 /// The checkout a new controller config points at, if any: VADE_SOURCE, else
@@ -351,7 +352,7 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
         match command {
             Command::Detect if crate::checks::json() => self.detect_json(),
             Command::Detect => {
-                self.detection(Config::load(&self.root)?.as_ref(), INSTALL_SPACE)?;
+                self.detection(Config::load(&self.root)?.as_ref().map(|config| config.model.as_path()), INSTALL_SPACE)?;
                 Ok(())
             }
             Command::Install | Command::Launch(_) | Command::Up(_) => {
@@ -386,13 +387,24 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
                     // in Prepare before the first start.
                     let (mut config, chosen) = if let Some(record) = &prior {
                         let config = configured.ok_or("Run vade down before repairing the local config.")?;
+                        // A start (not vade install) that names another checkpoint folder cannot attach to this engine.
+                        if command != Command::Install
+                            && let Some(requested) = model::named_checkpoint(&self.home).filter(|path| *path != config.model) {
+                            return Err(format!("The running engine serves {}, but VADE_MODELS selects {}. Run vade down, then run vade up again to start that checkpoint.",
+                                text::terminal_text(&config.model.to_string_lossy()), text::terminal_text(&requested.to_string_lossy())));
+                        }
                         (config.check_running_options(&options, record)?, false)
                     } else {
-                        let (model, identity) = self.detection(configured.as_ref(),
-                            if installed.is_some() { 0 } else { INSTALL_SPACE })?;
+                        let saved = configured.as_ref().map(|config| config.model.as_path());
+                        let saved = if command == Command::Install { saved } else { model::start_saved(&self.home, saved) };
+                        let (model, identity) = self.detection(saved, if installed.is_some() { 0 } else { INSTALL_SPACE })?;
                         let configured_phase = phase("Config", "choose and save local defaults")?;
                         let previous = configured.as_ref().map(Config::display);
                         let changed_model = configured.as_ref().is_some_and(|c| c.model != model.path);
+                        if let Some(previous) = configured.as_ref().filter(|_| changed_model) {
+                            output::line(format_args!("Model: {} replaces the saved checkpoint {}.",
+                                text::terminal_text(&model.path.to_string_lossy()), text::terminal_text(&previous.model.to_string_lossy())))?;
+                        }
                         let chosen = configured.is_none() || changed_model;
                         let mut config = match configured {
                             Some(config) if !changed_model => config,
@@ -430,7 +442,7 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
                         done("Config", configured_phase)?;
                         (config, chosen)
                     };
-                    let (artifacts, fresh) = self.install_files(installed, command == Command::Install && prior.is_none(), model::loop_text(&config.model))?;
+                    let (artifacts, fresh) = self.install_files(installed, command == Command::Install && prior.is_none())?;
                     let record = if command == Command::Install {
                         if prior.is_none() { self.prepare(Some(&config.model), &artifacts, "install")?; }
                         None
@@ -529,9 +541,9 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
                     return Err("The local engine is running; run vade down, then vade update and vade up.".into());
                 }
                 let config = Config::load(&self.root)?.ok_or("No local setup yet; run vade launch first.")?;
-                let (model, identity) = self.detection(Some(&config), INSTALL_SPACE)?;
+                let (model, identity) = self.detection(Some(config.model.as_path()), INSTALL_SPACE)?;
                 config.check_resources(&model, &identity)?;
-                install::refresh(&self.root, &mut self.runner, model::loop_text(&config.model))?;
+                install::refresh(&self.root, &mut self.runner)?;
                 output::line(format_args!("Local engine and chat updated. Start: {}", text::command("up")))
             }
             Command::Status | Command::Menu => {
@@ -564,17 +576,16 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
     /// The Install phase: reuse the installed files, or build and stage them.
     /// With `check_source`, files from another checkout or bundle are replaced.
     /// Returns the files and whether they are new.
-    /// `loop_kernels`: the located checkpoint is a looped one, so a build adds its kernel image.
-    fn install_files(&mut self, installed: Option<Fields>, check_source: bool, loop_kernels: bool) -> Result<(Fields, bool), String> {
+    fn install_files(&mut self, installed: Option<Fields>, check_source: bool) -> Result<(Fields, bool), String> {
         // vade install from a new checkout or bundle must not keep an engine from another one.
         let outdated = check_source
             && installed.as_ref().map_or(Ok(false), |files| install::outdated(files, &mut self.runner))?;
         let start = phase("Install", if installed.is_some() && !outdated { "reuse installed files" } else { "prepare local engine and chat" })?;
         let fresh = installed.is_none() || outdated;
         let artifacts = match installed {
-            Some(_) if outdated => install::rebuild(&self.root, &mut self.runner, loop_kernels)?,
+            Some(_) if outdated => install::rebuild(&self.root, &mut self.runner)?,
             Some(files) => files,
-            None => install::ensure(&self.root, &mut self.runner, loop_kernels)?,
+            None => install::ensure(&self.root, &mut self.runner)?,
         };
         done("Install", start)?;
         Ok((artifacts, fresh))
@@ -595,19 +606,20 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
             output::line(format_args!("Model: {reason} The install goes on without it; vade launch needs the model."))?;
         }
         done("Detect", start)?;
-        let (artifacts, _) = self.install_files(installed, true, false)?;
+        let (artifacts, _) = self.install_files(installed, true)?;
         self.prepare(None, &artifacts, "install")?;
         output::line(format_args!("Installed without a model, so no local defaults were saved yet.\n{}\nThen start the engine and open chat: {}",
             model::MODEL_HELP, text::command("launch")))
     }
 
+    /// `saved`: the saved checkpoint this command reads first (see model::start_saved for a start).
     fn detection(
         &mut self,
-        config: Option<&Config>,
+        saved: Option<&Path>,
         install_space: u64,
     ) -> Result<(model::Model, detect::Identity), String> {
         let start = phase("Detect", "read this Spark and the model on disk")?;
-        let model = model::discover(&self.home, config.map(|c| c.model.as_path()))?;
+        let model = model::discover(&self.home, saved)?;
         let identity = self.identify(&model, install_space)?;
         output::text(format_args!("{}", identity.display(Some(&model.path))))?;
         done("Detect", start)?;

@@ -40,29 +40,21 @@ impl Support {
         }
     }
     /// The step that serves `folder`, and a note that explains it. `root`
-    /// holds the saved defaults; `home` holds the new Vade home the step can
-    /// suggest.
+    /// holds the saved defaults; `home` holds the ~/models folder vade up
+    /// searches.
     pub(crate) fn next(&self, folder: &Path, root: &Path, home: &Path) -> Option<(String, Option<String>)> {
-        let saved = crate::launch::saved_model(root);
-        let saved = saved.as_deref();
         let quote = |path: &Path| crate::runner::quote(&path.to_string_lossy());
-        let same = saved.is_some_and(|saved| fs::canonicalize(saved).is_ok_and(|saved| fs::canonicalize(folder).is_ok_and(|folder| folder == saved)));
-        let new_home = || {
-            // The org and name, and a number when that home is already in use.
-            let part = |path: Option<&Path>| path.and_then(Path::file_name).map(|name| name.to_string_lossy()
-                .chars().filter(|c| c.is_ascii_alphanumeric() || "._-".contains(*c)).collect::<String>()).unwrap_or_default();
-            let base = format!(".vade-{}-{}", part(folder.parent()), part(Some(folder)));
-            (1..).map(|n| home.join(if n == 1 { base.clone() } else { format!("{base}-{n}") }))
-                .find(|path| fs::symlink_metadata(path).is_err()).unwrap_or_else(|| home.join(&base))
-        };
+        let folder_path = fs::canonicalize(folder).ok();
+        // Another saved checkpoint is no reason for a new home: an exported VADE_MODELS selects over it, and
+        // vade up saves the new choice.
+        let saved = crate::launch::saved_model(root).filter(|saved| fs::canonicalize(saved).ok() != folder_path);
         let shown = quote(folder);
         match self.route {
-            Route::Fp4Local => Some(match saved {
-                _ if same => ("vade up".into(), None),
-                None if crate::launch::default_model(root, home).is_some_and(|path| fs::canonicalize(folder).is_ok_and(|folder| folder == path)) => ("vade up".into(), None),
-                None => (format!("VADE_MODELS={shown} vade up"), None),
-                Some(saved) => (format!("VADE_HOME={} VADE_MODELS={shown} vade up", quote(&new_home())),
-                    Some(format!("vade up serves its saved checkpoint {} first, so this step uses a new, unused Vade home.", quote(saved)))),
+            Route::Fp4Local => Some(if folder_path.is_some() && crate::launch::served_model(root, home) == folder_path {
+                ("vade up".into(), None)
+            } else {
+                (format!("VADE_MODELS={shown} vade up"), saved.map(|saved|
+                    format!("vade up then serves this checkpoint in place of the saved {}, and saves it.", quote(&saved))))
             }),
             Route::Fp8 => Some((format!("set model_path = {shown} in the controller config, then run vade up --fp8"), None)),
             Route::Qwen3Bf16 => Some((format!("vade run qwen3-8b --weights-source {shown}"), None)),

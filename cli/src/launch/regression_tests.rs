@@ -69,6 +69,22 @@ fn regression_child() {
             assert_eq!(start["model_path"], base.join("replacement").to_string_lossy());
             assert_eq!(start["arg.5"], start["model_path"]);
         }
+        "replacement-valid" => {
+            // vade detect keeps the valid saved checkpoint first, as install, doctor and update do.
+            let saved = launch.home.join("models/checkpoint");
+            let capture = output::testing::Capture::default();
+            let result = output::with_writer(capture.clone(), || launch.execute(Command::Detect, false));
+            if let Err(error) = result { crate::fail(&error); }
+            let printed = String::from_utf8(capture.bytes.borrow().clone()).unwrap();
+            assert!(printed.contains(&format!("Models: {}", text::quoted(&saved.to_string_lossy()))) && !printed.contains("replacement"), "{printed}");
+            // A plain start with VADE_MODELS naming another checkpoint folder serves that one, says so and saves it.
+            let capture = output::testing::Capture::default();
+            let result = output::with_writer(capture.clone(), || launch.execute(Command::Up(Default::default()), false));
+            if let Err(error) = result { crate::fail(&error); }
+            let printed = String::from_utf8(capture.bytes.borrow().clone()).unwrap();
+            let line = format!("Model: {} replaces the saved checkpoint {}.", base.join("replacement").display(), saved.display());
+            assert!(printed.contains(&line), "{printed}");
+        }
         "resource-output" | "start-output" | "chat-output" | "stop-output" | "clean-output" => {
             let needle = match mode.as_str() {
                 "resource-output" => {
@@ -149,6 +165,25 @@ fn rejected_saved_model_can_be_replaced_only_after_validation_and_admission() {
             }
         }
     }
+}
+
+#[test]
+fn a_valid_saved_model_gives_way_to_an_exported_models_folder() {
+    let f = Fixture::new();
+    f.installed();
+    f.configured();
+    let port = Config::load(&f.root).unwrap().unwrap().port;
+    let replacement = f.base.join("replacement");
+    fs::create_dir(&replacement).unwrap();
+    fs::write(replacement.join("config.json"), model::test_mixed_config(16384)).unwrap();
+    model::test_write_serving_metadata(&replacement);
+    fs::write(replacement.join("model.safetensors.index.json"), model::test_index()).unwrap();
+    fs::write(replacement.join("model.safetensors"), [0; 64]).unwrap();
+    let mut process = child("replacement-valid", &f);
+    assert!(bounded_status(&mut process.0).success());
+    let config = Config::load(&f.root).unwrap().unwrap();
+    assert_eq!((config.model, config.port), (replacement.clone(), port));
+    assert_eq!(read_fields(&f.root.join("state/run.conf")).unwrap().unwrap()["model_path"], replacement.to_string_lossy());
 }
 
 #[test]

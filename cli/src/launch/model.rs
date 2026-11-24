@@ -27,7 +27,7 @@ pub(super) struct Model {
 }
 
 /// Why `vade launch` and `vade models` do not offer a looped block checkpoint.
-pub(crate) const LOOP_TEXT_ONLY: &str = "This checkpoint's text service runs on one Spark only, as an unqualified preview. Start it as: vade up --sparks 1.";
+pub(crate) const LOOP_TEXT_ONLY: &str = "This checkpoint's text service runs on one Spark only, as an unqualified preview. Start it on that Spark with VADE_MODELS set to its folder: VADE_MODELS=<folder> vade up.";
 
 pub(super) fn discover(home: &Path, saved: Option<&Path>) -> Result<Model, String> {
     discover_with(
@@ -67,6 +67,30 @@ pub(super) fn discover_existing(home: &Path, saved: Option<&Path>) -> Result<Mod
 /// there is none.
 pub(super) fn find(home: &Path) -> Result<Model, String> {
     discover_with(home, None, None, |reason| Err(reason.into()))
+}
+
+/// The checkpoint folder an exported VADE_MODELS names itself: a folder with its own config.json, not a folder to
+/// search. Canonical, so it compares with a saved path.
+pub(super) fn named_checkpoint(home: &Path) -> Option<PathBuf> {
+    named_checkpoint_with(home, std::env::var_os("VADE_MODELS").as_deref())
+}
+
+fn named_checkpoint_with(home: &Path, environment: Option<&OsStr>) -> Option<PathBuf> {
+    let path = fs::canonicalize(expand(home, Path::new(environment.filter(|path| !path.is_empty())?)).ok()?).ok()?;
+    path.join("config.json").is_file().then_some(path)
+}
+
+/// The saved choice a stopped `vade up` or `vade launch` reads first. It is `None` when VADE_MODELS names another
+/// checkpoint folder: the start then serves that folder and saves it. Every install holds all kernel images, so one
+/// Vade home serves either family. A folder to search, such as ~/models, never replaces a saved choice, and every
+/// other command (install, detect, doctor, update) keeps the saved choice first.
+pub(super) fn start_saved<'a>(home: &Path, saved: Option<&'a Path>) -> Option<&'a Path> {
+    start_saved_with(home, saved, std::env::var_os("VADE_MODELS").as_deref())
+}
+
+fn start_saved_with<'a>(home: &Path, saved: Option<&'a Path>, environment: Option<&OsStr>) -> Option<&'a Path> {
+    saved.filter(|saved| named_checkpoint_with(home, environment)
+        .is_none_or(|named| fs::canonicalize(saved).is_ok_and(|saved| saved == named)))
 }
 
 pub(super) fn default_folder_missing(home: &Path) -> bool {
@@ -149,6 +173,8 @@ fn discover_with(
 ) -> Result<Model, String> {
     // Keep a valid saved choice, but let owners recover from an incompatible
     // first selection through VADE_MODELS or the same first-run prompt.
+    // A start that VADE_MODELS points at a checkpoint folder passes no saved
+    // choice (see start_saved).
     let mut reason = match saved {
         Some(path) => match inspect(path) {
             Ok(model) => return Ok(model),

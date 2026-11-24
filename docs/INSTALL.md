@@ -1725,12 +1725,28 @@ line at the next scheduler pass.
 
 ### Use a different checkpoint folder
 
-Before the first launch, set `VADE_MODELS` to use a checkpoint outside
-`~/models`. A valid saved checkpoint takes precedence. To replace it, run
-`vade down` with the current `VADE_HOME`. Then set `VADE_MODELS` to the new
-checkpoint folder and choose an unused `VADE_HOME` before you run
-`vade launch`. Use that new `VADE_HOME` for later commands. This route
-supports only the documented FP4-Local checkpoint.
+Set `VADE_MODELS` to a checkpoint folder to serve it. The install builds the
+GPU code of every model family, so the same `VADE_HOME` serves either
+checkpoint. Run `vade down` first if the engine runs. Then run
+`VADE_MODELS=<folder> vade up`. When the folder is not the saved checkpoint,
+the start prints `Model: <folder> replaces the saved checkpoint <old folder>.`
+and saves the new folder, so a later `vade up` without `VADE_MODELS` serves it
+too. Only a stopped `vade up` or `vade launch` does this, and only for a folder
+that is a checkpoint itself (it holds `config.json`). A folder that holds
+checkpoints, such as `~/models`, does not replace a saved checkpoint. The other
+commands, such as `vade install`, `vade detect` and `vade doctor`, keep the
+saved checkpoint.
+
+The Inkling 2 Mini checkpoint runs as a text-only preview on one Spark. For
+example, with it in `~/models/thinkingmachines/Inkling-2-Mini`:
+
+```sh
+VADE_MODELS=~/models/thinkingmachines/Inkling-2-Mini vade up
+```
+
+The start prints one line that says it is a preview that has not been through
+qualification. To serve the FP4-Local checkpoint again, run `vade down`, then
+`VADE_MODELS=~/models/nvidia/Qwen3.8-Flash-Next-FP4-Local vade up`.
 
 ## Client gateway
 

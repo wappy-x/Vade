@@ -36,6 +36,30 @@ fn missing_default_folder_has_a_plain_reason_but_broken_links_still_fail() {
 }
 
 #[test]
+fn only_a_start_that_names_another_checkpoint_folder_passes_over_the_saved_choice() {
+    let f = Fixture::new();
+    let saved = f.model("models/nvidia/saved");
+    let other = f.model("models/thinkingmachines/other");
+    let no_prompt = |_: &str| panic!("unexpected prompt");
+    // Install, detect, doctor and update read the saved choice first, whatever VADE_MODELS says.
+    for environment in [None, Some(other.as_os_str()), Some(OsStr::new("~/models")), Some(OsStr::new(""))] {
+        assert_eq!(discover_with(&f.0, Some(&saved), environment, no_prompt).unwrap().path, saved);
+    }
+    // A start drops the saved choice only for a VADE_MODELS that names another checkpoint folder itself.
+    assert_eq!(start_saved_with(&f.0, Some(&saved), None), Some(saved.as_path()));
+    assert_eq!(start_saved_with(&f.0, Some(&saved), Some(OsStr::new(""))), Some(saved.as_path()));
+    assert_eq!(start_saved_with(&f.0, Some(&saved), Some(OsStr::new("~/models"))), Some(saved.as_path()));
+    assert_eq!(start_saved_with(&f.0, Some(&saved), Some(OsStr::new("~/models/nvidia/saved"))), Some(saved.as_path()));
+    assert_eq!(start_saved_with(&f.0, Some(&saved), Some(f.0.join("missing").as_os_str())), Some(saved.as_path()));
+    assert_eq!(start_saved_with(&f.0, Some(&saved), Some(OsStr::new("~/models/thinkingmachines/other"))), None);
+    assert_eq!(named_checkpoint_with(&f.0, Some(OsStr::new("~/models/thinkingmachines/other"))), Some(other.clone()));
+    assert_eq!(named_checkpoint_with(&f.0, Some(OsStr::new("~/models"))), None);
+    // With the saved choice dropped, the start serves the named folder.
+    let dropped = start_saved_with(&f.0, Some(&saved), Some(other.as_os_str()));
+    assert_eq!(discover_with(&f.0, dropped, Some(other.as_os_str()), no_prompt).unwrap().path, other);
+}
+
+#[test]
 fn environment_then_preferred_default_then_one_prompt_and_saved_path() {
     let f = Fixture::new();
     let env = f.model("elsewhere/checkpoint");

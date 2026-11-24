@@ -116,7 +116,7 @@ fn page(command: &str) -> Option<Page<'static>> {
                 "Finds the FP4-Local checkpoint, saves defaults, installs if missing and starts the engine. It opens chat when standard input is a terminal. Run it again to attach.",
                 "Local defaults match vade up from a controller: context 32768, output 8192 (or the context if smaller), drafting depth chosen by the engine.",
                 "If the engine refuses the default or saved context for memory, launch tries smaller sizes from 32768, 16384, 8192 and 4096. It saves the first size that starts. A refused explicit --context is an error.",
-                "The checkpoint comes from the saved config, then explicit VADE_MODELS, then the FP4-Local checkpoint under ~/models; launch asks if it is missing. Files install under ~/.vade (or VADE_HOME).",
+                "The checkpoint comes from a VADE_MODELS that names a checkpoint folder (it replaces the saved one), then the saved config, then any other VADE_MODELS, then the FP4-Local checkpoint under ~/models; launch asks if it is missing. Files install under ~/.vade (or VADE_HOME).",
                 "Local launch does not take --chats or a positive --cache-bytes. See vade up --help for memory options. Unset VADE_CONFIG to use the local setup.",
                 "Launch also takes --fp4-local, --sparks 1 and --fast-prompts from vade up; they change nothing here.",
             ],

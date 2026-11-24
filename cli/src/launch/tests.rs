@@ -636,10 +636,10 @@ fn source_install_fixture_child() {
             .iter()
             .filter(|e| e.label.starts_with("Build "))
             .count(),
-        3
+        4
     );
-    // A checkpoint that is not a looped one builds what main builds: no Inkling kernel image.
-    assert!(launch.runner.calls.iter().all(|e| e.label != "Build Inkling GPU kernels"));
+    // A checkpoint that is not a looped one still gets the Inkling kernel image: a later start may select one.
+    assert!(launch.runner.calls.iter().any(|e| e.label == "Build Inkling GPU kernels"));
     // The first launch prepares both startup caches before the engine starts.
     assert_eq!(
         launch.runner.worker_ops(),

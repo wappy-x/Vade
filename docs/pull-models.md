@@ -52,11 +52,11 @@ also keeps the explicit command. If the search needs a choice, pull prints
 `Next: VADE_MODELS=<folder> vade up`.
 
 A checkpoint that an earlier `vade up` or `vade launch` saved comes before
-`VADE_MODELS` and before that folder. Pull prints `Next: vade up` when the
-saved checkpoint matches the pulled folder. To serve a different folder, use
-a new Vade home. Pull gives a command with a home that is not in use yet, such as
-`Next: VADE_HOME=~/.vade-<org>-<name> VADE_MODELS=<folder> vade up`.
-A `Note:` line says why.
+that folder, and before an exported `VADE_MODELS` that is not a checkpoint
+folder itself. Pull prints `Next: vade up` when that start would serve the
+pulled folder. To serve a different folder, pull prints
+`Next: VADE_MODELS=<folder> vade up`. That start serves the pulled folder and
+saves it in place of the saved one. A `Note:` line says so.
 
 The download takes a long time. Over SSH, run it inside `tmux`, or under
 `nohup` with its output in a log file:
