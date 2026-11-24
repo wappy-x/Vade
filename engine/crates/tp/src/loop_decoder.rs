@@ -121,7 +121,8 @@ impl<'a,C:Compute,W:Weights<C>> Driver<'a,C,W> {
         let d=self.run.description;
         let (r,c,w,taps)=(rows as u128,chats.min(rows) as u128,self.run.width() as u128,d.conv.kernel as u128);
         let (messages,rank,head)=(d.core.end.saturating_sub(d.core.start) as u128*MESSAGES as u128,d.core.gate_rank as u128,d.head_rows as u128);
-        let pending=c*self.layouts.iter().map(|l|2*(l.kv_taps*l.kv_channels+l.taps*l.channels) as u128).sum::<u128>();
+        // The rings of each chat, and the window planes of a chat with many rows (`state::many::narrow`), wait to the end.
+        let pending=c*self.layouts.iter().map(|l|2*(l.kv_taps*l.kv_channels+l.taps*l.channels) as u128+if l.wide().rows>l.rows {2*(l.rows*l.row_words) as u128} else {0}).sum::<u128>();
         // One mix of `asked` queries over `vectors` vectors a row: the joined list in both orders, the dots, the
         // result as parts and joined, two tables.
         let blend=|asked:u128,vectors:u128|w*r*(2*vectors+2*asked)+3*asked*r*vectors+r*(vectors+asked);
@@ -146,9 +147,11 @@ impl<'a,C:Compute,W:Weights<C>> Driver<'a,C,W> {
             // output and its rings.
             let (heads,kv,kt)=(a.query_heads as u128,a.kv_heads as u128,layout.kv_taps as u128);
             let (out,moved,keys)=(heads*a.head_dim as u128,heads*a.relative.dim as u128,kv*a.head_dim as u128);
-            let one=heads*(2*layout.rows as u128+a.relative.extent as u128);
+            let one=heads*(2*layout.wide().rows as u128+a.relative.extent as u128);
+            // The wide planes of a window layer for each chat with many rows (`state::many::widen`), through the attention.
+            let widened=if layout.wide().rows>layout.rows {2*c*(layout.wide().rows*layout.row_words) as u128} else {0};
             let group=(layout.key_bytes as u128/4).max(one).min(r*one);
-            let attention=w*r*(taps+6)+2*c*taps*w+5*out*r+3*moved*r+2*heads*r+keys*(r*(kt+6)+2*c*kt)+group+r*(2*kt+2*taps+2*kv*kt+8)+c*(kt+taps);
+            let attention=w*r*(taps+6)+2*c*taps*w+5*out*r+3*moved*r+2*heads*r+keys*(r*(kt+6)+2*c*kt)+group+r*(2*kt+2*taps+2*kv*kt+8)+c*(kt+taps)+widened;
             // The expert half: the mix and the gate; the router and the picked experts (the input rows by expert, the
             // two products as parts and joined, the activation, the rows back in pick order); the ring; the last sum.
             if spec.boundary {list+=1;}
@@ -189,7 +192,7 @@ impl<'a,C:Compute,W:Weights<C>> Driver<'a,C,W> {
     }
     /// A bound of the count of device buffers of a step that live at one time: the values that live through a
     /// visit (the block list, the messages, the rows of a ring), the per-row values of a product of rows before its
-    /// join and of the groups over keys (three a row), the values of each chat (four), the values of each expert
+    /// join and of the groups over keys (three a row), the values of each chat (four, and the window planes of a chat with many rows), the values of each expert
     /// that rows picked (four), and 64 more for the rest of a visit. The meter of the device counts the live buffers
     /// of steps of the two made-up checkpoints under it (test of `meter.rs`).
     pub fn transient_buffers(&self,rows:usize,chats:usize)->usize {
@@ -198,7 +201,10 @@ impl<'a,C:Compute,W:Weights<C>> Driver<'a,C,W> {
         let blocks=d.visits.iter().filter(|visit|usize::try_from(visit.layer).ok().and_then(|layer|d.layers.get(layer)).is_some_and(|spec|spec.boundary)).count();
         let experts=d.layers.iter().map(|spec|match spec.ffn {Ffn::Experts(e)=>(e.count as usize).min(rows.saturating_mul(e.selected as usize)),_=>0}).max().unwrap_or(0);
         let taps=d.conv.kernel as usize;
-        [blocks,messages,taps,64].iter().sum::<usize>().saturating_add(rows.saturating_mul(3)).saturating_add(chats.min(rows).saturating_mul(4)).saturating_add(experts.saturating_mul(4))
+        // A chat with many rows keeps two window planes a window layer to the end of the step, and two wide ones in a visit.
+        let windows=self.layouts.iter().filter(|layout|layout.wide().rows>layout.rows).count();
+        let planes=if windows>0 {2*windows+2} else {0};
+        [blocks,messages,taps,64].iter().sum::<usize>().saturating_add(rows.saturating_mul(3)).saturating_add(chats.min(rows).saturating_mul(4+planes)).saturating_add(experts.saturating_mul(4))
     }
     /// The state of a new chat.
     pub fn clean(&self)->Result<State<C::Value>> {state::clean(self.run.compute,&self.layouts)}
@@ -283,7 +289,7 @@ impl<'a,C:Compute,W:Weights<C>> Driver<'a,C,W> {
     ///
     /// Refused before any launch and before any value is made, with the number of the chat in the step in the
     /// text: a chat with no token; a state of another driver (another count of visits, or planes and rings of
-    /// other sizes, as a driver with another step row limit or another capacity makes them); a state with a ring
+    /// other sizes, as a driver with another capacity makes them); a state with a ring
     /// that still waits; a chat that would pass the capacity or the model's longest length; a token outside the
     /// stored embedding rows. Refused for the whole step: more rows than `limits().step_rows`; more rows with an end
     /// than one launch of the logits takes.
@@ -321,12 +327,12 @@ impl<'a,C:Compute,W:Weights<C>> Driver<'a,C,W> {
         for (number,chat) in chats.iter().enumerate() {
             let refuse=|ok:bool,why:&str|if ok {Ok(())} else {Err(format!("loop decoder: chat {number} of the step: {why}"))};
             refuse(chat.state.visits.len()==self.layouts.len(),"the state differs from the visits of the description")?;
-            // A state of a driver with another step row limit or another capacity has planes of another size.
+            // A state of a driver with another capacity has planes of another size (the step row limit changes none).
             refuse(chat.state.visits.iter().zip(&self.layouts).all(|(visit,layout)|{
                 let plane=layout.rows*layout.row_words;
                 c.words(&visit.keys)==plane && c.words(&visit.values)==plane && Ring::ALL.iter().all(|&ring|{let (channels,taps)=layout.ring_size(ring);c.words(&visit.rings[ring as usize])==channels*taps})
-            }),"the state has the sizes of another driver (another step row limit or another capacity)")?;
-            refuse(chat.state.visits.iter().all(|visit|visit.next.iter().all(Option::is_none)),"a ring of the state still waits for the end of a step")?;
+            }),"the state has the sizes of another driver (another capacity)")?;
+            refuse(chat.state.visits.iter().all(|visit|visit.next.iter().all(Option::is_none) && visit.planes.is_none()),"a ring of the state still waits for the end of a step")?;
             refuse(!chat.tokens.is_empty(),"it has no token")?;
             let end=chat.state.position.checked_add(chat.tokens.len() as u64);
             refuse(end.is_some_and(|end|end<=self.capacity),"the chat is longer than the state's capacity")?;
@@ -356,8 +362,8 @@ impl<'a,C:Compute,W:Weights<C>> Driver<'a,C,W> {
             let residual=attention::half_rows(run,visit,layout,rows,&mut kept,&keep,&inputs)?;
             let input=mix.expert_input(run,visit,&keep,&residual)?;
             let sum=experts::sum(run,visit,&input)?;
-            let (rings,words)=state::row_rings(c,layout,Ring::AfterExperts,rows,&mut kept,&sum)?;
-            stream=experts::close(run,visit,&rings,&words,&residual)?;
+            let (rings,words,window)=state::conv_rings(c,layout,Ring::AfterExperts,rows,&mut kept,&sum)?;
+            stream=experts::close(run,visit,&rings,&words,window,&residual)?;
             seen(place,&stream)?;
         }
         // The end, for the wanted rows only: the end mix of those rows, then one norm, one head product, one cap.
@@ -389,7 +395,7 @@ impl<'a,C:Compute,W:Weights<C>> Driver<'a,C,W> {
             let input=mix.expert_input(run,visit,&keep,&residual)?;
             let sum=experts::sum(run,visit,&input)?;
             let word=state::write_ring(c,layout,Ring::AfterExperts,&mut kept.rings,position,&sum)?;
-            stream=experts::close(run,visit,&kept.rings[Ring::AfterExperts as usize],&word,&residual)?;
+            stream=experts::close(run,visit,&kept.rings[Ring::AfterExperts as usize],&word,0,&residual)?;
             seen(place,&stream)?;
         }
         Ok((mix,stream))

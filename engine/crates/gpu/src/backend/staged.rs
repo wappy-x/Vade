@@ -7,6 +7,7 @@
 use super::*;
 use crate::resident_launch::{Command, Kind};
 use crate::staged_product::{self, Span};
+use crate::staged_narrow;
 
 impl<'a> Backend<'a> {
     /// True when `project_staged_into` runs this product now: the shape is inside the tile, the weights and the
@@ -42,11 +43,50 @@ impl<'a> Backend<'a> {
         }
         self.resident_completion()
     }
+    /// True when `project_staged_narrow_into` runs this product now: a matrix of few rows (`staged_narrow`), the
+    /// weights and the input contiguous and 16-byte aligned, and launches recorded.
+    pub fn staged_narrow_ready(&self, rows: usize, cols: usize, input: &DeviceVector<'_>, weight: &DeviceVector<'_>) -> bool {
+        staged_narrow::shape_admitted(rows, cols) && !input.is_segmented() && !weight.is_segmented()
+            && (input.device_address() | weight.device_address()) & 15 == 0 && self.resident_launches_active()
+    }
+    /// The product of one BF16 matrix of few rows (`rows x cols` values, two a word, row-major) with one input row of
+    /// `cols` words, as `project_staged_into`, in blocks of 4 rows (`staged_narrow`). `output` gets `rows` words: the
+    /// words of `project_staged_into` and of `project_bf16_chain_into`.
+    pub fn project_staged_narrow_into(&self, rows: usize, cols: usize, input: &DeviceVector<'_>, weight: &DeviceVector<'_>, output: &mut DeviceVector<'_>) -> Result<(), String> {
+        if self.arm_capture() { return Err("staged narrow product: refused inside a stream capture".into()); }
+        self.require_resident_stream()?;
+        let span = |vector: &DeviceVector<'_>| Span { address: vector.device_address(), bytes: vector.len() as u64 * 4 };
+        // Every extent and every alignment that the body relies on, before anything is recorded.
+        staged_narrow::check(rows, cols, span(weight), span(input), span(output))?;
+        self.check_vector(weight, rows * cols / 2)?;
+        self.check_vector(input, cols)?;
+        self.check_vector(output, rows)?;
+        if weight.is_segmented() || input.is_segmented() { return Err("staged narrow product: an operand must be contiguous".into()); }
+        if output.is_segmented() || !output.writable_from(0) { return Err("staged narrow product: the output requires private contiguous storage".into()); }
+        self.require_arm_kernels(&[Kind::PlainStagedNarrow.kernel()])?;
+        self.resident_completion()?;
+        let (rows, cols) = (u32::try_from(rows).map_err(|_| "staged narrow product: the rows exceed the ABI")?, u32::try_from(cols).map_err(|_| "staged narrow product: the columns exceed the ABI")?);
+        let mut command = Command::new(Kind::PlainStagedNarrow);
+        for (index, word) in [weight.device_address(), input.device_address(), output.device_address(), u64::from(rows), u64::from(cols)].into_iter().enumerate() { command.word(index, word); }
+        let threads = staged_narrow::THREADS as u32;
+        if !self.record_resident_block(Kind::PlainStagedNarrow, command, [staged_narrow::blocks(rows as usize), 1, 1, threads, 0])? {
+            return Err("staged narrow product: the launch runs only as a recorded launch, and launches are not recorded now".into());
+        }
+        self.resident_completion()
+    }
     /// True when `project_staged_rows_into` runs this product now: the shape is inside the rows tile, the weights
     /// and the input are contiguous and 16-byte aligned, and launches are recorded.
     pub fn staged_rows_ready(&self, rows: usize, cols: usize, inputs: usize, input: &DeviceVector<'_>, weight: &DeviceVector<'_>) -> bool {
         staged_product::rows_shape_admitted(rows, cols, inputs) && !input.is_segmented() && !weight.is_segmented()
             && input.len() == inputs * cols && weight.len() == rows * cols / 2
+            && (input.device_address() | weight.device_address()) & 15 == 0 && self.resident_launches_active()
+    }
+    /// True when `project_staged_rows_at_into` runs a launch of `inputs` launch rows now: the shape is inside the
+    /// rows tile, `input` holds whole rows of `cols` words, the weights hold the matrix, both are contiguous and
+    /// 16-byte aligned, and launches are recorded. The tables are checked by the call.
+    pub fn staged_rows_at_ready(&self, rows: usize, cols: usize, inputs: usize, input: &DeviceVector<'_>, weight: &DeviceVector<'_>) -> bool {
+        staged_product::rows_shape_admitted(rows, cols, inputs) && !input.is_segmented() && !weight.is_segmented()
+            && !input.is_empty() && input.len().is_multiple_of(cols) && weight.len() == rows * cols / 2
             && (input.device_address() | weight.device_address()) & 15 == 0 && self.resident_launches_active()
     }
     /// The product of one BF16 matrix (`rows x cols` values, two a word, row-major) with `inputs` input rows
@@ -111,6 +151,75 @@ impl<'a> Backend<'a> {
         }
         self.resident_completion()
     }
+    /// True when `project_staged_rows_grouped_into` takes these runs now: every run is inside the rows tile, every
+    /// matrix and the input are contiguous and 16-byte aligned, the staged tables fit the recorder's stage, and launches
+    /// are recorded. `inputs` are all launch rows; with tables, two words a launch row are staged.
+    pub fn staged_rows_grouped_ready(&self, rows: usize, cols: usize, runs: &[(&DeviceVector<'_>, usize)], input: &DeviceVector<'_>, tables: bool) -> bool {
+        let inputs = runs.iter().map(|run| run.1).sum::<usize>();
+        let blocks = runs.iter().map(|run| rows.div_ceil(staged_product::ROWS_TILE) * run.1.div_ceil(staged_product::ROWS_TILE)).sum::<usize>();
+        let bytes = runs.len() * 16 + blocks * 8 + if tables { inputs * 8 } else { 0 };
+        !runs.is_empty() && runs.len() <= staged_product::ROWS_GROUP_RUNS_MAX && inputs <= staged_product::ROWS_GROUP_INPUTS_MAX
+            && bytes <= crate::resident_launch::stage::BYTES / 4 && u32::try_from(blocks).is_ok()
+            && runs.iter().all(|&(weight, count)| staged_product::rows_shape_admitted(rows, cols, count) && !weight.is_segmented() && weight.len() == rows * cols / 2 && weight.device_address() & 15 == 0)
+            && !input.is_segmented() && !input.is_empty() && input.len().is_multiple_of(cols.max(1)) && input.device_address() & 15 == 0 && self.resident_launches_active()
+    }
+    /// The expert runs of a visit in ONE launch of the rows tile (`project_staged_rows_at_into` for each run, the runs
+    /// taking the launch rows in order): run `r` is the matrix `runs[r].0` with `runs[r].1` launch rows. The tables
+    /// name the input row and the output row of every launch row, as there. The words are those of one launch a run.
+    /// The recorder stages the run table, the block table and the two row tables with the command, all from host
+    /// words this call checked (`staged_product::check_rows_grouped`).
+    #[allow(clippy::too_many_arguments, reason = "the shape, the stride, the runs, the operands and the two tables")]
+    pub fn project_staged_rows_grouped_into(&self, rows: usize, cols: usize, stride: usize, runs: &[(&DeviceVector<'_>, usize)], input: &DeviceVector<'_>, input_rows: Option<&[u32]>, output: &mut DeviceVector<'_>, output_rows: Option<&[u32]>) -> Result<(), String> {
+        if self.arm_capture() { return Err("staged rows product: refused inside a stream capture".into()); }
+        self.require_resident_stream()?;
+        let span = |vector: &DeviceVector<'_>| Span { address: vector.device_address(), bytes: vector.len() as u64 * 4 };
+        let inputs = runs.iter().map(|run| run.1).sum::<usize>();
+        let input_count = if input_rows.is_some() && cols > 0 { input.len() / cols } else { inputs };
+        let output_count = if output_rows.is_some() && stride > 0 && output.len() >= rows { (output.len() - rows) / stride + 1 } else { inputs };
+        let spans = runs.iter().map(|&(weight, count)| (span(weight), count)).collect::<Vec<_>>();
+        staged_product::check_rows_grouped(rows, cols, stride, &spans, span(input), staged_product::Rows { count: input_count, table: input_rows }, span(output), staged_product::Rows { count: output_count, table: output_rows })?;
+        for &(weight, _) in runs {
+            self.check_vector(weight, rows * cols / 2)?;
+            if weight.is_segmented() { return Err("staged rows product: a matrix must be contiguous".into()); }
+        }
+        self.check_vector(input, input_count * cols)?;
+        self.check_vector(output, (output_count - 1) * stride + rows)?;
+        if input.is_segmented() { return Err("staged rows product: an operand must be contiguous".into()); }
+        if output.is_segmented() || !output.writable_from(0) { return Err("staged rows product: the output requires private contiguous storage".into()); }
+        self.require_arm_kernels(&[Kind::PlainStagedRows.kernel()])?;
+        self.resident_completion()?;
+        let word = |value: usize| u32::try_from(value).map(u64::from).map_err(|_| "staged rows product: a count exceeds the ABI");
+        // The staged bytes: the run table (16 bytes a run), the block table (8 bytes a block), then the row tables.
+        let counts = runs.iter().map(|run| run.1).collect::<Vec<_>>();
+        let blocks = staged_product::rows_group_blocks(rows, &counts);
+        let grid_blocks = u32::try_from(blocks.len()).map_err(|_| "staged rows product: too many blocks")?;
+        let mut bytes = Vec::with_capacity(runs.len() * 16 + blocks.len() * 8 + inputs * 8);
+        let mut first = 0u32;
+        for &(weight, count) in runs {
+            bytes.extend_from_slice(&weight.device_address().to_ne_bytes());
+            bytes.extend_from_slice(&first.to_ne_bytes());
+            bytes.extend_from_slice(&(count as u32).to_ne_bytes());
+            first += count as u32;
+        }
+        for block in &blocks { for half in block { bytes.extend_from_slice(&half.to_ne_bytes()); } }
+        let tables_at = bytes.len() as u64;
+        for row in input_rows.into_iter().chain(output_rows).flatten() { bytes.extend_from_slice(&row.to_ne_bytes()); }
+        let input_bytes = input_rows.map_or(0, |table| table.len() as u64 * 4);
+        let head = [input.device_address(), output.device_address(), word(rows)?, word(cols)?, word(inputs)?, word(stride)?];
+        let (run_count, block_count) = (runs.len() as u64, blocks.len() as u64);
+        let recorded = self.record_resident_tabled(Kind::PlainStagedRows, [grid_blocks, 1, 1, staged_product::ROWS_THREADS as u32, 0], &bytes, |address| {
+            let mut command = Command::new(Kind::PlainStagedRows);
+            let input_table = if input_rows.is_some() { address + tables_at } else { 0 };
+            let output_table = if output_rows.is_some() { address + tables_at + input_bytes } else { 0 };
+            // Word 0 (the one matrix) stays 0: the grouped form reads each run's matrix from the run table.
+            for (index, value) in [0].into_iter().chain(head).chain([input_table, input_count as u64, output_table, output_count as u64, address, run_count, address + run_count * 16, block_count]).enumerate() { command.word(index, value); }
+            command
+        })?;
+        if !recorded {
+            return Err("staged rows product: the grouped launch runs only as a recorded launch whose tables fit the stage, and that is not the case now".into());
+        }
+        self.resident_completion()
+    }
 }
 #[cfg(test)]
 mod tests {
@@ -129,17 +238,22 @@ mod tests {
             let one = x.resident_range(0..cols)?;
             let row = || b.project_staged_into(rows, cols, &one, &weight, &mut y.resident_range(0..rows)?);
             let tile = || b.project_staged_rows_at_into(rows, cols, inputs, rows, &x, Some(&[1, 0]), &weight, &mut y.resident_range(0..inputs * rows)?, Some(&[1, 0]));
+            // The narrow product (24 rows of 256 columns, its own operands).
+            let (narrow_weight, narrow_x, narrow_y) = (b.upload_vector(&vec![0.25f32; 24 * 256 / 2])?.into_resident_shared()?, b.upload_vector(&vec![0.5f32; 256])?.into_resident_shared()?, b.vector(24)?.into_resident_shared()?);
+            let narrow = || b.project_staged_narrow_into(24, 256, &narrow_x, &narrow_weight, &mut narrow_y.resident_range(0..24)?);
             let refused = |result: Result<(), String>, name: &str| -> Result<(), String> {
                 match result { Err(e) if e.contains("stream capture") => Ok(()), Err(e) => Err(format!("{name}: other error {e}")), Ok(()) => Err(format!("{name}: the staged product was captured")) }
             };
-            let calls: [(&dyn Fn() -> Result<(), String>, &str); 2] = [(&row, "row product"), (&tile, "rows tile")];
+            let calls: [(&dyn Fn() -> Result<(), String>, &str); 3] = [(&row, "row product"), (&tile, "rows tile"), (&narrow, "narrow product")];
+            // Review REVNARROW: with launch recording off, the narrow product is refused outside any capture too.
+            if narrow().is_ok() { return Err("the narrow product ran with launch recording off".into()); }
             let mut queue = None;
             for recording in [false, true] {
                 if recording { queue = Some(b.resident_queue()?); b.enable_resident_launches()?; }
                 for (call, kind) in calls {
                     // SAFETY: each capture records nothing (the staged product is refused before any launch, so the
-                    // capture fails or is empty) and every buffer the closure names (weight, x, y, position) lives to
-                    // the end of this test.
+                    // capture fails or is empty) and every buffer the closure names (weight, x, y, position, the three narrow
+                    // operands) lives to the end of this test.
                     let graphs = unsafe { [b.capture_batch(1, 1, call), b.capture_batch_bounded(64, call), b.capture_decode(&position, 0, 1, 1, call)] };
                     for (graph, name) in graphs.into_iter().zip(["capture_batch", "capture_batch_bounded", "capture_decode"]) { refused(graph.map(drop), &format!("{kind} {name}, recording {recording}"))?; }
                     // The verify segment: its capture is open between begin_segment and abort_segment.
@@ -152,6 +266,7 @@ mod tests {
             }
             row()?;
             tile()?;
+            narrow()?;
             drop(queue);
             Ok(())
         }).unwrap();

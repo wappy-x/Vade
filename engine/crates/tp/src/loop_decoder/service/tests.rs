@@ -369,10 +369,11 @@ fn a_context_is_admitted_by_the_ledger_and_refused_with_the_largest_that_fits() 
     let extra:u64=rows.visits.iter().filter(|visit|visit.window.is_some()).map(|visit|2*visit.row_bytes*(LIMITS.step_rows as u64-1)).sum();
     assert!(extra>0);assert_eq!(rows.fixed_bytes().unwrap(),one.fixed_bytes().unwrap()+extra);assert_eq!(rows.plane_bytes().unwrap(),one.plane_bytes().unwrap());
     assert_eq!(LoopStatePlan::for_steps(d,48,bucket,1).unwrap(),one);assert!(LoopStatePlan::for_steps(d,48,bucket,0).is_err());
-    // The driver allocates for a chat the state bytes of the ledger. The ledger holds the values of one row of a step beside them.
+    // The driver allocates for a chat the state bytes of the ledger less the extra rows of the wider window rings: its
+    // state keeps window rings, and a chat with many rows in a step makes its wider rings in the step (step bytes).
     for context in [8,48,64] {
         let driver=Driver::with_limits(&Host,&fixture,d,context,LIMITS).unwrap();let plan=plan(context);
-        assert_eq!(driver.state_words() as u64*4,plan.fixed_bytes().unwrap()+plan.plane_bytes().unwrap(),"context {context}");
+        assert_eq!(driver.state_words() as u64*4+extra,plan.fixed_bytes().unwrap()+plan.plane_bytes().unwrap(),"context {context}");
     }
     // One byte less: 48 is refused, and the text names 44, the largest context of whole buckets that fits.
     let refusal=admit(d,&load,48,total(48)-1,bucket,LIMITS).unwrap_err();

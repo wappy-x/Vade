@@ -2461,6 +2461,8 @@ engine/crates/gpu/kernels-inkling	src/lib.rs	fn:run	block:1	ruling 2026-11-22 18
 # The two entries and run declared unsafe like the tensor-core entry (review REVIMAGE finding 4, lead 2026-11-22 19:22).
 engine/crates/gpu/kernels-inkling	src/lib.rs	fn:resident_launch_block_arms	fn:1	ruling 2026-11-22 18:21
 engine/crates/gpu/kernels-inkling	src/lib.rs	fn:resident_launch_block_rows	fn:1	ruling 2026-11-22 18:21
+engine/crates/gpu/kernels-inkling	src/lib.rs	fn:resident_launch_block_scores	fn:1	ruling 2026-11-22 18:21
+engine/crates/gpu/kernels-inkling	src/lib.rs	fn:resident_launch_block_softmax	fn:1	ruling 2026-11-22 18:21
 engine/crates/gpu/kernels-inkling	src/lib.rs	fn:run	fn:1	ruling 2026-11-22 18:21
 # Ruling R6h rule 1 (lead 2026-11-22 19:22): the host launch of the Inkling entries in Inkling's own host file.
 engine/crates/gpu	src/backend/inkling_family.rs	impl:Backend::fn:block_arm	block:1	ruling 2026-11-22 19:22
@@ -2490,3 +2492,8 @@ engine/crates/gpu/kernels-inkling	src/lib.rs	fn:resident_launch_plain_packed_gro
 engine/crates/gpu/kernels-inkling	src/lib.rs	fn:run_packed_picked	block:1	ruling 2026-11-22 18:21
 engine/crates/gpu/kernels-inkling	src/lib.rs	fn:run_packed_picked	fn:1	ruling 2026-11-22 18:21
 engine/crates/gpu/kernels-inkling	src/lib.rs	fn:resident_launch_plain_packed_picked	fn:1	ruling 2026-11-22 18:21
+# The narrow staged BF16 row product (seat INKLOAD, kind 93): its replay fn and block, its warp fn, its entry.
+engine/crates/gpu/kernels-inkling	src/plain_staged_narrow.rs	fn:replay	fn:1	ruling 2026-11-22 18:21
+engine/crates/gpu/kernels-inkling	src/plain_staged_narrow.rs	fn:replay	block:1	ruling 2026-11-22 18:21
+engine/crates/gpu/kernels-inkling	src/plain_staged_narrow.rs	fn:warp	fn:1	ruling 2026-11-22 18:21
+engine/crates/gpu/kernels-inkling	src/lib.rs	fn:resident_launch_plain_staged_narrow	fn:1	ruling 2026-11-22 18:21

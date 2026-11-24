@@ -19,7 +19,7 @@
 //! `state::commit`. The planes are written: only slots of the positions of this step, which no row of a
 //! position before the step can see.
 use super::{position_factor,rounded_norm,score_scale};
-use super::super::{experts::conv_scale,mix::{Inputs,Run,Weight,Weights,need,number,shape},rows::{Rows,rows_operation,shared},state::{self,Layout,Ring,VisitState,size,many::{key_steps,room,row_rings,write_rows}}};
+use super::super::{experts::conv_scale,mix::{Inputs,Run,Weight,Weights,need,number,shape},rows::{Rows,rows_operation,shared},state::{self,Layout,Ring,VisitState,size,many::{conv_rings,key_steps,room,write_rows}}};
 use crate::{Result,bounded_decoder::Compute};
 use engine_model::plan::description::{ConvTaps,Visit};
 use spark_gpu_probe::{block_stream::{CONV_ADDEND,CONV_TOKEN_TAPS},causal_ops::Op};
@@ -40,7 +40,10 @@ pub fn half_rows<C:Compute,W:Weights<C>>(run:&Run<'_,C,W>,visit:&Visit,layout:&L
     let rows=step.total();
     need(!spans.is_empty() && states.len()==spans.len() && spans.iter().all(|span|span.count>0) && c.words(keep)==rows*width,"the rows of a step differ from the stream or from the chats")?;
     // Refused before any launch: a chat with more rows than its state takes in one step.
-    need(spans.iter().all(|span|span.count<=room(layout,span.first)),"a step has more rows of one chat than its state takes")?;
+    // A chat with more than one row in the step works in wide planes of a window layer (`Layout::wide`), made from its
+    // state before any write; the state keeps its planes until the step is done.
+    let wide=layout.wide();
+    need(spans.iter().all(|span|span.count<=room(&wide,span.first)),"a step has more rows of one chat than its state takes")?;
     // Step 4. A layer with one attention norm gives the same weight under all three names.
     let norm=|x:&C::Value,count:usize,which:Weight|rounded_norm(c,x,count,width,epsilon,Some(w.words(which)?));
     let normed=match inputs {
@@ -80,11 +83,11 @@ pub fn half_rows<C:Compute,W:Weights<C>>(run:&Run<'_,C,W>,visit:&Visit,layout:&L
     let conv=|states:&mut [&mut VisitState<C::Value>],which:Ring,fixed:Weight,made:Option<&C::Value>,product:&C::Value|->Result<C::Value> {
         let (channels,taps)=layout.ring_size(which);let fixed=w.words(fixed)?;
         need(channels.is_multiple_of(kv_heads) && fixed.len()==channels*taps && made.is_none_or(|made|c.words(made)==rows*kv_heads*taps),"the taps of a key or value convolution differ from the description")?;
-        let (rings,steps)=row_rings(c,layout,which,step,states,product)?;
+        let (rings,steps,window)=conv_rings(c,layout,which,step,states,product)?;
         let mut s=shape(Op::ShortConv);s.heads=number(kv_heads)?;s.dim=number(channels/kv_heads)?;s.taps=number(taps)?;
         // The divisor counts each tap once, the made taps once more, and the input that is added back.
         s.cols=if made.is_some() {CONV_TOKEN_TAPS} else {0};s.bound=conv_scale(if made.is_some() {2*taps as u64+1} else {taps as u64+1});
-        rows_operation(c,s,rows,[Some(&rings),made,None,Some(&steps)],0,fixed)
+        rows_operation(c,s,rows,[Some(&rings),made,None,Some(&steps)],window,fixed)
     };
     let key={
         let made=made(Weight::KeyTapProjection(layer),xk)?;
@@ -96,20 +99,25 @@ pub fn half_rows<C:Compute,W:Weights<C>>(run:&Run<'_,C,W>,visit:&Visit,layout:&L
         let y=conv(states,Ring::Value,Weight::ValueTaps(layer),made.as_ref(),&product(Weight::Value(layer),xv,kv_heads*head)?)?;
         rounded_norm(c,&y,rows*kv_heads,head,epsilon,None)?
     };
+    // The wide planes of each chat with more than one row in the step of a window layer whose ring is wider for a step.
+    let mut scratch=spans.iter().zip(states.iter()).map(|(span,state)|if span.count>1 && wide.rows>layout.rows {
+        Ok(Some([state::many::widen(c,layout,&state.keys,span.first)?,state::many::widen(c,layout,&state.values,span.first)?]))} else {Ok(None)}).collect::<Result<Vec<_>>>()?;
     // The finished keys and values of all rows go into the planes of their chats before any row reads a plane.
     {
         let (keys,values,words)=(state::pack(c,&key)?,state::pack(c,&value)?,layout.row_words);let mut offset=0;
-        for (span,state) in spans.iter().zip(states.iter_mut()) {
-            write_rows(c,layout,&mut state.keys,*span,&c.range(&keys,offset*words,span.count*words)?)?;
-            write_rows(c,layout,&mut state.values,*span,&c.range(&values,offset*words,span.count*words)?)?;
+        for ((span,state),scratch) in spans.iter().zip(states.iter_mut()).zip(scratch.iter_mut()) {
+            let (keys,values)=(c.range(&keys,offset*words,span.count*words)?,c.range(&values,offset*words,span.count*words)?);
+            if let Some([wide_keys,wide_values])=scratch {write_rows(c,&wide,wide_keys,*span,&keys)?;write_rows(c,&wide,wide_values,*span,&values)?;}
+            else {write_rows(c,layout,&mut state.keys,*span,&keys)?;write_rows(c,layout,&mut state.values,*span,&values)?;}
             offset+=span.count;
         }
     }
     // Step 5, the attention: once for each chat, in groups of rows. The views of the planes live only inside a chat's turn.
     let mut parts=Vec::new();let mut offset=0;
-    for (span,state) in spans.iter().zip(states.iter()) {
+    for ((span,state),scratch) in spans.iter().zip(states.iter()).zip(&scratch) {
+        let (layout,planes)=match scratch {Some([keys,values])=>(&wide,[keys,values]),None=>(layout,[&state.keys,&state.values])};
         let (view,group)=(layout.view_rows(span.first+span.count as u64-1)?,heads/kv_heads);
-        let (key_view,value_view)=(state::view(c,layout,&state.keys,view)?,state::view(c,layout,&state.values,view)?);
+        let (key_view,value_view)=(state::view(c,layout,planes[0],view)?,state::view(c,layout,planes[1],view)?);
         // Bytes of one row over keys: the scores and the weights of each head over the view, and its relative term.
         let each=(key_bytes/4usize.saturating_mul(heads).saturating_mul(view.saturating_mul(2).saturating_add(extent)).max(1)).max(1);
         let mut done=0;
@@ -129,16 +137,20 @@ pub fn half_rows<C:Compute,W:Weights<C>>(run:&Run<'_,C,W>,visit:&Visit,layout:&L
         }
         offset+=span.count;
     }
+    // The window rings after the step wait in the states as pending (`commit` puts them in).
+    for ((span,state),scratch) in spans.iter().zip(states.iter_mut()).zip(scratch) {
+        if let Some([keys,values])=scratch {let end=span.first+span.count as u64;state.planes=Some([state::many::narrow(c,layout,&keys,end)?,state::many::narrow(c,layout,&values,end)?]);}
+    }
     let attended=if parts.len()==1 {parts.remove(0)} else {c.join(&parts.iter().collect::<Vec<_>>())?};
     need(c.words(&attended)==rows*heads*head,"the attention output differs from the description")?;
     // Steps 6 and 7. The output product is the new input of the ring after attention; one launch gives the convolution
     // and the first sum.
     let output=product(Weight::Output(layer),&attended,width)?;
-    let (rings,steps)=row_rings(c,layout,Ring::AfterAttention,step,states,&output)?;
+    let (rings,steps,window)=conv_rings(c,layout,Ring::AfterAttention,step,states,&output)?;
     let taps=w.words(Weight::ConvAfterAttention(layer))?;need(taps.len()==width*layout.taps,"the taps after attention differ from the description")?;
     let mut s=shape(Op::ShortConv);s.heads=1;s.dim=number(width)?;s.taps=number(layout.taps)?;s.bound=conv_scale(layout.taps as u64+1);
-    if spec.boundary {return rows_operation(c,s,rows,[Some(&rings),None,None,Some(&steps)],0,taps);}
-    s.cols=CONV_ADDEND;rows_operation(c,s,rows,[Some(&rings),None,Some(keep),Some(&steps)],0,taps)
+    if spec.boundary {return rows_operation(c,s,rows,[Some(&rings),None,None,Some(&steps)],window,taps);}
+    s.cols=CONV_ADDEND;rows_operation(c,s,rows,[Some(&rings),None,Some(keep),Some(&steps)],window,taps)
 }
 #[cfg(test)]
 mod tests;

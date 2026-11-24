@@ -77,7 +77,10 @@ fn a_chat_in_steps_of_many_rows_equals_the_chat_one_row_a_step() {
                         let count=limit.min((12-position) as usize);
                         let residual=step(&fixture,layer,limit,&[0],&mut states,&[Span {first:position,count}],each,key_bytes).unwrap();
                         for (row,residual) in residual.into_iter().enumerate() {
-                            let at=position+row as u64;let (key,value)=kept(&layout,&states[0],at);
+                            // The state keeps the window ring: a row more than a window before the step's end is gone
+                            // from it (the later rows of the step read it, so the residuals still hold it).
+                            let at=position+row as u64;
+                            let (key,value)=if at+layout.window as u64>=position+count as u64 {kept(&layout,&states[0],at)} else {(want[at as usize].key.clone(),want[at as usize].value.clone())};
                             assert_eq!(Words {residual,key,value},want[at as usize],"layer {layer}, limit {limit}, position {at}");compared+=1;
                         }
                         position+=count as u64;assert_eq!(states[0].position,position);

@@ -26,6 +26,7 @@ pub fn source_files(root: &Path) -> io::Result<Vec<PathBuf>> {
     let mut files = vec![root.join("kernels-inkling/Cargo.toml"), root.join("kernels-inkling/REGISTERS.txt"), root.join("kernels/src/ptx.rs"),
         root.join("src/fixed_math.rs"), root.join("src/block_ops.rs"), root.join("src/block_rows.rs"), root.join("src/block_attention.rs"),
         root.join("src/block_stream.rs"), root.join("src/block_experts.rs"), root.join("src/inkling_launch.rs"), root.join("src/staged_product.rs"), root.join("src/packed_product.rs"),
+        root.join("src/block_scores.rs"), root.join("src/staged_narrow.rs"),
         root.join("build-kernels/src/bin/inkling.rs"), root.join("inkling_stamp.rs")];
     for entry in fs::read_dir(root.join("kernels-inkling/src"))? {
         let path = entry?.path();

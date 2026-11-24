@@ -30,7 +30,7 @@ fn chat(fixture:&Fixture,seed:u64) {
             // The driver: the expert sum, the ring write, the convolution and the stream after the visit.
             let u=sum(&run,visit,&input).unwrap();
             rings[index][slot*width..(slot+1)*width].copy_from_slice(&u);
-            let got=close(&run,visit,&rings[index],&vec![slot as f32],&residual).unwrap();
+            let got=close(&run,visit,&rings[index],&vec![slot as f32],0,&residual).unwrap();
             // The scalar form.
             let (ids,_,want_u)=expert_sum(d,&w,layer,&input);picks.extend(ids.into_iter().map(|expert|(layer,expert)));
             assert_eq!(bits(&u),bits(&want_u),"expert sum, {at}");

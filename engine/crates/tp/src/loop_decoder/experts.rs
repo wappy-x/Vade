@@ -16,7 +16,7 @@
 //!
 //! Orders that the reference leaves open, fixed here for every path: the pick is in falling `score + bias` with the
 //! lower expert number first on equal values, and the picked experts add in that order (`Op::Route`, arm `RouteFold`).
-use super::{mix::{Run,Token,Weight,Weights,need,number,reciprocal,shape},rows::{gather,rows_operation}};
+use super::{mix::{Run,Token,Weight,Weights,need,number,reciprocal,shape},rows::rows_operation};
 use crate::{Result,bounded_decoder::Compute};
 use engine_model::{host_ops::router::RouterKind,plan::description::Visit,shapes::{ExpertShape,Ffn}};
 use spark_gpu_probe::causal_ops::{Op,Shape};
@@ -25,6 +25,10 @@ use spark_gpu_probe::causal_ops::{Op,Shape};
 /// Form word of arm `ShortConv`: an addend is given, and the sum with the addend is rounded to BF16.
 const CONV_ADDEND:u32=1<<1;
 const CONV_ROUND:u32=1<<2;
+/// The most rows of a step whose expert sum runs row by row with the picks on the device (`device_sum`). Such a
+/// step reads an expert once a pick; a larger step reads each picked expert once, one launch an expert, after one
+/// read of the route. Measured on the decode of 1 to 8 chats (the row form is the faster one there).
+const DEVICE_ROWS:usize=8;
 /// The number that the convolution after the experts multiplies by, for `terms` terms (its taps and the input that is
 /// added back). The reference divides by `sqrt(terms)` (line 392): see `reciprocal`.
 pub fn conv_scale(terms:u64)->f32 {reciprocal((terms as f64).sqrt())}
@@ -62,12 +66,31 @@ pub fn sum<C:Compute,W:Weights<C>>(run:&Run<'_,C,W>,visit:&Visit,input:&C::Value
     let bias=w.words(Weight::RouterBias(layer))?;need(bias.len()==count,"the router bias differs from the expert count")?;
     // Sigmoid scores, the pick by falling `score + bias`, and the weights `score / (sum + 1e-20) * scale` in pick order.
     let s=Shape {op:Op::Route,heads:number(r.groups as usize)?,dim:number(r.selected_groups as usize)?,taps:u32::from(r.normalize_selected),rows:number(count)?,cols:number(picks)?,epsilon:0.0,bound:r.scale as f32};
+    // READ ARM 2: more rows pick in one rows launch of arm `RouterPick`, the first 2k words of `Op::Route` a row, bit
+    // for bit (host test in block_experts_tests.rs); one row keeps `Op::Route`.
+    let s=if rows>1 && spark_gpu_probe::block_rows::lengths(Shape {op:Op::RouterPick,..s},rows,0).is_some() {Shape {op:Op::RouterPick,..s}} else {s};
     let route=rows_operation(c,s,rows,[Some(&logits),None,None,None],0,bias)?;
     if rows==1 {
         let (ids,weights)=(c.range(&route,0,picks)?,c.range(&route,picks,picks)?);
         if let Some(sum)=device_sum(run,layer,experts,&z,&ids,&weights,picks)? {return Ok(sum);}
         let ids=picked(&c.read(&ids)?,count)?;
         return picked_sum(run,layer,experts,&z,&[ids],&weights);
+    }
+    // A step of a few rows (the decode of several chats, one new token each): each row runs the form of one row with
+    // its picks left on the device, so the host reads no route and the queue does not drain here. A row's words do
+    // not depend on the other rows of the step, so they are those of `picked_sum` for all rows.
+    if rows<=DEVICE_ROWS {
+        let (each,width)=(c.words(&route)/rows,run.width());
+        need(each>=2*picks && c.words(&route)==rows*each,"the route of a step differs from its rows")?;
+        let mut sums=Vec::with_capacity(rows);
+        for row in 0..rows {
+            let (ids,weights)=(c.range(&route,row*each,picks)?,c.range(&route,row*each+picks,picks)?);
+            // No device form: the weights have none for any row, so the step takes the form for many rows.
+            let Some(sum)=device_sum(run,layer,experts,&c.range(&z,row*width,width)?,&ids,&weights,picks)? else {break};
+            sums.push(sum);
+        }
+        if sums.len()==rows {return c.join(&sums.iter().collect::<Vec<_>>());}
+        need(sums.is_empty(),"loop decoder: the device form of the picked experts went away inside a step")?;
     }
     // The words of each row are its picked numbers, then its weights in pick order. The weights go back as the
     // bits that were read: the host computes nothing on them.
@@ -124,39 +147,42 @@ fn picked_sum<C:Compute,W:Weights<C>>(run:&Run<'_,C,W>,layer:usize,experts:Exper
     // The runs of one expert in that order: its number, its first pick and its count of picks.
     let mut runs:Vec<(usize,usize,usize)>=Vec::new();
     for at in 0..all {match runs.last_mut() {Some(last) if rows>1 && last.0==expert(at)=>last.2+=1,_=>runs.push((expert(at),at,1))}}
-    // The input row of each pick, in launch order. One row: every pick reads `z` itself.
-    let sorted=if rows==1 {None} else {Some(gather(c,z,&order.iter().map(|&pick|pick/picks).collect::<Vec<_>>(),width)?)};
     // One row (a token step): the products of all picks in one call where the weights have it, the same words as one
-    // call a pick. Else, and for many rows, one call a run of one expert.
+    // call a pick. More rows: the runs read the input row of each pick through a table (`Weights::product_runs`), in
+    // launch order.
     let grouped=|kind:fn(usize,usize)->Weight,x:&C::Value,shared:bool|->Result<Option<C::Value>> {
         if rows!=1 {return Ok(None);}
         w.products(c,&runs.iter().map(|&(number,_,_)|kind(layer,number)).collect::<Vec<_>>(),x,shared)
     };
-    let halves=match grouped(Weight::GateUp,z,true)? {Some(all)=>all,None=>join(&runs.iter().map(|&(number,first,count)|match &sorted {
-        None=>w.product(c,Weight::GateUp(layer,number),z),
-        Some(sorted)=>w.product_rows(c,Weight::GateUp(layer,number),&c.range(sorted,first*width,count*width)?,count),
-    }).collect::<Result<Vec<_>>>()?)?};
+    let launches=|kind:fn(usize,usize)->Weight|runs.iter().map(|&(number,_,count)|(kind(layer,number),count)).collect::<Vec<_>>();
+    let halves=if rows==1 {match grouped(Weight::GateUp,z,true)? {Some(all)=>all,None=>join(&runs.iter().map(|&(number,_,_)|w.product(c,Weight::GateUp(layer,number),z)).collect::<Result<Vec<_>>>()?)?}} else {
+        let input=order.iter().map(|&pick|pick/picks).collect::<Vec<_>>();
+        w.product_runs(c,&launches(Weight::GateUp),z,width,Some(&input),None)?
+    };
     need(c.words(&halves)==all*2*inner,"a gate-and-up product differs from the expert width")?;
     let mut s=shape(Op::CappedGate);s.rows=number(all)?;s.dim=number(inner)?;s.epsilon=caps.gate as f32;s.bound=caps.up as f32;
     let active=c.operation(s,[Some(&halves),None,None,None],&[reciprocal(caps.gate),reciprocal(caps.up)])?;
-    let downs=match grouped(Weight::Down,&active,false)? {Some(all)=>all,None=>join(&runs.iter().map(|&(number,first,count)|w.product_rows(c,Weight::Down(layer,number),&c.range(&active,first*inner,count*inner)?,count)).collect::<Result<Vec<_>>>()?)?};
-    need(c.words(&downs)==all*width,"a down product differs from the width")?;
-    // Back to row order, each row with its picks in pick order.
+    // The downs back in row order, each row with its picks in pick order: row `pick` of the result is launch row
+    // `place[pick]`. One row: the launch order is the pick order.
     let mut place=vec![0usize;all];for (at,&pick) in order.iter().enumerate() {place[pick]=at;}
+    let downs=match grouped(Weight::Down,&active,false)? {Some(all)=>all,None=>w.product_runs(c,&launches(Weight::Down),&active,inner,None,if rows==1 {None} else {Some(&place)})?};
+    need(c.words(&downs)==all*width,"a down product differs from the width")?;
     let mut s=shape(Op::RouteFold);s.rows=number(picks)?;s.dim=number(width)?;
-    rows_operation(c,s,rows,[Some(weights),Some(&gather(c,&downs,&place,width)?),None,None],0,&[])
+    rows_operation(c,s,rows,[Some(weights),Some(&downs),None,None],0,&[])
 }
 /// Steps 11 and 12 of a visit, for the rows of a step: `f = rn((the taps on the ring + u) * conv_scale)`, then the
 /// stream after the visit, `rn(residual + f)`. One launch of arm `ShortConv` with the addend and the round.
 /// `ring` holds the convolution ring of each row, `[rows][taps][width]`, with the expert sum `u` of that row in its
-/// slot (`state::row_rings`). `step` is one word a row: that slot. `residual` is the 32-bit stream after the
-/// attention half, `[rows][width]`. The result is `[rows][width]`.
-pub fn close<C:Compute,W:Weights<C>>(run:&Run<'_,C,W>,visit:&Visit,ring:&C::Value,step:&C::Value,residual:&C::Value)->Result<C::Value> {
+/// slot (`state::row_rings`). `step` is one word a row: that slot. Or, with `window` the mask of the window form
+/// (`state::conv_rings`), `ring` is the window of the step and `step` one word. `residual` is the 32-bit stream
+/// after the attention half, `[rows][width]`. The result is `[rows][width]`.
+pub fn close<C:Compute,W:Weights<C>>(run:&Run<'_,C,W>,visit:&Visit,ring:&C::Value,step:&C::Value,window:u32,residual:&C::Value)->Result<C::Value> {
     let (layer,_)=run.layer(visit)?;let c=run.compute;let width=run.width();let taps=run.description.conv.kernel;let rows=run.rows(residual)?;
-    need(taps>0 && c.words(ring)==rows*taps as usize*width && c.words(step)==rows,"the convolution ring after the experts differs from the description")?;
+    let (ring_rows,steps)=if window==0 {(rows*taps as usize,rows)} else {(rows+taps as usize-1,1)};
+    need(taps>0 && c.words(ring)==ring_rows*width && c.words(step)==steps,"the convolution ring after the experts differs from the description")?;
     let weight=run.weights.words(Weight::ConvAfterExperts(layer))?;need(weight.len()==width*taps as usize,"the taps after the experts differ from the description")?;
     let mut s=shape(Op::ShortConv);s.heads=1;s.dim=number(width)?;s.taps=number(taps as usize)?;s.cols=CONV_ADDEND|CONV_ROUND;s.bound=conv_scale(taps+1);
-    rows_operation(c,s,rows,[Some(ring),None,Some(residual),Some(step)],0,weight)
+    rows_operation(c,s,rows,[Some(ring),None,Some(residual),Some(step)],window,weight)
 }
 /// The expert half of one visit. `stream` is the stream that the visit read. `residual` is the stream after the
 /// attention half. `ring` puts the expert sum of this token into the convolution ring of this visit and gives the
@@ -165,5 +191,5 @@ pub fn half<C:Compute,W:Weights<C>>(run:&Run<'_,C,W>,visit:&Visit,token:&mut Tok
     ring:impl FnOnce(&C::Value)->Result<(C::Value,C::Value)>)->Result<C::Value> {
     let input=token.expert_input(run,visit,stream,residual)?;
     let (ring,step)=ring(&sum(run,visit,&input)?)?;
-    close(run,visit,&ring,&step,residual)
+    close(run,visit,&ring,&step,0,residual)
 }

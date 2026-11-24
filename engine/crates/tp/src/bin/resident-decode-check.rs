@@ -45,6 +45,10 @@ use spark_tp::Result;
 #[cfg(target_os="linux")]
 #[path="resident-decode-check/routed_fold.rs"] mod routed_fold;
 #[path="resident-decode-check/block_arms.rs"] mod block_arms;
+#[cfg(target_os="linux")]
+#[path="resident-decode-check/route_rows.rs"] mod route_rows;
+#[cfg(target_os="linux")]
+#[path="resident-decode-check/rel_rows.rs"] mod rel_rows;
 #[path="resident-decode-check/loop_token.rs"] mod loop_token;
 #[path="resident-decode-check/loop_token_time.rs"] mod loop_token_time;
 #[path="resident-decode-check/loop_rows.rs"] mod loop_rows;
@@ -943,6 +947,14 @@ fn main() {
         #[cfg(target_os="linux")]
         [mode,out] if mode=="block-arms-entries"=>block_arms::entries(Path::new(out)),
         #[cfg(target_os="linux")]
+        [mode,out] if mode=="route-rows-guard"=>route_rows::run(Path::new(out)),
+        #[cfg(target_os="linux")]
+        [mode,out] if mode=="rel-rows-time"=>rel_rows::time(Path::new(out)),
+        #[cfg(target_os="linux")]
+        [mode,out] if mode=="rel-rows-guard"=>rel_rows::guard(Path::new(out)),
+        #[cfg(target_os="linux")]
+        [mode,out] if mode=="block-arms-guards"=>block_arms::guards(Path::new(out)),
+        #[cfg(target_os="linux")]
         [mode,out,list] if mode=="block-arms-time"=>block_arms::time(Path::new(out),Path::new(list)),
         #[cfg(target_os="linux")]
         [mode,model,trace,out] if mode=="loop-token"=>loop_token::run(Path::new(model),Path::new(trace),Path::new(out),loop_token::Job::Trace),
@@ -954,6 +966,8 @@ fn main() {
         [mode,model,trace,out,steps] if mode=="loop-token-rate"=>loop_token::run_rate(Path::new(model),Path::new(trace),Path::new(out),steps,false),
         #[cfg(target_os="linux")]
         [mode,model,trace,out,steps] if mode=="loop-token-rate-pooled"=>loop_token::run_rate(Path::new(model),Path::new(trace),Path::new(out),steps,true),
+        #[cfg(target_os="linux")]
+        [mode,model,trace,out,steps] if mode=="loop-token-rate-rows-pooled"=>loop_token::run_rate_rows(Path::new(model),Path::new(trace),Path::new(out),steps),
         #[cfg(target_os="linux")]
         [mode,out] if mode=="loop-token-fixture"=>loop_token::fixtures_device(Path::new(out)),
         [mode,out] if mode=="loop-token-fixture-host"=>loop_token::fixtures(&spark_tp::bounded_decoder::Host,Path::new(out),"host"),
@@ -967,6 +981,8 @@ fn main() {
         [mode,model,folder,out,rows,positions,new] if mode=="loop-rows-time"=>loop_token_time::run_rows(Path::new(model),Path::new(folder),Path::new(out),rows,positions,new),
         #[cfg(target_os="linux")]
         [mode,model,folder,out,prefixes,rows,profile,repeats] if mode=="loop-rows-price"=>loop_token_time::run_price(Path::new(model),Path::new(folder),Path::new(out),prefixes,rows,profile,repeats),
+        #[cfg(target_os="linux")]
+        [mode,model,folder,out,rows,positions,new] if mode=="loop-rows-time-pooled"=>loop_token_time::run_rows_pooled(Path::new(model),Path::new(folder),Path::new(out),rows,positions,new),
         [mode,out] if mode=="loop-token-time-host"=>loop_token_time::fixtures(Path::new(out)),
         #[cfg(target_os="linux")]
         [mode,model,trace,out,rows,prompt] if mode=="loop-rows"=>loop_rows::run(Path::new(model),Path::new(trace),Path::new(out),rows,prompt,false),

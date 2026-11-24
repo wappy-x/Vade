@@ -4,7 +4,18 @@
 use super::*;
 
 /// Entries that live in the Inkling image: the kernel names of its kinds (host test).
-pub(crate) fn in_inkling_image(name:&str)->bool {matches!(name,"resident_launch_block_arms"|"resident_launch_block_rows"|"resident_launch_plain_staged"|"resident_launch_plain_staged_rows"|"resident_launch_plain_packed"|"resident_launch_plain_packed_group"|"resident_launch_plain_packed_picked")}
+pub(crate) fn in_inkling_image(name:&str)->bool {matches!(name,"resident_launch_block_arms"|"resident_launch_block_rows"|"resident_launch_plain_staged"|"resident_launch_plain_staged_rows"|"resident_launch_plain_staged_narrow"|"resident_launch_plain_packed"|"resident_launch_plain_packed_group"|"resident_launch_plain_packed_picked"|"resident_launch_block_scores"|"resident_launch_block_softmax")}
+
+/// The entry of a rows launch of a block arm: `WindowScores` with its key plane shared takes its own entry
+/// (`block_scores::stage`), `SinkSoftmax` with its scores per row its own (`block_attention::softmax_rows_stage`);
+/// every other rows launch takes the rows entry. One choice for the kernel check of
+/// `resident_causal_into` and for `block_arm` (review REVSCORES, LOW 2).
+pub(super) fn rows_kind(shape:crate::causal_ops::Shape,count:usize,shared:u32)->crate::resident_launch::Kind {
+    use crate::resident_launch::Kind;
+    if crate::block_scores::stage(shape,count,shared).is_some() {Kind::BlockScores}
+    else if crate::block_attention::softmax_rows_stage(shape,count,shared).is_some() {Kind::BlockSoftmax}
+    else {Kind::BlockRows}
+}
 
 /// The backend's state for the Inkling image.
 pub(super) struct InklingState<'a> {
@@ -56,7 +67,13 @@ impl<'a> Backend<'a> {
         let (kind,(blocks,threads))=match row_launch {
             Some((count,shared))=>{
                 command.put(crate::block_ops::device::ROWS_AT,&(count as u32).to_ne_bytes());command.put(crate::block_ops::device::SHARED_AT,&shared.to_ne_bytes());
-                (Kind::BlockRows,(u32::try_from(units.div_ceil(128)).map_err(|_|"block rows grid overflow")?,128))
+                // WindowScores at rows with its key plane shared (the bias shared or each row's own), and SinkSoftmax at
+                // rows with its scores per row: each its own entry (rows_kind, block_scores::stage, softmax_rows_stage).
+                match (rows_kind(shape,count,shared),crate::block_scores::stage(shape,count,shared),crate::block_attention::softmax_rows_stage(shape,count,shared)) {
+                    (Kind::BlockScores,Some((blocks,threads)),_)=>(Kind::BlockScores,(u32::try_from(blocks).map_err(|_|"block scores grid overflow")?,threads as u32)),
+                    (Kind::BlockSoftmax,_,Some(blocks))=>(Kind::BlockSoftmax,(u32::try_from(blocks).map_err(|_|"block softmax grid overflow")?,crate::block_ops::SUM_THREADS as u32)),
+                    _=>(Kind::BlockRows,(u32::try_from(units.div_ceil(128)).map_err(|_|"block rows grid overflow")?,128)),
+                }
             },
             None=>(Kind::BlockArms,crate::block_ops::geometry(shape,units)),
         };
@@ -83,12 +100,27 @@ impl<'a> Backend<'a> {
     }
 }
 #[cfg(test)] mod tests {
-    use crate::{inkling_launch::{BLOCK_ARMS,BLOCK_ROWS,PLAIN_STAGED,PLAIN_STAGED_ROWS,PLAIN_PACKED,PLAIN_PACKED_GROUP,PLAIN_PACKED_PICKED},resident_launch::Kind};
+    use crate::{inkling_launch::{BLOCK_ARMS,BLOCK_ROWS,PLAIN_STAGED,PLAIN_STAGED_ROWS,PLAIN_STAGED_NARROW,PLAIN_PACKED,PLAIN_PACKED_GROUP,PLAIN_PACKED_PICKED,BLOCK_SCORES,BLOCK_SOFTMAX},resident_launch::Kind};
     #[test] fn the_inkling_entries_are_the_kernels_of_its_kinds() {
         for kind in Kind::ALL {
-            assert_eq!(super::in_inkling_image(kind.kernel()),[BLOCK_ARMS,BLOCK_ROWS,PLAIN_STAGED,PLAIN_STAGED_ROWS,PLAIN_PACKED,PLAIN_PACKED_GROUP,PLAIN_PACKED_PICKED].contains(&(kind as u32)),"{}",kind.kernel());
+            assert_eq!(super::in_inkling_image(kind.kernel()),[BLOCK_ARMS,BLOCK_ROWS,PLAIN_STAGED,PLAIN_STAGED_ROWS,PLAIN_STAGED_NARROW,PLAIN_PACKED,PLAIN_PACKED_GROUP,PLAIN_PACKED_PICKED,BLOCK_SCORES,BLOCK_SOFTMAX].contains(&(kind as u32)),"{}",kind.kernel());
         }
         assert!(!super::in_inkling_image("causal_operation") && !super::in_inkling_image("resident_launch_causal"));
+    }
+    /// The one choice of the rows entry (review REVSOFTMAX, LOW 1): WindowScores with its key plane shared takes
+    /// kind 97, SinkSoftmax with its scores per row kind 98, every other rows launch the rows entry.
+    #[test] fn a_rows_launch_takes_the_entry_of_its_stage() {
+        use crate::causal_ops::{Op,Shape};
+        let softmax=Shape {op:Op::SinkSoftmax,heads:24,dim:0,taps:0,rows:8192,cols:0,epsilon:0.0,bound:0.0};
+        let scores=Shape {op:Op::WindowScores,heads:24,dim:128,taps:3,rows:1024,cols:1024,epsilon:0.0,bound:0.088_388_35};
+        assert_eq!(super::rows_kind(scores,1024,0b0010),Kind::BlockScores);
+        assert_eq!(super::rows_kind(scores,1024,0),Kind::BlockRows);
+        assert_eq!(super::rows_kind(softmax,1024,0),Kind::BlockSoftmax);
+        assert_eq!(super::rows_kind(softmax,1024,0b0110),Kind::BlockSoftmax);
+        // Shared scores, a launch above the rows limit, another arm: the rows entry.
+        assert_eq!(super::rows_kind(softmax,1024,0b0001),Kind::BlockRows);
+        assert_eq!(super::rows_kind(softmax,crate::block_rows::ROWS_MAX+1,0),Kind::BlockRows);
+        assert_eq!(super::rows_kind(Shape {op:Op::WindowValues,..scores},1024,0b0010),Kind::BlockRows);
     }
     /// Review REVIMAGE finding 1: an arm launched inside each graph capture is refused with an error, no launch, and
     /// the same arm launches after the capture.

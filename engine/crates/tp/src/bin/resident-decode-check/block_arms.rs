@@ -120,6 +120,9 @@ fn cases()->Vec<Case> {
     for heads in [1u32,3,24] {for dim in [2u32,16] {for extent in [1u32,4,1024] {
         all.push(case("RelBias",format!("heads={heads} dim={dim} extent={extent}"),Shape {heads,dim,cols:extent,..empty(Op::RelBias)}));
     }}}
+    // An extent that is no multiple of 8 (one distance a unit, read arm 4), last, so that block-arms-guards guards
+    // both forms (review REVARM4): the first case has 8 distances a unit.
+    all.push(case("RelBias","heads=24 dim=16 extent=52 one distance a unit".into(),Shape {heads:24,dim:16,cols:52,..empty(Op::RelBias)}));
     // WindowScores and WindowValues: a group of 1 and of 3; 4 to 4096 rows; the live counts and slots of `live_steps`;
     // a bias extent below, at and above the rows; a gate of zeros. SinkSoftmax: the same rows and live counts, and a
     // sink far above and far below the scores.
@@ -560,6 +563,65 @@ pub fn entries(out:&Path)->Result<()> {
     write("ENTRIES.txt",&text)?;
     if failed>0 {return Err(format!("{failed} of the entry launches did not pass; see ENTRIES.txt"));}
     write("COMPLETE","")
+}
+/// Guard words of the mode `block-arms-guards` on each side of an output, and their bits: a quiet NaN that no arm
+/// writes, and a mark for the output words before the launch.
+#[cfg(target_os="linux")] const GUARD_WORDS:usize=64;
+#[cfg(target_os="linux")] const GUARD:u32=0x7fc0_dead;
+#[cfg(target_os="linux")] const MARK:u32=0x7fa0_beef;
+/// Mode `block-arms-guards` (Ruling R6f, condition 2): each arm writes its output into a view inside a larger buffer,
+/// with `GUARD_WORDS` guard words on both sides. The guards are read back and must keep their bits, and the output
+/// words must equal the host reference. Two cases an arm: its first and its last case of the sweep (a small shape and
+/// a large one). The launch is the one the decoder uses (`resident_causal_into` into caller storage).
+#[cfg(target_os="linux")]
+pub fn guards(out:&Path)->Result<()> {
+    fs::create_dir_all(out).map_err(|e|format!("{}: {e}",out.display()))?;
+    let all=cases();
+    let (mut text,mut failed,mut checked)=(String::new(),0usize,0usize);
+    spark_gpu_probe::driver::with_backend(0,spark_gpu_probe::layer_ptx()?,1<<30,|b| {
+        for (name,_) in ARMS {
+            let mine=all.iter().filter(|case|case.name==name).collect::<Vec<_>>();
+            let picks=match (mine.first(),mine.last()) {(Some(first),Some(last)) if mine.len()>1=>vec![*first,*last],(Some(first),_)=>vec![*first],_=>Vec::new()};
+            if picks.is_empty() {failed+=1;let _=writeln!(text,"BLOCK-ARM GUARD arm={name} NO CASE");continue;}
+            // The arms whose rows share a sum also at many rows: from block_ops::WHOLE_ROWS rows on one block makes
+            // a whole row (read arm 1), so that write set is guarded too, on both sides of the switch (review
+            // REVARM1 finding 1: 63, 64 and 65 rows at width 2,304).
+            let whole=spark_gpu_probe::block_ops::WHOLE_ROWS as u32;
+            let many=|rows:u32|->Option<Case> {
+                let s=|op,taps,epsilon,bound|Shape {op,heads:rows,dim:2304,taps,rows:0,cols:0,epsilon,bound};
+                let shape=match name {"PlainNorm"=>s(Op::PlainNorm,0,1.0e-6,0.0),"RoundedNorm"=>s(Op::RoundedNorm,1,1.0e-6,0.0),"HeadClip"=>s(Op::HeadClip,0,0.0,7.5),_=>return None};
+                Some(case(name,format!("rows={rows} width=2304 {}",if rows>=whole {"one block a row"} else {"a block a span"}),shape))
+            };
+            let extra=[whole-1,whole,whole+1,1024].into_iter().filter_map(many).collect::<Vec<_>>();
+            for case in picks.into_iter().chain(extra.iter()) {
+                let (x,weight)=inputs(case,false)?;
+                let expected=reference(case.shape,[&x[0][..],&x[1][..],&x[2][..],&x[3][..]],&weight).map_err(|e|format!("{name} host: {e}"))?;
+                let n=expected.len();
+                let mut words=vec![f32::from_bits(GUARD);GUARD_WORDS];words.extend(std::iter::repeat_n(f32::from_bits(MARK),n));words.extend(std::iter::repeat_n(f32::from_bits(GUARD),GUARD_WORDS));
+                let buffer=b.upload_vector(&words)?.into_resident_shared()?;
+                let mut view=buffer.resident_range(GUARD_WORDS..GUARD_WORDS+n)?;
+                let mut device=Vec::new();
+                for input in &x {device.push(if input.is_empty() {None} else {Some(b.upload_vector(input)?)});}
+                let device_weight=if weight.is_empty() {None} else {Some(b.upload_vector(&weight)?)};
+                b.resident_causal_into(case.shape,[device[0].as_ref(),device[1].as_ref(),device[2].as_ref(),device[3].as_ref()],device_weight.as_ref(),&mut view)?;
+                b.synchronize()?;drop(view);
+                let got=b.read_vector_values(&buffer)?;
+                let low=got[..GUARD_WORDS].iter().filter(|w|w.to_bits()!=GUARD).count();
+                let high=got[GUARD_WORDS+n..].iter().filter(|w|w.to_bits()!=GUARD).count();
+                let differ=differing(&got[GUARD_WORDS..GUARD_WORDS+n],&expected);
+                let pass=got.len()==n+2*GUARD_WORDS && low==0 && high==0 && differ==0;
+                if !pass {failed+=1;}
+                checked+=1;
+                let _=writeln!(text,"BLOCK-ARM GUARD arm={name} label={} words={n} guards_each_side={GUARD_WORDS} guards_changed_below={low} guards_changed_above={high} differing_words={differ} {}",case.label,if pass {"PASS"} else {"MISS"});
+            }
+        }
+        Ok(())
+    })?;
+    let _=writeln!(text,"BLOCK-ARM GUARDS {} arms={} launches={checked} failed={failed}",if failed==0 {"PASS"} else {"MISS"},ARMS.len());
+    eprint!("{text}");
+    save(&out.join("GUARDS.txt"),&text)?;
+    if failed>0 {return Err(format!("{failed} of the guard launches did not pass; see GUARDS.txt"));}
+    save(&out.join("COMPLETE"),&text)
 }
 /// The device sweep on GPU 0.
 #[cfg(target_os="linux")]

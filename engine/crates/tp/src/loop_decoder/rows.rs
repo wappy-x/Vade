@@ -78,9 +78,12 @@ pub fn rows_operation<C:Compute>(compute:&C,s:Shape,rows:usize,x:[Option<&C::Val
     need(rows>0,"a launch for rows has no row")?;
     if rows==1 {return compute.operation(s,x,w);}
     let mut parts=[0usize;4];
+    // The window form (`block_rows::WINDOW`): input 0 holds `rows + taps - 1` rows, and row `r` reads `taps` of them
+    // from row `r`.
+    let window=if shared&spark_gpu_probe::block_rows::WINDOW!=0 {Some(spark_gpu_probe::block_rows::windowed(s).ok_or("the window form is for arm ShortConv only")?)} else {None};
     for (n,input) in x.iter().enumerate() {
         let Some(value)=input else {continue;};
-        if shared>>n&1==1 {continue;}
+        if shared>>n&1==1 || (n==0 && window.is_some()) {continue;}
         let words=compute.words(value);need(words>0 && words.is_multiple_of(rows),"an input of a launch for rows holds no whole count of rows")?;
         parts[n]=words/rows;
     }
@@ -89,7 +92,8 @@ pub fn rows_operation<C:Compute>(compute:&C,s:Shape,rows:usize,x:[Option<&C::Val
     for row in 0..rows {
         let mut own:[Option<C::Value>;4]=[None,None,None,None];
         for n in 0..4 {if let (Some(value),true)=(x[n],parts[n]>0) {own[n]=Some(compute.range(value,row*parts[n],parts[n])?);}}
-        let input=|n:usize|if parts[n]>0 {own[n].as_ref()} else {x[n]};
+        if let (Some(width),Some(value))=(window,x[0]) {own[0]=Some(compute.range(value,row*width,s.taps as usize*width)?);}
+        let input=|n:usize|if parts[n]>0 || (n==0 && window.is_some()) {own[n].as_ref()} else {x[n]};
         outs.push(compute.operation(s,[input(0),input(1),input(2),input(3)],w)?);
     }
     compute.join(&outs.iter().collect::<Vec<_>>())

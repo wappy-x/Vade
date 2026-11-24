@@ -149,6 +149,55 @@ pub trait Weights<C:Compute> {
     /// (`Weight::GateUp(layer,0)` or `Weight::Down(layer,0)`). The words are those of `products` on the weights of
     /// those numbers. None: no such call here; the caller reads the numbers and calls `products`.
     fn picked_products(&self,_compute:&C,_first:Weight,_ids:&C::Value,_x:&C::Value,_shared:bool)->Result<Option<C::Value>> {Ok(None)}
+    /// `stack_products` for `rows` input rows (`x` is `[rows][columns]`): where the owner holds the matrices one after
+    /// another, one product for many rows over all their rows, so row `r` of the result is the products of all
+    /// matrices on input row `r`, side by side (`[rows][matrix rows of all]`). Each word is the chain of `product`.
+    /// None: no such stack here; the caller runs `product_rows` a matrix.
+    fn stack_product_rows(&self,_compute:&C,_weights:&[Weight],_x:&C::Value,_rows:usize)->Result<Option<C::Value>> {Ok(None)}
+    /// The products of the expert runs of a step of rows, in launch order (the index rows of the rows tile, kind 92).
+    /// `runs` holds the matrix and the count of rows of each run, in launch order; together they take `n` rows.
+    /// Launch row `i` reads row `input[i]` of `x` (rows of `columns` words), or row `i` of `x` when `input` is None.
+    /// Row `j` of the result is launch row `output[j]`, or launch row `j` when `output` is None. Each word is the
+    /// chain of `product`: a table changes only where a row is read and where it goes.
+    /// The body here gathers the input rows (one launch), runs `product_rows` for each run, joins them, and gathers
+    /// the result rows (one launch): the launches of before. An owner of weights with a rows tile that reads and
+    /// writes rows through index tables gives its own body with the same words and no gather.
+    /// Refused before any launch (`check_runs`).
+    fn product_runs(&self,compute:&C,runs:&[(Weight,usize)],x:&C::Value,columns:usize,input:Option<&[usize]>,output:Option<&[usize]>)->Result<C::Value> {
+        gathered_runs(self,compute,runs,x,columns,input,output)
+    }
+}
+/// The body of `Weights::product_runs` with gathers: the input rows gathered (one launch), `product_rows` for each run,
+/// a join, and the result rows gathered (one launch). An owner of weights with its own body calls it for the cases
+/// that its body does not take.
+pub fn gathered_runs<C:Compute,W:Weights<C>+?Sized>(weights:&W,compute:&C,runs:&[(Weight,usize)],x:&C::Value,columns:usize,input:Option<&[usize]>,output:Option<&[usize]>)->Result<C::Value> {
+    let n=check_runs(compute.words(x),columns,runs,input,output)?;
+    let gathered;let x=match input {Some(rows)=>{gathered=super::rows::gather(compute,x,rows,columns)?;&gathered},None=>x};
+    let mut at=0;let mut parts=Vec::with_capacity(runs.len());
+    for &(weight,count) in runs {parts.push(weights.product_rows(compute,weight,&compute.range(x,at*columns,count*columns)?,count)?);at+=count;}
+    let joined=compute.join(&parts.iter().collect::<Vec<_>>())?;
+    match output {
+        Some(rows)=>{need(compute.words(&joined).is_multiple_of(n),"the products of the runs hold no whole rows")?;super::rows::gather(compute,&joined,rows,compute.words(&joined)/n)},
+        None=>Ok(joined),
+    }
+}
+/// The checks of `Weights::product_runs`, on counts only, before any launch. `words` are the words of the input
+/// value and `columns` the words of one of its rows. It gives the launch rows of the runs.
+/// Refused: a run with no row; an input that holds no whole rows; an input table that does not name one row of the
+/// input for each launch row; an output table that is no permutation of the launch rows (each written once).
+pub fn check_runs(words:usize,columns:usize,runs:&[(Weight,usize)],input:Option<&[usize]>,output:Option<&[usize]>)->Result<usize> {
+    let n=runs.iter().try_fold(0usize,|n,run|if run.1>0 {n.checked_add(run.1)} else {None}).ok_or("loop decoder: a run of products has no rows")?;
+    need(n>0 && columns>0 && words.is_multiple_of(columns),"the runs of products have no rows, or their input holds no whole rows")?;
+    let source=words/columns;
+    match input {
+        Some(rows)=>need(rows.len()==n && rows.iter().all(|&row|row<source),"an input row of the runs is outside the input")?,
+        None=>need(source==n,"the input of the runs differs from their rows")?,
+    }
+    if let Some(rows)=output {
+        let mut seen=vec![false;n];
+        need(rows.len()==n && rows.iter().all(|&row|row<n && !std::mem::replace(&mut seen[row],true)),"the output rows of the runs are no permutation of their rows")?;
+    }
+    Ok(n)
 }
 /// The host form of `Weights::product` for a matrix that is held as 32-bit words, row-major.
 pub fn chain_product<C:Compute>(compute:&C,matrix:&[f32],x:&C::Value)->Result<C::Value> {
@@ -310,13 +359,23 @@ impl<'a,C:Compute,W:Weights<C>> Run<'a,C,W> {
         let inner=c.round(&inner)?;
         // One row: the forget and the gain matrix on the same inner vector are one products call; where the owner holds
         // them one after another the two parts lie side by side and the pair below is a view.
-        let (forget,gain)=if count==1 {
-            let mut y=w.stack_products(c,&[Weight::GateForget(layer,which),Weight::GateGain(layer,which)],&inner)?.into_iter();
-            (y.next().ok_or("loop decoder: a forget product is missing")?,y.next().ok_or("loop decoder: a gain product is missing")?)
-        } else {(w.product_rows(c,Weight::GateForget(layer,which),&inner,count)?,w.product_rows(c,Weight::GateGain(layer,which),&inner,count)?)};
-        need(c.words(&forget)==count*width && c.words(&gain)==count*width,"a gate's outer product differs from the width")?;
+        // More rows: where the owner holds them one after another, one product for all rows gives each row's forget and
+        // gain side by side, the pair that arm GateBlend reads, with no join and no swap.
+        let both=[Weight::GateForget(layer,which),Weight::GateGain(layer,which)];
+        let stacked=if count>1 {w.stack_product_rows(c,&both,&inner,count)?} else {None};
+        let pair=match stacked {
+            Some(pair)=>{need(c.words(&pair)==count*2*width,"a gate's outer product differs from the width")?;pair},
+            None=>{
+                let (forget,gain)=if count==1 {
+                    let mut y=w.stack_products(c,&both,&inner)?.into_iter();
+                    (y.next().ok_or("loop decoder: a forget product is missing")?,y.next().ok_or("loop decoder: a gain product is missing")?)
+                } else {(w.product_rows(c,both[0],&inner,count)?,w.product_rows(c,both[1],&inner,count)?)};
+                need(c.words(&forget)==count*width && c.words(&gain)==count*width,"a gate's outer product differs from the width")?;
+                pair(&forget,&gain)?
+            },
+        };
         let mut s=shape(Op::GateBlend);s.dim=number(width)?;
-        rows_operation(c,s,count,[Some(&pair(&forget,&gain)?),Some(value),Some(message),None],0,&[])
+        rows_operation(c,s,count,[Some(&pair),Some(value),Some(message),None],0,&[])
     }
 }
 

@@ -37,6 +37,8 @@ pub mod plain_admission;
 /// The staged BF16 products of the Inkling image (Ruling R6h): rules and host checks, shared by path with `kernels-inkling`.
 #[allow(clippy::manual_is_multiple_of)] // Shared with the NVPTX crate; fix it with the kernels.
 pub mod staged_product;
+#[allow(clippy::manual_is_multiple_of)] // Shared with the NVPTX crate, as staged_product.
+pub mod staged_narrow;
 #[allow(clippy::manual_is_multiple_of)] // Shared with the NVPTX crate; fix it with the kernels.
 pub mod packed_product;
 pub mod select_admission;
@@ -95,6 +97,7 @@ pub mod latent_absorb;
 /// The Inkling block arms: safe shared code. The Inkling kernel crate (`kernels-inkling`) includes the same files by path.
 pub mod block_ops;
 pub mod block_rows;
+pub mod block_scores;
 pub mod block_attention;
 pub mod block_stream;
 pub mod block_experts;

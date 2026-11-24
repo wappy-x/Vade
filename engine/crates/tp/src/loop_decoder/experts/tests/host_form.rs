@@ -38,7 +38,7 @@ fn compare(fixture:&Fixture)->usize {
             assert_eq!(picked,record.route.ids,"picked experts, {at}");
             assert_eq!(bits(&u),bits(&record.experts),"expert sum, {at}");
             rings[index][slot*width..(slot+1)*width].copy_from_slice(&u);
-            let got=close(&run,visit,&rings[index],&vec![slot as f32],&record.residual).unwrap();
+            let got=close(&run,visit,&rings[index],&vec![slot as f32],0,&record.residual).unwrap();
             assert_eq!(bits(&got),bits(&out.streams[index]),"stream after the visit, {at}");
             words+=3*width+2*width;stream=got;
         }

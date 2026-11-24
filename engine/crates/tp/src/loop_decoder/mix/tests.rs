@@ -289,3 +289,26 @@ fn a_mix_of_a_step_on_the_list_form_has_the_words_of_one_row_at_a_time() {
         }
     }
 }
+#[test]
+fn the_runs_of_products_refuse_a_bad_table_and_keep_the_words_of_one_product_a_row() {
+    let (g,d)=(Weight::GateUp(0,0),Weight::Down(0,1));
+    // Counts only.
+    assert_eq!(check_runs(12,2,&[(g,2),(d,4)],None,None).unwrap(),6);
+    assert_eq!(check_runs(8,2,&[(g,2),(d,4)],Some(&[3,0,0,1,2,3]),Some(&[5,4,3,2,1,0])).unwrap(),6);
+    assert!(check_runs(12,2,&[(g,0),(d,6)],None,None).is_err(),"a run with no row");
+    assert!(check_runs(13,2,&[(g,6)],None,None).is_err(),"no whole rows");
+    assert!(check_runs(12,2,&[(g,5)],None,None).is_err(),"the input differs from the rows");
+    assert!(check_runs(8,2,&[(g,3)],Some(&[0,4,1]),None).is_err(),"an input row outside the input");
+    assert!(check_runs(8,2,&[(g,3)],Some(&[0,1]),None).is_err(),"a short input table");
+    assert!(check_runs(6,2,&[(g,3)],None,Some(&[0,0,2])).is_err(),"a row written twice");
+    assert!(check_runs(6,2,&[(g,3)],None,Some(&[0,1,3])).is_err(),"a row outside the output");
+    // The words: each result row is the product of its own input row with the matrix of its run.
+    let f=Fixture::small();let x=crate::loop_decoder::fixture::made("runs input",5*f.description.hidden as usize,12,-2,2);let h=f.description.hidden as usize;
+    let rows=[(Weight::GateUp(0,0),2),(Weight::GateUp(0,1),3)];let input=[4,0,4,2,1];let output=[2,0,4,1,3];
+    let got=<Fixture as Weights<Host>>::product_runs(&f,&Host,&rows,&x,h,Some(&input),Some(&output)).unwrap();
+    let each=got.len()/5;
+    for (j,&launch) in output.iter().enumerate() {
+        let weight=if launch<2 {rows[0].0} else {rows[1].0};let row=&x[input[launch]*h..(input[launch]+1)*h];
+        assert_eq!(bits(&got[j*each..(j+1)*each]),bits(&<Fixture as Weights<Host>>::product(&f,&Host,weight,&row.to_vec()).unwrap()),"row {j}");
+    }
+}

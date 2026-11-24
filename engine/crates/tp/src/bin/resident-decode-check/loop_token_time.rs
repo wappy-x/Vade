@@ -443,10 +443,16 @@ fn trace_ids(folder:&Path)->Result<(Vec<u32>,Vec<u32>)> {
 }
 /// Mode `loop-rows-time`: the real checkpoint on one device, the prompt read in steps of rows.
 #[cfg(target_os="linux")]
-pub fn run_rows(model:&Path,folder:&Path,out:&Path,rows:&str,positions:&str,new:&str)->Result<()> {
+pub fn run_rows(model:&Path,folder:&Path,out:&Path,rows:&str,positions:&str,new:&str)->Result<()> {rows_with(model,folder,out,rows,positions,new,false)}
+/// Mode `loop-rows-time-pooled`: `loop-rows-time` with the vector pool of the backend on (margin 1 GiB), as a server
+/// runs it. A word of the check program, no environment read.
+#[cfg(target_os="linux")]
+pub fn run_rows_pooled(model:&Path,folder:&Path,out:&Path,rows:&str,positions:&str,new:&str)->Result<()> {rows_with(model,folder,out,rows,positions,new,true)}
+#[cfg(target_os="linux")]
+fn rows_with(model:&Path,folder:&Path,out:&Path,rows:&str,positions:&str,new:&str,pool:bool)->Result<()> {
     let count=|name:&str,word:&str|word.parse::<usize>().ok().filter(|&n|n>0).ok_or_else(||format!("loop rows time: {name} must be a count above zero, got {word}"));
     let (rows,positions)=(count("ROWS",rows)?,count("POSITIONS",positions)?);
-    run_with(model,folder,out,new,Some((Limits {step_rows:rows,..Limits::ONE},positions)),false)
+    run_with(model,folder,out,new,Some((Limits {step_rows:rows,..Limits::ONE},positions)),pool)
 }
 /// Mode `loop-rows-price`: the real checkpoint on one device. `FOLDER` holds `prompt.ids` and `tokens.tsv`.
 #[cfg(target_os="linux")]
@@ -512,6 +518,7 @@ pub fn run(model:&Path,trace:&Path,out:&Path,new:&str)->Result<()> {run_with(mod
 #[cfg(target_os="linux")]
 pub fn run_pooled(model:&Path,trace:&Path,out:&Path,new:&str)->Result<()> {run_with(model,trace,out,new,None,true)}
 /// The device run of both modes. `rows` is the step row limit and the count of prompt rows of mode `loop-rows-time`.
+/// `pool` turns the vector pool of the backend on (margin 1 GiB) after the load.
 #[cfg(target_os="linux")]
 fn run_with(model:&Path,trace:&Path,out:&Path,new:&str,rows:Option<(Limits,usize)>,pool:bool)->Result<()> {
     use engine_model::plan::{loop_load,loop_state::{LoopLedger,LoopStatePlan,context_limit}};
@@ -546,6 +553,7 @@ fn run_with(model:&Path,trace:&Path,out:&Path,new:&str,rows:Option<(Limits,usize
         let loaded=load::load(&checkpoint,model,&mut store,workers)?;backend.synchronize()?;
         let files=load::Files::open(&checkpoint,model)?;
         let weights=LoadedWeights::new(&checkpoint,&files,&loaded.operands)?;
+        if pool {backend.configure_vector_pool(1<<30);eprintln!("LOOP-TOKEN-TIME POOL margin_bytes={}",1usize<<30);}
         lines.push(format!("LOOP-TOKEN-TIME LOAD tensors={} units={} fingerprint={} host_weight_bytes={} device_bytes={} seconds_to_backend={image:.3} seconds_to_weights={:.3}",
             loaded.report.tensors,loaded.report.units,loaded.fingerprint(),weights.host_bytes(),backend.allocated_bytes(),started.elapsed().as_secs_f64()));
         eprintln!("{}",lines[1]);

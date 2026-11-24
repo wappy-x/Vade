@@ -6,14 +6,32 @@
 # block_rows 84 registers, 0 shared, 384 stack; no spill. Each row = the measured registers plus 4, the measured bytes.
 # block_arms shared: 128 bytes of sum parts + 4,096 bytes of RowDots tiles (2 x DOT_TILE words), 2026-11-22 ink-dots.
 # block_arms stack 576 -> 608 bytes (measured, pair four rank 1, run W2): the staged SinkSoftmax and WindowValues forms.
-resident_launch_block_arms     128      86             4224              608
+# block_arms registers 86 -> 92 on ink-read-fast (measured 88, plus 4; pair four rank 1, run rf1-h): read arm 1 (shared_span)
+# and the staged SinkSoftmax and WindowValues in one function; 5 blocks a multiprocessor in place of 6.
+# block_scores (kind 97, 128 threads, a lane a key row): measured 64 registers, 16,512 shared bytes (the key tile, 32 rows
+# of 129 words), 96 stack bytes, no spill (pair four rank 1, run sc2-h).
+# block_scores registers 68 -> 84: seat INKARM measured 80 on the merged reading kit ink-read-combo (pair three rank 0,
+# build C, 2026-11-23 08:21), plus 4.
+# block_softmax (kind 98, 128 threads, a block a (row, head)): measured 54 registers, 4,224 shared bytes (the staged
+# head of block_arms), 96 stack bytes, no spill (pair four rank 1, run sm1-h).
+# block_scores third form (ink-scores3): measured 90 registers on the branch, 85 on the reading kit, 32,896 shared
+# bytes (key tile 8,320 + rounded queries 24,576), 96 stack, no spill, 3 blocks a multiprocessor (pair four rank 1,
+# runs sc3b-h and sc3b-A). Row 84 -> 94, shared 16,512 -> 32,896.
+resident_launch_block_arms     128      92             4224              608
 resident_launch_block_rows     128      88             0                 384
+resident_launch_block_scores   128      94             32896             96
+resident_launch_block_softmax  128      58             4224              96
 # The staged BF16 products (seat INKLOAD), measured in the macro form on pair one, rank 1 (CUDA 13.0 ptxas): row product
 # 80 registers, 38,912 shared, 0 stack (launched with 32 or 128 threads; the row is for 128); rows tile 62 registers,
 # 36,864 shared, 0 stack. Each row = the measured registers plus 4, the measured bytes. The rows tile with index rows
 # (kind 92, two row tables): 78 registers, 36,864 shared, 0 stack, still 2 blocks a multiprocessor (pair one, rank 1).
+# The grouped form (kind 92, run and block tables): 92 registers, 36,864 shared, 0 stack (pair two, rank 0); 256 x 96
+# = 24,576 of 65,536 registers a multiprocessor, so still 2 blocks a multiprocessor.
 resident_launch_plain_staged   128      84             38912             0
-resident_launch_plain_staged_rows 256   82             36864             0
+resident_launch_plain_staged_rows 256   96             36864             0
+# The narrow row product (seat INKLOAD, kind 93), measured on pair two, rank 0 (CUDA 13.0 ptxas): 42 registers, 12,544
+# shared, 0 stack, 8 blocks a multiprocessor. The row = the measured registers plus 4.
+resident_launch_plain_staged_narrow 32   46             12544             0
 # resident_launch_plain_packed (seat INKPACK): measured in the general image 68 registers, 37,376 shared (static), 0 stack.
 resident_launch_plain_packed   160      72             37376             0
 # resident_launch_plain_packed_group (seat INKPACK): the same body as plain_packed; not yet measured, the row of the single entry.

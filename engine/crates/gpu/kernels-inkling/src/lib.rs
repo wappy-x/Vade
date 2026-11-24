@@ -3,8 +3,9 @@
 //! byte for byte the image of private main
 //! and no change here can move a register, an instruction or a build unit of another family's kernels.
 //! The arm bodies are the safe shared files `block_*.rs` (one source with the host twins). The one unsafe block of
-//! the image is in `run`, written out in full (no macro), with its contract above it; the staged BF16 products have
-//! their own counted sites in `plain_staged.rs` and `plain_staged_rows.rs`; the panic handler traps. `run` and the
+//! the image is in `run`, written out in full (no macro), with its contract above it; the staged BF16 products
+//! have their own counted sites in `plain_staged.rs`, `plain_staged_rows.rs` and `plain_staged_narrow.rs`; the panic
+//! handler traps. `run` and the
 //! entries are `unsafe fn`, as the tensor-core image declares its entry (review REVIMAGE finding 4).
 //!
 //! How a seat adds an entry (see also `src/inkling_launch.rs`): a kind number in `inkling_launch.rs` and in the host's
@@ -27,6 +28,8 @@ mod fixed_math;
 mod block_ops;
 #[path = "../../src/block_rows.rs"]
 mod block_rows;
+#[path = "../../src/block_scores.rs"]
+mod block_scores;
 #[path = "../../src/block_attention.rs"]
 mod block_attention;
 #[path = "../../src/block_stream.rs"]
@@ -39,6 +42,9 @@ mod inkling_launch;
 mod staged_product;
 mod plain_staged;
 mod plain_staged_rows;
+#[path = "../../src/staged_narrow.rs"]
+mod staged_narrow;
+mod plain_staged_narrow;
 #[path = "../../src/packed_product.rs"]
 mod packed_product;
 mod plain_packed;
@@ -48,10 +54,10 @@ mod inkling_math {
     pub fn root(x: f32) -> f32 { core::f32::math::sqrt(x) }
 }
 use block_ops::device::{Arguments, RowsArguments, FIRST, LAST, OP_AT};
-use inkling_launch::{Command, BLOCK_ARMS, BLOCK_ROWS, PLAIN_PACKED, PLAIN_PACKED_GROUP, PLAIN_PACKED_PICKED};
+use inkling_launch::{Command, BLOCK_ARMS, BLOCK_ROWS, BLOCK_SCORES, BLOCK_SOFTMAX, PLAIN_PACKED, PLAIN_PACKED_GROUP, PLAIN_PACKED_PICKED};
 
 /// The replay of one recorded command of an Inkling kind: `table[index]`, launched in the geometry the host recorded.
-/// SAFETY (contract of the caller, the two entries): `table` and `index` are the arguments the host passes to the
+/// SAFETY (contract of the caller, the four entries block_arms, block_rows, block_scores and block_softmax): `table` and `index` are the arguments the host passes to the
 /// entry (`Backend::resident_causal_into` and the recorded replay); the block inside names what that host checks.
 #[inline(always)]
 unsafe fn run<const KIND: u32>(table: *const Command, index: u64) {
@@ -65,8 +71,9 @@ unsafe fn run<const KIND: u32>(table: *const Command, index: u64) {
     // no input and not the weight. So each slice made below lies inside its buffer, and the input slices are read only.
     // Writes: in the one-thread-a-unit form, thread `index < units` writes only its own unit (index*words..+words). In
     // the shared-sum form (block_ops::shared_sum, taken only when this launch has exactly `blocks` blocks of
-    // SUM_THREADS threads, read here), blocks*SUM_THREADS = units*words (host test), so thread t of block b writes the
-    // one word b*SUM_THREADS+t, inside the output and no other thread's. The block's shared words: thread p < parts
+    // SUM_THREADS threads, read here), blocks*span = units*words with span = block_ops::shared_span (a multiple of
+    // SUM_THREADS that divides the width; host test), so thread t of block b writes the each = span/SUM_THREADS words
+    // b*span + t*each ..+each, inside the output, each once and by no other thread (host test). The block's shared words: thread p < parts
     // (parts <= LANES, the 4*LANES bytes reserved) stores word p before the barrier, every thread of the block reaches
     // the barrier (no thread leaves before it), and after it the threads only read. The rows form keeps one thread a
     // (row, unit) and writes only its own unit (index < units of block_rows::lengths). The staged RowDots form
@@ -85,6 +92,23 @@ unsafe fn run<const KIND: u32>(table: *const Command, index: u64) {
     // VALUES_CHANNELS blocks of SUM_THREADS threads): thread t of block b writes stage word t alone, between barriers
     // reached by every thread (the distance loop bounds are the same for the block), and only the thread of part 0
     // writes output word b*VALUES_CHANNELS + t mod VALUES_CHANNELS < units, its own.
+    // The staged WindowScores form (KIND == BLOCK_SCORES; its commands are rows commands, checked by
+    // block_rows::lengths like BLOCK_ROWS; the launch traps unless its grid is exactly block_scores::stage of the
+    // command, which also asks for a shared key plane, own queries and step words, and t <= TAPS_MAX, d/2 <= HALF_MAX):
+    // the query words item*d + c (item < ITEMS, c < d <= 2*HALF_MAX, so < QUERY_WORDS) are written by one thread each
+    // before the first barrier and only read after it; each query row (row < rows) of block (group, chunk) is taken by
+    // one warp (rows w, w + 4, ..), and lane p writes only the words of distance (slot - first - p) mod r of that row's
+    // t heads group*t + head (out_index < rows*heads*r = units): each distance once (a stored row is one distance of a
+    // slot); the tile words p*(half + 1) + j (p < TILE_KEYS, j < half <= HALF_MAX, so < TILE_WORDS) are written by one
+    // thread each before a barrier and only read after it, and the tile loop bounds (r) are the same for the whole
+    // block, so every thread reaches every barrier.
+    // The staged SinkSoftmax at rows (KIND == BLOCK_SOFTMAX; rows commands, checked by block_rows::lengths like
+    // BLOCK_ROWS; the launch traps unless its block is SUM_THREADS threads and its grid is exactly
+    // block_attention::softmax_rows_stage of the command, rows * h blocks with the scores per row): block b runs its
+    // copy of the staged SinkSoftmax body above (the same reads, barriers and shared words) for head b mod h on the
+    // slices of row b / h (block_rows::row_inputs, inside the checked lengths: row < rows) and writes only the r words
+    // of (row, head) at (row*h + head)*r < rows*h*r, the output count; its shared words are declared for this kind as
+    // for BLOCK_ARMS.
     unsafe {
         let c = &*table.add(index as usize);
         if c.kind != KIND { core::arch::nvptx::trap(); }
@@ -93,7 +117,7 @@ unsafe fn run<const KIND: u32>(table: *const Command, index: u64) {
         if !(FIRST..=LAST).contains(&op) { core::arch::nvptx::trap(); }
         let (a, rows, mask) = match KIND {
             BLOCK_ARMS => (p.cast::<Arguments>().read(), None, 0),
-            BLOCK_ROWS => { let r = p.cast::<RowsArguments>().read(); (r.arguments, Some(r.rows as usize), r.shared) }
+            BLOCK_ROWS | BLOCK_SCORES | BLOCK_SOFTMAX => { let r = p.cast::<RowsArguments>().read(); (r.arguments, Some(r.rows as usize), r.shared) }
             _ => core::arch::nvptx::trap(),
         };
         let counts = match rows { Some(n) => block_rows::lengths(a.shape, n, mask), None => block_ops::checked_lengths(a.shape) };
@@ -102,9 +126,73 @@ unsafe fn run<const KIND: u32>(table: *const Command, index: u64) {
         let weight = core::slice::from_raw_parts(a.weight as *const f32, weights);
         let output = a.output as *mut f32;
         let (block, thread, threads) = (_block_idx_x() as usize, _thread_idx_x() as usize, _block_dim_x() as usize);
-        // The shared words of the arms entry, declared once: the stage (two RowDots tiles, or the exps of a staged
-        // SinkSoftmax head, or the parts of a staged WindowValues block) and the sum parts. The rows entry has none.
-        let (tiles, sums) = if KIND == BLOCK_ARMS { (ptx::shared::<{ 8 * block_ops::DOT_TILE }>(), ptx::shared::<{ 4 * block_ops::LANES }>()) } else { (0, 0) };
+        // The shared words of the arms entry and of the BLOCK_SOFTMAX entry, declared once (below, `tiles` and `sums`):
+        // the stage (two RowDots tiles; or, for a staged SinkSoftmax head, the best (value, distance) of each thread in
+        // words 0..2*SUM_THREADS and the block-sum parts in words 2*SUM_THREADS..3*SUM_THREADS; or the parts of a staged
+        // WindowValues block) and the sum parts (the top of a staged SinkSoftmax in word APART). The rows entry has none;
+        // the BLOCK_SCORES entry declares its own.
+        // WindowScores at rows, staged (block_scores; the BLOCK_SCORES entry only): a block a key head and ITEMS / t
+        // query rows. The block rounds the queries of its ITEMS items into shared words once; then for each tile it copies
+        // TILE_KEYS stored key rows (rows of half + 1 words), warp w takes the query rows w, w + 4, .. of the block, and
+        // lane p runs the t chains of that row's heads against tile row p and writes their words.
+        if KIND == BLOCK_SCORES {
+            let n_rows = match rows { Some(n) => n, None => core::arch::nvptx::trap() };
+            if block_scores::stage(a.shape, n_rows, mask) != Some((_grid_dim_x() as usize, threads)) { core::arch::nvptx::trap(); }
+            let tile = ptx::shared::<{ 4 * block_scores::TILE_WORDS }>();
+            let queries = ptx::shared::<{ 4 * block_scores::QUERY_WORDS }>();
+            let s = a.shape;
+            let (half, r, width, d, t) = (s.dim as usize / 2, s.rows as usize, (s.heads * s.dim) as usize, s.dim as usize, s.taps as usize);
+            let (group, first_row) = block_scores::block_of(s, n_rows, block);
+            let (warp, lane, warps) = (thread / block_scores::TILE_KEYS, thread % block_scores::TILE_KEYS, threads / block_scores::TILE_KEYS);
+            let mut i = thread;
+            while i < block_scores::ITEMS * d {
+                let (it, c) = (i / d, i % d);
+                let value = match block_scores::item(s, n_rows, group, first_row, it) { Some((row, head)) => fixed_math::rn(input[0][row * width + head * d + c]), None => 0.0 };
+                ptx::store(queries + (4 * block_scores::query_at(s, it, c)) as u32, value);
+                i += threads;
+            }
+            let mut first = 0usize;
+            while first < r {
+                let count = if r - first > block_scores::TILE_KEYS { block_scores::TILE_KEYS } else { r - first };
+                let mut i = thread;
+                while i < count * half {
+                    let (p, j) = (i / half, i % half);
+                    ptx::store(tile + (4 * block_scores::tile_at(half, p, j)) as u32, input[1][block_scores::plane_word(s, group, first + p, j)]);
+                    i += threads;
+                }
+                _syncthreads();
+                if lane < count {
+                    let mut local = warp;
+                    while local < block_scores::block_rows_of(s) {
+                        let row = first_row + local;
+                        if row < n_rows {
+                            match block_scores::live(s, row, input[3]) {
+                                // A query row whose step words are no count: NaN at the distance numbered like the stored row.
+                                None => { let mut head = 0; while head < t { *output.add(block_scores::out_index(s, row, group * t + head, first + lane)) = f32::NAN; head += 1; } }
+                                Some((n, slot)) => {
+                                    let dist = block_scores::distance(r, slot, first + lane);
+                                    let sums = if dist < n {
+                                        block_scores::chains_of(t, half, &|head, i| ptx::load(queries + (4 * block_scores::query_at(s, local * t + head, i)) as u32), &|j| ptx::load(tile + (4 * block_scores::tile_at(half, lane, j)) as u32).to_bits())
+                                    } else { [0.0; block_scores::TAPS_MAX] };
+                                    let bias = block_scores::bias_of(s, row, mask, input[2]);
+                                    let mut head = 0;
+                                    while head < t {
+                                        let word = if dist < n { block_scores::score_word(s, group * t + head, dist, bias, sums[head]) } else { 0.0 };
+                                        *output.add(block_scores::out_index(s, row, group * t + head, dist)) = word;
+                                        head += 1;
+                                    }
+                                }
+                            }
+                        }
+                        local += warps;
+                    }
+                }
+                _syncthreads();
+                first += count;
+            }
+            return;
+        }
+        let (tiles, sums) = if KIND == BLOCK_ARMS || KIND == BLOCK_SOFTMAX { (ptx::shared::<{ 8 * block_ops::DOT_TILE }>(), ptx::shared::<{ 4 * block_ops::LANES }>()) } else { (0, 0) };
         // A staged form runs only in the geometry block_ops::geometry gives it: blocks of SUM_THREADS, `count` blocks.
         let one_grid = |count: usize| rows.is_none() && threads == block_ops::SUM_THREADS && _grid_dim_x() as usize == count;
         // RowDots staged (block_ops::dot_stage): a block a dot. All threads copy a tile of the dot's input row and
@@ -130,6 +218,57 @@ unsafe fn run<const KIND: u32>(table: *const Command, index: u64) {
         // SinkSoftmax staged (block_attention::softmax_stage): a block a head, any row count. Each thread finds the
         // best of its distances; thread 0 picks the top; SOFTMAX_GROUP blocks of distances at a time, 8 threads each
         // make the parts of the block sums; every thread chains them and writes the weights of its distances.
+        // SinkSoftmax at rows (the BLOCK_SOFTMAX entry only, block_attention::softmax_rows_stage): block b runs the
+        // staged head below (the same body as the arms entry's) for head b mod h on the inputs of row b / h
+        // (block_rows::row_inputs) and writes the words of (row, head). Its own copy, so the arms entry is unchanged.
+        if KIND == BLOCK_SOFTMAX {
+            let n_rows = match rows { Some(n) => n, None => core::arch::nvptx::trap() };
+            if threads != block_ops::SUM_THREADS || block_attention::softmax_rows_stage(a.shape, n_rows, mask) != Some(_grid_dim_x() as usize) { core::arch::nvptx::trap(); }
+            let (h, r) = (a.shape.heads as usize, a.shape.rows as usize);
+            let (row, head) = (block / h, block % h);
+            let Some((one, _, _, _)) = block_ops::checked_lengths(a.shape) else { core::arch::nvptx::trap() };
+            let input = block_rows::row_inputs(mask, row, one, input);
+            let out = output.add((row * h + head) * r);
+            let at = |i: usize| tiles + (4 * i) as u32;
+            match block_attention::softmax_live(a.shape, input) {
+                None => { let mut j = thread; while j < r { *out.add(j) = f32::NAN; j += threads; } }
+                Some(n) => {
+                    let scores = &input[0][head * r..(head + 1) * r];
+                    let sink = block_attention::softmax_sink(head, input);
+                    let (value, dist) = block_attention::softmax_best(n, thread, threads, &|d| scores[d]);
+                    ptx::store(at(2 * thread), value);
+                    ptx::store(at(2 * thread + 1), f32::from_bits(dist));
+                    _syncthreads();
+                    let top_at = sums + (4 * block_ops::APART) as u32;
+                    if thread == 0 { ptx::store(top_at, block_attention::softmax_pick(sink, (0..threads).map(|t| (ptx::load(at(2 * t)), ptx::load(at(2 * t + 1)).to_bits())))); }
+                    _syncthreads();
+                    let top = ptx::load(top_at);
+                    let e = |d: usize| block_attention::softmax_exp(scores[d], top);
+                    let (blocks, parts_at) = (n.div_ceil(block_attention::BLOCK), 2 * block_ops::SUM_THREADS);
+                    let (mut chain, mut group) = (0.0f32, 0usize);
+                    while group < blocks {
+                        let (q, part) = (group + thread / block_ops::APART, thread % block_ops::APART);
+                        if q < blocks {
+                            let first = q * block_attention::BLOCK;
+                            let end = if n - first > block_attention::BLOCK { first + block_attention::BLOCK } else { n };
+                            ptx::store(at(parts_at + thread), block_attention::softmax_part_sum(first, end, part, &e));
+                        }
+                        _syncthreads();
+                        let mut k = 0;
+                        while k < block_attention::SOFTMAX_GROUP && group + k < blocks {
+                            chain = block_attention::softmax_add(chain, core::array::from_fn(|p| ptx::load(at(parts_at + k * block_ops::APART + p))));
+                            k += 1;
+                        }
+                        _syncthreads();
+                        group += block_attention::SOFTMAX_GROUP;
+                    }
+                    let total = block_attention::softmax_total(chain, sink, top);
+                    let mut j = thread;
+                    while j < r { let w = if j < n { e(j) } else { 0.0 }; *out.add(j) = block_attention::softmax_word(j, n, w, total); j += threads; }
+                }
+            }
+            return;
+        }
         if block_attention::softmax_stage(a.shape).is_some_and(one_grid) {
             let (head, r) = (block, a.shape.rows as usize);
             let out = output.add(head * r);
@@ -198,17 +337,19 @@ unsafe fn run<const KIND: u32>(table: *const Command, index: u64) {
             }
             return;
         }
-        // The norm and clip arms whose rows share one sum: a block for each SUM_THREADS words of a row.
+        // The norm and clip arms whose rows share one sum: a block for each `shared_span` words of a row.
         let shared = if rows.is_none() { block_ops::shared_sum(a.shape).filter(|&(blocks, _)| threads == block_ops::SUM_THREADS && _grid_dim_x() as usize == blocks) } else { None };
         if let Some((_, parts)) = shared {
-            let (row, first) = block_ops::split(block * block_ops::SUM_THREADS, a.shape.dim as usize);
+            let span = block_ops::shared_span(a.shape);
+            let (row, first) = block_ops::split(block * span, a.shape.dim as usize);
             let base = sums;
             if thread < parts { ptx::store(base + (thread * 4) as u32, block_ops::sum_part(a.shape, row, thread, input, weight)); }
             _syncthreads();
             let mut sums = [0.0f32; block_ops::LANES];
             for (part, sum) in sums.iter_mut().enumerate().take(parts) { *sum = ptx::load(base + (part * 4) as u32); }
-            let word = core::slice::from_raw_parts_mut(output.add(block * block_ops::SUM_THREADS + thread), 1);
-            block_ops::shared_words(a.shape, row, first + thread, input, weight, &sums, word);
+            let each = span / block_ops::SUM_THREADS;
+            let words = core::slice::from_raw_parts_mut(output.add(block * span + thread * each), each);
+            block_ops::shared_words(a.shape, row, first + thread * each, input, weight, &sums, words);
         } else {
             let index = block * threads + thread;
             if index < units {
@@ -308,6 +449,12 @@ pub unsafe extern "ptx-kernel" fn resident_launch_block_arms(table: *const Comma
 /// SAFETY: launched only by the host with a table of commands of kind BLOCK_ROWS (`run`, whose contract holds).
 #[no_mangle]
 pub unsafe extern "ptx-kernel" fn resident_launch_block_rows(table: *const Command, index: u64) { run::<BLOCK_ROWS>(table, index) }
+/// SAFETY: launched only by the host with a table of commands of kind BLOCK_SCORES (`run`, whose contract holds).
+#[no_mangle]
+pub unsafe extern "ptx-kernel" fn resident_launch_block_scores(table: *const Command, index: u64) { run::<BLOCK_SCORES>(table, index) }
+/// SAFETY: launched only by the host with a table of commands of kind BLOCK_SOFTMAX (`run`, whose contract holds).
+#[no_mangle]
+pub unsafe extern "ptx-kernel" fn resident_launch_block_softmax(table: *const Command, index: u64) { run::<BLOCK_SOFTMAX>(table, index) }
 /// The staged BF16 row product (`plain_staged.rs`); its body reads and checks its own recorded command.
 /// SAFETY: launched only by the host with a table of commands of kind PLAIN_STAGED (`plain_staged::replay`, whose
 /// contract holds).
@@ -318,6 +465,11 @@ pub unsafe extern "ptx-kernel" fn resident_launch_plain_staged(table: *const Com
 /// whose contract holds).
 #[no_mangle]
 pub unsafe extern "ptx-kernel" fn resident_launch_plain_staged_rows(table: *const Command, index: u64) { plain_staged_rows::replay(table, index) }
+/// The narrow staged BF16 row product (`plain_staged_narrow.rs`); its body reads and checks its own recorded command.
+/// SAFETY: launched only by the host with a table of commands of kind PLAIN_STAGED_NARROW (`plain_staged_narrow::replay`,
+/// whose contract holds).
+#[no_mangle]
+pub unsafe extern "ptx-kernel" fn resident_launch_plain_staged_narrow(table: *const Command, index: u64) { plain_staged_narrow::replay(table, index) }
 /// SAFETY: launched only by the host with a table of commands of kind PLAIN_PACKED (`run_packed`, whose contract holds).
 #[no_mangle]
 pub unsafe extern "ptx-kernel" fn resident_launch_plain_packed(table: *const Command, index: u64) { run_packed(table, index) }

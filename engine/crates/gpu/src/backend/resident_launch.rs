@@ -48,7 +48,7 @@ fn first_arithmetic(calls:&[Call])->Option<Kind> {calls.iter().map(|call|call.gr
 /// from the moment they fuse. A grouped launch is one command the same way: the member it absorbs is not counted again.
 fn arithmetic(kind:Kind)->bool {
     matches!(kind,Kind::AbsorbDense|Kind::AbsorbAttention
-        |Kind::Causal|Kind::BlockArms|Kind::BlockRows|Kind::PlainStaged|Kind::PlainStagedRows|Kind::Expert|Kind::Plain|Kind::PlainBf16|Kind::PlainPacked|Kind::PlainPackedGroup|Kind::PlainPackedPicked|Kind::Mx|Kind::Mixed|Kind::MixedBf16|Kind::PlainBatch|Kind::NvStream|Kind::CausalFast|Kind::CausalChain|Kind::CausalGroup
+        |Kind::Causal|Kind::BlockArms|Kind::BlockRows|Kind::BlockScores|Kind::BlockSoftmax|Kind::PlainStaged|Kind::PlainStagedRows|Kind::PlainStagedNarrow|Kind::Expert|Kind::Plain|Kind::PlainBf16|Kind::PlainPacked|Kind::PlainPackedGroup|Kind::PlainPackedPicked|Kind::Mx|Kind::Mixed|Kind::MixedBf16|Kind::PlainBatch|Kind::NvStream|Kind::CausalFast|Kind::CausalChain|Kind::CausalGroup
         |Kind::NvTile|Kind::Fp8Tile|Kind::DeviceRoute|Kind::NvQuarters|Kind::MxRows2|Kind::MxRows4|Kind::MxRows8|Kind::MxRows8w|Kind::MxRowsTile
         |Kind::MixedRows|Kind::FoldRows|Kind::FoldRowsF32|Kind::Fp8RowsSmall|Kind::Fp8RowsMulti|Kind::Fp8RowsFew|Kind::Fp8RowsShare|Kind::PlainRowsSmall|Kind::DeviceRouteRows|Kind::RowRecurrent)
 }

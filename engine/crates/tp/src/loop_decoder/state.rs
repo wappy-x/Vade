@@ -24,19 +24,22 @@
 //! A count or a slot goes to an arm as one 32-bit word that holds the number (as the count word of the older
 //! attention arms). `step_words` is the one place that makes such words.
 //!
-//! A step of many rows (`many`): a chat can take several positions in one step. Then the ring of a window layer
-//! has more rows than its window: `window + step row limit - 1`. A row of the step still sees `window` keys at
-//! most, and no row of the step writes over a key that an earlier row of the step still reads. The order of a sum
-//! over keys is by distance, so the ring size changes no word. With a step row limit of 1 the ring has `window`
-//! rows, as before. A convolution ring is not written in such a step: each row gets its ring by one gather, and
-//! the ring after the step is kept as pending until the whole step is done (`commit`).
+//! A step of many rows (`many`): a chat can take several positions in one step. The ring of a window layer in the
+//! state keeps `window` rows whatever the step row limit, so a token step reads only its window. A chat with more
+//! than one row in a step works in a wider ring of its own, `window + step row limit - 1` rows (`Layout::wide`):
+//! the rows it needs from the state go in first (`many::widen`), a row of the step still sees `window` keys at most,
+//! and no row of the step writes over a key that an earlier row of the step still reads. The window ring after the
+//! step (`many::narrow`) waits as pending until the whole step is done (`commit`), so the state keeps every key a
+//! step that fails needs to run again. The order of a sum over keys is by distance, so the ring size changes no
+//! word. A convolution ring is not written in such a step: each row gets its ring by one gather, and the ring after
+//! the step is kept as pending until the whole step is done (`commit`).
 use crate::{Result,bounded_decoder::Compute};
 use engine_model::plan::description::LoopTextDescription;
 use super::rows::Limits;
 use spark_gpu_probe::causal_ops::{BUCKET_ROWS,Op,Shape};
 
 pub mod many;
-pub use many::{commit,discard,row_rings};
+pub use many::{commit,conv_rings,discard,row_rings};
 
 /// A 32-bit float holds every whole number up to this one. A larger count or slot cannot be a step word.
 pub const STEP_WORD_LIMIT:usize=1<<24;
@@ -51,8 +54,8 @@ impl Ring {pub const ALL:[Self;4]=[Self::Key,Self::Value,Self::AfterAttention,Se
 /// The sizes of the state of one visit. Every number comes from the description of the visit's layer.
 #[derive(Debug,Clone,Copy,PartialEq,Eq)]
 pub struct Layout {
-    /// Rows of the key plane and of the value plane. A window layer: its window and the step row limit less one.
-    /// Else the admitted context.
+    /// Rows of the key plane and of the value plane in the state. A window layer: its window (`wide` gives the ring of
+    /// a chat with many rows in a step). Else the admitted context.
     pub rows:usize,
     /// The most keys that one token sees: the window of a window layer, else `rows`.
     pub window:usize,
@@ -81,13 +84,18 @@ impl Layout {
         need(capacity>0 && capacity as u64<=d.max_positions,"the capacity is zero or above the model's longest chat")?;
         need(kv_channels>0 && kv_channels.is_multiple_of(2),"a packed row needs an even count of values")?;
         need(step_rows>0 && step_rows<=STEP_WORD_LIMIT && key_bytes>0,"a limit of a step is zero or too large")?;
-        let (ring,rows,window)=match a.window {Some(window)=>(true,size(window)?.checked_add(step_rows-1).ok_or("loop decoder state: a ring size overflows")?,size(window)?),None=>(false,capacity,capacity)};
+        let (ring,rows,window)=match a.window {Some(window)=>{let window=size(window)?;window.checked_add(step_rows-1).ok_or("loop decoder state: a ring size overflows")?;(true,window,window)},None=>(false,capacity,capacity)};
         let layout=Self {rows,window,step_rows,key_bytes,ring,row_words:kv_channels/2,kv_channels,kv_taps:size(a.key_value_conv.kernel)?,channels:size(d.hidden)?,taps:size(d.conv.kernel)?};
+        let wide=layout.wide().rows;
         need(rows>0 && layout.kv_taps>0 && layout.taps>0 && layout.channels>0,"a state size is zero")?;
-        need(rows<=STEP_WORD_LIMIT,"a plane has more rows than a step word can count")?;
-        need(rows.checked_mul(layout.row_words).is_some() && layout.kv_taps.checked_mul(kv_channels).is_some() && layout.taps.checked_mul(layout.channels).is_some(),"a state size overflows")?;
+        need(wide<=STEP_WORD_LIMIT,"a plane has more rows than a step word can count")?;
+        need(wide.checked_mul(layout.row_words).is_some() && layout.kv_taps.checked_mul(kv_channels).is_some() && layout.taps.checked_mul(layout.channels).is_some(),"a state size overflows")?;
         Ok(layout)
     }
+    /// The layout of the planes that a chat with more than one row in a step works in: a window layer's ring of
+    /// `window + step_rows - 1` rows, so no row of the step writes over a key that an earlier row still reads. A
+    /// straight plane, or a step row limit of 1: the layout itself.
+    pub fn wide(&self)->Self {if self.ring {Self {rows:self.window+self.step_rows-1,..*self}} else {*self}}
     /// The row of the token at `position` in the key plane and in the value plane.
     pub fn slot(&self,position:u64)->Result<usize> {
         if self.ring {return Ok((position%self.rows as u64) as usize);}
@@ -115,8 +123,9 @@ impl Layout {
     pub fn words(&self)->usize {2*self.rows*self.row_words+2*self.kv_taps*self.kv_channels+2*self.taps*self.channels}
 }
 /// What one visit keeps of a chat. `next` holds the rings after a step of many rows until that step is done
-/// (`commit`); outside such a step it is empty.
-pub struct VisitState<V> {pub keys:V,pub values:V,pub rings:[V;4],pub next:[Option<V>;4]}
+/// (`commit`), and `planes` the key and the value ring of a window layer after a step where the chat had more than
+/// one row; outside such a step both are empty.
+pub struct VisitState<V> {pub keys:V,pub values:V,pub rings:[V;4],pub next:[Option<V>;4],pub planes:Option<[V;2]>}
 /// The state of a chat: the position of its next token, and one entry for each visit. The entry of a visit is at
 /// the state slot that the description gives the visit (`Visit::slot`), not at its place in run order.
 pub struct State<V> {pub position:u64,pub visits:Vec<VisitState<V>>}
@@ -138,7 +147,7 @@ pub fn layouts_for(d:&LoopTextDescription,capacity:u64,limits:Limits)->Result<Ve
 pub fn clean<C:Compute>(compute:&C,layouts:&[Layout])->Result<State<C::Value>> {
     let visits=layouts.iter().map(|l|Ok(VisitState {keys:compute.zeros(l.rows*l.row_words)?,values:compute.zeros(l.rows*l.row_words)?,
         rings:[compute.zeros(l.kv_taps*l.kv_channels)?,compute.zeros(l.kv_taps*l.kv_channels)?,compute.zeros(l.taps*l.channels)?,compute.zeros(l.taps*l.channels)?],
-        next:std::array::from_fn(|_|None)})).collect::<Result<Vec<_>>>()?;
+        next:std::array::from_fn(|_|None),planes:None})).collect::<Result<Vec<_>>>()?;
     Ok(State {position:0,visits})
 }
 /// Numbers for an arm, one 32-bit word each: a live count, a slot.
@@ -192,9 +201,12 @@ mod tests {
         // Visit 0 is a window layer: a ring of the window's rows. Visit 1 sees every token: a plane of the capacity.
         assert_eq!(l[0],Layout {rows:4,window:4,step_rows:1,key_bytes:1<<30,ring:true,row_words:8,kv_channels:16,kv_taps:4,channels:32,taps:4});
         assert_eq!(l[1],Layout {rows:16,window:16,step_rows:1,key_bytes:1<<30,ring:false,row_words:4,kv_channels:8,kv_taps:4,channels:32,taps:4});
-        // For steps of up to 5 rows a ring has 4 more rows and a token still sees the window. A plane does not change.
+        // For steps of up to 5 rows the state ring stays the window, the wide ring has 4 more rows and a token still sees the window. A plane does not change.
         let wider=layouts_for(d,16,Limits {step_rows:5,key_bytes:64}).unwrap();
-        assert_eq!((wider[0].rows,wider[0].window,wider[0].live(2).unwrap(),wider[0].live(9).unwrap(),wider[0].slot(9).unwrap(),wider[0].view_rows(9).unwrap()),(8,4,3,4,1,8));
+        assert_eq!((wider[0].rows,wider[0].window,wider[0].live(2).unwrap(),wider[0].live(9).unwrap(),wider[0].slot(9).unwrap(),wider[0].view_rows(9).unwrap()),(4,4,3,4,1,4));
+        // The state keeps a window ring; a chat with many rows in a step works in the wider ring.
+        let wide=wider[0].wide();assert_eq!((wide.rows,wide.slot(9).unwrap(),wide.view_rows(9).unwrap(),wide.live(9).unwrap()),(8,1,8,4));
+        assert_eq!(Layout {step_rows:1,key_bytes:1<<30,..wider[0]},l[0]);assert_eq!(l[0].wide(),l[0]);
         assert_eq!(Layout {step_rows:1,key_bytes:1<<30,..wider[1]},l[1]);assert_eq!(layouts_for(d,16,Limits::ONE).unwrap(),l);
         assert!(layouts_for(d,16,Limits {step_rows:0,key_bytes:64}).is_err() && layouts_for(d,16,Limits {step_rows:2,key_bytes:0}).is_err());
         // The two visits of one layer have the same layout and their own state.

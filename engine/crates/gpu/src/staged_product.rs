@@ -92,11 +92,13 @@ pub fn check(rows: usize, cols: usize, weights: Span, input: Span, output: Span)
 pub const ROWS_THREADS: usize = 256;
 /// Weight rows and input rows of one block.
 pub const ROWS_TILE: usize = 64;
-/// The envelope of the rows tile (the shapes the device check runs): weight rows above the narrow matrices, whole
-/// stages of columns, at most this many input rows.
-pub const ROWS_MATRIX_ROWS_MIN: usize = 193;
+/// The envelope of the rows tile (the shapes the device check runs): 1 to 16,384 weight rows, whole stages of columns
+/// up to 4,608 (the widest matrix of this model, GateDown), at most this many input rows. A narrow matrix fills part
+/// of one 64-row tile: the body reads and writes no weight row at or past `rows`, so the narrow matrices (GateDown,
+/// Router, Sink) take the tile too, with the same chains.
+pub const ROWS_MATRIX_ROWS_MIN: usize = 1;
 pub const ROWS_MATRIX_ROWS_MAX: usize = 16384;
-pub const ROWS_COLS_MAX: usize = 4096;
+pub const ROWS_COLS_MAX: usize = 4608;
 pub const ROWS_INPUTS_MAX: usize = 1024;
 /// A shape the rows tile takes.
 #[inline(always)]
@@ -145,12 +147,51 @@ pub struct Rows<'t> { pub count: usize, pub table: Option<&'t [u32]> }
 #[cfg(not(target_arch = "nvptx64"))]
 #[allow(clippy::too_many_arguments, reason = "the shape, the stride, the three operands and the two tables")]
 pub fn check_rows_at(rows: usize, cols: usize, inputs: usize, stride: usize, weights: Span, input: Span, inputs_at: Rows<'_>, output: Span, outputs_at: Rows<'_>) -> Result<(), &'static str> {
+    check_rows_of(rows, cols, inputs, ROWS_INPUTS_MAX, stride, &[weights], input, inputs_at, output, outputs_at)
+}
+/// Most launch rows of one grouped launch of the rows tile (the expert runs of one visit: rows of a step x picks).
+#[cfg(not(target_arch = "nvptx64"))]
+pub const ROWS_GROUP_INPUTS_MAX: usize = 16_384;
+/// Most runs of one grouped launch.
+#[cfg(not(target_arch = "nvptx64"))]
+pub const ROWS_GROUP_RUNS_MAX: usize = 4_096;
+/// The host check of one GROUPED launch of the rows tile (the expert runs of a visit in one launch): run `r` is a
+/// matrix (`runs[r].0`, exactly `rows x cols` BF16 values) and a count of launch rows (`runs[r].1`, 1 to
+/// `ROWS_INPUTS_MAX`); the runs take the launch rows in order, together all of them (at most `ROWS_GROUP_INPUTS_MAX`).
+/// The input, the output and the two tables are those of `check_rows_at` for all launch rows. Every matrix holds
+/// what `check_rows_at` asks of the one matrix there and meets no output. It gives the launch rows.
+#[cfg(not(target_arch = "nvptx64"))]
+#[allow(clippy::too_many_arguments, reason = "the shape, the stride, the runs, the operands and the two tables")]
+pub fn check_rows_grouped(rows: usize, cols: usize, stride: usize, runs: &[(Span, usize)], input: Span, inputs_at: Rows<'_>, output: Span, outputs_at: Rows<'_>) -> Result<usize, &'static str> {
+    if runs.is_empty() || runs.len() > ROWS_GROUP_RUNS_MAX { return Err("staged rows product: a grouped launch has no run or too many runs"); }
+    if runs.iter().any(|&(_, count)| count == 0 || count > ROWS_INPUTS_MAX) { return Err("staged rows product: a run has no launch row or more than the tile takes"); }
+    let inputs = runs.iter().map(|&(_, count)| count).sum::<usize>();
+    let weights = runs.iter().map(|&(span, _)| span).collect::<Vec<_>>();
+    check_rows_of(rows, cols, inputs, ROWS_GROUP_INPUTS_MAX, stride, &weights, input, inputs_at, output, outputs_at)?;
+    Ok(inputs)
+}
+/// The blocks of a grouped launch, in launch order: (run, input tile | weight tile << 16) for every 64-row tile of
+/// the run's launch rows and every 64-row tile of the matrix; the input tiles of a weight tile are neighbours, so
+/// neighbouring blocks share weight lines.
+#[cfg(not(target_arch = "nvptx64"))]
+pub fn rows_group_blocks(rows: usize, counts: &[usize]) -> Vec<[u32; 2]> {
+    let mut blocks = Vec::new();
+    for (run, &count) in counts.iter().enumerate() {
+        for tile_r in 0..rows.div_ceil(ROWS_TILE) { for tile_t in 0..count.div_ceil(ROWS_TILE) { blocks.push([run as u32, (tile_t | tile_r << 16) as u32]); } }
+    }
+    blocks
+}
+/// The checks that `check_rows_at` and `check_rows_grouped` share: `weights` holds the one matrix, or the matrix of
+/// each run.
+#[cfg(not(target_arch = "nvptx64"))]
+#[allow(clippy::too_many_arguments, reason = "the shape, the bound, the stride, the operands and the two tables")]
+fn check_rows_of(rows: usize, cols: usize, inputs: usize, inputs_max: usize, stride: usize, weights: &[Span], input: Span, inputs_at: Rows<'_>, output: Span, outputs_at: Rows<'_>) -> Result<(), &'static str> {
     if rows == 0 || cols == 0 || inputs == 0 { return Err("staged rows product: no rows, no columns or no input rows"); }
-    if cols > ROWS_COLS_MAX || cols % STAGE != 0 { return Err("staged rows product: the columns are not whole stages of 64 up to 4096"); }
+    if cols > ROWS_COLS_MAX || cols % STAGE != 0 { return Err("staged rows product: the columns are not whole stages of 64 up to 4608"); }
     if !(ROWS_MATRIX_ROWS_MIN..=ROWS_MATRIX_ROWS_MAX).contains(&rows) { return Err("staged rows product: the rows of the matrix are outside the envelope of the tile"); }
-    if inputs > ROWS_INPUTS_MAX { return Err("staged rows product: the input rows are above the envelope of the tile"); }
+    if inputs > inputs_max { return Err("staged rows product: the input rows are above the envelope of the tile"); }
     if stride < rows || stride > u32::MAX as usize { return Err("staged rows product: the output stride is below the rows of the matrix or above the ABI"); }
-    if weights.bytes != rows as u64 * cols as u64 * 2 { return Err("staged rows product: the weights differ from rows x columns of BF16 values"); }
+    if weights.iter().any(|w| w.bytes != rows as u64 * cols as u64 * 2) { return Err("staged rows product: the weights differ from rows x columns of BF16 values"); }
     for at in [inputs_at, outputs_at] {
         if at.count == 0 || at.count > u32::MAX as usize || (at.table.is_none() && at.count != inputs) { return Err("staged rows product: the rows of an operand differ from the launch rows without a table, or are 0 or above the ABI"); }
     }
@@ -158,12 +199,12 @@ pub fn check_rows_at(rows: usize, cols: usize, inputs: usize, stride: usize, wei
     if input_bytes != Some(input.bytes) { return Err("staged rows product: the input differs from the input rows x the columns of the matrix"); }
     let output_bytes = (outputs_at.count as u64 - 1).checked_mul(stride as u64).and_then(|words| words.checked_add(rows as u64)).and_then(|words| words.checked_mul(4));
     if output_bytes != Some(output.bytes) { return Err("staged rows product: the output differs from the input rows x the stride"); }
-    if weights.address == 0 || input.address == 0 || output.address == 0 { return Err("staged rows product: an operand is null"); }
-    if !weights.ends() || !input.ends() || !output.ends() { return Err("staged rows product: an operand ends above the address space"); }
-    if weights.address % 16 != 0 { return Err("staged rows product: the weights are not 16-byte aligned"); }
+    if weights.iter().any(|w| w.address == 0) || input.address == 0 || output.address == 0 { return Err("staged rows product: an operand is null"); }
+    if weights.iter().any(|w| !w.ends()) || !input.ends() || !output.ends() { return Err("staged rows product: an operand ends above the address space"); }
+    if weights.iter().any(|w| w.address % 16 != 0) { return Err("staged rows product: the weights are not 16-byte aligned"); }
     if input.address % 16 != 0 { return Err("staged rows product: the input is not 16-byte aligned"); }
     if output.address % 4 != 0 { return Err("staged rows product: the output is not word aligned"); }
-    if output.meets(weights) || output.meets(input) { return Err("staged rows product: the output overlaps an operand"); }
+    if weights.iter().any(|&w| output.meets(w)) || output.meets(input) { return Err("staged rows product: the output overlaps an operand"); }
     for at in [inputs_at, outputs_at] {
         let Some(words) = at.table else { continue };
         if words.len() != inputs { return Err("staged rows product: a row table differs from the launch rows"); }
@@ -320,7 +361,15 @@ mod tests {
     #[test]
     fn the_rows_tile_takes_large_matrices_of_whole_stages() {
         assert_eq!((ROWS_THREADS as u32, ROWS_TILE, ROWS_MATRIX_ROWS_MAX), (crate::plain_tile::THREADS, 64, crate::plain_tile::MAX_ROWS));
-        assert_eq!(ROWS_MATRIX_ROWS_MIN, crate::plain_tile::NARROW_MAX_ROWS + 1);
+        assert_eq!((ROWS_MATRIX_ROWS_MIN, ROWS_COLS_MAX), (1, 4608));
+        // The narrow matrices of this model and the edges: on the tile, from 8 input rows.
+        for (rows, cols) in [(1usize, 64usize), (24, 2304), (64, 4608), (128, 2304), (192, 2304), (2304, 4608)] {
+            for inputs in [1usize, 4, 16, 64, 256, 1024] {
+                assert!(rows_shape_admitted(rows, cols, inputs) && rows_admitted(rows, cols, inputs, 256, 512, ROWS_THREADS), "{rows}x{cols} {inputs}");
+                assert_eq!(rows_blocks(rows, inputs), (rows.div_ceil(64) * inputs.div_ceil(64)) as u32, "{rows}x{cols} {inputs}");
+                assert_eq!(rows_tile_ahead(rows, cols, inputs), inputs >= 8, "{rows}x{cols} {inputs}");
+            }
+        }
         for (rows, cols) in [(2304usize, 2304usize), (2304, 1152), (3072, 2304), (1024, 2304), (2304, 3072), (384, 2304), (2304, 64), (193, 64), (16384, 4096)] {
             for inputs in [1usize, 4, 16, 64, 256, 1024] {
                 assert!(rows_shape_admitted(rows, cols, inputs), "{rows}x{cols} {inputs}");
@@ -332,8 +381,8 @@ mod tests {
             }
             assert!(!rows_shape_admitted(rows, cols, 0) && !rows_shape_admitted(rows, cols, 1025), "{rows}x{cols}");
         }
-        // Not on the tile: the rows of a narrow matrix, columns that are no whole stages, columns past the tile, too many rows.
-        for (rows, cols) in [(192usize, 2304usize), (24, 2304), (64, 4608), (2304, 2296), (2304, 32), (2304, 4160), (2304, 8192), (16385, 2304), (200_058, 2304), (0, 2304), (2304, 0)] {
+        // Not on the tile: columns that are no whole stages, columns past the tile, too many rows, no rows.
+        for (rows, cols) in [(2304usize, 2296usize), (2304, 32), (2304, 4672), (2304, 8192), (16385, 2304), (200_058, 2304), (0, 2304), (2304, 0)] {
             for inputs in [1usize, 16, 1024] {
                 assert!(!rows_shape_admitted(rows, cols, inputs) && !rows_admitted(rows, cols, inputs, 256, 512, ROWS_THREADS), "{rows}x{cols} {inputs}");
                 // Only a matrix above the rows of the tile takes it, in parts.
@@ -355,7 +404,7 @@ mod tests {
             }
             assert_eq!(rows_tile_part(rows, cols, 7), None);
         }
-        for (rows, cols, inputs) in [(192usize, 2304usize, 64usize), (200_058, 4160, 64), (200_058, 2296, 64), (2304, 2304, 1025)] { assert_eq!(rows_tile_part(rows, cols, inputs), None, "{rows}x{cols} {inputs}"); }
+        for (rows, cols, inputs) in [(0usize, 2304usize, 64usize), (200_058, 4672, 64), (200_058, 2296, 64), (2304, 2304, 1025)] { assert_eq!(rows_tile_part(rows, cols, inputs), None, "{rows}x{cols} {inputs}"); }
     }
     /// The operands of a good launch of the rows tile: a 2304 x 2304 matrix and 64 input rows.
     fn good_rows() -> (usize, usize, usize, Span, Span, Span) { (2304, 2304, 64, span(1 << 20, 2304 * 2304 * 2), span(1 << 30, 64 * 2304 * 4), span(1 << 31, 64 * 2304 * 4)) }
@@ -375,8 +424,7 @@ mod tests {
         refused(check_rows(rows, 0, inputs, rows, weights, input, output), "no rows, no columns or no input rows");
         refused(check_rows(rows, cols, 0, rows, weights, input, output), "no rows, no columns or no input rows");
         refused(check_rows(rows, 2296, inputs, rows, span(1 << 20, 2304 * 2296 * 2), span(1 << 30, 64 * 2296 * 4), output), "not whole stages");
-        refused(check_rows(rows, 4160, inputs, rows, span(1 << 20, 2304 * 4160 * 2), span(1 << 30, 64 * 4160 * 4), output), "not whole stages");
-        refused(check_rows(192, cols, inputs, 192, span(1 << 20, 192 * 2304 * 2), input, span(1 << 31, 64 * 192 * 4)), "outside the envelope");
+        refused(check_rows(rows, 4672, inputs, rows, span(1 << 20, 2304 * 4672 * 2), span(1 << 30, 64 * 4672 * 4), output), "not whole stages");
         refused(check_rows(16385, cols, inputs, 16385, span(1 << 20, 16385 * 2304 * 2), input, span(1 << 31, 64 * 16385 * 4)), "outside the envelope");
         refused(check_rows(rows, cols, 1025, rows, weights, span(1 << 30, 1025 * 2304 * 4), span(1 << 31, 1025 * 2304 * 4)), "input rows are above the envelope");
         // Each extent, one value short and one value long.
@@ -441,6 +489,42 @@ mod tests {
         twice[9] = twice[2];
         refused(check(at(64, &ins), at(64, &twice), output), "names a row twice");
         assert_eq!(check(at(64, &[5; 16]), at(64, &outs), output), Ok(()));
+    }
+    /// The grouped launch: three runs of one shape over 100 launch rows, each matrix checked as the one matrix is.
+    #[test]
+    fn the_host_check_of_a_grouped_launch_takes_good_runs_and_names_each_refusal() {
+        let (rows, cols) = (2304usize, 2304usize);
+        let matrix = |n: u64| span((1 << 32) * (n + 1), (rows * cols * 2) as u64);
+        let runs = [(matrix(0), 9usize), (matrix(1), 64), (matrix(2), 27)];
+        let (input, output) = (span(1 << 30, 37 * 2304 * 4), span(1 << 31, 100 * 2304 * 4));
+        let ins = (0..100u32).map(|t| (t * 13 + 5) % 37).collect::<Vec<_>>();
+        let outs = (0..100u32).map(|t| (t * 7 + 3) % 100).collect::<Vec<_>>();
+        let (inputs_at, outputs_at) = (Rows { count: 37, table: Some(&ins) }, Rows { count: 100, table: Some(&outs) });
+        assert_eq!(check_rows_grouped(rows, cols, rows, &runs, input, inputs_at, output, outputs_at), Ok(100));
+        let refused = |result: Result<usize, &'static str>, text: &str| assert!(result.is_err_and(|error| error.contains(text)), "{result:?} lacks {text}");
+        refused(check_rows_grouped(rows, cols, rows, &[], input, inputs_at, output, outputs_at), "no run or too many runs");
+        refused(check_rows_grouped(rows, cols, rows, &[(matrix(0), 0), (matrix(1), 100)], input, inputs_at, output, outputs_at), "a run has no launch row");
+        refused(check_rows_grouped(rows, cols, rows, &[(matrix(0), 1025)], input, Rows { count: 37, table: Some(&[0; 1025]) }, span(1 << 31, 1025 * 2304 * 4), Rows { count: 1025, table: None }), "more than the tile takes");
+        // The runs must take exactly the launch rows of the tables.
+        refused(check_rows_grouped(rows, cols, rows, &runs[..2], input, inputs_at, output, outputs_at), "a row table differs");
+        // Each run's matrix: its extent, its alignment, null, and the output meeting it.
+        let mut bad = runs;
+        bad[1].0.bytes -= 2;
+        refused(check_rows_grouped(rows, cols, rows, &bad, input, inputs_at, output, outputs_at), "the weights differ");
+        let mut bad = runs;
+        bad[2].0.address += 8;
+        refused(check_rows_grouped(rows, cols, rows, &bad, input, inputs_at, output, outputs_at), "not 16-byte aligned");
+        let mut bad = runs;
+        bad[2].0.address = 0;
+        refused(check_rows_grouped(rows, cols, rows, &bad, input, inputs_at, output, outputs_at), "an operand is null");
+        let mut bad = runs;
+        bad[1].0.address = output.address + 64;
+        refused(check_rows_grouped(rows, cols, rows, &bad, input, inputs_at, output, outputs_at), "overlaps an operand");
+        // The blocks: every (run, input tile, weight tile), input tiles of a weight tile next to each other.
+        let blocks = rows_group_blocks(rows, &[9, 64, 65]);
+        assert_eq!(blocks.len(), 36 * (1 + 1 + 2));
+        assert_eq!(&blocks[..2], &[[0, 0], [0, 1 << 16]]);
+        assert_eq!(&blocks[72..76], &[[2, 0], [2, 1], [2, 1 << 16], [2, 1 | 1 << 16]]);
     }
     /// Review REVPROD finding 2: extents that pass 64 bits are refused, never wrapped; and the other bounds.
     #[test]

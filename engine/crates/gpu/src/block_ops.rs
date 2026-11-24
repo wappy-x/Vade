@@ -19,7 +19,7 @@ pub mod device {
     pub const FIRST:u32=45;
     #[repr(u32)]
     #[derive(Debug,Clone,Copy,PartialEq,Eq)]
-    pub enum Op {HeadClip=FIRST,RelBias,ShortConv,WindowScores,SinkSoftmax,WindowValues,MixBlend,GateBlend,CappedGate,RouteFold,Softcap,PlainNorm,RoundedNorm,RowDots}
+    pub enum Op {HeadClip=FIRST,RelBias,ShortConv,WindowScores,SinkSoftmax,WindowValues,MixBlend,GateBlend,CappedGate,RouteFold,Softcap,PlainNorm,RoundedNorm,RowDots,RouterPick}
     #[repr(C)]
     #[derive(Debug,Clone,Copy)]
     pub struct Shape {pub op:Op,pub heads:u32,pub dim:u32,pub taps:u32,pub rows:u32,pub cols:u32,pub epsilon:f32,pub bound:f32}
@@ -36,7 +36,7 @@ pub mod device {
     pub const SHARED_AT:usize=core::mem::offset_of!(RowsArguments,shared);
     /// The number of the last arm. The entry reads the op word of a command as a `u32` at `OP_AT` and takes the
     /// command as `Arguments` only when that word is in `FIRST..=LAST` (an `Op` of any other value is no valid value).
-    pub const LAST:u32=Op::RowDots as u32;
+    pub const LAST:u32=Op::RouterPick as u32;
     /// Where the op word lies in `Arguments`, and so in `RowsArguments` (its first field).
     pub const OP_AT:usize=core::mem::offset_of!(Arguments,shape)+core::mem::offset_of!(Shape,op);
 }
@@ -174,18 +174,28 @@ pub fn norm_squares(x:&[f32])->f32 {
 }
 /// Threads of one block of a launch whose rows share a sum (`shared_sum`): a part of the launch layout.
 pub const SUM_THREADS:usize=128;
+/// Rows of a shared-sum launch from which one block makes a whole row (`shared_span`): a part of the launch layout,
+/// not a size of a model. With fewer rows a block makes `SUM_THREADS` words of a row, so a short launch still has
+/// many blocks; with this many rows there are blocks enough, and a row's parts are made once, not once a block.
+pub const WHOLE_ROWS:usize=64;
+/// The words of a row that one block of a shared-sum launch writes: the whole row from `WHOLE_ROWS` rows on, else
+/// `SUM_THREADS`. Either way a multiple of `SUM_THREADS` that divides the width.
+#[inline(always)]
+pub fn shared_span(s:Shape)->usize {if s.heads as usize>=WHOLE_ROWS {s.dim as usize} else {SUM_THREADS}}
 /// A launch whose rows each share ONE sum (`PlainNorm`, `RoundedNorm`, `HeadClip` at a width that is a multiple of
 /// `SUM_THREADS`): (blocks, parts of the sum). On the GPU a block of `SUM_THREADS` threads then writes
-/// `SUM_THREADS` words of one row, one word a thread: thread `p` makes part `p` of the sum of the row (`sum_part`),
-/// the threads of the block meet, and each thread joins the parts and writes its word (`shared_words`). The parts
-/// and their join are the very sums of `unit`, in the same order, so the words are those of `unit` (host test).
+/// `shared_span` words of one row, thread `t` the `span / SUM_THREADS` words from `t * span / SUM_THREADS` on (one
+/// call of `shared_words`, so a thread holds no more state than with one word): thread `p` makes
+/// part `p` of the sum of the row (`sum_part`), the threads of the block meet, and each thread joins the parts and
+/// writes its words (`shared_words`). The parts and their join are the very sums of `unit`, in the same order, so
+/// the words are those of `unit` with either span (host test).
 #[inline(always)]
 pub fn shared_sum(s:Shape)->Option<(usize,usize)> {
     let (h,d)=(s.heads as usize,s.dim as usize);
     if !matches!(s.op,Op::PlainNorm|Op::RoundedNorm|Op::HeadClip) || d==0 || !d.is_multiple_of(SUM_THREADS) {return None;}
     let parts=if s.op==Op::RoundedNorm {d/NORM_CHUNK} else {LANES};
     if parts>LANES {return None;}
-    Some((h.checked_mul(d/SUM_THREADS)?,parts))
+    Some((h.checked_mul(d/shared_span(s))?,parts))
 }
 /// Words of each of the two rows a staged `RowDots` block holds in shared memory at a time (a tile).
 pub const DOT_TILE:usize=512;
@@ -202,8 +212,9 @@ pub fn dot_stage(s:Shape)->Option<(usize,usize)> {
 }
 /// Launch geometry (blocks, threads a block) of an arm: a block a dot for a staged `RowDots` (`dot_stage`); a block a
 /// head for a staged `SinkSoftmax` (`block_attention::softmax_stage`); a block for each `VALUES_CHANNELS` words of a
-/// staged `WindowValues` (`block_attention::values_stage`); a block for each `SUM_THREADS` words of a row when the
-/// rows share a sum (`shared_sum`); else one thread a unit in blocks of 128.
+/// staged `WindowValues` (`block_attention::values_stage`); a block for each `shared_span` words of a row when the
+/// rows share a sum (`shared_sum`: `SUM_THREADS` words, or a whole row from `WHOLE_ROWS` rows on); else one thread a
+/// unit in blocks of 128.
 #[inline]
 pub fn geometry(s:Shape,units:usize)->(u32,u32) {
     if let Some((dots,_))=dot_stage(s) {return (dots as u32,SUM_THREADS as u32);}
@@ -258,7 +269,7 @@ fn attention(op:Op)->bool {matches!(op,Op::HeadClip|Op::RelBias|Op::WindowScores
 #[inline(always)]
 fn stream(op:Op)->bool {matches!(op,Op::ShortConv|Op::MixBlend|Op::GateBlend|Op::PlainNorm|Op::RoundedNorm|Op::RowDots)}
 #[inline(always)]
-fn experts(op:Op)->bool {matches!(op,Op::CappedGate|Op::RouteFold|Op::Softcap)}
+fn experts(op:Op)->bool {matches!(op,Op::CappedGate|Op::RouteFold|Op::Softcap|Op::RouterPick)}
 #[inline(always)]
 pub fn is_block(op:Op)->bool {attention(op) || stream(op) || experts(op)}
 #[inline(always)]
@@ -290,7 +301,7 @@ mod tests {
         let pairs=[(D::HeadClip,Op::HeadClip),(D::RelBias,Op::RelBias),(D::ShortConv,Op::ShortConv),(D::WindowScores,Op::WindowScores),
             (D::SinkSoftmax,Op::SinkSoftmax),(D::WindowValues,Op::WindowValues),(D::MixBlend,Op::MixBlend),(D::GateBlend,Op::GateBlend),
             (D::CappedGate,Op::CappedGate),(D::RouteFold,Op::RouteFold),(D::Softcap,Op::Softcap),(D::PlainNorm,Op::PlainNorm),
-            (D::RoundedNorm,Op::RoundedNorm),(D::RowDots,Op::RowDots)];
+            (D::RoundedNorm,Op::RoundedNorm),(D::RowDots,Op::RowDots),(D::RouterPick,Op::RouterPick)];
         for (gpu,host) in pairs {assert_eq!(gpu as u32,host as u32,"{host:?}");assert!(is_block(host));}
         // Every arm is in the list, and no older operation has an arm's number.
         assert_eq!((0..200u32).filter(|&n|n>=device::FIRST && n<device::FIRST+pairs.len() as u32).count(),pairs.len());
@@ -311,7 +322,7 @@ mod tests {
         }
     }
     use super::*;
-    const ARMS:[Op;14]=[Op::HeadClip,Op::RelBias,Op::ShortConv,Op::WindowScores,Op::SinkSoftmax,Op::WindowValues,Op::MixBlend,Op::GateBlend,Op::CappedGate,Op::RouteFold,Op::Softcap,Op::PlainNorm,Op::RoundedNorm,Op::RowDots];
+    const ARMS:[Op;15]=[Op::HeadClip,Op::RelBias,Op::ShortConv,Op::WindowScores,Op::SinkSoftmax,Op::WindowValues,Op::MixBlend,Op::GateBlend,Op::CappedGate,Op::RouteFold,Op::Softcap,Op::PlainNorm,Op::RoundedNorm,Op::RowDots,Op::RouterPick];
     #[test] fn the_arms_are_block_arms_and_each_has_one_file() {
         for op in ARMS {
             assert!(is_block(op));
@@ -326,6 +337,7 @@ mod tests {
         assert_eq!(Op::HeadClip as u32,Op::AbsorbProject as u32+1);
         assert_eq!(Op::RoundedNorm as u32,Op::AbsorbProject as u32+13);
         assert_eq!(Op::RowDots as u32,Op::AbsorbProject as u32+14);
+        assert_eq!(Op::RouterPick as u32,Op::AbsorbProject as u32+15);
     }
     /// The norm tree as its definition says it, with the chunk sums kept in a list.
     fn norm_tree_by_definition(x:&[f32])->f32 {
@@ -354,7 +366,8 @@ mod tests {
         let mut seed=0x9e37_79b9u32;
         let mut next=||{seed^=seed<<13;seed^=seed>>17;seed^=seed<<5;((seed>>8) as f32/8388608.0-1.0)*if seed&64==0 {1.0} else {1.0e3}};
         let mut seen=0;
-        for op in [Op::PlainNorm,Op::RoundedNorm,Op::HeadClip] {for d in [128usize,256,384,1024,2304,3968,4096] {for h in [1usize,2,3] {for form in 0..4u32 {
+        for op in [Op::PlainNorm,Op::RoundedNorm,Op::HeadClip] {for d in [128usize,256,384,1024,2304,3968,4096] {for h in [1usize,2,3,WHOLE_ROWS-1,WHOLE_ROWS,WHOLE_ROWS+1] {for form in 0..4u32 {
+            if h>=WHOLE_ROWS-1 && !matches!(d,128|2304) {continue;}
             let s=match op {
                 Op::HeadClip=>Shape {op,heads:h as u32,dim:d as u32,taps:form&1,rows:0,cols:form>>1,epsilon:0.0,bound:if form==3 {1.0e-3} else {7.5}},
                 _ if form<2=>Shape {op,heads:h as u32,dim:d as u32,taps:if op==Op::RoundedNorm {form} else {0},rows:0,cols:0,epsilon:1.0e-6,bound:0.0},
@@ -364,20 +377,29 @@ mod tests {
             let inputs:[Vec<f32>;4]=core::array::from_fn(|i|(0..lengths[i]).map(|_|next()).collect());
             let x:[&[f32];4]=core::array::from_fn(|i|&inputs[i][..]);
             let w:Vec<f32>=(0..weight).map(|_|next()).collect();
-            let (blocks,parts)=shared_sum(s).unwrap();
-            assert_eq!((blocks*SUM_THREADS,parts<=LANES),(units*words,true));
+            let (blocks,parts)=shared_sum(s).unwrap();let span=shared_span(s);
+            assert_eq!(span,if h>=WHOLE_ROWS {d} else {SUM_THREADS});
+            assert!(span.is_multiple_of(SUM_THREADS) && d.is_multiple_of(span));
+            assert_eq!((blocks*span,parts<=LANES),(units*words,true));
             assert_eq!(geometry(s,units),(blocks as u32,SUM_THREADS as u32));
             let mut alone=vec![f32::NAN;units*words];
             for (index,slice) in alone.chunks_exact_mut(words).enumerate() {crate::causal_ops::unit(s,index,x,&w,slice);}
+            // Each output word is written once: by thread t of block b at b * span + t * each + k, k < each = span / SUM_THREADS.
+            let mut written=vec![0u8;units*words];
             for block in 0..blocks {
-                let (row,first)=split(block*SUM_THREADS,d);
+                let (row,first)=split(block*span,d);
                 let mut sums=[0.0f32;LANES];
                 for (part,sum) in sums.iter_mut().enumerate().take(parts) {*sum=sum_part(s,row,part,x,&w);}
+                let each=span/SUM_THREADS;
                 for thread in 0..SUM_THREADS {
-                    let mut word=[f32::NAN];shared_words(s,row,first+thread,x,&w,&sums,&mut word);
-                    assert_eq!(word[0].to_bits(),alone[block*SUM_THREADS+thread].to_bits(),"{s:?} block {block} thread {thread}");seen+=1;
+                    let at=block*span+thread*each;
+                    let mut words=vec![f32::NAN;each];shared_words(s,row,first+thread*each,x,&w,&sums,&mut words);
+                    for (k,word) in words.iter().enumerate() {
+                        assert_eq!(word.to_bits(),alone[at+k].to_bits(),"{s:?} block {block} thread {thread} k {k}");seen+=1;written[at+k]+=1;
+                    }
                 }
             }
+            assert!(written.iter().all(|&n|n==1),"{s:?}: a word written other than once");
         }}}}
         assert!(seen>100_000);
         // The join of lanes in memory is `join`.

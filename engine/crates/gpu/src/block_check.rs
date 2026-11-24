@@ -20,15 +20,21 @@ pub fn operands(counts:Option<Lengths>,inputs:[Option<Operand>;4],weight:Option<
     let fits=|operand:Option<Operand>,count:usize,what:&str|->Result<(),String> {match operand {
         None if count==0=>Ok(()),
         Some(o) if count>0 && o.words==count=>if !o.contiguous {Err(format!("block arm {what} is not contiguous"))} else if !o.own_context {Err(format!("block arm {what} belongs to another context"))}
-            else if o.address%4!=0 {Err(format!("block arm {what} is not aligned"))} else {Ok(())},
+            else if o.address==0 {Err(format!("block arm {what} has no address"))}
+            else if o.address%4!=0 {Err(format!("block arm {what} is not aligned"))}
+            else if end_of(o).is_none() {Err(format!("block arm {what} ends past the address space"))} else {Ok(())},
         _=>Err(format!("block arm {what} count differs")),
     }};
     for (n,(operand,count)) in inputs.into_iter().zip(lengths).enumerate() {fits(operand,count,["input 0","input 1","input 2","input 3"][n])?;}
     fits(weight,weights,"weight")?;fits(Some(output),all,"output")?;
-    let span=|o:Operand|(o.address,o.address+o.words as u64*4);
-    let (start,end)=span(output);
-    for operand in inputs.into_iter().flatten().chain(weight) {let (a,b)=span(operand);if start<b && a<end {return Err("block arm output overlaps an operand".into());}}
+    // Every operand passed `fits`, so its end is known (review REVARM1 finding 3: no unchecked sum).
+    let span=|o:Operand|end_of(o).map(|end|(o.address,end)).ok_or("block arm operand ends past the address space");
+    let (start,end)=span(output)?;
+    for operand in inputs.into_iter().flatten().chain(weight) {let (a,b)=span(operand)?;if start<b && a<end {return Err("block arm output overlaps an operand".into());}}
     Ok((lengths,weights,units,words))
+}
+/// The first byte after an operand, or None when its bytes would pass the end of the address space.
+fn end_of(o:Operand)->Option<u64> {(o.words as u64).checked_mul(4).and_then(|bytes|o.address.checked_add(bytes))
 }
 #[cfg(test)] mod tests {
     use super::*;
@@ -65,5 +71,25 @@ pub fn operands(counts:Option<Lengths>,inputs:[Option<Operand>;4],weight:Option<
         refused(operands(norm().lengths(),[Some(x),None,None,None],Some(w),y,true),"stream capture");
         // A shape that is no arm has no arm counts.
         refused(operands(crate::block_ops::checked_lengths(Shape {op:Op::Project,..norm()}),[Some(x),None,None,None],Some(w),y,false),"invalid block arm shape");
+        // Review REVARM1 finding 3: an operand at address 0, one whose bytes pass the end of the address space, and
+        // counts whose output words overflow.
+        refused(check(Some(at(0,2*ROW)),Some(w),y),"input 0 has no address");
+        refused(check(Some(x),Some(w),at(0,2*ROW)),"output has no address");
+        refused(check(Some(x),Some(at(u64::MAX-3,ROW)),y),"weight ends past the address space");
+        refused(check(Some(x),Some(w),at(u64::MAX-4*ROW as u64+1,2*ROW)),"output ends past the address space");
+        refused(operands(Some(([0,0,0,0],0,usize::MAX,2)),[None;4],None,y,false),"output overflow");
+        // An operand that ends one word before the end of the address space passes.
+        assert!(check(Some(x),Some(w),at(u64::MAX-8*ROW as u64-3,2*ROW)).is_ok());
+    }
+    /// The shared-sum norms of read arm 1 at the row counts around `WHOLE_ROWS` and at 1,024 rows, width 2,304: the
+    /// counts pass with exact extents and are refused one word off (review REVARM1 finding 3).
+    #[test] fn the_norms_of_many_rows_pass_with_their_exact_counts() {
+        for heads in [63u32,64,65,1024] {
+            let s=Shape {heads,dim:2304,..norm()};let n=heads as usize*2304;
+            let (x,w,y)=(at(0x10_0000,n),at(0x100_0000,2304),at(0x200_0000,n));
+            assert_eq!(operands(s.lengths(),[Some(x),None,None,None],Some(w),y,false),Ok(s.lengths().unwrap()),"{heads} rows");
+            assert!(operands(s.lengths(),[Some(at(0x10_0000,n-1)),None,None,None],Some(w),y,false).is_err(),"{heads} rows");
+            assert!(operands(s.lengths(),[Some(x),None,None,None],Some(w),at(0x200_0000,n+1),false).is_err(),"{heads} rows");
+        }
     }
 }

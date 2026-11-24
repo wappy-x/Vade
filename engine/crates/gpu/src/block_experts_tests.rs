@@ -219,3 +219,92 @@ const SEVENTEEN:f32=17.0/16_777_216.0;
     }
     assert!(block_experts::lengths(Shape {op:Op::PlainNorm,..softcap(7,30.0)}).is_none());
 }
+/// Read arm 2: `RouterPick` gives the first `2k` words of the general `Op::Route` of the same fields, bit for bit:
+/// spread logits, logits with equal choices (the lower number first), the largest and smallest finite values,
+/// infinities and a NaN (no choice above minus infinity: expert 0), with and without the divide, at the expert and
+/// pick counts of the model and small ones. Its counts: one unit of `2k` words; any other group form is refused.
+#[test] fn router_pick_gives_the_first_words_of_the_route_bit_for_bit() {
+    let pick=|experts:u32,picks:u32,normalize:u32,scale:f32|Shape {op:Op::RouterPick,heads:1,dim:1,taps:normalize,rows:experts,cols:picks,epsilon:0.0,bound:scale};
+    let mut cases=0;
+    for (experts,picks) in [(2u32,1u32),(2,2),(8,3),(64,8),(128,8),(256,8),(256,16)] {
+        let e=experts as usize;
+        let inputs:Vec<(Vec<f32>,Vec<f32>)>=vec![
+            (spread(e,1),spread(e,2).iter().map(|v|v*0.01).collect()),
+            // Equal choices: every logit equal and every bias zero, then pairs of equal values.
+            (vec![0.25;e],vec![0.0;e]),
+            ((0..e).map(|i|(i/2) as f32*0.5-3.0).collect(),vec![0.0;e]),
+            ((0..e).map(|i|if i%3==0 {f32::MAX} else {f32::MIN}).collect(),(0..e).map(|i|if i%5==0 {f32::INFINITY} else {0.0}).collect()),
+            (vec![f32::NAN;e],vec![0.0;e]),
+            ((0..e).map(|i|if i%2==0 {f32::NAN} else {1.0}).collect(),vec![f32::NEG_INFINITY;e]),
+        ];
+        for (logits,bias) in &inputs {for normalize in [0u32,1] {for scale in [1.0f32,2.5,0.3] {
+            let s=pick(experts,picks,normalize,scale);
+            let route=Shape {op:Op::Route,..s};
+            let k=picks as usize;
+            // The units themselves: `reference` refuses a value that is not finite, the units do not.
+            let mut want=vec![f32::from_bits(0x7fc0_dead);2*k+2*e+2];crate::latent_ops::unit(route,0,[logits,&[],&[],&[]],bias,&mut want);
+            let mut got=vec![f32::from_bits(0x7fc0_dead);2*k];block_experts::unit(s,0,[logits,&[],&[],&[]],bias,&mut got);
+            assert_eq!(bits(&got),bits(&want[..2*k]),"experts={experts} picks={picks} normalize={normalize} scale={scale}");
+            if logits.iter().chain(bias).all(|v|v.is_finite()) {
+                let full=reference(s,[logits,&[],&[],&[]],bias).unwrap();
+                assert_eq!(bits(&full),bits(&got));
+                assert_eq!(bits(&reference(route,[logits,&[],&[],&[]],bias).unwrap()[..2*k]),bits(&got));
+            }
+            cases+=1;
+        }}}
+    }
+    assert_eq!(cases,7*6*2*3);
+    let s=pick(8,3,1,2.5);
+    assert_eq!(block_experts::lengths(s),Some(([8,0,0,0],8,1,6)));
+    for bad in [Shape {heads:2,..s},Shape {dim:2,..s},Shape {rows:1,..s},Shape {rows:0,..s},Shape {cols:0,..s},Shape {cols:9,..s},Shape {taps:2,..s},
+        Shape {bound:0.0,..s},Shape {bound:-1.0,..s}] {
+        assert!(block_experts::lengths(bad).is_none(),"{bad:?}");
+    }
+    // Numbers that are not finite: refused by the checked counts of both entries (and by `Shape::lengths`).
+    for bad in [Shape {bound:f32::INFINITY,..s},Shape {bound:f32::NAN,..s},Shape {epsilon:f32::NAN,..s},Shape {epsilon:f32::INFINITY,..s}] {
+        assert!(crate::block_ops::checked_lengths(bad).is_none() && bad.lengths().is_none(),"{bad:?}");
+    }
+}
+/// Review REVARM2 finding 2: `RouterPick` takes at most `PICK_EXPERTS_MAX` experts (65,536), so every expert number
+/// is exact as a float. One above is refused by the arm, the checked counts and the rows counts; the cap itself is
+/// taken. At the cap, ties at the top numbers pick the lower number first and every picked word is below the count.
+#[test] fn router_pick_refuses_more_than_its_expert_cap_and_picks_by_number_at_the_cap() {
+    use crate::{block_experts::PICK_EXPERTS_MAX,block_ops::checked_lengths,block_rows};
+    let pick=|experts:usize,picks:u32|Shape {op:Op::RouterPick,heads:1,dim:1,taps:1,rows:experts as u32,cols:picks,epsilon:0.0,bound:1.0};
+    let over=pick(PICK_EXPERTS_MAX+1,2);
+    assert!(block_experts::lengths(over).is_none() && checked_lengths(over).is_none() && block_rows::lengths(over,1,0).is_none());
+    assert!(block_experts::lengths(pick(1<<24,2)).is_none() && block_experts::lengths(pick(u32::MAX as usize,2)).is_none());
+    let s=pick(PICK_EXPERTS_MAX,4);
+    assert_eq!(block_experts::lengths(s),Some(([PICK_EXPERTS_MAX,0,0,0],PICK_EXPERTS_MAX,1,8)));
+    let e=PICK_EXPERTS_MAX;
+    // The top three numbers tie on the largest choice, the number 1 ties below them.
+    let logits=vec![0.0f32;e];let mut bias=vec![0.0f32;e];
+    for top in [e-3,e-2,e-1] {bias[top]=2.0;}bias[1]=1.0;
+    let mut want=vec![f32::NAN;2*4+2*e+2];crate::latent_ops::unit(Shape {op:Op::Route,..s},0,[&logits,&[],&[],&[]],&bias,&mut want);
+    let mut got=vec![f32::NAN;8];block_experts::unit(s,0,[&logits,&[],&[],&[]],&bias,&mut got);
+    assert_eq!(bits(&got),bits(&want[..8]));
+    assert_eq!(&got[..4],&[(e-3) as f32,(e-2) as f32,(e-1) as f32,1.0]);
+    assert!(got[..4].iter().all(|&id|(id as usize)<e && id.fract()==0.0));
+}
+/// The rows form (`block_rows::unit`, as the rows entry runs it) and `Op::Route` of each row pick the same words, also
+/// with ties and with values that are not finite (which `reference` refuses, so the units are compared).
+#[test] fn router_pick_rows_and_route_pick_the_same_words_on_ties_and_nan() {
+    use crate::block_rows;
+    for (experts,picks) in [(8u32,3u32),(64,8),(2,2),(256,1)] {
+        let e=experts as usize;let k=picks as usize;
+        let rows=[vec![0.5f32;e],vec![f32::NAN;e],(0..e).map(|i|if i%2==0 {f32::NAN} else {-0.0}).collect(),
+            (0..e).map(|i|if i%3==0 {f32::NEG_INFINITY} else {f32::INFINITY}).collect(),(0..e).map(|i|(i/2) as f32*0.25).collect::<Vec<f32>>()];
+        let logits=rows.concat();let count=rows.len();
+        for bias in [vec![0.0f32;e],(0..e).map(|i|if i%4==1 {f32::NAN} else {0.0}).collect(),(0..e).map(|i|-((i%5) as f32)).collect::<Vec<f32>>()] {
+            for normalize in [0u32,1] {
+                let s=Shape {op:Op::RouterPick,heads:1,dim:1,taps:normalize,rows:experts,cols:picks,epsilon:0.0,bound:2.5};
+                let (_,_,units,words)=block_rows::lengths(s,count,0).unwrap();
+                for index in 0..units {
+                    let mut got=vec![f32::NAN;words];block_rows::unit(s,count,0,index,[&logits,&[],&[],&[]],&bias,&mut got);
+                    let mut want=vec![f32::NAN;2*k+2*e+2];crate::latent_ops::unit(Shape {op:Op::Route,..s},0,[&logits[index*e..(index+1)*e],&[],&[],&[]],&bias,&mut want);
+                    assert_eq!(bits(&got),bits(&want[..2*k]),"experts {experts} picks {picks} row {index} normalize {normalize}");
+                }
+            }
+        }
+    }
+}

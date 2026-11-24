@@ -106,3 +106,33 @@ fn register_check(ptx: &Path, table: &Path, given: Option<PathBuf>, allow_missin
     if failures.is_empty() { eprintln!("INKLING REGISTER CHECK PASS entries={} ptxas={}", measured.len(), ptxas.display()); Ok(()) }
     else { Err(format!("INKLING REGISTER CHECK FAIL\n{}", failures.join("\n"))) }
 }
+#[cfg(test)]
+mod tests {
+    use super::inkling_stamp;
+    use std::{fs, path::{Path, PathBuf}};
+    /// Every file that a source of the Inkling crate includes by `#[path = "..."]` is in the stamp's source list, so an
+    /// edit to it rebuilds the image (review REVSCORES: `block_scores.rs` and `staged_narrow.rs` were missing, and a
+    /// stale PTX could run). The path is resolved from the folder of the file that holds the line.
+    #[test]
+    fn every_file_the_inkling_crate_includes_by_path_is_in_the_stamp() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
+        let listed: Vec<PathBuf> = inkling_stamp::source_files(&root).unwrap().iter().map(|f| fs::canonicalize(f).unwrap()).collect();
+        let (mut found, mut missing) = (Vec::new(), Vec::new());
+        for entry in fs::read_dir(root.join("kernels-inkling/src")).unwrap() {
+            let file = entry.unwrap().path();
+            if file.extension().is_none_or(|e| e != "rs") { continue; }
+            for line in fs::read_to_string(&file).unwrap().lines() {
+                let Some(rest) = line.trim().strip_prefix("#[path") else { continue };
+                let target = rest.split('"').nth(1).unwrap_or_else(|| panic!("{}: a #[path] line without a quoted path: {line}", file.display()));
+                let path = fs::canonicalize(file.parent().unwrap().join(target)).unwrap_or_else(|e| panic!("{}: {target}: {e}", file.display()));
+                if !listed.contains(&path) { missing.push(path.display().to_string()); }
+                found.push(path);
+            }
+        }
+        assert!(found.len() >= 12, "only {} #[path] lines found in kernels-inkling/src", found.len());
+        for name in ["src/block_scores.rs", "src/staged_narrow.rs"] {
+            assert!(found.contains(&fs::canonicalize(root.join(name)).unwrap()), "{name} is no longer included by path");
+        }
+        assert!(missing.is_empty(), "files included by #[path] but not in inkling_stamp::source_files: {missing:?}");
+    }
+}

@@ -18,13 +18,21 @@
 //! recorded. For the other cases two forms with the same words, picked by cost (`staged_product::rows_one_launch`):
 //! one launch of the general rows kernel for all input rows (`prompt_ops::Op::ProjectRowsBf16`, then
 //! `Op::Transpose`), or one launch of the row product for each input row into one output, with no join.
+//!
+//! The expert runs of a step of rows (`resident_product_runs`, `Weights::product_runs`): no gather. A run of 8 or
+//! more launch rows takes the rows tile with index rows (`Backend::project_staged_rows_at_into`): it reads each
+//! launch row from its row of the input and writes it to its row of the result, through two tables of host words
+//! that the backend checks and the recorder stages with each launch. A shorter run takes the row product for each launch row, from a view of its input row into a view
+//! of its result row. Every word is the word of `resident_product` on its input row.
 use super::*;
 
 impl<'b,'d> Device<'b,'d> {
-    /// One launch: `rows` chains of one BF16 matrix with one input row. The staged product when it runs now, else the
-    /// chain of `project_bf16_ordered`. Both give the same words.
+    /// One launch: `rows` chains of one BF16 matrix with one input row. The narrow staged product for a matrix of few
+    /// rows (`staged_narrow`) when it runs now, else the staged product when it runs now, else the
+    /// chain of `project_bf16_ordered`. All three give the same words.
     fn row_product(&self,rows:usize,columns:usize,input:&DeviceVector<'d>,matrix:&DeviceVector<'d>,output:&mut DeviceVector<'d>)->Result<()> {
-        if self.backend.staged_product_ready(rows,columns,input,matrix) {self.backend.project_staged_into(rows,columns,input,matrix,output)?;}
+        if self.backend.staged_narrow_ready(rows,columns,input,matrix) {self.backend.project_staged_narrow_into(rows,columns,input,matrix,output)?;}
+        else if self.backend.staged_product_ready(rows,columns,input,matrix) {self.backend.project_staged_into(rows,columns,input,matrix,output)?;}
         else {self.backend.project_bf16_chain_into(rows,columns,input,matrix,output)?;}
         Ok(())
     }
@@ -113,5 +121,52 @@ impl<'b,'d> Device<'b,'d> {
             }
         }
         self.shared_value(Rc::new(whole),total)
+    }
+    /// The products of the expert runs of a step of rows with no gather (`ResidentProduct::resident_product_runs`):
+    /// `runs` holds (matrix, words, rows, launch rows) of each run in launch order. None when a run takes neither
+    /// form here (a segmented operand, mixed shapes, a matrix above the envelope of the row product); then nothing
+    /// was launched and the caller gathers.
+    pub(crate) fn resident_product_runs(&self,runs:&[(&DeviceVector<'d>,std::ops::Range<usize>,usize,usize)],x:&Value<'b,'d>,columns:usize,input:Option<&[usize]>,output:Option<&[usize]>)->Result<Option<Value<'b,'d>>> {
+        use spark_gpu_probe::staged_product as staged;
+        let Some(&(_,_,rows,_))=runs.first() else {return Ok(None)};
+        let n=runs.iter().map(|run|run.3).sum::<usize>();
+        if rows==0 || columns==0 || n==0 || !x.words.is_multiple_of(columns) || x.vector.len()!=x.words || x.vector.is_segmented() || staged::part_rows(rows,columns)<rows
+            || runs.iter().any(|run|run.2!=rows || run.3==0 || run.0.is_segmented() || run.1.len().checked_mul(2)!=rows.checked_mul(columns)) {return Ok(None);}
+        self.ready(x)?;
+        let sources=x.words/columns;
+        // The input row and the result row of each launch row (the result table is the inverse of `output`).
+        let word=|row:usize|u32::try_from(row).map_err(|_|"resident product: a row of the runs exceeds the ABI".to_owned());
+        let in_words=match input {Some(rows)=>rows.iter().map(|&row|word(row)).collect::<Result<Vec<_>>>()?,None=>(0..n).map(word).collect::<Result<Vec<_>>>()?};
+        let mut out_words=(0..n).map(word).collect::<Result<Vec<_>>>()?;
+        if let Some(rows)=output {for (j,&i) in rows.iter().enumerate() {*out_words.get_mut(i).ok_or("resident product: an output row of the runs is outside the launch rows")?=word(j)?;}}
+        need(in_words.len()==n && output.is_none_or(|rows|rows.len()==n) && in_words.iter().all(|&row|(row as usize)<sources),"resident product: a table of the runs differs from the launch rows")?;
+        // The form of each run, all asked before the first launch.
+        // A run of more launch rows than one launch of the tile runs in launches of at most `ROWS_INPUTS_MAX`.
+        let tile=|count:usize|count>=staged::ROWS_TILE_INPUTS_MIN && staged::rows_shape_admitted(rows,columns,1);
+        let mut matrices=Vec::with_capacity(runs.len());
+        for run in runs {
+            let matrix=run.0.resident_range(run.1.clone())?;
+            if tile(run.3) && !self.backend.staged_rows_at_ready(rows,columns,run.3.min(staged::ROWS_INPUTS_MAX),&x.vector,&matrix) {return Ok(None);}
+            matrices.push(matrix);
+        }
+        let total=n.checked_mul(rows).ok_or("resident product: the result of the runs is too large")?;
+        let whole=self.backend.vector(total)?.into_resident_shared()?;
+        let mut at=0;
+        for (run,matrix) in runs.iter().zip(&matrices) {
+            let count=run.3;
+            if tile(count) {
+                for first in (at..at+count).step_by(staged::ROWS_INPUTS_MAX) {
+                    let span=first..(first+staged::ROWS_INPUTS_MAX).min(at+count);
+                    self.backend.project_staged_rows_at_into(rows,columns,span.len(),rows,&x.vector,Some(&in_words[span.clone()]),matrix,&mut whole.resident_range(0..total)?,Some(&out_words[span]))?;
+                }
+            } else {
+                for (&source,&target) in in_words[at..at+count].iter().zip(&out_words[at..at+count]) {
+                    let (source,target)=(source as usize,target as usize);
+                    self.row_product(rows,columns,&x.vector.resident_range(source*columns..(source+1)*columns)?,matrix,&mut whole.resident_range(target*rows..(target+1)*rows)?)?;
+                }
+            }
+            at+=count;
+        }
+        Ok(Some(self.shared_value(Rc::new(whole),total)?))
     }
 }

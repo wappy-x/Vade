@@ -187,6 +187,15 @@ fn stacked_equal_to_the_fixture(fixture: &Fixture) -> (usize, usize) {
                 assert_eq!(bits(got), bits(&<Fixture as Weights<Stand>>::product(fixture, &c, *weight, &inner).unwrap()), "{weight:?}");
                 compared += 1;
             }
+            // Many rows: one product gives each row's forget and gain side by side, the words of one product each.
+            for rows in [2usize, 3, 7] {
+                let x = (0..rows * rank).map(|k| ((k * 7 + 5) % 13) as f32 * 0.0625 - 0.375).collect::<Vec<_>>();
+                let got = <LoadedWeights<'_, Part> as Weights<Stand>>::stack_product_rows(&weights, &c, &pair, &x, rows).unwrap().unwrap();
+                let want = (0..rows).flat_map(|r| pair.iter().flat_map(|&weight| <Fixture as Weights<Stand>>::product(fixture, &c, weight, &x[r * rank..(r + 1) * rank].to_vec()).unwrap()).collect::<Vec<_>>()).collect::<Vec<_>>();
+                assert_eq!(bits(&got), bits(&want), "{pair:?} rows {rows}");
+                assert!(<LoadedWeights<'_, Part> as Weights<Stand>>::stack_product_rows(&weights, &c, &pair, &x[1..].to_vec(), rows).is_err());
+                compared += 1;
+            }
         }
     }
     assert!(taps > 0 && gates > 0, "a fixture layer makes taps from the token, and one reads messages: {taps} {gates}");

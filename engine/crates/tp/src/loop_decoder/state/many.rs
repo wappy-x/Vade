@@ -72,6 +72,33 @@ pub fn row_rings<C:Compute>(compute:&C,layout:&Layout,which:Ring,step:&Rows,stat
     }
     Ok((rings,step_words(compute,&table.slots)?))
 }
+/// The rings of a convolution for a launch of arm `ShortConv`: the input 0, the step word input 3, and the mask
+/// bits of the rows launch. A step of more than one row of ONE chat takes the window form of the rows entry
+/// (`spark_gpu_probe::block_rows::WINDOW`): the `taps - 1` positions before the step from the chat's ring in time
+/// order, then the new inputs, in one join; row `r` reads rows `r ..= r + taps - 1` of it, and one shared step word
+/// `taps - 1`. So no ring is gathered for each row. The ring of the chat after the step becomes pending, made by one
+/// small gather as in `row_rings`. Any other step takes `row_rings` and the mask 0. No ring of the state changes here.
+pub fn conv_rings<C:Compute>(compute:&C,layout:&Layout,which:Ring,step:&Rows,states:&mut [&mut VisitState<C::Value>],inputs:&C::Value)->Result<(C::Value,C::Value,u32)> {
+    let ((channels,taps),rows)=(layout.ring_size(which),step.total());
+    let [span]=step.chats() else {let (rings,steps)=row_rings(compute,layout,which,step,states,inputs)?;return Ok((rings,steps,0));};
+    if rows<2 || taps<2 {let (rings,steps)=row_rings(compute,layout,which,step,states,inputs)?;return Ok((rings,steps,0));}
+    need(states.len()==1 && compute.words(inputs)==rows*channels && compute.words(&states[0].rings[which as usize])==taps*channels,
+        "the rings or the inputs of a step differ from the layout")?;
+    let first=(span.first%taps as u64) as usize;
+    let window={
+        let ring=&states[0].rings[which as usize];
+        // Position `first - (taps - 1) + j` lies in slot `(first + 1 + j) mod taps` of the ring.
+        let mut parts=(0..taps-1).map(|j|compute.range(ring,((first+1+j)%taps)*channels,channels)).collect::<Result<Vec<_>>>()?;
+        parts.push(compute.range(inputs,0,rows*channels)?);
+        compute.join(&parts.iter().collect::<Vec<_>>())?
+    };
+    // The ring after the step: slot `s` holds the newest position with that slot, `back` rows before the last row,
+    // which is row `rows + taps - 2` of the window.
+    let last=(first+rows-1)%taps;
+    let after=(0..taps).map(|slot|rows+taps-2-(last+taps-slot)%taps).collect::<Vec<_>>();
+    states[0].next[which as usize]=Some(permute(compute,&window,rows+taps-1,&after,channels)?);
+    Ok((window,step_words(compute,&[taps-1])?,spark_gpu_probe::block_rows::WINDOW|1<<3))
+}
 /// The most rows of one chat that a step may write into a plane of `layout` from position `first`: a later row
 /// must not write over a key that an earlier row of the step still reads, and a plane must hold every row.
 pub fn room(layout:&Layout,first:u64)->usize {
@@ -104,14 +131,49 @@ pub fn commit<V>(states:&mut [&mut State<V>],step:&Rows)->Result<()> {
     need(states.len()==spans.len() && states.iter().zip(spans).all(|(state,span)|state.position==span.first),"the states of a step differ from its rows")?;
     need(states.iter().all(|state|state.visits.iter().all(|visit|visit.next.iter().all(Option::is_some))),"a visit of the step left a ring without its rows")?;
     for (state,span) in states.iter_mut().zip(spans) {
-        for visit in &mut state.visits {for (ring,next) in visit.rings.iter_mut().zip(&mut visit.next) {if let Some(next)=next.take() {*ring=next;}}}
+        for visit in &mut state.visits {
+            for (ring,next) in visit.rings.iter_mut().zip(&mut visit.next) {if let Some(next)=next.take() {*ring=next;}}
+            if let Some([keys,values])=visit.planes.take() {visit.keys=keys;visit.values=values;}
+        }
         state.position+=span.count as u64;
     }
     Ok(())
 }
-/// The step did not end: what is pending goes. The rings and the positions are those from before the step.
+/// The step did not end: what is pending goes. The rings, the planes and the positions are those from before the step.
 pub fn discard<V>(states:&mut [&mut State<V>]) {
-    for state in states {for visit in &mut state.visits {visit.next=std::array::from_fn(|_|None);}}
+    for state in states {for visit in &mut state.visits {visit.next=std::array::from_fn(|_|None);visit.planes=None;}}
+}
+/// The runs of rows that move positions `from..to` from a ring of `source` rows to a ring of `target` rows:
+/// (source row, target row, rows), each run unbroken in both rings.
+pub fn moves(from:u64,to:u64,source:usize,target:usize)->Vec<(usize,usize,usize)> {
+    let (mut out,mut position)=(Vec::new(),from);
+    while position<to {
+        let (s,t)=((position%source as u64) as usize,(position%target as u64) as usize);
+        let n=((to-position).min(usize::MAX as u64) as usize).min(source-s).min(target-t);
+        out.push((s,t,n));position+=n as u64;
+    }
+    out
+}
+/// Copy the rows of `moves` from `source` into `target`, `words` words a row.
+fn carry<C:Compute>(compute:&C,source:&C::Value,target:&mut C::Value,runs:&[(usize,usize,usize)],words:usize)->Result<()> {
+    for &(s,t,n) in runs {compute.state_fill(target,t*words,&compute.range(source,s*words,n*words)?)?;}
+    Ok(())
+}
+/// The wide ring (`Layout::wide`) of a plane of the state for a chat whose step starts at position `first`: the keys
+/// of positions `first - window + 1` to `first - 1` at their wide slots, every other row zero. The state is read only.
+pub fn widen<C:Compute>(compute:&C,layout:&Layout,plane:&C::Value,first:u64)->Result<C::Value> {
+    let (wide,words)=(layout.wide(),layout.row_words);
+    need(layout.ring && compute.words(plane)==layout.rows*words,"a plane to widen differs from the layout")?;
+    let mut out=compute.zeros(wide.rows*words)?;
+    carry(compute,plane,&mut out,&moves(first.saturating_sub(layout.window as u64-1),first,layout.rows,wide.rows),words)?;Ok(out)
+}
+/// The window ring of a wide plane after a step whose last position is `end - 1`: the keys of positions `end - window`
+/// to `end - 1` at their slots, every other row zero. A new value: the state does not change here.
+pub fn narrow<C:Compute>(compute:&C,layout:&Layout,wide_plane:&C::Value,end:u64)->Result<C::Value> {
+    let (wide,words)=(layout.wide(),layout.row_words);
+    need(layout.ring && compute.words(wide_plane)==wide.rows*words,"a wide plane differs from the layout")?;
+    let mut out=compute.zeros(layout.rows*words)?;
+    carry(compute,wide_plane,&mut out,&moves(end.saturating_sub(layout.window as u64),end,wide.rows,layout.rows),words)?;Ok(out)
 }
 #[cfg(test)]
 mod tests;

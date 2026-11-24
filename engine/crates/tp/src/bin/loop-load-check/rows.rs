@@ -16,6 +16,11 @@
 //! can be read against it. The driver's calls and the rows tile run in a scope of work (recorded launches).
 //!
 //! Last, the 32-bit rows tile on made-up matrices in shapes of the current family, to compare two builds.
+//!
+//! First, the expert runs of a step (`Weights::product_runs`, index rows): runs of 2, 9, 1, 24, 64 and 1,030 launch
+//! rows over six experts of the first layer. Gate-and-up: each launch row reads a scattered row of a smaller input
+//! (rows read many times). Down: the launch rows in order, the result rows a permutation. Every result row against
+//! `product` of the matrix of its run with its input row, every word; the launches of the rows tile are counted.
 use spark_gpu_probe::{driver::{Backend, DeviceVector}, prompt_ops::{Op, Shape}};
 use spark_tp::{Result, bounded_decoder::{Compute, Device}, loop_decoder::{mix::{Weight, Weights}, operands::weights::LoadedWeights}};
 use std::time::Instant;
@@ -44,8 +49,49 @@ fn a_launch_a_row<'a>(backend: &Backend<'a>, rows: usize, columns: usize, inputs
 }
 fn unequal(a: &[f32], b: &[f32]) -> usize { a.iter().zip(b).filter(|(a, b)| a.to_bits() != b.to_bits()).count() + a.len().abs_diff(b.len()) }
 
+/// The check of the expert runs (see the head of the file). It gives the words, the words different and the launches
+/// of the rows tile.
+fn runs<'d>(backend: &Backend<'d>, compute: &Device<'_, 'd>, weights: &LoadedWeights<'_, DeviceVector<'d>>) -> Result<(usize, usize, u128)> {
+    let tile_kind = spark_gpu_probe::resident_launch::Kind::PlainStagedRows as usize;
+    let counts = [2usize, 9, 1, 24, 64, 1030];
+    let n = counts.iter().sum::<usize>();
+    let (mut words, mut different, mut launches) = (0usize, 0usize, 0u128);
+    for down in [false, true] {
+        let weight = |expert: usize| if down { Weight::Down(0, expert) } else { Weight::GateUp(0, expert) };
+        let (_, _, _, columns) = weights.matrix(weight(0))?.ok_or("the expert matrix is not on the device")?;
+        let runs = counts.iter().enumerate().map(|(expert, &count)| (weight(expert), count)).collect::<Vec<_>>();
+        // Gate-and-up: 37 input rows, launch row i reads row (13 i + 5) mod 37. Down: n input rows in launch order,
+        // result row j is launch row (7 j + 3) mod n (7 and n share no factor).
+        let sources = if down { n } else { 37 };
+        let input = (!down).then(|| (0..n).map(|i| (13 * i + 5) % sources).collect::<Vec<_>>());
+        let output = down.then(|| (0..n).map(|j| (7 * j + 3) % n).collect::<Vec<_>>());
+        if let Some(rows) = &output { let mut sorted = rows.clone(); sorted.sort_unstable(); if sorted != (0..n).collect::<Vec<_>>() { return Err("the check's output table is no permutation".into()); } }
+        let host = (0..sources * columns).map(|k| ((k as u32).wrapping_mul(2_654_435_761) >> 8) as f32 / 8_388_608.0 - 1.0).collect::<Vec<_>>();
+        let x = compute.upload(&host)?;
+        let recorded = backend.stats().recorded_kinds[tile_kind];
+        let got = compute.work(|| compute.read(&weights.product_runs(compute, &runs, &x, columns, input.as_deref(), output.as_deref())?))?;
+        launches += backend.stats().recorded_kinds[tile_kind] - recorded;
+        // The run of each launch row, then the words that result row j must hold.
+        let run_of = counts.iter().enumerate().flat_map(|(expert, &count)| std::iter::repeat_n(expert, count)).collect::<Vec<_>>();
+        let mut want = Vec::new();
+        for j in 0..n {
+            let launch = output.as_ref().map_or(j, |rows| rows[j]);
+            let row = input.as_ref().map_or(launch, |rows| rows[launch]);
+            want.extend(compute.work(|| compute.read(&weights.product(compute, weight(run_of[launch]), &compute.range(&x, row * columns, columns)?)?))?);
+        }
+        words += want.len();
+        different += unequal(&got, &want);
+        eprintln!("LOOP LOAD RUNS matrix={} launch_rows={n} input_rows={sources} words={} different={}", if down { "down" } else { "gate-and-up" }, want.len(), unequal(&got, &want));
+    }
+    Ok((words, different, launches))
+}
+
 pub fn run<'d>(backend: &Backend<'d>, weights: &LoadedWeights<'_, DeviceVector<'d>>, picked: &[(String, Weight)]) -> Result<()> {
     let compute = Device::new(backend);
+    let (run_words, run_different, run_launches) = runs(backend, &compute, weights)?;
+    eprintln!("LOOP LOAD RUNS words={run_words} different={run_different} tile_launches={run_launches}");
+    if run_different > 0 { return Err(format!("the expert runs: {run_different} of {run_words} words differ from one product a row")); }
+    if run_launches == 0 { return Err("the expert runs recorded no launch of the rows tile".into()); }
     let (mut words, mut different, mut first) = (0usize, 0usize, None);
     // The rows tile, the entry of its own: launches of the driver's call, and the check with guard words.
     let tile_kind = spark_gpu_probe::resident_launch::Kind::PlainStagedRows as usize;

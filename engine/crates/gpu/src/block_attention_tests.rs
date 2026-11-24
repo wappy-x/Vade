@@ -1,5 +1,5 @@
 //! Host tests of the arms in `block_attention.rs`: small shapes with hand-worked values.
-use crate::{block_attention::{distance_sum,distance_tree,softmax_part,BLOCK},block_ops::Terms,causal_ops::{reference,Op,Shape},fixed_math::{exp,rn}};
+use crate::{block_attention::{distance_sum,distance_tree,rel_part,softmax_part,BLOCK},block_ops::Terms,causal_ops::{reference,Op,Shape},fixed_math::{exp,rn}};
 
 fn shape(op:Op)->Shape {Shape {op,heads:0,dim:0,taps:0,rows:0,cols:0,epsilon:0.0,bound:0.0}}
 fn bits(values:&[f32])->Vec<u32> {values.iter().map(|v|v.to_bits()).collect()}
@@ -61,6 +61,48 @@ fn pack(values:&[f32])->Vec<f32> {
     // 1 + 2^-9 is no BF16 value: the sum is rounded to 1.
     let one=Shape {heads:1,dim:2,cols:1,..shape(Op::RelBias)};
     assert_eq!(reference(one,[&[1.0,1.0],&[],&[],&[]],&[1.0,0.001_953_125]).unwrap(),[1.0]);
+}
+/// Review REVARM4: the units of 8 distances (an extent that is a multiple of 8) and of 1 give, unit by unit as the
+/// entries write them, the words of the definition (one chain over the state from +0.0 in rising j, rounded once),
+/// written here on its own; with zeros of both signs, NaN and infinities in the state.
+#[test] fn rel_bias_units_of_eight_and_of_one_give_the_words_of_the_definition() {
+    assert_eq!((rel_part(1),rel_part(7),rel_part(8),rel_part(9),rel_part(16),rel_part(52),rel_part(1024)),(1,1,8,1,8,1,8));
+    let mut state=0x1f83_d9abu32;
+    let mut next=||{state^=state<<13;state^=state>>17;state^=state<<5;state};
+    for (heads,dim,extent) in [(24usize,16usize,1024usize),(3,2,8),(2,5,16),(1,1,9),(2,16,52),(4,3,7),(1,2,1)] {
+        let s=Shape {heads:heads as u32,dim:dim as u32,cols:extent as u32,..shape(Op::RelBias)};
+        let x:Vec<f32>=(0..heads*dim).map(|i|match i%13 {3=>-0.0,5=>f32::NAN,7=>f32::NEG_INFINITY,_=>((next()>>8) as f32/8_388_608.0-1.0)*3.0}).collect();
+        let w:Vec<f32>=(0..dim*extent).map(|i|if i%11==4 {0.0} else {((next()>>8) as f32/8_388_608.0-1.0)*2.0}).collect();
+        let mut definition=vec![0.0f32;heads*extent];
+        for head in 0..heads {for dist in 0..extent {
+            let mut sum=0.0f32;
+            for j in 0..dim {sum+=rn(x[head*dim+j])*w[j*extent+dist];}
+            definition[head*extent+dist]=rn(sum);
+        }}
+        let (_,_,units,words)=crate::block_attention::lengths(s).unwrap();
+        assert_eq!((units,words),(heads*extent/rel_part(extent),rel_part(extent)));
+        let mut out=vec![f32::from_bits(0x7fa0_beef);units*words];
+        for index in 0..units {crate::block_attention::unit(s,index,[&x,&[],&[],&[]],&w,&mut out[index*words..(index+1)*words]);}
+        assert_eq!(bits(&out),bits(&definition),"heads {heads} dim {dim} extent {extent}");
+    }
+}
+/// Review REVARM4: the shapes RelBias refuses, on the host and in a rows launch.
+#[test] fn rel_bias_refuses_the_shapes_it_does_not_hold() {
+    use crate::block_attention::lengths;
+    let good=Shape {heads:24,dim:16,cols:1024,..shape(Op::RelBias)};
+    assert!(lengths(good).is_some());
+    for s in [Shape {heads:0,..good},Shape {dim:0,..good},Shape {cols:0,..good},Shape {rows:1,..good},Shape {taps:1,..good},
+        Shape {bound:1.0,..good},Shape {bound:f32::NAN,..good},Shape {epsilon:1.0e-6,..good},Shape {epsilon:f32::INFINITY,..good}] {
+        assert_eq!(lengths(s),None,"{s:?}");
+    }
+    // Counts past what the device ABI holds are refused by the checked counts of both entries.
+    for s in [Shape {heads:u32::MAX,dim:2,cols:8,..good},Shape {heads:65_536,dim:1,cols:u32::MAX-7,..good},Shape {heads:1,dim:u32::MAX,cols:8,..good}] {
+        assert_eq!(crate::block_ops::checked_lengths(s),None,"{s:?}");
+    }
+    // A rows launch: no row, too many rows, a mask bit of an input the arm does not read.
+    use crate::block_rows::{lengths as rows,ROWS_MAX};
+    assert!(rows(good,4,0).is_some() && rows(good,4,1).is_some());
+    for (count,mask) in [(0usize,0u32),(ROWS_MAX+1,0),(4,2),(4,4),(4,8)] {assert_eq!(rows(good,count,mask),None,"rows {count} mask {mask}");}
 }
 /// Keys of the score tests: 2 query heads on 1 key head, 2 values a head, 4 rows.
 /// The live keys by distance are (1, 1), (2, 0), (0.5, -1). The fourth row is not live and holds 9.
@@ -199,7 +241,9 @@ fn value_sum(rows:usize,slot:usize,terms:&[(usize,f32)],n:usize)->f32 {
     assert_eq!(lengths(Shape {heads:3,rows:33,..shape(Op::SinkSoftmax)}),Some(([99,3,1,0],0,3,33)));
     assert_eq!((softmax_part(1024),softmax_part(256),softmax_part(32),softmax_part(31),softmax_part(1),softmax_part(100)),(32,32,32,31,1,100));
     assert_eq!(lengths(Shape {cols:0,bound:0.0,..Shape {op:Op::WindowValues,..scores}}),Some(([24_576,524_288,3072,2],0,3072,1)));
-    assert_eq!(lengths(Shape {heads:24,dim:16,cols:1024,..shape(Op::RelBias)}),Some(([384,0,0,0],16_384,24_576,1)));
+    assert_eq!(lengths(Shape {heads:24,dim:16,cols:1024,..shape(Op::RelBias)}),Some(([384,0,0,0],16_384,24*128,8)));
+    assert_eq!(lengths(Shape {heads:2,dim:2,cols:3,..shape(Op::RelBias)}),Some(([4,0,0,0],6,6,1)));
+    assert_eq!((rel_part(1024),rel_part(8),rel_part(52),rel_part(3)),(8,8,1,1));
     assert_eq!(lengths(Shape {heads:24,dim:128,taps:1,cols:1,bound:8.0,..shape(Op::HeadClip)}),Some(([3072,1,0,0],3072,24*4,32)));
     assert_eq!(lengths(Shape {heads:8,dim:128,bound:8.0,..shape(Op::HeadClip)}),Some(([1024,0,0,0],0,8*4,32)));
     // A head of the clip is written in parts of 32 words when its width is a multiple of 32, else in one unit.
@@ -338,7 +382,7 @@ fn clip_by_definition(s:Shape,x:&[f32],position:Option<f32>,scale:&[f32])->Vec<f
 
 /// A few odd words among the values of a staged-form test: signed zeros, an infinity, a NaN, a large value.
 fn odd(seed:u32,value:f32)->f32 {
-    match seed%61 {0=>0.0,1=>-0.0,2=>f32::NEG_INFINITY,3=>f32::NAN,4=>40.0,_=>value}
+    match seed%61 {0=>0.0,1=>-0.0,2=>f32::NEG_INFINITY,3=>f32::NAN,4=>40.0,5=>f32::INFINITY,_=>value}
 }
 /// The staged `SinkSoftmax` of the GPU entry, phase by phase as a block of SUM_THREADS threads runs it.
 fn softmax_staged(s:Shape,x:[&[f32];4])->Vec<f32> {
@@ -414,6 +458,15 @@ fn by_units(s:Shape,x:[&[f32];4])->Vec<f32> {
         for bad in [0.5f32,(r+1) as f32,f32::NAN] {let x=[&scores[..],&sink[..],&[bad][..],&[][..]];assert_eq!(bits(&softmax_staged(s,x)),bits(&by_units(s,x)));}
     }
     assert!(checked>=100,"{checked}");
+    // More than SOFTMAX_GROUP blocks of distances (review REVFAST, LOW 1): a second group of the staged loop, and
+    // a last block of one distance.
+    for (rows,live) in [(16_385u32,16_385usize),(17_000,16_385),(20_000,19_999)] {
+        let s=Shape {heads:1,rows,..shape(Op::SinkSoftmax)};let r=rows as usize;
+        assert!(live.div_ceil(BLOCK)>crate::block_attention::SOFTMAX_GROUP);
+        let scores=(0..r).map(|_|{let v=next();odd(v,((v>>8) as f32/8_388_608.0-1.0)*8.0)}).collect::<Vec<_>>();
+        let x=[&scores[..],&[0.25f32][..],&[live as f32][..],&[][..]];
+        assert_eq!(bits(&softmax_staged(s,x)),bits(&by_units(s,x)),"{rows} rows, {live} live");
+    }
     // Ties of the top: the sink and scores of +0.0 and -0.0, or of one value, in every order. The top of the unit
     // is the first of them; the staged pick gives the same bits.
     for (sink,first,later) in [(0.0f32,-0.0f32,0.0f32),(-0.0,0.0,-0.0),(f32::NEG_INFINITY,-0.0,0.0),(f32::NEG_INFINITY,0.0,-0.0),(-1.0,2.0,2.0),(f32::NAN,1.0,2.0),(f32::NEG_INFINITY,f32::NAN,f32::NEG_INFINITY)] {
@@ -459,4 +512,60 @@ fn by_units(s:Shape,x:[&[f32];4])->Vec<f32> {
     assert_eq!(values_stage(Shape {heads:2,dim:16,taps:0,rows:4,..shape(Op::WindowValues)}),None);
     assert_eq!(values_stage(Shape {heads:2,dim:16,taps:1,rows:4,bound:1.0,..shape(Op::WindowValues)}),None);
     assert_eq!(values_stage(Shape {heads:2,dim:16,taps:1,rows:4,..shape(Op::SinkSoftmax)}),None);
+}
+/// The rows entry `resident_launch_block_softmax`: block b runs the staged head b mod h on the inputs of row b / h.
+fn softmax_rows_staged(s:Shape,rows:usize,shared:u32,x:[&[f32];4])->Vec<f32> {
+    let blocks=crate::block_attention::softmax_rows_stage(s,rows,shared).unwrap();
+    let (h,r)=(s.heads as usize,s.rows as usize);
+    assert_eq!(blocks,rows*h);
+    let (one,_,_,_)=crate::block_ops::checked_lengths(s).unwrap();
+    let mut out=vec![f32::from_bits(0x7fc0_dead);rows*h*r];
+    for block in 0..blocks {
+        let (row,head)=(block/h,block%h);
+        let words=softmax_staged(s,crate::block_rows::row_inputs(shared,row,one,x));
+        out[(row*h+head)*r..(row*h+head+1)*r].copy_from_slice(&words[head*r..(head+1)*r]);
+    }
+    out
+}
+#[test] fn sink_softmax_staged_at_rows_gives_the_words_of_the_rows_unit() {
+    let mut state=0x1b87_3593u32;
+    let mut next=||{state^=state<<13;state^=state>>17;state^=state<<5;state};
+    let mut checked=0;
+    for (heads,keys,rows) in [(1u32,1u32,1usize),(2,7,3),(3,32,5),(2,100,4),(4,1024,3),(1,2112,2),(2,33,17),(1,16_400,2)] {
+        let s=Shape {heads,rows:keys,..shape(Op::SinkSoftmax)};
+        let (h,r)=(heads as usize,keys as usize);
+        for shared in [0u32,0b0010,0b0100,0b0110] {
+            let per=|n:usize,words:usize|if shared>>n&1==1 {words} else {rows*words};
+            let scores=(0..rows*h*r).map(|_|{let v=next();odd(v,((v>>8) as f32/8_388_608.0-1.0)*30.0)}).collect::<Vec<_>>();
+            let sink=(0..per(1,h)).map(|_|{let v=next();odd(v>>3,((v>>8) as f32/8_388_608.0-1.0)*30.0)}).collect::<Vec<_>>();
+            // Live counts of each row (or the one shared), some no count (NaN words).
+            // A shared step word is no count in every third shape (all words NaN).
+            let bad_shared=shared&0b0100!=0 && keys%3==1;
+            let step=(0..per(2,1)).map(|i|{let v=next() as usize;if i%5==3 || bad_shared {0.5} else {(v%(r+1)) as f32}}).collect::<Vec<_>>();
+            let x=[&scores[..],&sink[..],&step[..],&[][..]];
+            let (_,_,units,words)=crate::block_rows::lengths(s,rows,shared).unwrap();
+            let mut want=vec![0.0f32;units*words];
+            for (index,unit) in want.chunks_exact_mut(words).enumerate() {crate::block_rows::unit(s,rows,shared,index,x,&[],unit);}
+            assert_eq!(bits(&softmax_rows_staged(s,rows,shared,x)),bits(&want),"{heads} heads of {keys} keys, {rows} rows, mask {shared}");
+            checked+=1;
+        }
+    }
+    assert_eq!(checked,32);
+}
+#[test] fn sink_softmax_is_staged_at_rows_only_with_its_scores_per_row() {
+    use crate::block_attention::softmax_rows_stage;
+    let s=Shape {heads:24,rows:8192,..shape(Op::SinkSoftmax)};
+    assert_eq!(softmax_rows_stage(s,1024,0),Some(24*1024));
+    assert_eq!(softmax_rows_stage(s,1024,0b0110),Some(24*1024));
+    // Shared scores, the list or window bits, an unused input, another arm, no rows, a shape the arm refuses: refused.
+    for mask in [0b0001,0b0111,0b1000,crate::block_rows::LIST,crate::block_rows::WINDOW] {assert_eq!(softmax_rows_stage(s,1024,mask),None,"{mask}");}
+    assert_eq!(softmax_rows_stage(Shape {op:Op::WindowValues,..s},1024,0),None);
+    assert_eq!(softmax_rows_stage(s,0,0),None);
+    assert_eq!(softmax_rows_stage(Shape {dim:1,..s},4,0),None);
+    // Review REVSOFTMAX, LOW 1: too many rows, no keys or too many, no heads, more output words than the device ABI holds.
+    assert_eq!(softmax_rows_stage(s,crate::block_rows::ROWS_MAX+1,0),None);
+    assert_eq!(softmax_rows_stage(Shape {rows:0,..s},4,0),None);
+    assert_eq!(softmax_rows_stage(Shape {rows:(1<<24)+1,..s},4,0),None);
+    assert_eq!(softmax_rows_stage(Shape {heads:0,..s},4,0),None);
+    assert_eq!(softmax_rows_stage(Shape {rows:1<<20,..s},crate::block_rows::ROWS_MAX,0),None);
 }

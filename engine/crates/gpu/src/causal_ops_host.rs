@@ -35,6 +35,7 @@ pub enum Op {Conv,Prepare,Step,GatedNorm,SwiGlu,Project,KeyNorm,Pool,PoolScores,
     #[cfg(not(target_arch="nvptx64"))] PlainNorm, // INKLING
     #[cfg(not(target_arch="nvptx64"))] RoundedNorm, // INKLING
     #[cfg(not(target_arch="nvptx64"))] RowDots, // INKLING
+    #[cfg(not(target_arch="nvptx64"))] RouterPick, // INKLING
 } // INKLING
 #[repr(C)]
 #[derive(Debug,Clone,Copy)]

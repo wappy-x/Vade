@@ -125,7 +125,7 @@ fn the_taps_meet_the_inputs_by_their_lag() {
     // Position 5: slot 1 holds the current input, slot 0 the one before it, slot 3 the one before that, slot 2 the oldest.
     let mut ring=vec![0.0f32;taps*width];for (slot,value) in [(2,1.0),(3,2.0),(0,3.0),(1,4.0)] {ring[slot*width]=value;}
     let residual=vec![0.25f32;width];
-    let out=close(&run,&d.visits[0],&ring,&vec![1.0],&residual).unwrap();
+    let out=close(&run,&d.visits[0],&ring,&vec![1.0],0,&residual).unwrap();
     assert_eq!(out[0],rn(0.25+rn(1238.0*conv_scale(5))));
     // A channel with no tap keeps its own input: (0 + u) * scale. Here u is 0, so the residual stays.
     assert!(out[1..].iter().all(|&v|v==0.25));
@@ -137,12 +137,12 @@ fn a_wrong_extent_is_refused() {
     let d=small();let w=Made::new(&d,28);let c=Stand::new();let run=Run::new(&c,&w,&d).unwrap();let width=d.hidden as usize;
     let (good,short)=(vec![1.0f32;width],vec![1.0f32;width-1]);let ring=vec![0.0f32;4*width];let visit=d.visits[0];
     assert!(sum(&run,&visit,&short).unwrap_err().contains("no whole count of rows of the width"));
-    assert!(close(&run,&visit,&ring[width..].to_vec(),&vec![0.0],&good).is_err());
-    assert!(close(&run,&visit,&ring,&vec![0.0,0.0],&good).is_err());
-    assert!(close(&run,&visit,&ring,&vec![0.0],&short).is_err());
-    assert!(close(&run,&visit,&ring,&vec![0.0],&good).is_ok());
+    assert!(close(&run,&visit,&ring[width..].to_vec(),&vec![0.0],0,&good).is_err());
+    assert!(close(&run,&visit,&ring,&vec![0.0,0.0],0,&good).is_err());
+    assert!(close(&run,&visit,&ring,&vec![0.0],0,&short).is_err());
+    assert!(close(&run,&visit,&ring,&vec![0.0],0,&good).is_ok());
     // A slot outside the ring stops the launch.
-    assert!(close(&run,&visit,&ring,&vec![4.0],&good).is_err());
+    assert!(close(&run,&visit,&ring,&vec![4.0],0,&good).is_err());
     // A layer with no routed experts, a router bias of another length, and a visit outside the layers.
     let mut dense=d.clone();dense.layers[0].ffn=Ffn::Dense {width:8};
     assert!(sum(&Run::new(&c,&w,&dense).unwrap(),&visit,&good).unwrap_err().contains("routed experts"));

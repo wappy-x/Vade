@@ -14,7 +14,7 @@
 //! - The projection of token-made taps: row `head * taps + lag`.
 //! - The message queries: for each loop layer the query, key, value and expert row, from the two stored tensors.
 use super::{ConvOperands, InputNorms, Operands, Resident, load::Files};
-use crate::{Result, bounded_decoder::Compute, loop_decoder::mix::{Message, Weight, Weights, chain_product}};
+use crate::{Result, bounded_decoder::Compute, loop_decoder::mix::{Message, Weight, Weights, chain_product, check_runs, gathered_runs}};
 use engine_model::{plan::{description::{ConvTaps, TapOrder}, loop_load::LoopCheckpoint, loop_packed_unit::UnitShape}, safetensors::Dtype, shapes::Proj};
 use std::{collections::BTreeMap, ops::Range};
 
@@ -32,6 +32,15 @@ pub trait ResidentProduct<V>: Compute {
         if inputs == 1 { return self.resident_product(weight, words, rows, columns, x); }
         let outs = (0..inputs).map(|input| self.resident_product(weight, words.clone(), rows, columns, &self.range(x, input * columns, columns)?)).collect::<Result<Vec<_>>>()?;
         self.join(&outs.iter().collect::<Vec<_>>())
+    }
+    /// The products of the expert runs of a step of rows with no gather (`Weights::product_runs`). `runs` holds the
+    /// matrix of each run in launch order: its value, its words, its rows and its count of launch rows; all runs have
+    /// the same rows and `columns` columns. Launch row `i` reads row `input[i]` of `x` (row `i` without a table); row
+    /// `j` of the result is launch row `output[j]` (row `j` without a table). The tables passed `mix::check_runs`.
+    /// None: this compute has no such body for these runs, and the caller gathers. The body here gives None.
+    fn resident_product_runs(&self, runs: &[(&V, Range<usize>, usize, usize)], x: &Self::Value, columns: usize, input: Option<&[usize]>, output: Option<&[usize]>) -> Result<Option<Self::Value>> {
+        let _ = (runs, x, columns, input, output);
+        Ok(None)
     }
     /// `words` of `weight` hold the unit of one packed matrix (`loop_packed_unit`). The result is the result of
     /// `resident_product` on the same matrix widened to BF16, gate rows first, word for word. None: this compute
@@ -53,6 +62,9 @@ impl<'b, 'd> ResidentProduct<spark_gpu_probe::driver::DeviceVector<'d>> for crat
     }
     fn resident_product_rows(&self, weight: &spark_gpu_probe::driver::DeviceVector<'d>, words: Range<usize>, rows: usize, columns: usize, x: &Self::Value, inputs: usize) -> Result<Self::Value> {
         crate::bounded_decoder::Device::resident_product_rows(self, weight, words, rows, columns, x, inputs)
+    }
+    fn resident_product_runs(&self, runs: &[(&spark_gpu_probe::driver::DeviceVector<'d>, Range<usize>, usize, usize)], x: &Self::Value, columns: usize, input: Option<&[usize]>, output: Option<&[usize]>) -> Result<Option<Self::Value>> {
+        crate::bounded_decoder::Device::resident_product_runs(self, runs, x, columns, input, output)
     }
     fn packed_product(&self, weight: &spark_gpu_probe::driver::DeviceVector<'d>, words: Range<usize>, unit: UnitShape, x: &Self::Value) -> Result<Option<Self::Value>> {
         crate::bounded_decoder::Device::packed_product(self, weight, words, unit, x)
@@ -259,6 +271,22 @@ impl<C: ResidentProduct<V>, V> Weights<C> for LoadedWeights<'_, V> {
         let outs = (0..rows).map(|row| self.product(compute, weight, &compute.range(x, row * columns, columns)?)).collect::<Result<Vec<_>>>()?;
         compute.join(&outs.iter().collect::<Vec<_>>())
     }
+    /// The expert runs go to the compute with no gather when every run is a matrix that stays with the owner of the
+    /// weights, with one shape; any other case, or a compute with no such body, takes the body with gathers.
+    fn product_runs(&self, compute: &C, runs: &[(Weight, usize)], x: &C::Value, columns: usize, input: Option<&[usize]>, output: Option<&[usize]>) -> Result<C::Value> {
+        check_runs(compute.words(x), columns, runs, input, output)?;
+        let mut matrices = Vec::with_capacity(runs.len());
+        for &(weight, count) in runs {
+            match self.matrix(weight)? {
+                Some((value, words, rows, matrix_columns)) if matrix_columns == columns && matrices.first().is_none_or(|first: &(&V, Range<usize>, usize, usize)| first.2 == rows) => matrices.push((value, words, rows, count)),
+                _ => return gathered_runs(self, compute, runs, x, columns, input, output),
+            }
+        }
+        match compute.resident_product_runs(&matrices, x, columns, input, output)? {
+            Some(value) => Ok(value),
+            None => gathered_runs(self, compute, runs, x, columns, input, output),
+        }
+    }
     /// Matrices that a stack holds one after another run as one product over all their rows. A row is one chain over
     /// the same input, so each part holds the words of its own product.
     fn stack_products(&self, compute: &C, weights: &[Weight], x: &C::Value) -> Result<Vec<C::Value>> {
@@ -266,6 +294,11 @@ impl<C: ResidentProduct<V>, V> Weights<C> for LoadedWeights<'_, V> {
         let y = compute.resident_product(value, words, rows.iter().sum(), columns, x)?;
         let mut start = 0;
         rows.iter().map(|&n| { let part = compute.range(&y, start, n); start += n; part }).collect()
+    }
+    fn stack_product_rows(&self, compute: &C, weights: &[Weight], x: &C::Value, rows: usize) -> Result<Option<C::Value>> {
+        let Some((value, words, parts, columns)) = self.run(weights)? else { return Ok(None) };
+        if rows == 0 || rows.checked_mul(columns) != Some(compute.words(x)) { return Err("loop weights: the input of a stacked product differs from its rows".into()); }
+        compute.resident_product_rows(value, words, parts.iter().sum(), columns, x, rows).map(Some)
     }
     fn products(&self, compute: &C, weights: &[Weight], x: &C::Value, shared: bool) -> Result<Option<C::Value>> {
         // Experts of one projection of one layer, from one packed stack.

@@ -5,8 +5,10 @@ use crate::{bounded_decoder::Host,loop_decoder::{fixture::{Fixture,made},rows::L
 type Span=ChatRows;
 fn total(spans:&[Span])->usize {spans.iter().map(|span|span.count).sum()}
 fn list(spans:&[Span])->Rows {Rows::new(spans.to_vec()).unwrap()}
-/// The layouts of a description for steps of up to `limit` rows.
-fn layouts_for(d:&engine_model::plan::description::LoopTextDescription,capacity:u64,limit:usize)->crate::Result<Vec<Layout>> {state::layouts_for(d,capacity,Limits {step_rows:limit,key_bytes:1<<20})}
+/// The layouts that a chat with many rows works in (`Layout::wide`) for steps of up to `limit` rows.
+fn layouts_for(d:&engine_model::plan::description::LoopTextDescription,capacity:u64,limit:usize)->crate::Result<Vec<Layout>> {
+    Ok(state::layouts_for(d,capacity,Limits {step_rows:limit,key_bytes:1<<20})?.iter().map(Layout::wide).collect())
+}
 
 fn bits(v:&[f32])->Vec<u32> {v.iter().map(|v|v.to_bits()).collect()}
 /// What a ring holds after each row of a chat, by the rule of a step of one row: the position that each slot
@@ -151,4 +153,35 @@ fn the_step_words_of_the_rows_are_those_of_steps_of_one_row() {
     }
     assert!(key_steps(&Host,&l[1],14,3).is_err(),"a row past the capacity");
     let _=state::STEP_WORD_LIMIT;
+}
+#[test]
+fn a_chat_with_many_rows_works_in_a_wide_ring_and_the_state_keeps_the_window_ring_of_token_steps() {
+    let fixture=Fixture::small();let d=&fixture.description;
+    for limit in [2usize,3,6] {
+        let l=state::layouts_for(d,16,Limits {step_rows:limit,key_bytes:1<<20}).unwrap();let (layout,wide)=(&l[0],l[0].wide());
+        assert!(layout.ring && layout.rows==layout.window && wide.rows==layout.window+limit-1);
+        let key=|position:u64|(0..layout.kv_channels as u32).map(|i|f32::from_bits((0x3f00+position as u32*64+i)<<16)).collect::<Vec<_>>();
+        let (mut one,mut many)=(clean(&Host,std::slice::from_ref(layout)).unwrap(),clean(&Host,std::slice::from_ref(layout)).unwrap());
+        let mut position=0u64;
+        while position<14 {
+            let count=limit.min((14-position) as usize);let span=Span {first:position,count};
+            let mut plane=super::widen(&Host,layout,&many.visits[0].keys,position).unwrap();
+            let rows=(position..).take(count).flat_map(key).collect::<Vec<_>>();
+            write_rows(&Host,&wide,&mut plane,span,&pack(&Host,&rows).unwrap()).unwrap();
+            // Every row of the step sees its keys at their wide slots.
+            for at in (position..).take(count) {
+                for seen in (at+1-wide.live(at).unwrap() as u64)..=at {
+                    let slot=wide.slot(seen).unwrap();
+                    assert_eq!(bits(&plane[slot*wide.row_words..(slot+1)*wide.row_words]),bits(&pack(&Host,&key(seen)).unwrap()),"limit {limit} row {at} key {seen}");
+                }
+            }
+            many.visits[0].keys=super::narrow(&Host,layout,&plane,position+count as u64).unwrap();
+            for at in (position..).take(count) {write_row(&Host,layout,&mut one.visits[0].keys,at,&key(at)).unwrap();}
+            position+=count as u64;
+            assert_eq!(bits(&many.visits[0].keys),bits(&one.visits[0].keys),"limit {limit} position {position}");
+        }
+        // A plane of another size is refused.
+        assert!(super::widen(&Host,layout,&vec![0.0;1],4).is_err() && super::narrow(&Host,layout,&vec![0.0;1],4).is_err());
+    }
+    assert_eq!(super::moves(5,12,4,6),[(1,5,1),(2,0,2),(0,2,4)]);
 }

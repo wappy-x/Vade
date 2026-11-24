@@ -12,6 +12,12 @@
 //! arm on the vectors of row `r` in rising `e`: the same values in the same order, so the same bits (host test). The
 //! input has the same count as when each row holds its own vectors; it is not a shared input.
 //!
+//! Window form (bit `WINDOW` of the mask, for `ShortConv` only): input 0 holds `rows + taps - 1` rows of the ring
+//! width in time order, the `taps - 1` positions before the step and then the new input of each row, and row `r`
+//! reads the `taps` rows from row `r` as its ring, with its own row in the last slot. So a step of rows of one chat
+//! reads the rings where they lie and needs no gather of a ring for each row. The step word is `taps - 1` for every
+//! row; the arm reads the same words in the same order as from the gathered ring (host test).
+//!
 //! Every function here is pure and takes only counts, so the kernel entry reads its slices by the same counts as
 //! the host checks them.
 use crate::block_ops::{Op,Shape,checked_lengths,split,unit as arm_unit};
@@ -26,6 +32,16 @@ pub fn is_shared(shared:u32,n:usize)->bool {shared>>n&1==1}
 /// Bit 4 of the mask: the vectors of the arm are read in list form (module text).
 pub const LIST:u32=1<<4;
 
+/// Bit 5 of the mask: arm `ShortConv` reads its rings in window form (module text).
+pub const WINDOW:u32=1<<5;
+
+/// The words of one ring row of the window form: the channels of arm `ShortConv` (`heads * dim`). None: the arm has
+/// no window form or no taps.
+#[inline(always)]
+pub fn windowed(s:Shape)->Option<usize> {
+    match s.op {Op::ShortConv if s.taps>0=>(s.heads as usize).checked_mul(s.dim as usize),_=>None}
+}
+
 /// The input that the list form reads as a joined list, and the words of one vector: `RowDots` input 0 (`cols`
 /// words), `MixBlend` input 1 (`dim` words). None: the arm has no list form.
 #[inline(always)]
@@ -35,14 +51,20 @@ pub fn listed(s:Shape)->Option<(usize,usize)> {
 
 /// The counts of a rows launch: the words of each input, of the weight, the units of all rows and the words of a
 /// unit. None: the arm has no counts, `rows` is 0 or above `ROWS_MAX`, the mask names an input past the fourth or an
-/// input the arm does not read, the list form is asked of an arm without one or with its listed input shared, or a
-/// count exceeds what the device ABI holds.
+/// input the arm does not read, the list form is asked of an arm without one or with its listed input shared, the
+/// window form is asked of an arm without one, with the list form, or with input 0 shared, or a count exceeds what
+/// the device ABI holds.
 #[inline(always)]
 pub fn lengths(s:Shape,rows:usize,shared:u32)->Option<([usize;4],usize,usize,usize)> {
     let (x,weight,units,words)=checked_lengths(s)?;
-    if rows==0 || rows>ROWS_MAX || shared>=LIST<<1 || (0..4).any(|n|is_shared(shared,n) && x[n]==0) {return None;}
+    if rows==0 || rows>ROWS_MAX || shared>=WINDOW<<1 || (0..4).any(|n|is_shared(shared,n) && x[n]==0) {return None;}
     if shared&LIST!=0 && listed(s).is_none_or(|(n,_)|is_shared(shared,n)) {return None;}
-    let extent=|n:usize|if is_shared(shared,n) {Some(x[n])} else {rows.checked_mul(x[n])};
+    let window=if shared&WINDOW!=0 {
+        let width=windowed(s)?;
+        if shared&LIST!=0 || is_shared(shared,0) || Some(x[0])!=width.checked_mul(s.taps as usize) {return None;}
+        Some(rows.checked_add(s.taps as usize-1)?.checked_mul(width)?)
+    } else {None};
+    let extent=|n:usize|if is_shared(shared,n) {Some(x[n])} else if n==0 && window.is_some() {window} else {rows.checked_mul(x[n])};
     let lengths=[extent(0)?,extent(1)?,extent(2)?,extent(3)?];
     let all=rows.checked_mul(units)?;
     if lengths.into_iter().chain([all.checked_mul(words)?]).any(|n|n>u32::MAX as usize || n>isize::MAX as usize/4) {return None;}
@@ -56,9 +78,23 @@ pub fn unit(s:Shape,rows:usize,shared:u32,index:usize,x:[&[f32];4],w:&[f32],out:
     let Some((one,_,units,_))=checked_lengths(s) else {return;};
     if units==0 || rows==0 {return;}
     let (row,inner)=(index/units,index%units);
-    let part=|n:usize|if is_shared(shared,n) {x[n]} else {&x[n][row*one[n]..(row+1)*one[n]]};
+    let part=|n:usize|if is_shared(shared,n) {x[n]} else if n==0 && shared&WINDOW!=0 {window_ring(s,row,one[0],x[0])} else {&x[n][row*one[n]..(row+1)*one[n]]};
     if shared&LIST!=0 {list_unit(s,rows,shared,index,x,w,out);return;}
     arm_unit(s,inner,[part(0),part(1),part(2),part(3)],w,out)
+}
+
+/// The inputs of row `row` of a rows launch without the list or the window form: input `n` whole when it is shared,
+/// else the words of that row (`one` = the counts of one row, `block_ops::checked_lengths`). The slices `unit` reads.
+#[inline(always)]
+pub fn row_inputs(shared:u32,row:usize,one:[usize;4],x:[&[f32];4])->[&[f32];4] {
+    core::array::from_fn(|n|if is_shared(shared,n) {x[n]} else {&x[n][row*one[n]..(row+1)*one[n]]})
+}
+
+/// The ring of row `row` in window form: the `one` words (`taps` rows) from row `row` of the window `x`.
+#[inline(always)]
+fn window_ring(s:Shape,row:usize,one:usize,x:&[f32])->&[f32] {
+    let width=one/(s.taps as usize).max(1);
+    &x[row*width..row*width+one]
 }
 
 /// Unit `index` of a rows launch in list form: the words of `RowDots` or `MixBlend` (`block_stream::unit`) with
@@ -106,7 +142,7 @@ pub fn reference(s:Shape,rows:usize,shared:u32,x:[&[f32];4],w:&[f32])->Result<Ve
     for row in 0..rows {
         // List form: the row's own vectors, gathered from the joined list in rising place, then the arm as today.
         let gathered=listed(s).filter(|_|shared&LIST!=0).map(|(n,width)|(n,(0..one[n]/width).flat_map(|e|&x[n][(e*rows+row)*width..(e*rows+row+1)*width]).copied().collect::<Vec<f32>>()));
-        let part=|n:usize|match &gathered {Some((m,g)) if *m==n=>g.as_slice(),_=>if is_shared(shared,n) {x[n]} else {&x[n][row*one[n]..(row+1)*one[n]]}};
+        let part=|n:usize|match &gathered {Some((m,g)) if *m==n=>g.as_slice(),_=>if is_shared(shared,n) {x[n]} else if n==0 && shared&WINDOW!=0 {window_ring(s,row,one[0],x[0])} else {&x[n][row*one[n]..(row+1)*one[n]]}};
         out.extend(crate::causal_ops::reference(s,[part(0),part(1),part(2),part(3)],w)?);
     }
     Ok(out)
@@ -119,13 +155,13 @@ mod tests {
     fn value(i:usize,scale:f32)->f32 {((i*37%101) as f32-50.0)*scale}
     fn bits(x:&[f32])->Vec<u32> {x.iter().map(|v|v.to_bits()).collect()}
     /// Each arm with a small shape. The step words of an arm are counts and slots, so each row gets them from `words`.
-    fn arms()->[Shape;14] {
+    fn arms()->[Shape;15] {
         let s=|op,heads,dim,taps,rows,cols,epsilon,bound|Shape {op,heads,dim,taps,rows,cols,epsilon,bound};
         [s(Op::HeadClip,2,4,1,0,1,0.0,1.0),s(Op::RelBias,2,4,0,0,8,0.0,0.0),s(Op::ShortConv,2,3,4,0,3,0.0,0.5),
          s(Op::WindowScores,2,4,1,4,4,0.0,0.5),s(Op::SinkSoftmax,2,0,0,4,0,0.0,0.0),s(Op::WindowValues,2,4,1,4,0,0.0,0.0),
          s(Op::MixBlend,1,2,0,0,2,0.0,0.5),s(Op::GateBlend,0,2,0,0,0,0.0,0.0),s(Op::CappedGate,0,2,0,1,0,4.0,25.0),
          s(Op::RouteFold,0,2,0,2,0,0.0,0.0),s(Op::Softcap,0,0,0,2,0,0.03125,32.0),s(Op::PlainNorm,1,2,0,0,0,1.0e-6,0.0),
-         s(Op::RoundedNorm,1,2,1,0,0,1.0e-6,0.0),s(Op::RowDots,2,0,0,3,5,0.0,0.0)]
+         s(Op::RoundedNorm,1,2,1,0,0,1.0e-6,0.0),s(Op::RowDots,2,0,0,3,5,0.0,0.0),s(Op::RouterPick,1,1,1,4,2,0.0,1.5)]
     }
     fn words(s:Shape,n:usize,row:usize,count:usize)->Vec<f32> {
         match (s.op,n) {
@@ -205,12 +241,55 @@ mod tests {
         }
         assert_eq!(runs,28,"list runs: 3 RowDots shapes x 1 mask x 4 row counts, 2 MixBlend shapes x 2 masks x 4");
     }
+    /// The window form gives, bit for bit, the words of the rows launch on the ring of each row gathered in slot
+    /// order with its own slot word, for each start of the step in the ring and each mask of the other inputs.
+    #[test]
+    fn the_window_form_equals_the_rows_launch_on_each_rows_gathered_ring() {
+        let mut runs=0;
+        let conv=arms().into_iter().find(|s|s.op==Op::ShortConv).unwrap();
+        for s in [conv,Shape {cols:0,..conv},Shape {cols:crate::block_stream::CONV_ADDEND,..conv},Shape {heads:1,dim:2304,cols:0,..conv},Shape {taps:2,..conv}] {
+            let width=windowed(s).unwrap();let t=s.taps as usize;
+            let (per,weights,units,size)=checked_lengths(s).unwrap();
+            assert_eq!(per[0],t*width);
+            let w=(0..weights).map(|i|value(i+11,0.125)+2.0).collect::<Vec<_>>();
+            for mask in [0u32,2,4,6].into_iter().filter(|&m|(1..3).all(|i|!is_shared(m,i) || per[i]>0)) {
+                for m in [1usize,2,5,129] {for base in 0..t {
+                    let window=(0..(m+t-1)*width).map(|i|value(i*3+base*7+1,0.0625)).collect::<Vec<f32>>();
+                    let row=|i:usize,r:usize|words(s,i,if is_shared(mask,i) {0} else {r},per[i]);
+                    let mut plain:[Vec<f32>;4]=core::array::from_fn(|i|if is_shared(mask,i) {row(i,0)} else {(0..m).flat_map(|r|row(i,r)).collect()});
+                    // Row r stands at position base + r: slot q of its ring holds the newest position with that slot.
+                    plain[0]=(0..m).flat_map(|r|{let own=(base+r)%t;let window=&window;(0..t).flat_map(move |q|{let back=(own+t-q)%t;let at=r+t-1-back;window[at*width..(at+1)*width].iter().copied()})}).collect();
+                    plain[3]=(0..m).map(|r|((base+r)%t) as f32).collect();
+                    let today=reference(s,m,mask,[&plain[0],&plain[1],&plain[2],&plain[3]],&w).unwrap();
+                    let step=[(t-1) as f32];
+                    let got=reference(s,m,mask|WINDOW|8,[&window,&plain[1],&plain[2],&step],&w).unwrap();
+                    assert_eq!(bits(&got),bits(&today),"{:?} mask {mask} rows {m} base {base}",s.cols);
+                    let mut units_out=vec![f32::NAN;m*units*size];
+                    for index in 0..m*units {unit(s,m,mask|WINDOW|8,index,[&window,&plain[1],&plain[2],&step],&w,&mut units_out[index*size..(index+1)*size]);}
+                    assert_eq!(bits(&units_out),bits(&today),"{:?} mask {mask} rows {m} base {base} units",s.cols);
+                    assert!(today.iter().all(|v|v.is_finite()));
+                    // One word short or long of the window is refused.
+                    assert!(reference(s,m,mask|WINDOW|8,[&window[1..],&plain[1],&plain[2],&step],&w).is_err());
+                    runs+=1;
+                }}
+            }
+        }
+        assert!(runs>=100,"window runs: {runs}");
+    }
     #[test]
     fn a_rows_launch_refuses_what_it_does_not_hold() {
         for s in arms() {
             assert!(lengths(s,0,0).is_none() && lengths(s,ROWS_MAX+1,0).is_none(),"{:?}",s.op);
             assert!(lengths(s,ROWS_MAX,0).is_some(),"{:?}",s.op);
-            for high in [32u32,33,1<<31] {assert!(lengths(s,4,high).is_none(),"{:?} mask {high}",s.op);}
+            for high in [64u32,65,1<<31] {assert!(lengths(s,4,high).is_none(),"{:?} mask {high}",s.op);}
+            // The window form only for ShortConv, never with the list form or with input 0 shared.
+            match windowed(s) {
+                None=>assert!(lengths(s,4,WINDOW).is_none() && lengths(s,4,WINDOW|8).is_none(),"{:?}",s.op),
+                Some(width)=>{
+                    assert_eq!(lengths(s,4,WINDOW|8).map(|l|l.0[0]),Some((4+s.taps as usize-1)*width),"{:?}",s.op);
+                    assert!(lengths(s,4,WINDOW|LIST).is_none() && lengths(s,4,WINDOW|1).is_none(),"{:?}",s.op);
+                },
+            }
             // The list form only for the two arms that have one, and never with the listed input shared.
             match listed(s) {
                 None=>assert!(lengths(s,4,LIST).is_none() && lengths(s,4,LIST|1).is_none(),"{:?}",s.op),

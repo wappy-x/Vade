@@ -165,7 +165,7 @@ fn the_state_bytes_of_each_visit_follow_the_slot_rule() {
         for (position,&id) in tokens.iter().enumerate() {
             if position==6 {
                 // Copy the state out and back in: new values with the same words. The ring has gone round by now.
-                state=State {position:state.position,visits:copy(&state).into_iter().map(|[keys,values,a,b,c,e]|state::VisitState {keys,values,rings:[a,b,c,e],next:std::array::from_fn(|_|None)}).collect()};
+                state=State {position:state.position,visits:copy(&state).into_iter().map(|[keys,values,a,b,c,e]|state::VisitState {keys,values,rings:[a,b,c,e],next:std::array::from_fn(|_|None),planes:None}).collect()};
             }
             let step=token(&driver,&mut state,id).unwrap();assert_eq!(state.position,position as u64+1);
             for (slot,(layout,(now,was))) in layouts.iter().zip(step.state.iter().zip(&before)).enumerate() {

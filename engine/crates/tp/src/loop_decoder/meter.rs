@@ -223,11 +223,11 @@ fn the_byte_limit_over_keys_and_the_extra_ring_rows_change_no_word() {
         // The bytes of one row over keys at the largest plane of a driver for 12 rows a step. A limit of two such
         // rows gives groups of two rows there, and larger groups in a smaller plane.
         let wide=Driver::with_limits(&Host,&fixture,d,16,Limits {step_rows:12,key_bytes:1<<30}).unwrap();
-        let row=d.visits.iter().map(|visit|{let a=d.layers[visit.layer as usize].attention;4*a.query_heads as usize*(2*wide.layouts()[visit.slot as usize].rows+a.relative.extent as usize)}).max().unwrap();
+        let row=d.visits.iter().map(|visit|{let a=d.layers[visit.layer as usize].attention;4*a.query_heads as usize*(2*wide.layouts()[visit.slot as usize].wide().rows+a.relative.extent as usize)}).max().unwrap();
         let (mut compared,mut pairs)=(0,0);
         for (step_rows,key_bytes,cut) in [(12,1<<30,vec![12]),(12,1,vec![12]),(12,2*row+1,vec![12]),(12,2*row+1,vec![2,3,4,3]),(5,1<<30,vec![5,5,2]),(5,1,vec![5,5,2]),(5,3*row,vec![4,5,3]),(1,1,vec![1;12])] {
             let driver=Driver::with_limits(&Host,&fixture,d,16,Limits {step_rows,key_bytes}).unwrap();
-            assert!(driver.layouts().iter().all(|layout|layout.key_bytes==key_bytes && layout.rows==if layout.ring {layout.window+step_rows-1} else {16}));
+            assert!(driver.layouts().iter().all(|layout|layout.key_bytes==key_bytes && layout.rows==if layout.ring {layout.window} else {16} && layout.wide().rows==if layout.ring {layout.window+step_rows-1} else {16}));
             let (rows,state)=chat(&driver,&tokens,&cut);
             assert_eq!(rows,words,"{name}: step row limit {step_rows}, {key_bytes} bytes over keys, cut {cut:?}");
             assert_eq!(by_position(&driver,&state),kept,"{name}: the state by position, step row limit {step_rows}, {key_bytes} bytes over keys, cut {cut:?}");
@@ -262,7 +262,7 @@ fn a_step_of_rows_that_fails_runs_again_with_the_same_words() {
         let start=|states:&mut [State<Vec<f32>>;2]|before_it.iter().map(|&counts|step(states,counts,None).unwrap()).collect::<Vec<_>>();
         let [first,second]=failing;let at=[before_it.iter().map(|counts|counts[0]).sum::<usize>() as u64,before_it.iter().map(|counts|counts[1]).sum::<usize>() as u64];
         // The step that fails goes over the end of a ring of the first chat, or not, as the case says.
-        let ring=driver.layouts().iter().filter(|layout|layout.ring).map(|layout|layout.rows as u64).min().unwrap();
+        let ring=driver.layouts().iter().filter(|layout|layout.ring).map(|layout|layout.wide().rows as u64).min().unwrap();
         assert_eq!(at[0]+first as u64>ring,step_rows==5,"{name}: the case and the ring");
         // Two twins never fail: one takes the last step whole, one takes it a chat at a time.
         let (mut whole,mut apart)=(fresh(),fresh());
@@ -289,14 +289,16 @@ fn a_step_of_rows_that_fails_runs_again_with_the_same_words() {
     }
 }
 /// A step that the driver cannot run is refused before any launch and before any value is made, and the text names
-/// the chat: a state of a driver with another step row limit or another capacity, and a state with a ring that
+/// the chat: a state of a driver with another capacity, and a state with a ring that
 /// still waits. A step row limit that one launch cannot take is refused when the driver is made.
 #[test]
 fn a_step_with_a_state_of_another_driver_is_refused_before_any_launch() {
     for (name,fixture) in [("small",Fixture::small()),("wide",Fixture::wide())] {
         let d=&fixture.description;let tokens=fixture.chat(12);let meter=Meter::default();
         let driver=Driver::with_limits(&meter,&fixture,d,16,Limits {step_rows:8,key_bytes:1<<30}).unwrap();
-        let others=[Driver::new(&meter,&fixture,d,16).unwrap(),Driver::with_limits(&meter,&fixture,d,12,Limits {step_rows:8,key_bytes:1<<30}).unwrap()];
+        // The driver of one row a step keeps states of the same sizes (window rings of the window): its state is taken.
+        assert_eq!(Driver::new(&meter,&fixture,d,16).unwrap().state_words(),driver.state_words(),"{name}: one row a step");
+        let others=[Driver::with_limits(&meter,&fixture,d,12,Limits {step_rows:8,key_bytes:1<<30}).unwrap()];
         for (which,other) in others.iter().enumerate() {
             let (mut own,mut wrong)=(driver.clean().unwrap(),other.clean().unwrap());
             let base=meter.live();meter.restart();meter.launches.borrow_mut().clear();

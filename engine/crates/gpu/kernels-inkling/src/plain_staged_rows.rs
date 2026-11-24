@@ -42,8 +42,11 @@ const _: () = assert!(BR * 8 % crate::staged_product::ROWS_THREADS == 0 && BT * 
 /// (rows x cols BF16 patterns, two a word), of the input (input count x cols FP32 values) and of the output ((output
 /// count - 1) x stride + rows words), then rows, cols, inputs (the input rows of the launch) and stride, then the input
 /// table (null, or inputs u32 row numbers) and the input count, then the output table (null, or inputs u32 row numbers)
-/// and the output count. Launch row `t` reads input row `in[t]` (`t` without a table) and writes the words
-/// `out[t] * stride + row` (`t * stride + row` without a table). A launch that the rule `staged_product::rows_admitted`
+/// and the output count, then the run table (null for one matrix) and the runs, then the block table and the blocks.
+/// Launch row `t` reads input row `in[t]` (`t` without a table) and writes the words `out[t] * stride + row`
+/// (`t * stride + row` without a table). In the grouped form block `b` reads its run and its input and weight tiles
+/// from the block table, and that run's matrix, first launch row and count from the run table; its launch rows are
+/// `first .. first + count`. A launch that the rule `staged_product::rows_admitted`
 /// does not take, a table that is not word aligned, and an index at or above its count stop the block.
 /// SAFETY (contract of the caller, the entry `resident_launch_plain_staged_rows`): `table` and `index` are the
 /// arguments the recorded replay passes to the entry; the block inside names what the host checks.
@@ -52,14 +55,20 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
     // SAFETY: `table[index]` is one initialized Command in a live, private, 16-byte aligned device vector (the
     // recorded table of the queue); no replay writes it, and a command of another kind traps before its words are
     // read. The host records a command of this kind only in Backend::project_staged_rows_at_into (the strided and the
-    // plain calls go through it), after staged_product::check_rows_at passed for its eleven words. That check holds:
+    // plain calls go through it) and Backend::project_staged_rows_grouped_into, after staged_product::check_rows_at
+    // or check_rows_grouped passed for its fifteen words. That check holds (for each run's matrix in the grouped form):
     // the weights to exactly rows x cols BF16 values, the input to exactly input count x cols words, the output to
     // exactly (output count - 1) x stride + rows words (checked arithmetic) that meet no operand, with stride at least
     // rows, the weights and the input to 16-byte addresses, cols to whole stages of 64. All three live through
     // completion. The row tables are not the caller's: the host checks its own host words (each table exactly inputs
     // words, every index below its count, the output rows distinct) and the recorder stages exactly those words with
     // this command in its own stage area (record_resident_tabled), uploaded with the command's piece and written by
-    // nothing else before this replay. So a table is read only at a launch row below inputs, inside it; every index is
+    // nothing else before this replay. The grouped form's run and block tables are staged the same way from host
+    // words the host check built and checked (every run's matrix exactly rows x cols BF16 values, 16-byte aligned,
+    // meeting no output; first + count of every run at most the launch rows; count at most 1,024). Here the block
+    // index is compared with the blocks and the run with the runs before either table is read at it, both tables'
+    // alignment is checked, and first + count is compared with the launch rows, so the run's launch rows stay inside
+    // the index tables. So a table is read only at a launch row below inputs, inside it; every index is
     // compared here with its count before any use and the block traps when it is not below it. The rule
     // staged_product::rows_admitted is asked here again before the first read; a launch that fails it stops. Weight
     // reads: two words (4 values) of a row below rows, from a column below cols that is a multiple of 4, so inside the
@@ -74,8 +83,8 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
         let c = &*table.add(index as usize);
         if c.kind != crate::inkling_launch::PLAIN_STAGED_ROWS { core::arch::nvptx::trap(); }
         let words = c.payload.as_ptr().cast::<u64>();
-        let (weights, input, output) = (*words as *const u32, *words.add(1) as *const f32, *words.add(2) as *mut f32);
-        let (rows, k, m) = (*words.add(3) as usize, *words.add(4) as usize, *words.add(5) as usize);
+        let (one_weights, input, output) = (*words as *const u32, *words.add(1) as *const f32, *words.add(2) as *mut f32);
+        let (rows, k, launch_rows) = (*words.add(3) as usize, *words.add(4) as usize, *words.add(5) as usize);
         let stride = *words.add(6) as usize;
         if stride < rows { core::arch::nvptx::trap(); }
         let (in_table, in_count) = (*words.add(7) as *const u32, *words.add(8) as usize);
@@ -87,11 +96,28 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
             if row >= count { core::arch::nvptx::trap(); }
             row
         };
+        // The grouped form (word 11 not null, the expert runs of a visit): the block reads its run and its two tiles
+        // from the staged block table, and the run's matrix, first launch row and count from the staged run table.
+        let (runs_table, runs) = (*words.add(11) as *const u32, *words.add(12) as usize);
+        let (blocks_table, blocks) = (*words.add(13) as *const u32, *words.add(14) as usize);
+        let block = core::arch::nvptx::_block_idx_x() as usize;
+        let (weights, base, m, tile_t, tile_r) = if runs_table.is_null() {
+            let token_tiles = launch_rows.div_ceil(BT);
+            (one_weights, 0, launch_rows, block % token_tiles, block / token_tiles)
+        } else {
+            if (runs_table as usize & 15) != 0 || (blocks_table as usize & 7) != 0 || block >= blocks { core::arch::nvptx::trap(); }
+            let entry = blocks_table.add(2 * block);
+            let (run, tiles) = (entry.read() as usize, entry.add(1).read() as usize);
+            if run >= runs { core::arch::nvptx::trap(); }
+            // 16 bytes a run: the matrix address (two words, low first), its first launch row, its count.
+            let at = runs_table.add(4 * run);
+            let matrix = (at.read() as usize | (at.add(1).read() as usize) << 32) as *const u32;
+            let (first, count) = (at.add(2).read() as usize, at.add(3).read() as usize);
+            if first + count > launch_rows { core::arch::nvptx::trap(); }
+            (matrix, first, count, tiles & 0xffff, tiles >> 16)
+        };
         let threads = core::arch::nvptx::_block_dim_x() as usize;
         if !crate::staged_product::rows_admitted(rows, k, m, weights as usize, input as usize, threads) { core::arch::nvptx::trap(); }
-        let token_tiles = m.div_ceil(BT);
-        let block = core::arch::nvptx::_block_idx_x() as usize;
-        let (tile_t, tile_r) = (block % token_tiles, block / token_tiles);
         if tile_r * BR >= rows { return; }
         let tid = core::arch::nvptx::_thread_idx_x() as usize;
         let (ty, tx) = (tid / 16, tid % 16);
@@ -99,8 +125,8 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
         // The input rows of the two input items of this thread, read once (unused when the launch row is not below m).
         // Two plain values, not an array read at a computed place, so they stay in registers.
         let first_row = tile_t * BT + tid / 8;
-        let source_low = if first_row < m { place(in_table, in_count, first_row) } else { 0 };
-        let source_high = if first_row + 32 < m { place(in_table, in_count, first_row + 32) } else { 0 };
+        let source_low = if first_row < m { place(in_table, in_count, base + first_row) } else { 0 };
+        let source_high = if first_row + 32 < m { place(in_table, in_count, base + first_row + 32) } else { 0 };
         // The columns are whole stages of 64, so every chunk of 32 is whole.
         let chunks = k / KC;
         // Copy chunk `c` of this block's 64 weight rows and 64 input rows into stage `c & 1`.
@@ -154,7 +180,7 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
         let mut target = [0usize; 4];
         for (j, slot) in target.iter_mut().enumerate() {
             let token = tile_t * BT + tx + 16 * j;
-            if token < m { *slot = place(out_table, out_count, token); }
+            if token < m { *slot = place(out_table, out_count, base + token); }
         }
         for i in 0..4 {
             let row = tile_r * BR + ty * 4 + i;

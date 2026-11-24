@@ -8,7 +8,8 @@
 //!   `p` = `block_ops::norm_part(d)`: 32 words when the width is a multiple of 32, else the whole head. A unit is
 //!   one part of one head, and each unit makes the length of the whole head itself, in the one fixed order.
 //! - `RelBias`: `h` heads, `d` = width of the relative state, `k` = extent of the table. Input: the state [h*d].
-//!   Weight: the table [d*k], row then distance. Units `h*k`, words 1.
+//!   Weight: the table [d*k], row then distance. Units `h * k / p`, words `p`, where `p` = `rel_part(k)`: 8
+//!   distances when the extent is a multiple of 8, else 1. Each word is the same chain over the state in any layout.
 //! - `WindowScores`: `h` query heads of `d` values, `t` = query heads for each key head, `r` rows of the key plane,
 //!   `k` = extent of the bias; `bound` = the score scale. Inputs: the query [h*d], the key plane [r*(h/t)*d/2] packed,
 //!   the bias [h*k], the step words [2] = live count and slot of the current token. Units `h*r`, words 1.
@@ -34,6 +35,12 @@ pub const SOFTMAX_PART:usize=32;
 /// The words of one unit of `SinkSoftmax` with `r` rows: `SOFTMAX_PART`, or the whole head when `r` is no multiple.
 #[inline(always)]
 pub fn softmax_part(r:usize)->usize {if r.is_multiple_of(SOFTMAX_PART) {SOFTMAX_PART} else {r}}
+/// Distances of one unit of `RelBias` when the extent is a multiple of it (read arm 4). A part of the launch layout:
+/// each word is the same chain as before, so the words do not depend on it.
+pub const REL_PART:usize=8;
+/// The distances of one unit of `RelBias` with extent `k`: `REL_PART`, or 1 when `k` is no multiple.
+#[inline(always)]
+pub fn rel_part(k:usize)->usize {if k.is_multiple_of(REL_PART) {REL_PART} else {1}}
 /// The largest row count whose live count and slot are exact as floats.
 const ROWS_MAX:usize=1<<24;
 
@@ -45,7 +52,7 @@ pub fn lengths(s:Shape)->Option<Lengths> {
     let plane=|| if d.is_multiple_of(2) && t>0 && h.is_multiple_of(t) && r>0 && r<=ROWS_MAX {r.checked_mul(h/t)?.checked_mul(d/2)} else {None};
     match s.op {
         Op::HeadClip if width>0 && t<=1 && k<=1 && r==0 && s.bound>0.0 && s.epsilon==0.0=>Some(([width,k,0,0],t*width,h.checked_mul(d/norm_part(d))?,norm_part(d))),
-        Op::RelBias if width>0 && k>0 && t==0 && r==0 && s.bound==0.0 && s.epsilon==0.0=>Some(([width,0,0,0],d.checked_mul(k)?,h.checked_mul(k)?,1)),
+        Op::RelBias if width>0 && k>0 && t==0 && r==0 && s.bound==0.0 && s.epsilon==0.0=>Some(([width,0,0,0],d.checked_mul(k)?,h.checked_mul(k/rel_part(k))?,rel_part(k))),
         Op::WindowScores if width>0 && k>0 && s.bound>0.0 && s.epsilon==0.0=>Some(([width,plane()?,h.checked_mul(k)?,2],0,h.checked_mul(r)?,1)),
         Op::SinkSoftmax if h>0 && r>0 && r<=ROWS_MAX && d==0 && t==0 && k==0 && s.bound==0.0 && s.epsilon==0.0=>Some(([h.checked_mul(r)?,h,1,0],0,h.checked_mul(r/softmax_part(r))?,softmax_part(r))),
         Op::WindowValues if width>0 && k==0 && s.bound==0.0 && s.epsilon==0.0=>Some(([h.checked_mul(r)?,plane()?,width,2],0,width,1)),
@@ -64,6 +71,9 @@ fn clip_factor(length:f32,threshold:f32)->f32 {
 /// A step word as a count, if it is a whole number that is not above `most`.
 #[inline(always)]
 fn count(word:f32,most:usize)->Option<usize> {let n=word as usize;if n as f32==word && n<=most {Some(n)} else {None}}
+/// `live` for the staged rows form of `WindowScores` (`block_scores`).
+#[inline(always)]
+pub(crate) fn live_of(step:&[f32],rows:usize)->Option<(usize,usize)> {live(step,rows)}
 /// The live count and the slot of the current token, if the count is not above the rows and the slot is a row.
 #[inline(always)]
 fn live(step:&[f32],rows:usize)->Option<(usize,usize)> {
@@ -161,6 +171,17 @@ pub fn softmax_stage(s:Shape)->Option<usize> {
     if s.op!=Op::SinkSoftmax {return None;}
     crate::block_ops::checked_lengths(s)?;
     Some(s.heads as usize)
+}
+/// `SinkSoftmax` at rows staged (`Some(blocks)`, the entry `resident_launch_block_softmax`): block `b` is head
+/// `b mod h` of row `b / h`, with `block_ops::SUM_THREADS` threads, and runs the staged form of one head on the inputs
+/// of its row (`block_rows::row_inputs`), so its words are those of the rows entry. The scores must be each row's own
+/// (bit 0 of the mask clear); the sink and the step word may be shared or per row; no list or window form.
+#[inline]
+pub fn softmax_rows_stage(s:Shape,rows:usize,shared:u32)->Option<usize> {
+    if s.op!=Op::SinkSoftmax || shared&!0b0110!=0 {return None;}
+    crate::block_rows::lengths(s,rows,shared)?;
+    let blocks=rows.checked_mul(s.heads as usize)?;
+    (blocks<=u32::MAX as usize).then_some(blocks)
 }
 /// Blocks of distances whose parts a staged `SinkSoftmax` block makes at one time.
 pub const SOFTMAX_GROUP:usize=crate::block_ops::SUM_THREADS/crate::block_ops::APART;
@@ -260,12 +281,14 @@ pub fn unit(s:Shape,index:usize,x:[&[f32];4],w:&[f32],out:&mut[f32]) {
             let values=Scaled {x:&x[0][base..base+d],scale:if t==1 {Some(&w[base..base+d])} else {None}};
             clipped(s,head,first*part,x,w,lane_sum(&values,0,d),out)
         },
-        // One head and one distance: a chain over the width of the state, rounded once.
+        // One head and `rel_part(k)` neighbour distances; each word a chain over the width of the state, rounded once.
         Op::RelBias=>{
-            let (head,dist)=split(index,k);
-            let mut sum=0.0f32;
-            for j in 0..d {sum+=rn(x[0][head*d+j])*w[j*k+dist];}
-            out[0]=rn(sum);
+            let part=rel_part(k);let (head,first)=split(index,k/part);let (first,state)=(first*part,&x[0][head*d..(head+1)*d]);
+            for (i,word) in out.iter_mut().enumerate().take(part) {
+                let mut sum=0.0f32;
+                for (j,&v) in state.iter().enumerate() {sum+=rn(v)*w[j*k+first+i];}
+                *word=rn(sum);
+            }
         },
         // One query head and one distance. Rounded after the dot, after the scale and after the bias.
         // The bias is +0.0 at a distance outside its extent. A slot that is not live gets 0.0 and reads no key.

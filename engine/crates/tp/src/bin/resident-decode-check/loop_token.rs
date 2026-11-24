@@ -238,13 +238,17 @@ pub enum Job {
     Driver,
     /// Mode `loop-token-rate`: the clock time of this many token steps after the prompt.
     Rate(usize),
+    /// Mode `loop-token-rate-rows-pooled`: `Rate` on a driver with the step limits of the text service
+    /// (`service::STEP_LIMITS`), whose window rings hold the rows of a whole step more than the window.
+    RateRows(usize),
 }
 /// The clock time of `steps` token steps after the prompt of the trace, on `c`. Each step is fed the top row of
 /// the step before it, and gives only its top row. The top rows are compared with the trace where it has them.
 #[cfg(target_os="linux")]
-fn rate<C:Compute,W:Weights<C>>(c:&C,w:&W,d:&LoopTextDescription,trace:&Trace,steps:usize,out:&Path,notes:&[String])->Result<()> {
+fn rate<C:Compute,W:Weights<C>>(c:&C,w:&W,d:&LoopTextDescription,trace:&Trace,steps:usize,out:&Path,notes:&[String],rows:bool)->Result<()> {
     let capacity=(trace.prompt()+steps) as u64;
-    let driver=Driver::new(c,w,d,capacity)?;let mut state=driver.clean()?;
+    let driver=if rows {Driver::with_limits(c,w,d,capacity,spark_tp::loop_decoder::service::STEP_LIMITS)?} else {Driver::new(c,w,d,capacity)?};
+    let mut state=driver.clean()?;
     let mut step=|token:u32|->Result<(u32,f64)> {
         let started=Instant::now();let top=c.work(||Ok(driver.step(&mut state,token)?.top))?;
         Ok((top,started.elapsed().as_secs_f64()))
@@ -264,6 +268,7 @@ fn rate<C:Compute,W:Weights<C>>(c:&C,w:&W,d:&LoopTextDescription,trace:&Trace,st
     let lines=[
         format!("LOOP-TOKEN RATE token_steps={steps} seconds={seconds:.4} tokens_per_second={:.3} step_ms_mean={:.3} step_ms_smallest={:.3} step_ms_middle={:.3} step_ms_largest={:.3} prompt_positions={} prompt_seconds={prompt_seconds:.4} capacity={capacity} read_a_step=the top row only",
             steps as f64/seconds,ms(times.iter().sum::<f64>()/steps as f64),ms(sorted[0]),ms(sorted[steps/2]),ms(sorted[steps-1]),trace.prompt()),
+        format!("LOOP-TOKEN RATE DRIVER step_rows={} (1: the token driver; more: the driver of the text service)",driver.limits().step_rows),
         format!("LOOP-TOKEN RATE TOKENS first_new={first} then={ids}"),
         format!("LOOP-TOKEN RATE TRACE top_rows_compared={compared} equal={equal}"),
     ];
@@ -277,6 +282,11 @@ fn rate<C:Compute,W:Weights<C>>(c:&C,w:&W,d:&LoopTextDescription,trace:&Trace,st
 #[cfg(target_os="linux")]
 pub fn run_rate(model:&Path,trace:&Path,out:&Path,steps:&str,pool:bool)->Result<()> {
     run_with_pool(model,trace,out,Job::Rate(steps.parse().map_err(|_|format!("loop token: STEPS must be a whole number, got {steps}"))?),pool)
+}
+/// Mode `loop-token-rate-rows-pooled`: `run_rate` with the pool on, on a driver with the step limits of the text service.
+#[cfg(target_os="linux")]
+pub fn run_rate_rows(model:&Path,trace:&Path,out:&Path,steps:&str)->Result<()> {
+    run_with_pool(model,trace,out,Job::RateRows(steps.parse().map_err(|_|format!("loop token: STEPS must be a whole number, got {steps}"))?),true)
 }
 /// Modes `loop-token`, `loop-token-driver` and `loop-token-rate`: the real checkpoint on one device.
 #[cfg(target_os="linux")]
@@ -293,7 +303,7 @@ pub fn run_with_pool(model:&Path,trace:&Path,out:&Path,job:Job,pool:bool)->Resul
     let trace=Trace::open(trace)?;
     let checkpoint=loop_load::read_folder(model).map_err(|e|format!("This engine cannot load this model: {e}."))?;
     let driver=job==Job::Driver;
-    let (d,capacity)=(&checkpoint.description,if let Job::Rate(steps)=job {if steps==0 {return Err("loop token: STEPS must be above zero".into());}(trace.prompt()+steps) as u64} else {trace.positions() as u64});
+    let (d,capacity)=(&checkpoint.description,if let Job::Rate(steps)|Job::RateRows(steps)=job {if steps==0 {return Err("loop token: STEPS must be above zero".into());}(trace.prompt()+steps) as u64} else {trace.positions() as u64});
     // The memory rule of the load check: the free bytes less the larger of one tenth and 2 GiB, and the ledger of
     // the weights and of one chat of the trace's length must fit.
     let bucket=spark_gpu_probe::causal_ops::BUCKET_ROWS as u64;
@@ -305,7 +315,7 @@ pub fn run_with_pool(model:&Path,trace:&Path,out:&Path,job:Job,pool:bool)->Resul
     let limit=context_limit(d,&checkpoint.load.bytes,bucket,budget).map_err(|e|e.to_string())?;
     ledger.admit(budget,limit).map_err(|refusal|format!("text service memory refusal: {refusal}"))?;
     let workers=std::thread::available_parallelism().map_or(4,|n|n.get()).min(16);
-    let source=match job {Job::Trace=>"trace",Job::Driver=>"driver",Job::Rate(_)=>"rate"};
+    let source=match job {Job::Trace=>"trace",Job::Driver=>"driver",Job::Rate(_)=>"rate",Job::RateRows(_)=>"rate-rows"};
     let host=if driver {Some(HostWeights::open(model,HOST_EXPERT_CACHE)?)} else {None};
     let mut notes=vec![format!("LOOP-TOKEN PLAN source={source} positions={} prompt_positions={} visits={} width={} head_rows={} capacity={capacity} ledger_bytes={} budget_bytes={budget}",trace.positions(),trace.prompt(),d.visits.len(),d.hidden,d.head_rows,ledger.total)];
     eprintln!("{}",notes[0]);
@@ -321,7 +331,7 @@ pub fn run_with_pool(model:&Path,trace:&Path,out:&Path,job:Job,pool:bool)->Resul
         eprintln!("{}",notes[1]);
         if pool {backend.configure_vector_pool(1<<30);notes.push("LOOP-TOKEN POOL vector_pool=on margin_bytes=1073741824".into());}
         let device=Device::new(backend);
-        if let Job::Rate(steps)=job {return rate(&device,&weights,d,&trace,steps,out,&notes);}
+        if let Job::Rate(steps)|Job::RateRows(steps)=job {return rate(&device,&weights,d,&trace,steps,out,&notes,matches!(job,Job::RateRows(_)));}
         let mut host_run=match &host {
             Some((description,words))=>{let driver=Driver::new(&Host,words,description,capacity)?;let state=driver.clean()?;Some((driver,state))},
             None=>None,
