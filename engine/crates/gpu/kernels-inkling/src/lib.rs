@@ -66,14 +66,21 @@ mod embed_rows;
 mod tc_rows;
 #[path = "../../src/prefill_moe.rs"]
 mod prefill_moe;
+#[path = "../../src/prefill_gate.rs"]
+mod prefill_gate;
 #[path = "../../src/flash_window.rs"]
 mod flash_window_abi;
 #[path = "../../src/fast_ops.rs"]
 mod fast_ops;
 mod tc_ptx;
+#[macro_use]
+mod tc_panels;
 mod plain_tc_rows;
 mod plain_packed_tc_rows;
 mod prefill_packed_tc;
+mod prefill_flash_window;
+#[path = "prefill_gate.rs"]
+mod prefill_gate_kern;
 mod plain_tc_big;
 mod moe_group_route;
 mod flash_window;
@@ -1182,6 +1189,16 @@ pub unsafe extern "ptx-kernel" fn resident_launch_plain_packed_tc_rows(table: *c
 /// whose contract holds).
 #[no_mangle]
 pub unsafe extern "ptx-kernel" fn resident_launch_prefill_packed_tc(table: *const Command, index: u64) { prefill_packed_tc::replay(table, index) }
+/// High-occupancy 2-stage prefill causal/sliding-window attention (`prefill_flash_window.rs`).
+/// SAFETY: launched only by the host with a table of commands of kind PREFILL_FLASH_WINDOW (`prefill_flash_window::replay`,
+/// whose contract holds).
+#[no_mangle]
+pub unsafe extern "ptx-kernel" fn resident_launch_prefill_flash_window(table: *const Command, index: u64) { prefill_flash_window::replay(table, index) }
+/// Fused prefill lazy message-meta and GateDown+GateOuter+GateBlend+RoundedNorm (`prefill_gate.rs`).
+/// SAFETY: launched only by the host with a table of commands of kind PREFILL_GATE_FUSE (`prefill_gate_kern::replay`,
+/// whose contract holds).
+#[no_mangle]
+pub unsafe extern "ptx-kernel" fn resident_launch_prefill_gate_fuse(table: *const Command, index: u64) { prefill_gate_kern::replay(table, index) }
 /// SM121a BF16 tensor-core MMA big-tile dense product for prefill (`plain_tc_big.rs`).
 /// SAFETY: launched only by the host with a table of commands of kind PLAIN_TC_BIG (`plain_tc_big::replay`, whose
 /// contract holds).

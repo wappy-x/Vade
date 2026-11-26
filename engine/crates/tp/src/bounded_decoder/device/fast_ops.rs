@@ -58,11 +58,16 @@ impl<'b, 'd> Device<'b, 'd> {
     /// `Compute::short_conv_keep`: runs `ShortConv` directly from `inputs` and `ring` without a `window` copy,
     /// and writes the ring after each row (`[rows][taps][width]`) in the same launch.
     pub(super) fn try_short_conv_keep(
-        &self, s: Shape, rows: usize, first: usize, x: [Option<&Value<'b, 'd>>; 4], w: &[f32],
+        &self, s: Shape, rows: usize, first: fast_ops::ShortConvRing, x: [Option<&Value<'b, 'd>>; 4], w: &[f32],
     ) -> Result<Option<(Value<'b, 'd>, Value<'b, 'd>)>> {
         let (heads, dim, taps) = (s.heads as usize, s.dim as usize, s.taps as usize);
         let width = heads.checked_mul(dim).ok_or("kept convolution width overflow")?;
-        let slot_ok = first < taps || fast_ops::short_conv_multi_decode(rows, taps, first).is_some();
+        let slot_ok = match first {
+            fast_ops::ShortConvRing::One(slot) => slot < taps,
+            fast_ops::ShortConvRing::Multi(m) => {
+                fast_ops::ShortConvMulti::encode(rows, taps, m.start_mask, m.slots_lo, m.slots_hi) == Some(m)
+            }
+        };
         if self.loop_prefill.get() || !self.backend.resident_launches_active() || rows < 2 || taps < 2 || !slot_ok
             || !fast_ops::stream_ops_admitted(fast_ops::STREAM_OP_SHORT_CONV_WIN, rows, width, taps, fast_ops::STREAM_OPS_THREADS)
             || x.iter().flatten().any(|v| v.vector.is_segmented() || v.vector.len() != v.words)
@@ -76,11 +81,87 @@ impl<'b, 'd> Device<'b, 'd> {
             .ok_or("kept convolution is missing taps")?;
         let (words, kept) = (rows * width, rows * taps * width);
         let (mut out, mut every) = (self.backend.vector(words)?, self.backend.vector(kept)?);
-        self.backend.fast_short_conv_win_into(rows, heads, dim, taps, s.cols, s.bound, &inputs.vector,
-            token.map(|v| &*v.vector), addend.map(|v| &*v.vector), &fixed, Some((&ring.vector, first)), &mut out, Some((&mut every, first)))?;
+        match first {
+            fast_ops::ShortConvRing::One(slot) => {
+                self.backend.fast_short_conv_win_into(rows, heads, dim, taps, s.cols, s.bound, &inputs.vector,
+                    token.map(|v| &*v.vector), addend.map(|v| &*v.vector), &fixed, Some((&ring.vector, slot)), &mut out, Some((&mut every, slot)))?;
+            }
+            fast_ops::ShortConvRing::Multi(multi) => {
+                self.backend.fast_short_conv_multi_into(rows, heads, dim, taps, s.cols, s.bound, &inputs.vector,
+                    token.map(|v| &*v.vector), addend.map(|v| &*v.vector), &fixed, &ring.vector, &mut out, &mut every, multi)?;
+            }
+        }
         let (value, every) = (self.value(out, words)?, self.value(every, kept)?);
         self.cost.record(|| "fast_short_conv_keep".into(), stamp, self.backend, w.len() * 4);
         Ok(Some((value, every)))
+    }
+
+    /// Direct per-chat ring-pointer `short_conv_keep_multi`: avoids `compute.join` copies across 2..=64 chats.
+    pub(super) fn try_short_conv_keep_multi(
+        &self, s: Shape, rows: usize, multi: fast_ops::ShortConvMulti,
+        x: [Option<&Value<'b, 'd>>; 3], rings: &[&Value<'b, 'd>], w: &[f32],
+    ) -> Result<Option<(Value<'b, 'd>, Value<'b, 'd>)>> {
+        let (heads, dim, taps) = (s.heads as usize, s.dim as usize, s.taps as usize);
+        let width = heads.checked_mul(dim).ok_or("kept convolution width overflow")?;
+        if self.loop_prefill.get() || !self.backend.resident_launches_active() || rows < 2 || taps < 2
+            || rings.len() != multi.chats
+            || fast_ops::ShortConvMulti::encode(rows, taps, multi.start_mask, multi.slots_lo, multi.slots_hi) != Some(multi)
+            || !fast_ops::stream_ops_admitted(fast_ops::STREAM_OP_SHORT_CONV_WIN, rows, width, taps, fast_ops::STREAM_OPS_THREADS)
+            || x.iter().flatten().any(|v| v.vector.is_segmented() || v.vector.len() != v.words)
+            || rings.iter().any(|v| v.vector.is_segmented() || v.vector.len() != v.words || v.words != taps * width)
+        {
+            return Ok(None);
+        }
+        let [Some(inputs), token, addend] = x else { return Err("kept convolution is missing inputs".into()); };
+        for value in x.iter().flatten() { self.ready(value)?; }
+        for ring in rings { self.ready(ring)?; }
+        let stamp = self.cost.start(self.backend);
+        let fixed = self.parameters.borrow_mut().resolve(w, None, |v| self.backend.upload_vector(v)?.into_resident_shared())?
+            .ok_or("kept convolution is missing taps")?;
+        let (words, kept) = (rows * width, rows * taps * width);
+        let (mut out, mut every) = (self.backend.vector(words)?, self.backend.vector(kept)?);
+        let ring_refs: Vec<&DeviceVector<'d>> = rings.iter().map(|v| &*v.vector).collect();
+        self.backend.fast_short_conv_multi_rings_into(
+            rows, heads, dim, taps, s.cols, s.bound, &inputs.vector,
+            token.map(|v| &*v.vector), addend.map(|v| &*v.vector), &fixed,
+            &ring_refs, &mut out, &mut every, multi,
+        )?;
+        let (value, every) = (self.value(out, words)?, self.value(every, kept)?);
+        self.cost.record(|| "fast_short_conv_keep_multi".into(), stamp, self.backend, w.len() * 4);
+        Ok(Some((value, every)))
+    }
+
+    /// Fused `Op::Softcap` + greedy argmax via `FAST_STREAM_OPS` (`STREAM_OP_SOFTCAP_ARGMAX`).
+    pub(super) fn try_rows_softcap_greedy(
+        &self, raw: &Value<'b, 'd>, rows: usize, bound: f32, eps: f32,
+    ) -> Result<Option<Vec<u32>>> {
+        if !self.backend.resident_launches_active() || rows == 0 || raw.words == 0 || !raw.words.is_multiple_of(rows) {
+            return Ok(None);
+        }
+        let cols = raw.words / rows;
+        let parts = fast_ops::softcap_argmax_parts(rows, cols);
+        if raw.vector.is_segmented() || raw.vector.len() != raw.words
+            || !(bound > 0.0 && bound.is_finite() && eps > 0.0 && eps.is_finite())
+            || !fast_ops::stream_ops_admitted(fast_ops::STREAM_OP_SOFTCAP_ARGMAX, rows, cols, parts, fast_ops::STREAM_OPS_THREADS)
+        {
+            return Ok(None);
+        }
+        self.ready(raw)?;
+        let stamp = self.cost.start(self.backend);
+        let mut result = self.backend.vector(rows * 3)?;
+        self.backend.fast_softcap_argmax_into(rows, cols, bound, eps, &raw.vector, &mut result)?;
+        let picked = self.read(&self.value(result, rows * 3)?)?;
+        self.cost.record(|| "fast_softcap_argmax".into(), stamp, self.backend, 0);
+        picked.as_chunks::<3>().0.iter()
+            .map(|row| {
+                if row[2] != 1.0 || !row[0].is_finite() || !row[1].is_finite() || row[1] < 0.0 {
+                    Err("nonfinite logits".into())
+                } else {
+                    Ok(row[1] as u32)
+                }
+            })
+            .collect::<Result<Vec<_>>>()
+            .map(Some)
     }
 
     pub(super) fn try_kv_finish_pair(&self, p: &KvFinishPair<'_, Value<'b, 'd>>) -> Result<Option<[Value<'b, 'd>; 4]>> {
@@ -588,5 +669,86 @@ impl<'b, 'd> Device<'b, 'd> {
         let value = self.value(out, words)?;
         self.cost.record(|| "fast_mix_blend_transposed".into(), stamp, self.backend, 0);
         Ok(Some(value))
+    }
+
+    pub(super) fn try_kv_finish_direct(
+        &self, p: &KvFinishDirect<'_, Value<'b, 'd>>, targets: &mut [KvDirectTarget<'_, Value<'b, 'd>>],
+    ) -> Result<Option<[Value<'b, 'd>; 2]>> {
+        if self.loop_prefill.get() || !self.backend.resident_launches_active()
+            || !fast_ops::kv_finish_direct_admitted(p.rows, p.kv_heads, p.taps, fast_ops::NORM_THREADS)
+            || targets.len() != p.rows || p.plane_rows == 0
+        {
+            return Ok(None);
+        }
+        let all_in = [Some(p.key_in), p.key_made, Some(p.val_in), p.val_made];
+        if all_in.iter().flatten().any(|v| v.vector.is_segmented() || v.vector.len() != v.words) {
+            return Ok(None);
+        }
+        let width = p.kv_heads * fast_ops::KV_FINISH_HEAD_DIM;
+        let plane_words = p.plane_rows * (width / 2);
+        for (kr, vr, rs, kp, vp, ps) in targets.iter() {
+            if *rs >= p.taps || *ps >= p.plane_rows
+                || kr.vector.is_segmented() || vr.vector.is_segmented()
+                || kp.vector.is_segmented() || vp.vector.is_segmented()
+                || kp.words != plane_words || vp.words != plane_words
+                || Rc::strong_count(&kp.vector) != 1 || Rc::strong_count(&vp.vector) != 1
+                || !kp.vector.writable_from(0) || !vp.vector.writable_from(0)
+            {
+                return Ok(None);
+            }
+        }
+        for v in all_in.iter().flatten() { self.ready(v)?; }
+        for (kr, vr, _, kp, vp, _) in targets.iter() {
+            self.ready(kr)?; self.ready(vr)?; self.ready(kp)?; self.ready(vp)?;
+        }
+        let stamp = self.cost.start(self.backend);
+        let key_fixed = self.parameters.borrow_mut().resolve(p.key_fixed, None, |v| self.backend.upload_vector(v)?.into_resident_shared())?
+            .ok_or("kv finish direct: missing key taps")?;
+        let val_fixed = self.parameters.borrow_mut().resolve(p.val_fixed, None, |v| self.backend.upload_vector(v)?.into_resident_shared())?
+            .ok_or("kv finish direct: missing value taps")?;
+        let every_words = p.rows * p.taps * width;
+        let (mut ke, mut ve) = (self.backend.vector(every_words)?, self.backend.vector(every_words)?);
+        let chats: Vec<_> = targets.iter().map(|(kr, vr, rs, kp, vp, ps)| (&*kr.vector, &*vr.vector, *rs, &*kp.vector, &*vp.vector, *ps)).collect();
+        self.backend.fast_kv_finish_direct_into(
+            p.rows, p.kv_heads, p.taps, p.plane_rows, p.key_bound, p.val_eps, p.key_scale, p.val_scale,
+            &p.key_in.vector, &key_fixed, p.key_made.map(|v| &*v.vector), &mut ke,
+            &p.val_in.vector, &val_fixed, p.val_made.map(|v| &*v.vector), &mut ve, &chats,
+        )?;
+        let out = [self.value(ke, every_words)?, self.value(ve, every_words)?];
+        self.cost.record(|| "fast_kv_finish_direct".into(), stamp, self.backend, (p.key_fixed.len() + p.val_fixed.len()) * 4);
+        Ok(Some(out))
+    }
+
+    pub(super) fn try_short_conv_direct(&self, p: &ShortConvDirect<'_, Value<'b, 'd>>) -> Result<Option<(Value<'b, 'd>, Value<'b, 'd>)>> {
+        let s = p.shape;
+        let (heads, dim, taps) = (s.heads as usize, s.dim as usize, s.taps as usize);
+        if self.loop_prefill.get() || !self.backend.resident_launches_active()
+            || !fast_ops::short_conv_direct_admitted(p.rows, heads, dim, taps, s.cols, fast_ops::NORM_THREADS)
+            || p.chat_rings.len() != p.rows
+        {
+            return Ok(None);
+        }
+        let all_in = [Some(p.inputs), p.token, p.addend];
+        if all_in.iter().flatten().any(|v| v.vector.is_segmented() || v.vector.len() != v.words)
+            || p.chat_rings.iter().any(|&(r, slot)| slot >= taps || r.vector.is_segmented() || r.vector.len() != r.words)
+        {
+            return Ok(None);
+        }
+        for v in all_in.iter().flatten() { self.ready(v)?; }
+        for &(r, _) in p.chat_rings { self.ready(r)?; }
+        let stamp = self.cost.start(self.backend);
+        let fixed = self.parameters.borrow_mut().resolve(p.fixed, None, |v| self.backend.upload_vector(v)?.into_resident_shared())?
+            .ok_or("short conv direct: missing fixed taps")?;
+        let width = heads * dim;
+        let (out_words, every_words) = (p.rows * width, p.rows * taps * width);
+        let (mut out, mut every) = (self.backend.vector(out_words)?, self.backend.vector(every_words)?);
+        let rings: Vec<_> = p.chat_rings.iter().map(|&(r, slot)| (&*r.vector, slot)).collect();
+        self.backend.fast_short_conv_direct_into(
+            p.rows, heads, dim, taps, s.cols, s.bound, &p.inputs.vector,
+            p.token.map(|v| &*v.vector), p.addend.map(|v| &*v.vector), &fixed, &mut out, &mut every, &rings,
+        )?;
+        let res = (self.value(out, out_words)?, self.value(every, every_words)?);
+        self.cost.record(|| "fast_short_conv_direct".into(), stamp, self.backend, p.fixed.len() * 4);
+        Ok(Some(res))
     }
 }

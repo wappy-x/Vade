@@ -26,7 +26,7 @@ pub fn source_files(root: &Path) -> io::Result<Vec<PathBuf>> {
     let mut files = vec![root.join("kernels-inkling/Cargo.toml"), root.join("kernels-inkling/REGISTERS.txt"), root.join("kernels/src/ptx.rs"),
         root.join("src/fixed_math.rs"), root.join("src/block_ops.rs"), root.join("src/block_rows.rs"), root.join("src/block_attention.rs"),
         root.join("src/block_stream.rs"), root.join("src/block_experts.rs"), root.join("src/inkling_launch.rs"), root.join("src/staged_product.rs"), root.join("src/packed_product.rs"),
-        root.join("src/few_product.rs"), root.join("src/bf16_panels.rs"), root.join("src/block_scores.rs"), root.join("src/block_values.rs"), root.join("src/staged_narrow.rs"), root.join("src/tc_rows.rs"), root.join("src/prefill_moe.rs"), root.join("src/flash_window.rs"),
+        root.join("src/few_product.rs"), root.join("src/bf16_panels.rs"), root.join("src/block_scores.rs"), root.join("src/block_values.rs"), root.join("src/staged_narrow.rs"), root.join("src/tc_rows.rs"), root.join("src/prefill_moe.rs"), root.join("src/prefill_gate.rs"), root.join("src/flash_window.rs"),
         root.join("src/fast_ops.rs"), root.join("build-kernels/src/bin/inkling.rs"), root.join("inkling_stamp.rs")];
     for entry in fs::read_dir(root.join("kernels-inkling/src"))? {
         let path = entry?.path();

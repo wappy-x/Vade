@@ -166,6 +166,7 @@ pub fn half_rows<C:Compute,W:Weights<C>>(run:&Run<'_,C,W>,visit:&Visit,layout:&L
     // Paired multi-row KV finish for kept decode passes and multi-chat cohorts (`head == 128`): fuses Key and Value
     // `ShortConv`, `HeadClip`/`RoundedNorm`, `PackBf16`, and ring capture into ceil(rows / 16) batched launches.
     let mut fused_kv: Option<(C::Value, C::Value)> = None;
+    let mut direct_kv = false;
     let separate = rows == spans.len() && spans.iter().all(|span| span.count == 1);
     if !prefill && rows > 1 && head == 128 && ((step.keeps() && spans.len() == 1) || separate) {
         let ((k_ch, k_taps), (v_ch, v_taps)) = (layout.ring_size(Ring::Key), layout.ring_size(Ring::Value));
@@ -178,7 +179,31 @@ pub fn half_rows<C:Compute,W:Weights<C>>(run:&Run<'_,C,W>,visit:&Visit,layout:&L
             let k_scale = conv_scale(if key_made.is_some() { 2 * k_taps as u64 + 1 } else { k_taps as u64 + 1 });
             let v_scale = conv_scale(if value_made.is_some() { 2 * v_taps as u64 + 1 } else { v_taps as u64 + 1 });
             let ring_words = k_taps * k_ch;
-            if !separate || rows <= 16 {
+            if separate && !step.keeps() && rows <= spark_gpu_probe::fast_ops::DIRECT_CHATS_MAX
+                && k_taps <= spark_gpu_probe::fast_ops::DIRECT_TAPS_MAX
+            {
+                let plane_slots = spans.iter().map(|s| layout.slot(s.first)).collect::<Result<Vec<_>>>()?;
+                let req = crate::bounded_decoder::KvFinishDirect {
+                    rows, kv_heads, taps: k_taps, plane_rows: layout.rows,
+                    key_bound: a.query_key_clip as f32, val_eps: epsilon as f32, key_scale: k_scale, val_scale: v_scale,
+                    key_in: &key_product, key_fixed: k_fixed, key_made: key_made.as_ref(),
+                    val_in: &value_product, val_fixed: v_fixed, val_made: value_made.as_ref(),
+                };
+                let mut targets: Vec<_> = states.iter_mut().zip(spans).zip(&plane_slots)
+                    .map(|((st, sp), &ps)| (&st.rings[Ring::Key as usize], &st.rings[Ring::Value as usize], (sp.first % k_taps as u64) as usize, &mut st.keys, &mut st.values, ps))
+                    .collect();
+                if let Some([ke, ve]) = c.kv_finish_direct(&req, &mut targets)? {
+                    drop(targets);
+                    need(c.words(&ke) == rows * ring_words && c.words(&ve) == rows * ring_words,
+                        "the direct key-value finish differs from the layout")?;
+                    for (row, state) in states.iter_mut().enumerate() {
+                        state.next[Ring::Key as usize] = Some(c.range(&ke, row * ring_words, ring_words)?);
+                        state.next[Ring::Value as usize] = Some(c.range(&ve, row * ring_words, ring_words)?);
+                    }
+                    direct_kv = true;
+                }
+            }
+            if !direct_kv && (!separate || rows <= 16) {
                 let first_slot = (spans[0].first % k_taps as u64) as usize;
                 let chat_rings = if separate {
                     states.iter().zip(spans).map(|(state, span)| (&state.rings[Ring::Key as usize],
@@ -209,7 +234,7 @@ pub fn half_rows<C:Compute,W:Weights<C>>(run:&Run<'_,C,W>,visit:&Visit,layout:&L
                     }
                     fused_kv = Some((kp, vp));
                 }
-            } else {
+            } else if !direct_kv {
                 let mut chunks = Vec::with_capacity(rows.div_ceil(16));
                 let mut done = 0usize;
                 for start in (0..rows).step_by(16) {
@@ -253,25 +278,47 @@ pub fn half_rows<C:Compute,W:Weights<C>>(run:&Run<'_,C,W>,visit:&Visit,layout:&L
     // The wide planes of each chat with more than one row in the step of a window layer whose ring is wider for a step.
     // Before the first wrap every new row occupies a never-committed slot. A retry
     // overwrites those slots before reading them, including after a partial accept.
-    let provisional=step.keeps() && layout.ring;
-    let mut scratch=spans.iter().zip(states.iter()).zip(&fits).map(|((span,state),fit)|if !provisional && span.count>1 && fit.wide().rows>layout.rows && span.first+span.count as u64>layout.rows as u64 {
+    let wraps:Vec<bool>=spans.iter().map(|span|step.keeps() && layout.ring && (spans.len()==1 || span.first+span.count as u64>layout.rows as u64)).collect();
+    let any_wraps=wraps.iter().any(|&w|w);
+    let mut scratch=spans.iter().zip(states.iter()).zip(&fits).map(|((span,state),fit)|if !step.keeps() && span.count>1 && fit.wide().rows>layout.rows && span.first+span.count as u64>layout.rows as u64 {
         Ok(Some([state::many::widen(c,fit,&state.keys,span.first)?,state::many::widen(c,fit,&state.values,span.first)?]))} else {Ok(None)}).collect::<Result<Vec<_>>>()?;
-    // A prompt has a single chat and writable KV planes. Use the widened planes when a step crosses a wrap.
-    let fused = if prefill && !step.keeps() && let ([span], [state], [scratch], [fit]) =
-        (spans, &mut *states, scratch.as_mut_slice(), fits.as_slice())
+    // Prompts (single or multi-chat) with writable KV planes fuse ShortConv + Clip/Norm + PackBf16 + plane write per chat.
+    let fused = if prefill && !step.keeps() && spans.len() == states.len()
+        && spans.iter().all(|s| s.count >= key_conv.taps as usize && s.count >= value_conv.taps as usize && s.count >= 2)
     {
-        let plane_layout = if scratch.is_some() { fit.wide() } else { *layout };
-        let first = plane_layout.slot(span.first)?;
-        let write = |clip, param| spark_gpu_probe::fast_ops::KvWrite { first, plane_rows: plane_layout.rows, clip, param };
-        let key = convolve_kv(c, Ring::Key, *span, key_conv, &key_product, key_made.as_ref(), key_fixed,
-            state, scratch.as_mut().map(|planes| &mut planes[0]), write(true, a.query_key_clip as f32))?;
-        key && convolve_kv(c, Ring::Value, *span, value_conv, &value_product, value_made.as_ref(), value_fixed,
-            state, scratch.as_mut().map(|planes| &mut planes[1]), write(false, epsilon as f32))?
+        let (kv_ch, k_taps, v_taps) = (kv_heads * head, key_conv.taps as usize, value_conv.taps as usize);
+        let (mut ok, mut offset) = (true, 0usize);
+        for (((span, state), scratch), fit) in spans.iter().zip(states.iter_mut()).zip(scratch.iter_mut()).zip(fits.iter()) {
+            let plane_layout = if scratch.is_some() { fit.wide() } else { *layout };
+            let first = plane_layout.slot(span.first)?;
+            let write = |clip, param| spark_gpu_probe::fast_ops::KvWrite { first, plane_rows: plane_layout.rows, clip, param };
+            let (k_slice, v_slice) = if spans.len() == 1 {
+                (None, None)
+            } else {
+                (Some(c.range(&key_product, offset * kv_ch, span.count * kv_ch)?),
+                 Some(c.range(&value_product, offset * kv_ch, span.count * kv_ch)?))
+            };
+            let k_m = if spans.len() == 1 { None } else { key_made.as_ref().map(|m| c.range(m, offset * kv_heads * k_taps, span.count * kv_heads * k_taps)).transpose()? };
+            let v_m = if spans.len() == 1 { None } else { value_made.as_ref().map(|m| c.range(m, offset * kv_heads * v_taps, span.count * kv_heads * v_taps)).transpose()? };
+            let kp = k_slice.as_ref().unwrap_or(&key_product);
+            let vp = v_slice.as_ref().unwrap_or(&value_product);
+            let km = if spans.len() == 1 { key_made.as_ref() } else { k_m.as_ref() };
+            let vm = if spans.len() == 1 { value_made.as_ref() } else { v_m.as_ref() };
+            let key = convolve_kv(c, Ring::Key, *span, key_conv, kp, km, key_fixed,
+                state, scratch.as_mut().map(|planes| &mut planes[0]), write(true, a.query_key_clip as f32))?;
+            if !key || !convolve_kv(c, Ring::Value, *span, value_conv, vp, vm, value_fixed,
+                state, scratch.as_mut().map(|planes| &mut planes[1]), write(false, epsilon as f32))?
+            {
+                ok = false; break;
+            }
+            offset += span.count;
+        }
+        ok
     } else {
         false
     };
     // If a plane declined the fused write, the original path rewrites the same rows before attention.
-    if !fused {
+    if !fused && !direct_kv {
         let (keys,values) = if let Some(pair) = fused_kv {
             pair
         } else {
@@ -282,11 +329,13 @@ pub fn half_rows<C:Compute,W:Weights<C>>(run:&Run<'_,C,W>,visit:&Visit,layout:&L
             (state::pack(c,&key)?,state::pack(c,&value)?)
         };
         let words=layout.row_words;let mut offset=0;
-        for (((span,state),scratch),fit) in spans.iter().zip(states.iter_mut()).zip(scratch.iter_mut()).zip(&fits) {
+        for ((((span,state),scratch),fit),&wrap) in spans.iter().zip(states.iter_mut()).zip(scratch.iter_mut()).zip(&fits).zip(&wraps) {
             let (keys,values)=(c.range(&keys,offset*words,span.count*words)?,c.range(&values,offset*words,span.count*words)?);
-            // Keep verify writes out of `state.keys`/`state.values` until `accept()` commits the kept prefix;
-            // attention reads the ring + proposed rows directly via zero-copy `window_split`/`window_one`/`block_ring_delta`.
-            if provisional {state.written=Some([keys,values]);}
+            // Keep wrapped-ring verify writes out of `state.keys`/`state.values` until `accept()` commits the kept prefix.
+            // Straight planes and unwrapped rings (`first + count <= layout.rows`) write directly into unused future slots
+            // (`>= span.first`), leaving every committed slot `0..span.first` untouched on partial accept or discard and
+            // letting multi-chat verify share the batched `window_split` path with zero `accept()` KV copies.
+            if wrap {state.written=Some([keys,values]);}
             else if let Some([wide_keys,wide_values])=scratch {
                 let wide=fit.wide();write_rows(c,&wide,wide_keys,*span,&keys)?;write_rows(c,&wide,wide_values,*span,&values)?;
             }
@@ -299,31 +348,37 @@ pub fn half_rows<C:Compute,W:Weights<C>>(run:&Run<'_,C,W>,visit:&Visit,layout:&L
     // Before the first wrap, all live keys lie in the prefix. After a wrap a
     // ring uses its full extent. A common view lets a decode cohort
     // run all four attention operations once, retaining the per-chat distance order.
-    let last=spans.iter().map(|span|span.first).max().unwrap_or(0);
+    let last=spans.iter().map(|span|span.first+span.count as u64-1).max().unwrap_or(0);
     let short=usize::try_from(last.saturating_add(1)).unwrap_or(usize::MAX).min(layout.rows);
     let view=short.checked_next_multiple_of(32).unwrap_or(layout.rows).min(layout.rows);
     let words=rows.saturating_mul(view).saturating_mul(2*heads)
         .saturating_add(rows.saturating_mul(heads).saturating_mul(extent));
-    // Multi-chat decode cohort (`C >= 2`): run GQA-packed Split-KV in chunks of `FW_SPLIT_ROWS_MAX` (16),
-    // bit-exact with C1 at any context length and avoiding per-chat attention launches for C > 16.
+    // Multi-chat decode & unwrapped multi-chat verify (`C >= 2`): run GQA-packed Split-KV in chunks of
+    // `FW_SPLIT_ROWS_MAX` (16), bit-exact with C1 at any context length and avoiding per-chat attention launches.
     let mut cohort_done = false;
     let split_max = spark_gpu_probe::flash_window::FW_SPLIT_ROWS_MAX;
-    if !prefill && !provisional && rows >= 2 && rows == spans.len() {
+    if !prefill && !any_wraps && spans.len() >= 2 && scratch.iter().all(Option::is_none) {
+        let mut row_meta: Vec<(usize, u64)> = Vec::with_capacity(rows);
+        for (chat, span) in spans.iter().enumerate() {
+            for r in 0..span.count {
+                row_meta.push((chat, span.first + r as u64));
+            }
+        }
         let mut cohort_parts = Vec::with_capacity(rows.div_ceil(split_max));
         let mut done = 0usize;
         for start in (0..rows).step_by(split_max) {
             let n = split_max.min(rows - start);
             let mut steps_v = Vec::with_capacity(2 * n);
             let mut row_pos_live = Vec::with_capacity(n);
-            for span in &spans[start..start + n] {
-                let live = layout.live(span.first)?;
-                steps_v.extend([live, layout.slot(span.first)?]);
-                row_pos_live.push((span.first, live));
+            let mut planes = Vec::with_capacity(n);
+            for &(chat, pos) in &row_meta[start..start + n] {
+                let live = layout.live(pos)?;
+                steps_v.extend([live, layout.slot(pos)?]);
+                row_pos_live.push((pos, live));
+                let state = &states[chat];
+                planes.push((state::view(c, layout, &state.keys, view)?, state::view(c, layout, &state.values, view)?));
             }
             let both = state::step_words(c, &steps_v)?;
-            let planes = states[start..start + n].iter()
-                .map(|state| Ok((state::view(c, layout, &state.keys, view)?, state::view(c, layout, &state.values, view)?)))
-                .collect::<Result<Vec<_>>>()?;
             let (q_part, m_part, s_part, g_part, pos_part) = if n == rows {
                 (None, None, None, None, None)
             } else {
@@ -353,9 +408,46 @@ pub fn half_rows<C:Compute,W:Weights<C>>(run:&Run<'_,C,W>,visit:&Visit,layout:&L
             cohort_done = true;
         }
     }
+    // Multi-chat prefill packed-BF16 attention (`window_rows_half`): lets `Weight::Output` run `HALF_IN` across all chats.
+    if !cohort_done && prefill && !any_wraps && spans.len() >= 2 && w.prefers_half_output(layer)
+        && spans.iter().all(|s| s.count >= spark_gpu_probe::flash_window::FW_ROWS_MIN)
+    {
+        let (mut half_parts, mut chat_off, mut ok) = (Vec::with_capacity(spans.len()), 0usize, true);
+        for (((span, state), scratch), fit) in spans.iter().zip(states.iter()).zip(&scratch).zip(&fits) {
+            let wide = fit.wide();
+            let (chat_layout, planes) = match scratch { Some([k, v]) => (&wide, [k, v]), None => (layout, [&state.keys, &state.values]) };
+            let chat_view = chat_layout.view_rows(span.first + span.count as u64 - 1)?;
+            let (kv, vv) = (state::view(c, chat_layout, planes[0], chat_view)?, state::view(c, chat_layout, planes[1], chat_view)?);
+            let mut done = 0usize;
+            while done < span.count {
+                let (n, at) = (spark_gpu_probe::flash_window::FW_ROWS_MAX.min(span.count - done), chat_off + done);
+                let both = key_steps_both(c, chat_layout, span.first + done as u64, n)?;
+                let part = |x: &C::Value, words: usize| c.range(x, at * words, n * words);
+                let position = match &factor { Some(f) => Some(part(f, 1)?), None => None };
+                let one = WindowOne {
+                    rows: n, heads, kv_heads, view: chat_view, extent, scale: score_scale(a.head_dim),
+                    query: &part(&products.0, heads * head)?, query_scale, query_bound: a.query_key_clip as f32,
+                    moved: &part(&products.1, heads * relative)?, moved_scale, moved_bound: a.relative.clip as f32,
+                    position: position.as_ref(), keys: &kv, values: &vv, written: None, rel_table: table,
+                    sink: &part(&sink, heads)?, gate: &part(&gate, heads * head)?, steps: &both,
+                };
+                match w.window_rows_half(c, &one, span.first + done as u64)? {
+                    Some(out) => { need(c.words(&out) == n * heads * head / 2, "the half prompt attention differs from the description")?; half_parts.push(out); done += n; }
+                    None => { ok = false; break; }
+                }
+            }
+            if !ok { break; }
+            chat_off += span.count;
+        }
+        if ok {
+            parts.extend(half_parts);
+            attended_half = true;
+            cohort_done = true;
+        }
+    }
     // A verify pass (provisional rows) keeps its own chronological views below.
     if cohort_done {
-    } else if !prefill && !provisional && (2..=16).contains(&rows) && rows==spans.len() && words<=key_bytes/4 {
+    } else if !prefill && !any_wraps && (2..=16).contains(&rows) && rows==spans.len() && words<=key_bytes/4 {
         let mut steps=Vec::with_capacity(2*rows);let mut counts=Vec::with_capacity(rows);
         for span in spans {let n=layout.live(span.first)?;steps.extend([n,layout.slot(span.first)?]);counts.push(n);}
         let both=state::step_words(c,&steps)?;
@@ -484,7 +576,7 @@ pub fn half_rows<C:Compute,W:Weights<C>>(run:&Run<'_,C,W>,visit:&Visit,layout:&L
             let (kv, vv) = materialized.as_ref().ok_or("loop decoder: attention views missing")?;
             Ok((c.range(kv, 0, c.words(kv))?, c.range(vv, 0, c.words(vv))?))
         };
-        let view_layout=if provisional {Layout {rows:view,..*layout}} else {*layout};
+        let view_layout=if state.written.is_some() {Layout {rows:view,..*layout}} else {*layout};
         // A check pass (and any step of rows outside a prompt): the attention of up to `FW_ONE_ROWS_MAX` rows in one
         // launch, the words of the arms below (`Compute::window_one`). A refused launch leaves the rest to the arms.
         let mut done=0;
@@ -528,7 +620,7 @@ pub fn half_rows<C:Compute,W:Weights<C>>(run:&Run<'_,C,W>,visit:&Visit,layout:&L
         // A prompt: the tensor-core attention with the clips of the query and of the relative state inside the launch
         // (`Compute::window_rows` or `Weights::window_rows_half` emitting packed BF16 directly for `Weight::Output`),
         // the words of the clip launches and then the launch below.
-        if prefill && !provisional {
+        if prefill && state.written.is_none() {
             let (key_view,value_view)=views(planes)?;
             if spans.len() == 1 && w.prefers_half_output(layer) {
                 let (mut fused_parts, mut done, mut ok) = (Vec::new(), 0, true);
@@ -576,7 +668,7 @@ pub fn half_rows<C:Compute,W:Weights<C>>(run:&Run<'_,C,W>,visit:&Visit,layout:&L
         // Fused SM121a BF16 tensor-core attention (`FLASH_WINDOW_ATTN`): bypasses `RelBias + WindowScores +
         // SinkSoftmax + WindowValues` and avoids materializing `[n, heads, view]` score/weight buffers.
         // Split spans above `FW_ROWS_MAX` into fused launches so prompt cut length never changes the arithmetic path.
-        if prefill && !provisional {
+        if prefill && state.written.is_none() {
             let (key_view,value_view)=views(planes)?;
             let (mut fused_parts, mut done, mut ok) = (Vec::new(), 0, true);
             while done < span.count {

@@ -18,6 +18,11 @@ use crate::{Result, bounded_decoder::Compute, loop_decoder::mix::{Message, Weigh
 use engine_model::{plan::{description::{ConvTaps, TapOrder}, loop_load::LoopCheckpoint, loop_packed_unit::UnitShape}, safetensors::Dtype, shapes::Proj};
 use std::{cell::Cell,collections::BTreeMap,ops::Range};
 
+/// One gate operand tuple for `ResidentProduct::resident_prefill_gate_fuse`.
+pub type GateFuseEntry<'a, V, Val> = (
+    &'a V, Range<usize>, &'a V, Range<usize>, &'a Val, &'a Val, &'a Val, &'a Val, Option<&'a [f32]>,
+);
+
 /// A compute that can run a product on a matrix that the owner of the weights holds as value `V`.
 pub trait ResidentProduct<V>: Compute {
     type RoutePlan;
@@ -147,6 +152,16 @@ pub trait ResidentProduct<V>: Compute {
     ) -> Result<Option<(Option<Self::Value>, Option<Self::Value>, Self::Value)>> { Ok(None) }
     /// Prefill `MIX_LIST_NORM_HALF`: FP32 messages + packed BF16 gate-normed messages.
     fn mix_prefill_normed_half(&self, _rows: usize, _dim: usize, _scale: f32, _eps: f32, _queries: &[f32], _list: &[&Self::Value]) -> Result<Option<(Self::Value, Self::Value)>> { Ok(None) }
+    /// Prefill `PG_OP_MSG_META`: compact lazy `(msg_weights, msg_nscales)` replacing `MIX_LIST_NORM_HALF`.
+    #[allow(clippy::too_many_arguments)]
+    fn prefill_msg_meta(&self, _rows: usize, _dim: usize, _scale: f32, _eps: f32, _queries: &[f32], _list: &[&Self::Value]) -> Result<Option<(Self::Value, Self::Value)>> { Ok(None) }
+    /// Prefill `PG_OP_FULL`: fused `GateDown + GateOuter + GateBlend + RoundedNorm` for `1..=3` gates over lazy sources.
+    #[allow(clippy::too_many_arguments)]
+    fn resident_prefill_gate_fuse(
+        &self, _sources: &[&Self::Value],
+        _entries: &[GateFuseEntry<'_, V, Self::Value>],
+        _rows: usize, _dim: usize, _k: usize, _eps: f32, _half_out: bool,
+    ) -> Result<Option<Vec<Self::Value>>> { Ok(None) }
 }
 #[cfg(target_os = "linux")]
 impl<'b, 'd> ResidentProduct<spark_gpu_probe::driver::DeviceVector<'d>> for crate::bounded_decoder::Device<'b, 'd> {
@@ -258,6 +273,16 @@ impl<'b, 'd> ResidentProduct<spark_gpu_probe::driver::DeviceVector<'d>> for crat
     }
     fn mix_prefill_normed_half(&self, rows: usize, dim: usize, scale: f32, eps: f32, queries: &[f32], list: &[&Self::Value]) -> Result<Option<(Self::Value, Self::Value)>> {
         crate::bounded_decoder::Device::try_mix_prefill_normed_half(self, rows, dim, scale, eps, queries, list)
+    }
+    fn prefill_msg_meta(&self, rows: usize, dim: usize, scale: f32, eps: f32, queries: &[f32], list: &[&Self::Value]) -> Result<Option<(Self::Value, Self::Value)>> {
+        crate::bounded_decoder::Device::try_prefill_msg_meta(self, rows, dim, scale, eps, queries, list)
+    }
+    fn resident_prefill_gate_fuse(
+        &self, sources: &[&Self::Value],
+        entries: &[GateFuseEntry<'_, spark_gpu_probe::driver::DeviceVector<'d>, Self::Value>],
+        rows: usize, dim: usize, k: usize, eps: f32, half_out: bool,
+    ) -> Result<Option<Vec<Self::Value>>> {
+        crate::bounded_decoder::Device::resident_prefill_gate_fuse(self, sources, entries, rows, dim, k, eps, half_out)
     }
 }
 
@@ -619,7 +644,7 @@ impl<C: ResidentProduct<V>, V> Weights<C> for LoadedWeights<'_, V> {
         compute.device_routed_packed_experts(gate, down, route, x, caps, weights, picks)
     }
     fn device_routed_experts_half_in(&self, compute: &C, layer: usize, route: &Self::RoutePlan, x: &C::Value, caps: [f32; 4], weights: &C::Value, picks: usize) -> Result<Option<C::Value>> {
-        if self.decode.get() { return Ok(None); }
+        if self.decode.get() && (picks == 0 || compute.words(weights) / picks <= spark_gpu_probe::few_product::FEW_MAX) { return Ok(None); }
         let layer = u32::try_from(layer).map_err(|_| "loop weights: a layer number exceeds its range".to_owned())?;
         let Some(gate) = self.operands.packed_experts(layer, Proj::GateUp)? else { return Ok(None) };
         let Some(down) = self.operands.packed_experts(layer, Proj::Down)? else { return Ok(None) };
@@ -652,7 +677,9 @@ impl<C: ResidentProduct<V>, V> Weights<C> for LoadedWeights<'_, V> {
         entries: &[(Message, &C::Value, &C::Value, &C::Value, Option<&[f32]>)],
         rows: usize, eps: f32, half_out: bool,
     ) -> Result<Option<Vec<C::Value>>> {
-        if self.decode.get() || entries.is_empty() || entries.len() > spark_gpu_probe::tc_rows::GATE_OUTER_GATES_MAX {
+        if (self.decode.get() && rows <= spark_gpu_probe::few_product::FEW_MAX)
+            || entries.is_empty() || entries.len() > spark_gpu_probe::tc_rows::GATE_OUTER_GATES_MAX
+        {
             return Ok(None);
         }
         let mut resolved = Vec::with_capacity(entries.len());
@@ -671,7 +698,6 @@ impl<C: ResidentProduct<V>, V> Weights<C> for LoadedWeights<'_, V> {
         compute.resident_gate_outer_blend_norm(&resolved, rows, dim, k, eps, half_out)
     }
     fn prefers_half_attention(&self, layer: usize) -> bool {
-        if self.decode.get() { return false; }
         let base = [Weight::Query(layer), Weight::Relative(layer), Weight::Sink(layer), Weight::OutputGate(layer), Weight::Key(layer), Weight::Value(layer)];
         if !base.into_iter().all(|w| self.is_resident_tc(w)) { return false; }
         for tap in [Weight::KeyTapProjection(layer), Weight::ValueTapProjection(layer)] {
@@ -680,7 +706,7 @@ impl<C: ResidentProduct<V>, V> Weights<C> for LoadedWeights<'_, V> {
         true
     }
     fn prefers_half_experts(&self, layer: usize) -> bool {
-        if self.decode.get() || !self.is_resident_tc(Weight::Router(layer)) { return false; }
+        if !self.is_resident_tc(Weight::Router(layer)) { return false; }
         let Ok(layer_u32) = u32::try_from(layer) else { return false };
         for proj in [Proj::GateUp, Proj::Down] {
             let Ok(Some((_, _, unit))) = self.operands.packed_experts(layer_u32, proj) else { return false };
@@ -691,7 +717,7 @@ impl<C: ResidentProduct<V>, V> Weights<C> for LoadedWeights<'_, V> {
         true
     }
     fn prefers_half_messages(&self, start: usize, end: usize) -> bool {
-        if self.decode.get() || start >= end { return false; }
+        if start >= end { return false; }
         for layer in start..end {
             for which in [Message::Query, Message::Key, Message::Value, Message::Expert] {
                 let down = Weight::GateDown(layer, which);
@@ -707,6 +733,51 @@ impl<C: ResidentProduct<V>, V> Weights<C> for LoadedWeights<'_, V> {
         }
         true
     }
+    fn prefers_lazy_messages(&self, start: usize, end: usize) -> bool {
+        use spark_gpu_probe::prefill_gate;
+        if self.decode.get() || start >= end { return false; }
+        for layer in start..end {
+            for which in [Message::Query, Message::Key, Message::Value, Message::Expert] {
+                let down = Weight::GateDown(layer, which);
+                let Some(Entry::Resident { rows: k, columns, .. }) = self.entries.get(&down) else { return false };
+                let Ok(Some((_, _, parts, ko))) = self.run(&[Weight::GateForget(layer, which), Weight::GateGain(layer, which)]) else { return false };
+                if parts.len() != 2 || parts[0] != parts[1] || *k != ko || *columns != 2 * parts[0]
+                    || !prefill_gate::full_admitted(1, parts[0], *k, 1, 1, prefill_gate::PG_FULL_THREADS)
+                {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+    fn prefill_msg_meta(&self, compute: &C, rows: usize, dim: usize, scale: f32, eps: f32, queries: &[f32], list: &[&C::Value]) -> Result<Option<(C::Value, C::Value)>> {
+        if self.decode.get() { return Ok(None); }
+        compute.prefill_msg_meta(rows, dim, scale, eps, queries, list)
+    }
+    fn prefill_gate_fuse(
+        &self, compute: &C, layer: usize, sources: &[&C::Value],
+        entries: &[(Message, &C::Value, &C::Value, &C::Value, &C::Value, Option<&[f32]>)],
+        rows: usize, eps: f32, half_out: bool,
+    ) -> Result<Option<Vec<C::Value>>> {
+        if self.decode.get() || entries.is_empty() || entries.len() > spark_gpu_probe::prefill_gate::PG_GATES_MAX {
+            return Ok(None);
+        }
+        let mut resolved = Vec::with_capacity(entries.len());
+        let mut shape = None;
+        for &(which, kept_val, kept_half, mw, mn, norm_w) in entries {
+            let Some((wd_val, wd_words, kd, cols)) = self.matrix(Weight::GateDown(layer, which))? else { return Ok(None); };
+            let Some((wo_val, wo_words, parts, ko)) = self.run(&[Weight::GateForget(layer, which), Weight::GateGain(layer, which)])? else {
+                return Ok(None);
+            };
+            if parts.len() != 2 || parts[0] != parts[1] || kd != ko || cols != 2 * parts[0] { return Ok(None); }
+            let dim = parts[0];
+            if shape.is_some_and(|s| s != (dim, ko)) { return Ok(None); }
+            shape = Some((dim, ko));
+            resolved.push((wd_val, wd_words, wo_val, wo_words, kept_val, kept_half, mw, mn, norm_w));
+        }
+        let Some((dim, k)) = shape else { return Ok(None); };
+        compute.resident_prefill_gate_fuse(sources, &resolved, rows, dim, k, eps, half_out)
+    }
     fn prefers_half_output(&self, layer: usize) -> bool {
         !self.decode.get() && self.is_resident_tc(Weight::Output(layer))
     }
@@ -720,7 +791,7 @@ impl<C: ResidentProduct<V>, V> Weights<C> for LoadedWeights<'_, V> {
         queries: &[f32], list: &[&C::Value], stream: &C::Value,
         post_weight: Option<&[f32]>, post_weight_per_query: bool,
     ) -> Result<Option<(Option<C::Value>, Option<C::Value>, C::Value)>> {
-        if self.decode.get() { return Ok(None); }
+        if self.decode.get() && rows <= spark_gpu_probe::few_product::FEW_MAX { return Ok(None); }
         compute.mix_rows_normed_half(rows, dim, scale, eps, post_eps, transpose, keep_normed, keep_mixed, queries, list, stream, post_weight, post_weight_per_query)
     }
     fn mix_prefill_normed_half(&self, compute: &C, rows: usize, dim: usize, scale: f32, eps: f32, queries: &[f32], list: &[&C::Value]) -> Result<Option<(C::Value, C::Value)>> {
@@ -728,12 +799,12 @@ impl<C: ResidentProduct<V>, V> Weights<C> for LoadedWeights<'_, V> {
         compute.mix_prefill_normed_half(rows, dim, scale, eps, queries, list)
     }
     fn product_rows_half_in(&self, compute: &C, weight: Weight, x: &C::Value, rows: usize) -> Result<Option<C::Value>> {
-        if self.decode.get() { return Ok(None); }
+        if self.decode.get() && rows <= spark_gpu_probe::few_product::FEW_MAX { return Ok(None); }
         let Some((value, words, matrix_rows, columns)) = self.matrix(weight)? else { return Ok(None) };
         compute.resident_product_rows_half_in(value, words, matrix_rows, columns, x, rows)
     }
     fn stack_products_rows_half_in(&self, compute: &C, weights: &[Weight], x: &C::Value, rows: usize) -> Result<Option<Vec<C::Value>>> {
-        if self.decode.get() { return Ok(None); }
+        if self.decode.get() && rows <= spark_gpu_probe::few_product::FEW_MAX { return Ok(None); }
         let Some((value, words, parts, columns)) = self.run(weights)? else { return Ok(None) };
         if rows == 0 || !columns.is_multiple_of(2) || rows.checked_mul(columns / 2) != Some(compute.words(x)) {
             return Err("loop weights: the half input of a stacked product differs from its rows".into());
@@ -741,7 +812,7 @@ impl<C: ResidentProduct<V>, V> Weights<C> for LoadedWeights<'_, V> {
         compute.resident_product_rows_split_half_in(value, words, &parts, columns, x, rows)
     }
     fn product_rows_pair_half_in(&self, compute: &C, weight: Weight, x1: &C::Value, x2: &C::Value, rows: usize) -> Result<Option<C::Value>> {
-        if self.decode.get() { return Ok(None); }
+        if self.decode.get() && rows <= spark_gpu_probe::few_product::FEW_MAX { return Ok(None); }
         let Some((value, words, matrix_rows, columns)) = self.matrix(weight)? else { return Ok(None) };
         compute.resident_product_rows_pair_half_in(value, words, matrix_rows, columns, x1, x2, rows)
     }

@@ -6,7 +6,7 @@ use spark_gpu_probe::draft_ops::{DRAFT_BATCH_MAX,DraftOp,PANEL_INPUTS_MAX};
 
 impl<'a,V,A> Drafter<'a,V,A> {
     /// Push committed target taps for multiple chats in one batched weight pass (`k_ctx`, `v_ctx`, `Mix`, `Rope`,
-    /// and `markov_norm`). Large prefill batches (`total_rows > 64`) delegate per chat to bound transient buffers.
+    /// and `markov_norm`). Large prefill batches (`total_rows > 256`) delegate per chat to bound transient buffers.
     pub fn push_values_batch<C:ResidentProduct<V,Value=A>+Lanes>(&self,c:&C,items:&mut [(&mut DraftChat<A>,&[A],usize)])->Result<()> {
         let active=items.iter().enumerate().filter_map(|(idx,(_,_,r))|(*r>0).then_some(idx)).collect::<Vec<_>>();
         if active.is_empty() {return Ok(());}
@@ -15,7 +15,7 @@ impl<'a,V,A> Drafter<'a,V,A> {
             return self.push_values(c,chat,taps,*rows);
         }
         let total_rows:usize=active.iter().map(|&idx|items[idx].2).sum();
-        if total_rows>64 {
+        if total_rows>256 {
             for idx in active {
                 let (chat,taps,rows)=&mut items[idx];
                 self.push_values(c,chat,taps,*rows)?;
@@ -114,6 +114,13 @@ impl<'a,V,A> Drafter<'a,V,A> {
             && self.rnn_split.is_some()
             && matches!(self.head,Some(packed::Packed::Panel{..}));
         let q_final:Vec<usize>=items.iter().map(|(_,_,_,d)|if use_batched_markov {max_depth} else {*d}).collect();
+        // Pre-upload anchor IDs and cached swap table BEFORE any draft layer launches so the resident launch queue
+        // never flushes mid-draft between the 3 transformer layers and the Markov head/fold walk.
+        let (pre_anchors,pre_swap)=if use_batched_markov {
+            let anchors=c.upload(&items.iter().map(|(_,a,_,_)|*a as f32).collect::<Vec<_>>())?;
+            let swap_tbl=if max_depth>1 {Some(c.upload_constant(&rows::swap_table(b_count,max_depth))?)} else {None};
+            (Some(anchors),swap_tbl)
+        } else {(None,None)};
         let mut res_parts=Vec::with_capacity(b_count*2);
         for (_,_,embed,_) in items.iter() {res_parts.push(*embed);res_parts.push(&self.mask);}
         let mut res=c.join(&res_parts)?;
@@ -187,8 +194,8 @@ impl<'a,V,A> Drafter<'a,V,A> {
             c.join(&parts.iter().collect::<Vec<_>>())?
         } else {res};
         let drafted_all=norm(&drafted_in,q_total,h,&self.final_norm)?;
-        if use_batched_markov {
-            return self.markov_walk_batch(c,&drafted_all,items,max_depth);
+        if let Some(anchors)=pre_anchors {
+            return self.markov_walk_batch(c,&drafted_all,items,max_depth,&anchors,pre_swap.as_ref());
         }
         let mut out=Vec::with_capacity(b_count);
         let mut off=0usize;
@@ -201,10 +208,11 @@ impl<'a,V,A> Drafter<'a,V,A> {
         Ok(out)
     }
 
-    /// Batched Markov walk across `B <= 8` chats sharing one `head`, `draft_part`, `feat_part`, `dyn_part`, and
-    /// `fold` panel read per step. Reads back all `max_depth * B` picks and softmax denominators in ONE host sync.
+    /// Batched Markov walk across `B <= DRAFT_BATCH_MAX` chats sharing one `head`, `draft_part`, `feat_part`,
+    /// `dyn_part`, and `fold` panel read per step. Reads back all `max_depth * B` picks and softmax denominators
+    /// in ONE host sync with zero mid-draft H2D uploads.
     fn markov_walk_batch<C:ResidentProduct<V,Value=A>+Lanes>(
-        &self,c:&C,drafted_all:&A,items:&[(&mut DraftChat<A>,u32,&A,usize)],max_depth:usize,
+        &self,c:&C,drafted_all:&A,items:&[(&mut DraftChat<A>,u32,&A,usize)],max_depth:usize,anchors:&A,swap_tbl:Option<&A>,
     )->Result<Vec<(Vec<u32>,Vec<f32>)>> {
         let cfg=self.config();
         let (b_count,h,rank,vocab)=(items.len(),cfg.hidden_size,cfg.markov_rank,cfg.unpadded_vocab_size);
@@ -214,6 +222,8 @@ impl<'a,V,A> Drafter<'a,V,A> {
         // Reorder `[B, max_depth, h]` -> `[max_depth, B, h]` so each Markov step `s` sees all `B` chats contiguously.
         let drafted_step=if max_depth==1 {
             c.range(drafted_all,0,b_count*h)?
+        } else if let Some(tbl)=swap_tbl {
+            rows::gather_table(c,drafted_all,tbl,b_count*max_depth,h)?
         } else {
             rows::swap(c,drafted_all,b_count,max_depth,h)?
         };
@@ -243,7 +253,6 @@ impl<'a,V,A> Drafter<'a,V,A> {
         let draft_out=panel_chunked(3*rank,&split.draft_part,&packed_drafted,total_draft_rows)?;
         let feat_out=c.draft_panel(DraftOp::Panel{rows:3*rank,columns:h,inputs:b_count},&split.feat_part,&packed_feats,None)?;
         let static_base=c.lanes3(DraftOp::MarkovStaticBaseBatch{batch:b_count,depth:max_depth,width:3*rank},&draft_out,&feat_out,&self.rnn_bias)?;
-        let anchors=c.upload(&items.iter().map(|(_,a,_,_)|*a as f32).collect::<Vec<_>>())?;
         let tile_count=vocab.div_ceil(16);
         let tile_words=(rank/64)*18;
         let mut state:Option<A>=None;
@@ -252,7 +261,7 @@ impl<'a,V,A> Drafter<'a,V,A> {
         let mut step_picks:Vec<A>=Vec::with_capacity(max_depth*b_count);
         for s in 0..max_depth {
             let packed_dyn=match prev_result.as_ref() {
-                None=>c.lanes(DraftOp::MarkovPrepBatch{batch:b_count,latent:rank,vocab:cfg.vocab_size,from_pick:false,pick_stride:0},&self.w1,Some(&anchors))?,
+                None=>c.lanes(DraftOp::MarkovPrepBatch{batch:b_count,latent:rank,vocab:cfg.vocab_size,from_pick:false,pick_stride:0},&self.w1,Some(anchors))?,
                 Some(prev)=>c.lanes3(DraftOp::MarkovPrepBatch{batch:b_count,latent:rank,vocab:cfg.vocab_size,from_pick:true,pick_stride},&self.w1,prev,state.as_ref().ok_or("missing markov state")?)?,
             };
             let dyn_out=c.draft_panel(DraftOp::Panel{rows:3*rank,columns:2*rank,inputs:b_count},&split.dyn_part,&packed_dyn,None)?;

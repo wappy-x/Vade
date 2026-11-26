@@ -1,30 +1,36 @@
-//! Multi-chat batched DSpark drafting, cohort-aware confidence gating, and batched speculative verify (`C2..=C8`).
+//! Multi-chat batched DSpark drafting, cohort-aware confidence gating, and batched speculative verify (`C2..=C32`).
 //!
-//! - `VERIFY_ROW_CAP` (`16`) matches the zero-sync `device_sum_route` (`DEVICE_ROWS`) and `SMALL_PASS_ROWS` envelope.
-//! - `DRAFT_CHAT_LIMIT` (`8`) admits up to `VERIFY_ROW_CAP / 2` concurrent drafting chats (`C2 d<=7`, `C4 d<=3`, `C8 d<=1`).
-//!   Lifting `VERIFY_ROW_CAP` once stacked with wide decode immediately scales `C8 d=2..3` and `C16`/`C32`.
+//! - `VERIFY_ROW_CAP` (`256`) fits `C8 d<=7` (`M<=64`), `C16 d<=7` (`M<=128`), and `C32 d<=7` (`M<=256`) in ONE
+//!   single-pass grouped `PLAIN_PACKED_TC_ROWS` target verify with `short_conv_multi` (`rows <= 256`).
+//! - `DRAFT_CHAT_LIMIT` (`32`) matches `DRAFT_BATCH_MAX` so `C2..=C32` all share ONE batched DSpark draft pass.
 use super::{BatchRows,Chat,ChatStep,Piece,Predictions,Service,Slot,Wanted,mtp::{Context,LAG_ROWS,Model,SHALLOW_PROPOSE},need};
 use crate::{Result,bounded_decoder::Compute,loop_decoder::{experts::Phase,mix::Weights}};
 use spark_engine::draft::ModelProposal;
 use spark_serve::{BatchError,BatchOutput,DraftRows};
 use std::time::Instant;
 
-/// Maximum verify rows per single target pass inside the zero-sync `DEVICE_ROWS` / `SMALL_PASS_ROWS` envelope.
-pub(super) const VERIFY_ROW_CAP:usize=16;
-/// Largest concurrent cohort that drafts (`>= 2` rows per chat under `VERIFY_ROW_CAP`).
-pub(super) const DRAFT_CHAT_LIMIT:usize=VERIFY_ROW_CAP/2;
+/// Maximum verify rows per single target pass inside the wide resident decode & `short_conv_multi` envelope.
+pub(super) const VERIFY_ROW_CAP:usize=256;
+/// Largest concurrent cohort that drafts (`<= VERIFY_ROW_CAP / 2` and `<= DRAFT_BATCH_MAX`).
+pub(super) const DRAFT_CHAT_LIMIT:usize=32;
 
 /// Minimum cohort rounds before checking sustained negative return vs plain cohort decode.
 const COHORT_FALLBACK_MIN_ROUNDS:u32=24;
 const COHORT_PROBE_FIRST:usize=8;
 const COHORT_PROBE_MOST:usize=64;
 
+/// Maximum uniform propose depth per concurrency band:
+/// - `C2..=C8`: up to `7` (`M <= 64`, fits the graph cache with zero evictions and `< 6 ms` draft).
+/// - `C9..=C32`: up to `3` (`M <= 64` at `C16`, `M <= 128` at `C32`), keeping draft `< 9 ms`, graph cache
+///   eviction-free (`2` verify widths), and straggler spread tight across diverse cohorts.
+fn max_cohort_depth(chats:usize)->usize {if chats>8 {3} else {7}}
+
 struct CohortState {
     ids:Vec<u64>,
     plain_ms:Option<f64>,
     plain_n:u32,
-    verify_ms:[Option<f64>;VERIFY_ROW_CAP+1],
-    verify_n:[u32;VERIFY_ROW_CAP+1],
+    verify_ms:Vec<Option<f64>>,
+    verify_n:Vec<u32>,
     tokens:f64,
     ms:f64,
     rounds:u32,
@@ -39,7 +45,7 @@ impl Default for CohortState {
         Self {
             ids:Vec::new(),
             plain_ms:None,plain_n:0,
-            verify_ms:[None;VERIFY_ROW_CAP+1],verify_n:[0;VERIFY_ROW_CAP+1],
+            verify_ms:vec![None;VERIFY_ROW_CAP+1],verify_n:vec![0;VERIFY_ROW_CAP+1],
             tokens:0.0,ms:0.0,rounds:0,
             paused:false,plain_run:0,gap:COHORT_PROBE_FIRST,probing:false,
         }
@@ -60,8 +66,9 @@ fn sorted_ids(iter:impl Iterator<Item=u64>)->Vec<u64> {
 /// distinct prompt cohorts (identical vs diverse MoE expert mixes, structured vs prose) never poison each other's
 /// `plain_ms`, `verify_ms`, `target_rate`, or `paused` state. Keeps `C1` single-chat `Prices` untouched.
 pub(super) struct CohortPricing {
-    cohorts:[CohortState;DRAFT_CHAT_LIMIT+1],
-    draft_ms:[Option<f64>;DRAFT_CHAT_LIMIT+1],
+    cohorts:Vec<CohortState>,
+    draft_ms:Vec<Option<f64>>,
+    draft_n:Vec<u32>,
     push_ms:Option<f64>,
     last_draft_ms:f64,
     next_round_id:u64,
@@ -71,8 +78,9 @@ pub(super) struct CohortPricing {
 impl Default for CohortPricing {
     fn default()->Self {
         Self {
-            cohorts:std::array::from_fn(|_|CohortState::default()),
-            draft_ms:[None;DRAFT_CHAT_LIMIT+1],
+            cohorts:(0..=DRAFT_CHAT_LIMIT).map(|_|CohortState::default()).collect(),
+            draft_ms:vec![None;DRAFT_CHAT_LIMIT+1],
+            draft_n:vec![0;DRAFT_CHAT_LIMIT+1],
             push_ms:None,
             last_draft_ms:0.0,next_round_id:1,open:None,
         }
@@ -109,51 +117,68 @@ impl CohortPricing {
         self.cohorts.get(chats).filter(|s|s.ids.as_slice()==ids)
     }
     fn note_plain(&mut self,chats:usize,ids:&[u64],ms:f64) {
-        if let Some(state)=self.state_mut(chats,ids) {Self::ema(&mut state.plain_ms,&mut state.plain_n,ms);}
-    }
-    fn note_verify(&mut self,chats:usize,ids:&[u64],rows:usize,ms:f64) {
-        if let Some(state)=self.state_mut(chats,ids)
-            && let (Some(slot),Some(n))=(state.verify_ms.get_mut(rows),state.verify_n.get_mut(rows)) {
-            Self::ema(slot,n,ms);
+        if let Some(state)=self.state_mut(chats,ids) {
+            Self::ema(&mut state.plain_ms,&mut state.plain_n,ms);
         }
+    }
+    /// Record one verify step timing. Ignores the cold first-ever run (`verify_n == 1`, which includes one-time
+    /// CUDA graph capture and vector-pool allocation) and smoothly clamps upward jumps (`<= 1.45x`) so single-tick
+    /// jitter never spikes `step_at` while genuine steady-state MoE divergence still converges cleanly.
+    fn note_verify(&mut self,chats:usize,ids:&[u64],rows:usize,ms:f64)->bool {
+        let Some(state)=self.state_mut(chats,ids) else {return false;};
+        let (Some(slot),Some(n))=(state.verify_ms.get_mut(rows),state.verify_n.get_mut(rows)) else {return false;};
+        *n=n.saturating_add(1);
+        if *n<2 {return false;}
+        if let Some(old)=*slot {
+            let clamped=ms.min(old*1.45);
+            *slot=Some(if clamped<old {0.35*old+0.65*clamped} else {0.80*old+0.20*clamped});
+        } else {
+            *slot=Some(ms);
+        }
+        true
     }
     fn note_draft(&mut self,chats:usize,ms:f64) {
-        if let Some(slot)=self.draft_ms.get_mut(chats) {
-            *slot=Some(slot.map_or(ms,|old|if ms<old {0.35*old+0.65*ms} else {0.75*old+0.25*ms}));
+        if let (Some(slot),Some(n))=(self.draft_ms.get_mut(chats),self.draft_n.get_mut(chats)) {
+            Self::ema(slot,n,ms);
+            self.last_draft_ms=slot.unwrap_or(ms);
+        } else {
+            self.last_draft_ms=ms;
         }
-        self.last_draft_ms=ms;
     }
     fn note_push(&mut self,ms:f64) {
         self.push_ms=Some(self.push_ms.map_or(ms,|old|if ms<old {0.35*old+0.65*ms} else {0.75*old+0.25*ms}));
     }
-    /// Estimated step time (ms) for `total_rows` rows in this `chats`-chat cohort.
+    /// Smooth MoE-saturated concave prior for `total_rows` in a `chats`-chat cohort before warm sample 2 arrives.
+    fn prior_at(plain:f64,chats:usize,total_rows:usize)->f64 {
+        if total_rows<=chats {return plain;}
+        let d_avg=(total_rows-chats) as f64/chats.max(1) as f64;
+        let sat=(1.0/(chats as f64).powf(0.45)).min(0.85);
+        plain*(1.0+sat*0.35*d_avg.powf(0.65))
+    }
+    /// Estimated warm step time (ms) for `total_rows` rows in this `chats`-chat cohort.
     fn step_at(&self,chats:usize,ids:&[u64],total_rows:usize)->f64 {
         let state=self.state_ref(chats,ids);
         let plain=state.and_then(|s|s.plain_ms).unwrap_or(30.0+2.5*chats as f64);
         if total_rows<=chats {return plain;}
-        let extra=(total_rows-chats) as f64;
-        // Physics prior for unmeasured verify widths: doubling rows (`chats -> 2*chats`) adds ~32% step time.
-        let prior_frac=(0.32/chats.max(1) as f64).clamp(0.04,0.12);
-        let prior=plain*(1.0+prior_frac*extra);
+        let prior=Self::prior_at(plain,chats,total_rows);
         let Some(state)=state else {return prior;};
+        if let Some(ms)=state.verify_ms.get(total_rows).copied().flatten() {return ms;}
         let below=(chats+1..total_rows).rev().find_map(|r|state.verify_ms.get(r).copied().flatten().map(|ms|(r,ms)));
         let above=(total_rows+1..state.verify_ms.len()).find_map(|r|state.verify_ms.get(r).copied().flatten().map(|ms|(r,ms)));
-        // Inside an already-open 2nd 8-row slab (`total_rows > 8` extrapolating down from a larger measured width in
-        // `9..=16`), dropping one row saves only marginal per-row expert work (~1.5% of plain), not a whole slab step.
-        let slope=(plain*prior_frac).max(0.5);
-        let down_slope=if total_rows>8 { (plain*0.015).max(0.5) } else { slope };
-        let est=match (below,above) {
+        match (below,above) {
             (Some((lo,a)),Some((hi,b)))=>a+(b-a)*(total_rows-lo) as f64/(hi-lo) as f64,
-            (Some((lo,ms)),None)=>ms+slope*(total_rows-lo) as f64,
-            (None,Some((hi,ms)))=>(ms-down_slope*(hi-total_rows) as f64).max(plain*1.03),
+            (Some((lo,ms)),None)=>{
+                let p_lo=(Self::prior_at(plain,chats,lo)-plain).max(1.0e-6);
+                let ratio=(prior-plain)/p_lo;
+                (plain+(ms-plain).max(0.0)*ratio).max(ms+0.25*(total_rows-lo) as f64)
+            }
+            (None,Some((hi,ms)))=>{
+                let p_hi=(Self::prior_at(plain,chats,hi)-plain).max(1.0e-6);
+                let ratio=(prior-plain)/p_hi;
+                (plain+(ms-plain).max(0.0)*ratio).max(plain*1.02)
+            }
             (None,None)=>prior,
-        };
-        if let Some(ms)=state.verify_ms.get(total_rows).copied().flatten() {
-            // A single cold sample (`n == 1`) may include one-time CUDA graph capture; cap by `est` so sample 2 runs.
-            if state.verify_n[total_rows]<2 || (state.verify_n[total_rows]<3 && (below.is_some() || above.is_some())) {return ms.min(est);}
-            return ms;
         }
-        est
     }
     fn target_rate(&self,chats:usize,ids:&[u64])->f64 {
         let state=self.state_ref(chats,ids);
@@ -176,21 +201,51 @@ impl CohortPricing {
         }
         true
     }
-    /// Exact greedy matroid selection over monotonically non-increasing per-chat survival gains: picks the prefix
-    /// `keep_d[i]` for each chat maximizing `(chats + sum_gains) - target_rate * (step_at(chats, chats + k) + push)`.
+    /// Optimal verify depth selection:
+    /// - `C2` (`chats <= 2`, `M <= 16`): exact per-chat greedy matroid selection over monotonically non-increasing
+    ///   survival gains.
+    /// - `C3..=C32` (`chats >= 3`): uniform cohort depth `d` chosen from a compact 3-4 entry ladder (`[1, 2, 3]`
+    ///   when `max_d <= 3`, else `[1, 3, 5, 7]` + `max_d`), giving every chat identical `span.count = d + 1` so
+    ///   CUDA Graphs and the device vector pool stay ~100% warm with zero per-step graph churn or allocator stalls.
     pub(super) fn select_depths(&self,chats:usize,ids:&[u64],row_cap:usize,gains:&[Vec<f64>])->Vec<usize> {
         let n=gains.len();
         let mut keep=vec![0usize;n];
         let max_extra=row_cap.saturating_sub(chats);
         if max_extra==0 || n==0 {return keep;}
+        let rate=self.target_rate(chats,ids);
+        let push=self.push_ms.unwrap_or(0.5);
+        let base_val=chats as f64-rate*self.step_at(chats,ids,chats);
+        if chats>=3 && n==chats {
+            let max_d=gains.iter().map(Vec::len).min().unwrap_or(0).min(max_extra/chats);
+            if max_d==0 {return keep;}
+            let mut ladder:Vec<usize>=if chats>8 {
+                if max_d<=1 {vec![1]} else {vec![1,max_d]}
+            } else if max_d<=3 {(1..=max_d).collect()} else {
+                let mut v:Vec<usize>=[1,3,5,7].into_iter().filter(|&d|d<=max_d).collect();
+                if v.last().copied()!=Some(max_d) {v.push(max_d);}
+                v
+            };
+            ladder.dedup();
+            let plain=self.step_at(chats,ids,chats).max(1.0);
+            // `draft` is already sunk when `select_depths` runs; evaluate post-draft Dinkelbach renewal value
+            // `(chats + gain_sum) - rate * (verify_ms + push)` against dropping to plain (`chats - rate * plain`),
+            // where `rate = target_rate` already reflects full round time (including draft) across observed rounds.
+            let (mut best_d,mut best_val)=(0usize,chats as f64-rate*plain);
+            for d in ladder {
+                let gain_sum:f64=gains.iter().map(|g|g[..d].iter().sum::<f64>()).sum();
+                let v_ms=(self.step_at(chats,ids,chats*(d+1))+push).max(1.0);
+                let val=(chats as f64+gain_sum)-rate*v_ms;
+                if val>best_val {best_d=d;best_val=val;}
+            }
+            keep.fill(best_d);
+            return keep;
+        }
         let mut cands:Vec<(usize,usize,f64)>=Vec::new();
         for (i,g) in gains.iter().enumerate() {
             for (s,&gain) in g.iter().enumerate() {cands.push((i,s,gain));}
         }
         cands.sort_by(|a,b|b.2.total_cmp(&a.2).then_with(||a.1.cmp(&b.1)).then_with(||a.0.cmp(&b.0)));
-        let rate=self.target_rate(chats,ids);
-        let push=self.push_ms.unwrap_or(0.5);
-        let (mut best_k,mut best_val)=(0usize,chats as f64-rate*self.step_at(chats,ids,chats));
+        let (mut best_k,mut best_val)=(0usize,base_val);
         let mut gain_sum=0.0f64;
         for (idx,&(_,_,gain)) in cands.iter().take(max_extra).enumerate() {
             gain_sum+=gain;
@@ -266,6 +321,9 @@ fn flush_batch<C:Compute,W:Weights<C>>(c:&C,model:&dyn Model<C,W>,ctxs:&mut [&mu
 }
 
 impl<'a,C:Compute,W:Weights<C>> Service<'a,C,W> {
+    pub(super) fn verify_row_cap(&self)->usize {
+        if self.depth>0 {VERIFY_ROW_CAP.min(self.driver.limits().step_rows)} else {1}
+    }
     pub(super) fn draft_chat_limit_value(&self)->usize {
         if self.depth>0 {DRAFT_CHAT_LIMIT.min(self.verify_row_cap()/2).max(1)} else {1}
     }
@@ -286,8 +344,12 @@ impl<'a,C:Compute,W:Weights<C>> Service<'a,C,W> {
         let cfg=m.config();
         let b_count=rows.len();
         let started=Instant::now();
-        // Reset per-round state on each chat and collect zero-cost exact suffix lookup hits first.
+        // Reset per-round state on each chat and collect exact suffix lookup hits. For `b_count >= 3`, keep all
+        // eligible chats in one constant-batch `propose_confident_batch` launch (warm draft CUDA graph!) and
+        // substitute exact suffix lookup hits after uniform depth selection so every chat verifies the same count.
+        let uniform_cohort=b_count>=3;
         let mut proposals:Vec<Option<Vec<u32>>>=vec![None;b_count];
+        let mut lookup_hits:Vec<Option<Vec<u32>>>=vec![None;b_count];
         let mut neural_indices:Vec<usize>=Vec::new();
         let mut neural_depths:Vec<usize>=Vec::new();
         let mut any_wide=false;
@@ -297,12 +359,15 @@ impl<'a,C:Compute,W:Weights<C>> Service<'a,C,W> {
             d.spent=0.0;d.last_neural=false;d.last_probs.clear();d.last_draft_ms=0.0;
             let most=row.limit.min(d.depth);
             let (copied,_)=if most>=2 {d.lookup.propose_after(row.history,&[row.next],most,8)} else {(Vec::new(),0)};
-            if copied.len()>=2 {
+            if !uniform_cohort && copied.len()>=2 {
                 proposals[i]=Some(copied);
             } else if most>0 && d.read_to()+cfg.block_size<=cfg.max_position_embeddings {
-                any_wide|=d.choose.wide;
+                if copied.len()>=2 {lookup_hits[i]=Some(copied);}
+                any_wide|=d.choose.is_multi_wide();
                 neural_indices.push(i);
                 neural_depths.push(most);
+            } else if copied.len()>=2 {
+                proposals[i]=Some(copied);
             } else {
                 d.drops[0]+=1;
                 proposals[i]=Some(Vec::new());
@@ -313,36 +378,48 @@ impl<'a,C:Compute,W:Weights<C>> Service<'a,C,W> {
         let allow_neural=if neural_indices.is_empty() {false} else {cohort.should_draft(b_count,&cohort_ids)};
         drop(cohort);
         if allow_neural {
-            // Cap shallow cohorts (e.g. C2 Prose before wide ramp) to SHALLOW_PROPOSE to save extra Markov steps.
+            // Cap shallow cohorts to SHALLOW_PROPOSE and cap uniform cohorts to the deepest uniform verify depth
+            // that fits `verify_row_cap()` (e.g. `d <= 3` at `C32` instead of wasting 7 Markov steps).
             let max_depth=neural_depths.iter().copied().max().unwrap_or(0);
-            let cap_depth=if any_wide || max_depth<=SHALLOW_PROPOSE {max_depth} else {SHALLOW_PROPOSE};
+            let mut cap_depth=if any_wide || max_depth<=SHALLOW_PROPOSE {max_depth} else {SHALLOW_PROPOSE};
+            if uniform_cohort {
+                let max_uniform=(self.verify_row_cap()/b_count).saturating_sub(1).min(max_cohort_depth(b_count)).max(1);
+                cap_depth=cap_depth.min(max_uniform);
+            }
             for d in &mut neural_depths {*d=(*d).min(cap_depth);}
-            let mut push_ms=0.0f64;
-            let mut draft_started=started;
-            let raw_results=self.compute.work(|| {
-                // Commit all deferred multi-chat target accepts asynchronously on the stream before drafting.
-                {
-                    let mut slots=self.slots.borrow_mut();
-                    for row in rows.iter() {
-                        if let Ok(active)=row.session.active_slot()
-                            && let Some(slot)=slots.get_mut(active).and_then(Option::as_mut)
-                        {
-                            self.flush_accept(slot)?;
+            // Flush deferred accepts and variable-row `push_batch` unrecorded BEFORE `propose_confident_batch` so
+            // variable accepted counts never instantiate unique CUDA graphs or evict warm verify/draft graphs.
+            let p0=Instant::now();
+            let flushed=self.compute.work(|| {
+                let paused=self.compute.rows_unrecorded(true)?;
+                let run=(|| -> Result<bool> {
+                    {
+                        let mut slots=self.slots.borrow_mut();
+                        for row in rows.iter() {
+                            if let Ok(active)=row.session.active_slot()
+                                && let Some(slot)=slots.get_mut(active).and_then(Option::as_mut)
+                            {
+                                self.flush_accept(slot)?;
+                            }
                         }
                     }
-                }
-                // Flush ALL chats' deferred taps together in ONE batched push before running the neural draft.
-                let mut all_ctxs:Vec<&mut Context<C::Value>>=rows.iter_mut()
-                    .filter_map(|r|r.session.draft.as_mut()).collect();
-                let p0=Instant::now();
-                if flush_batch(self.compute,m,&mut all_ctxs)? {
-                    push_ms=p0.elapsed().as_secs_f64()*1000.0;
-                }
-                drop(all_ctxs);
-                draft_started=Instant::now();
-                // Compute anchor embeddings before mutably borrowing `rows` for `DraftChat` references.
+                    let mut all_ctxs:Vec<&mut Context<C::Value>>=rows.iter_mut()
+                        .filter_map(|r|r.session.draft.as_mut()).collect();
+                    flush_batch(self.compute,m,&mut all_ctxs)
+                })();
+                let resumed=self.compute.rows_unrecorded(paused);
+                let flushed=run?;
+                resumed?;
+                Ok(flushed)
+            }).map_err(err)?;
+            let push_ms=if flushed {p0.elapsed().as_secs_f64()*1000.0} else {0.0};
+            let draft_started=Instant::now();
+            let raw_results=self.compute.work(|| {
+                // Compute all anchor embeddings in ONE batched lookup + norm launch before mutably borrowing `rows`.
                 let anchors:Vec<u32>=neural_indices.iter().map(|&idx|rows[idx].next).collect();
-                let embeds=anchors.iter().map(|&tok|self.driver.embedding(tok)).collect::<Result<Vec<_>>>()?;
+                let width=self.driver.run.width();
+                let embeds_all=self.driver.embeddings(&anchors)?;
+                let embeds=(0..anchors.len()).map(|i|self.compute.range(&embeds_all,i*width,width)).collect::<Result<Vec<_>>>()?;
                 let mut chats:Vec<Option<&mut super::super::draft::DraftChat<C::Value>>>=rows.iter_mut()
                     .map(|r|r.session.draft.as_mut().map(|d|&mut d.chat)).collect();
                 let mut items=Vec::with_capacity(neural_indices.len());
@@ -365,15 +442,30 @@ impl<'a,C:Compute,W:Weights<C>> Service<'a,C,W> {
                 let mut survive=1.0f64;
                 let mut g=Vec::with_capacity(probs.len());
                 for (pos,&p) in probs.iter().enumerate() {survive*=d.choose.cal_pos(pos,p);g.push(survive);}
+                if let Some(hit)=lookup_hits[idx].as_ref() {
+                    let mut h_surv=1.0f64;
+                    for slot in g.iter_mut().take(hit.len()) {
+                        h_surv*=0.85;
+                        if h_surv>*slot {*slot=h_surv;}
+                    }
+                }
                 gains.push(g);
             }
             let keep_depths=cohort.select_depths(b_count,&cohort_ids,avail_cap,&gains);
             drop(cohort);
             for ((&idx,(mut drafted,probs)),keep_d) in neural_indices.iter().zip(raw_results).zip(keep_depths) {
                 let d=rows[idx].session.draft.as_mut().expect("draft context checked");
-                drafted.truncate(keep_d);
-                if drafted.is_empty() {d.drops[1]+=1;d.dropped_ms+=draft_ms;}
-                d.last_probs=probs;d.last_draft_ms=draft_ms;d.last_neural=true;
+                let used_lookup=keep_d>=2 && lookup_hits[idx].as_ref().is_some_and(|h|h.len()>=keep_d);
+                if used_lookup {
+                    let mut hit=lookup_hits[idx].take().expect("checked");
+                    hit.truncate(keep_d);
+                    drafted=hit;
+                    d.last_neural=false;
+                } else {
+                    drafted.truncate(keep_d);
+                    if drafted.is_empty() {d.drops[1]+=1;d.dropped_ms+=draft_ms;}
+                    d.last_probs=probs;d.last_draft_ms=draft_ms;d.last_neural=true;
+                }
                 proposals[idx]=Some(drafted);
             }
         } else {
@@ -452,7 +544,12 @@ impl<'a,C:Compute,W:Weights<C>> Service<'a,C,W> {
                 taken.push(slot);
             }
             let (tops,logits,flushed)=self.compute.work(|| {
-                for slot in &mut taken {self.flush_accept(slot)?;}
+                if taken.iter().any(|s|s.pending_accept.is_some()) {
+                    let paused=self.compute.rows_unrecorded(true)?;
+                    let r=(|| -> Result<()> {for slot in &mut taken {self.flush_accept(slot)?;} Ok(())})();
+                    let resumed=self.compute.rows_unrecorded(paused);
+                    r?;resumed?;
+                }
                 let mut chats:Vec<ChatStep<'_,C::Value>>=taken.iter_mut().zip(pieces).map(|(slot,piece)| {
                     let batch=&rows[piece.row];
                     ChatStep {state:&mut slot.state,tokens:&batch.tokens[piece.from..piece.to],wanted:piece.wanted,logits:!batch.greedy && piece.wanted!=Wanted::None}
@@ -472,8 +569,11 @@ impl<'a,C:Compute,W:Weights<C>> Service<'a,C,W> {
                     if !decode || count>1 || ctx.lagged+ctx.deferred_rows>=LAG_ROWS {need_flush=true;}
                 }
                 if need_flush {
+                    let paused=self.compute.rows_unrecorded(true)?;
                     let mut ctxs:Vec<&mut Context<C::Value>>=rows.iter_mut().filter_map(|r|r.session.draft.as_mut()).collect();
-                    flush_batch(self.compute,model,&mut ctxs)?;
+                    let r=flush_batch(self.compute,model,&mut ctxs).map(|_|());
+                    let resumed=self.compute.rows_unrecorded(paused);
+                    r?;resumed?;
                 }
                 Ok((step.tops,logits,need_flush))
             })?;
@@ -557,18 +657,28 @@ impl<'a,C:Compute,W:Weights<C>> Service<'a,C,W> {
                 need(ctx.pending.is_empty(),"a draft window is still open")?;
                 taken.push(slot);
             }
+            let group_ids=sorted_ids(group.iter().map(|&idx|rows[idx].session.id));
             let mut pending_chats=0usize;
             let mut auto_kept=0usize;
             let tops=self.compute.work(|| {
-                for slot in &mut taken {self.flush_accept(slot)?;}
-                // Flush any chat that still holds queued taps before running `verify_many`.
-                let mut flush_ctxs:Vec<&mut Context<C::Value>>=Vec::new();
-                for (i,r) in rows.iter_mut().enumerate() {
-                    if group.contains(&i) && let Some(ctx)=r.session.draft.as_mut() && (ctx.lagged>0 || ctx.deferred_rows>0) {
-                        flush_ctxs.push(ctx);
-                    }
+                let any_pending=taken.iter().any(|s|s.pending_accept.is_some())
+                    || rows.iter().enumerate().any(|(i,r)|group.contains(&i) && r.session.draft.as_ref().is_some_and(|ctx|ctx.lagged>0 || ctx.deferred_rows>0));
+                if any_pending {
+                    let paused=self.compute.rows_unrecorded(true)?;
+                    let r=(|| -> Result<()> {
+                        for slot in &mut taken {self.flush_accept(slot)?;}
+                        let mut flush_ctxs:Vec<&mut Context<C::Value>>=Vec::new();
+                        for (i,r) in rows.iter_mut().enumerate() {
+                            if group.contains(&i) && let Some(ctx)=r.session.draft.as_mut() && (ctx.lagged>0 || ctx.deferred_rows>0) {
+                                flush_ctxs.push(ctx);
+                            }
+                        }
+                        if !flush_ctxs.is_empty() {flush_batch(self.compute,model,&mut flush_ctxs)?;}
+                        Ok(())
+                    })();
+                    let resumed=self.compute.rows_unrecorded(paused);
+                    r?;resumed?;
                 }
-                if !flush_ctxs.is_empty() {flush_batch(self.compute,model,&mut flush_ctxs)?;}
                 if has_multi {
                     let mut verify_chats:Vec<(&mut super::super::state::State<C::Value>,&[u32])>=taken.iter_mut().zip(&group)
                         .map(|(slot,&idx)|(&mut slot.state,rows[idx].tokens)).collect();
@@ -610,12 +720,16 @@ impl<'a,C:Compute,W:Weights<C>> Service<'a,C,W> {
             for slot in taken {slot.shared=true;}
             let elapsed=started.elapsed();
             let ms=elapsed.as_secs_f64()*1000.0;
-            let group_ids=sorted_ids(group.iter().map(|&idx|rows[idx].session.id));
             let round_id={
                 let mut cohort=self.cohort.borrow_mut();
-                if has_multi {cohort.note_verify(group.len(),&group_ids,total_rows,ms);}
-                else {cohort.note_plain(group.len(),&group_ids,ms);}
-                let round_ms=cohort.last_draft_ms+ms;
+                let eff_ms=if has_multi {
+                    let warm=cohort.note_verify(group.len(),&group_ids,total_rows,ms);
+                    if warm {ms} else {ms.min(cohort.step_at(group.len(),&group_ids,total_rows))}
+                } else {
+                    cohort.note_plain(group.len(),&group_ids,ms);
+                    ms
+                };
+                let round_ms=cohort.last_draft_ms+eff_ms;
                 cohort.start_open(group.len(),group_ids,round_ms,pending_chats,auto_kept)
             };
             let mut top_off=0usize;
@@ -660,36 +774,53 @@ mod tests {
         p.note_plain(4,&c4_b,49.0);
         assert!(p.should_draft(4,&c4_b),"new cohort is never paused by an earlier cohort");
         // A C8 cohort never inherits C4's 67ms M=16 timing when C8 plain is 33ms, and a single cold capture spike
-        // (`verify_n == 1`) is capped by the prior so sample 2 runs and replaces it cleanly.
+        // (`verify_n == 1`) is ignored so warm sample 2 runs and populates `verify_ms` cleanly.
         let c8=[20u64,21,22,23,24,25,26,27];
         assert!(!p.should_draft(8,&c8));
         p.note_plain(8,&c8,33.0);
         assert!(p.should_draft(8,&c8));
-        p.note_verify(8,&c8,16,95.0);
-        assert!(p.step_at(8,&c8,16)<50.0,"single cold sample capped by prior");
+        assert!(!p.note_verify(8,&c8,16,95.0),"cold sample 1 ignored");
+        assert!(p.step_at(8,&c8,16)<45.0,"cold sample 1 leaves prior intact");
         let gains:Vec<Vec<f64>>=(0..8).map(|_|vec![0.85]).collect();
         let keep=p.select_depths(8,&c8,VERIFY_ROW_CAP,&gains);
-        assert_eq!(keep,vec![1;8],"confident C8 cohort drafts all 8 chats on fresh/cold prior");
-        p.note_verify(8,&c8,16,60.0);
-        assert!((p.step_at(8,&c8,16)-60.0).abs()<1e-9,"warm sample 2 replaces cold spike");
+        assert_eq!(keep,vec![1;8],"confident C8 cohort drafts uniformly on fresh/cold prior");
+        assert!(p.note_verify(8,&c8,16,44.0),"warm sample 2 accepted");
+        assert!((p.step_at(8,&c8,16)-44.0).abs()<1e-9,"warm sample 2 recorded");
+        // Wide C16 and C32 cohorts select deep uniform depths from the compact ladder.
+        let c16:Vec<u64>=(100..116).collect();
+        p.note_plain(16,&c16,70.0);
+        let g16:Vec<Vec<f64>>=(0..16).map(|_|vec![0.85,0.72,0.55]).collect();
+        let k16=p.select_depths(16,&c16,VERIFY_ROW_CAP,&g16);
+        assert_eq!(k16,vec![3;16],"C16 drafts uniformly at d=3");
+        let c32:Vec<u64>=(200..232).collect();
+        p.note_plain(32,&c32,110.0);
+        let g32:Vec<Vec<f64>>=(0..32).map(|_|vec![0.85,0.72,0.55]).collect();
+        let k32=p.select_depths(32,&c32,VERIFY_ROW_CAP,&g32);
+        assert_eq!(k32,vec![3;32],"C32 drafts uniformly at d=3");
     }
 
     #[test]
     fn select_depths_allocates_rows_by_survival_gain_and_handles_cold_capture_and_probe() {
         let mut p=CohortPricing::default();
+        // C2 keeps per-chat greedy matroid allocation across heterogeneous chats.
+        let c2=[1u64,2];
+        p.note_plain(2,&c2,35.0);
+        assert!(!p.note_verify(2,&c2,6,110.0),"cold sample 1 ignored");
+        assert!(p.note_verify(2,&c2,6,48.0),"warm sample 2 accepted");
+        assert!((p.step_at(2,&c2,6)-48.0).abs()<1e-9);
+        let g2=vec![vec![0.95,0.90,0.85],vec![0.05,0.03,0.01]];
+        let k2=p.select_depths(2,&c2,VERIFY_ROW_CAP,&g2);
+        assert_eq!(k2,vec![3,0],"C2 allocates per chat");
+        // C4+ selects uniform depth from the compact ladder to keep CUDA graphs and vector pool warm.
         let ids=[1u64,2,3,4];
         p.note_plain(4,&ids,48.0);
-        // Cold first-run capture spike at M=8 replaced immediately by warm sample 2.
-        p.note_verify(4,&ids,8,110.0);
-        p.note_verify(4,&ids,8,56.0);
-        assert!((p.step_at(4,&ids,8)-56.0).abs()<1e-9);
-        p.note_verify(4,&ids,12,64.0);
-        p.note_verify(4,&ids,16,70.0);
-        // Heterogeneous chats: chat 0 & 1 highly confident, chat 2 moderate (1st pays, 2nd 0.06 < marginal cost), chat 3 uncertain.
-        let gains=vec![vec![0.95,0.90,0.85],vec![0.92,0.85,0.80],vec![0.70,0.06,0.02],vec![0.05,0.03,0.01]];
+        let _=p.note_verify(4,&ids,16,140.0);
+        let _=p.note_verify(4,&ids,16,70.0);
+        let _=p.note_verify(4,&ids,8,120.0);
+        let _=p.note_verify(4,&ids,8,56.0);
+        let gains=vec![vec![0.95,0.90,0.85],vec![0.92,0.85,0.80],vec![0.88,0.82,0.75],vec![0.85,0.78,0.70]];
         let keep=p.select_depths(4,&ids,VERIFY_ROW_CAP,&gains);
-        assert_eq!(keep[0],3);assert_eq!(keep[1],3);assert_eq!(keep[2],1);assert_eq!(keep[3],0);
-        assert!(keep.iter().sum::<usize>()+4<=VERIFY_ROW_CAP);
+        assert_eq!(keep,vec![3;4],"C4 selects uniform depth 3 across cohort");
         // Sustained negative return pauses, then a profitable probe resumes drafting.
         for _ in 0..COHORT_FALLBACK_MIN_ROUNDS {
             let _=p.should_draft(4,&ids);

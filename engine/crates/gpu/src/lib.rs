@@ -51,6 +51,9 @@ pub mod tc_rows;
 /// Bit-exact W4A16/W8A16 BF16 tensor-core prefill MoE kernel (`kernels-inkling`, kind 121, Ruling R6h).
 #[allow(clippy::manual_is_multiple_of)] // Shared with the NVPTX crate, as staged_product.
 pub mod prefill_moe;
+/// Bit-exact fused prefill message-meta and message-gate kernels (`kernels-inkling`, kind 123, Ruling R6h).
+#[allow(clippy::manual_is_multiple_of)] // Shared with the NVPTX crate, as staged_product.
+pub mod prefill_gate;
 /// Tensor-core BF16 fused causal/sliding-window attention (`kernels-inkling`, Ruling R6h).
 #[allow(clippy::manual_is_multiple_of)] // Shared with the NVPTX crate, as staged_product.
 pub mod flash_window;

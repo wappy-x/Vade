@@ -118,37 +118,47 @@ pub const fn one_panel_row_bytes_chunks(inputs: usize, part_chunks: usize) -> us
 /// Double-buffered SMEM handoff bytes for Warps `1..4` -> Warp `0` in 4-warp cooperative ascending-K `Vade-BF11-BP`:
 /// `2 slots * 3 producer warps * 4 tiles * 32 lanes * 16 B = 12,288 B`.
 pub const COOP_W_BYTES: usize = 12_288;
-/// Shared bytes of a Vade-BF11-BP panel launch with `slices` streams (`1` = independent warps, `4` = 4-warp
-/// cooperative ascending-K with `COOP_W_BYTES` double-buffered weight handoff). Avoids `ONE_BLOCK_BYTES` (20,480)
-/// so PDL `dependent_launch` stays enabled on `cols = 4096, inputs = 1`.
+/// SMEM handoff bytes for `slices`-warp cooperative ascending-K `Vade-BF11-BP`:
+/// - `slices == 4` (2 slots x 3 producer warps x 2,048 B = 12,288 B, double-buffered)
+/// - `slices == 8` (1 slot x 7 producer warps x 2,048 B = 14,336 B, single-buffered so 3 blk/SM = 24 warps/SM holds for all M=1..8)
+#[inline(always)]
+pub const fn coop_w_bytes(slices: usize) -> usize {
+    if slices == 8 { 7 * 2_048 } else if slices > 1 { (slices - 1) * 4_096 } else { 0 }
+}
+/// Shared bytes of a Vade-BF11-BP panel launch with `slices` streams (`1` = independent warps, `4`/`6`/`8` =
+/// cooperative ascending-K with `coop_w_bytes(slices)` double-buffered weight handoff). Avoids `ONE_BLOCK_BYTES`
+/// (20,480) so PDL `dependent_launch` stays enabled on `cols = 4096, inputs = 1`.
 pub const fn one_panel_shared_slices(inputs: usize, part_chunks: usize, slices: usize) -> usize {
     let x_bytes = inputs * one_panel_row_bytes_chunks(inputs, part_chunks);
-    if slices == 4 {
-        let total = x_bytes + COOP_W_BYTES;
+    if slices > 1 {
+        let total = x_bytes + coop_w_bytes(slices);
         if total == ONE_BLOCK_BYTES { total + 128 } else { total }
     } else {
         x_bytes
     }
 }
-/// Largest `part_chunks` dividing `chunks` (`cols / 64`, and a multiple of 4 when `slices == 4`) whose shared bytes
-/// fit `budget`.
+/// Minimum-SMEM `part_chunks` (multiple of `slices` for cooperative modes, `1..=chunks`) achieving the fewest
+/// `stage_x` passes whose shared bytes fit `budget`, for `inputs` in `1..=FEW_MAX` and `slices` in `{1, 4, 6, 8}`.
 pub const fn one_panel_part_chunks(inputs: usize, chunks: usize, budget: usize, slices: usize) -> Option<usize> {
-    if inputs == 0 || inputs > ONE_PANEL_INPUTS || chunks == 0 || !matches!(slices, 1 | 4) {
+    if inputs == 0 || inputs > FEW_MAX || chunks == 0 || !matches!(slices, 1 | 4 | 6 | 8) {
         return None;
     }
-    if slices == 4 && !chunks.is_multiple_of(4) {
+    if slices > 1 && !chunks.is_multiple_of(slices) {
         return None;
     }
     if one_panel_shared_slices(inputs, chunks, slices) <= budget {
         return Some(chunks);
     }
-    let step = if slices == 4 { 4 } else { 1 };
-    let mut part = (chunks / 2) / step * step;
-    while part >= step {
-        if chunks.is_multiple_of(part) && one_panel_shared_slices(inputs, part, slices) <= budget {
-            return Some(part);
+    let step = if slices > 1 { slices } else { 1 };
+    let mut best = chunks / step * step;
+    while best >= step {
+        if one_panel_shared_slices(inputs, best, slices) <= budget {
+            let passes = chunks.div_ceil(best);
+            let min_for_passes = chunks.div_ceil(passes).next_multiple_of(step);
+            let chosen = if min_for_passes < best { min_for_passes } else { best };
+            return Some(chosen);
         }
-        part -= step;
+        best -= step;
     }
     None
 }

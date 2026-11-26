@@ -37,9 +37,10 @@ use mix::{MESSAGES,Run,Token,Weight,Weights,need,number,reciprocal,shape};
 use rows::{ChatRows,GATHER_ROWS,Limits,Rows,gather};
 use spark_gpu_probe::{causal_ops::Op,prompt_ops};
 use state::{Layout,Ring,State};
-/// Rows of a pass that leaves room in the vector pool first (`Compute::pass_room`): a decode step, a verify pass of a
-/// drafted block (at most 8 rows), or a multi-chat decode cohort (up to 32 rows). Larger groups are prompt work.
+/// Rows of a pass that uses the small-pass `mix_rows` path (`mix.rs`). Larger groups use `mix_prefill_normed`.
 const SMALL_PASS_ROWS:usize=32;
+/// Maximum decode/verify rows that keep resident graph recording (`rows_small_pass`) and `pass_room` active.
+const DECODE_PASS_ROWS:usize=256;
 /// The room a small pass leaves under the vector pool's cap, as the bounded decoder's verify pass leaves.
 const PASS_ROOM:usize=1<<30;
 
@@ -244,6 +245,13 @@ impl<'a,C:Compute,W:Weights<C>> Driver<'a,C,W> {
         let row=self.stored(&[token])?;
         rounded_norm(c,&row,1,width,d.epsilon,Some(w.words(Weight::EmbeddingNorm)?))
     }
+    /// Batched embedding + `EmbeddingNorm` for `tokens` in one `stored` lookup and one `rounded_norm` launch.
+    pub fn embeddings(&self,tokens:&[u32])->Result<C::Value> {
+        let (c,w,d,width)=(self.run.compute,self.run.weights,self.run.description,self.run.width());
+        need(!tokens.is_empty() && tokens.iter().all(|&token|u64::from(token)<d.vocab),"a token is outside the stored embedding rows")?;
+        let rows=self.stored(tokens)?;
+        rounded_norm(c,&rows,tokens.len(),width,d.epsilon,Some(w.words(Weight::EmbeddingNorm)?))
+    }
     /// The stored embedding rows of `tokens`, `[tokens][width]`, 32-bit: a copy on the compute where the weights hold
     /// the table there (`Weights::stored_rows`), else the host rows, uploaded. The same words either way.
     fn stored(&self,tokens:&[u32])->Result<C::Value> {
@@ -281,6 +289,23 @@ impl<'a,C:Compute,W:Weights<C>> Driver<'a,C,W> {
             None=>{let words=c.read(&logits)?;(0..rows).map(|row|greedy_logits(&words[row*head..(row+1)*head],head)).collect::<Result<Vec<_>>>()?},
         };
         Ok((logits,tops))
+    }
+    /// Greedy-only `headed` when no caller asked for raw logits: fuses `Op::Softcap` + argmax on the head product,
+    /// eliminating the `[rows][head]` capped-logits DRAM write and reload.
+    fn headed_greedy(&self,normed:&C::Value,rows:usize)->Result<Vec<u32>> {
+        let (c,w,d)=(self.run.compute,self.run.weights,self.run.description);
+        let head=state::size(d.head_rows)?;
+        let product=w.product_rows(c,Weight::Head,normed,rows)?;need(head.checked_mul(rows)==Some(c.words(&product)),"the head product differs from the head rows")?;
+        if let Some(picked)=c.rows_softcap_greedy(&product,rows,d.caps.logits as f32,reciprocal(d.caps.logits))? {
+            need(picked.len()==rows && picked.iter().all(|&top|u64::from(top)<d.head_rows),"the device picked no head row")?;
+            return Ok(picked);
+        }
+        let mut s=shape(Op::Softcap);s.rows=number(rows*head)?;s.bound=d.caps.logits as f32;s.epsilon=reciprocal(d.caps.logits);
+        let logits=c.operation(s,[Some(&product),None,None,None],&[])?;
+        match c.rows_greedy(&logits,rows)? {
+            Some(picked)=>{need(picked.len()==rows && picked.iter().all(|&top|u64::from(top)<d.head_rows),"the device picked no head row")?;Ok(picked)},
+            None=>{let words=c.read(&logits)?;(0..rows).map(|row|greedy_logits(&words[row*head..(row+1)*head],head)).collect::<Result<Vec<_>>>()},
+        }
     }
     /// One token: its embedding, every visit of the description in its order, and the end. The token is the one at
     /// `state.position`. The position moves on only when the whole step is done.
@@ -455,8 +480,8 @@ impl<'a,C:Compute,W:Weights<C>> Driver<'a,C,W> {
     /// Restore the single-row launch mode even on error.
     fn rows_pass(&self,chats:&mut [ChatStep<'_,C::Value>],rows:&Rows,phase:experts::Phase,taps:&[u64],seen:impl FnMut(usize,&C::Value)->Result<()>)->Result<(StepRows<C::Value>,Vec<C::Value>)> {
         let (c,total)=(self.run.compute,rows.total());
-        if total<=SMALL_PASS_ROWS && (rows.keeps() || !taps.is_empty()) {c.pass_room(PASS_ROOM);}
-        if phase!=experts::Phase::Decode || !(2..=SMALL_PASS_ROWS).contains(&total) {return self.rows_visits(chats,rows,phase,taps,seen);}
+        if total<=DECODE_PASS_ROWS && (rows.keeps() || !taps.is_empty()) {c.pass_room(PASS_ROOM);}
+        if phase!=experts::Phase::Decode || !(2..=DECODE_PASS_ROWS).contains(&total) {return self.rows_visits(chats,rows,phase,taps,seen);}
         c.rows_small_pass(total);
         let result=self.rows_visits(chats,rows,phase,taps,seen);
         c.rows_small_pass(1);result
@@ -466,9 +491,9 @@ impl<'a,C:Compute,W:Weights<C>> Driver<'a,C,W> {
         let visits=d.visits.len() as u64;
         need(taps.iter().all(|&tap|tap<=visits),"a draft tap names a state after the last visit")?;
         let mut tapped:Vec<Option<C::Value>>=taps.iter().map(|_|None).collect();
-        // Pre-populate per-step position factors, KV step words, and convolution ring slot/gather tables in the constant
-        // cache before Visit 0 while the resident launch queue is empty, avoiding mid-step H2D uploads and graph
-        // flushes across the 48 visits for single-chat verify, multi-chat verify, and multi-chat decode cohorts.
+        // Pre-populate per-step position factors, KV step words, and convolution ring slot/gather tables in the
+        // constant cache before Visit 0 while the resident launch queue is empty, avoiding mid-step H2D uploads and
+        // graph flushes across the 48 visits for single-chat verify, multi-chat verify, and plain decode cohorts.
         if phase==experts::Phase::Decode && total>1 {
             let spans=rows.chats();
             let mut seen_scales=Vec::new();
@@ -479,44 +504,46 @@ impl<'a,C:Compute,W:Weights<C>> Driver<'a,C,W> {
                     let _=c.upload_constant(&vals)?;
                 }
             }
-            let mut seen_layouts=Vec::new();
-            for layout in &self.layouts {
-                let key=(layout.ring,layout.window,layout.rows);
-                if !seen_layouts.contains(&key) {
-                    seen_layouts.push(key);
-                    if let [span]=spans {
-                        let _=state::many::key_steps(c,layout,span.first,span.count)?;
-                    } else if rows.keeps() || total!=spans.len() {
-                        for span in spans {
-                            let _=state::many::key_steps_both(c,layout,span.first,span.count)?;
-                        }
-                    } else {
-                        for chunk in spans.chunks(spark_gpu_probe::flash_window::FW_SPLIT_ROWS_MAX) {
-                            let mut steps_v=Vec::with_capacity(2*chunk.len());
-                            for span in chunk {
-                                steps_v.extend([layout.live(span.first)?,layout.slot(span.first)?]);
-                            }
-                            let _=state::step_words(c,&steps_v)?;
-                        }
-                    }
-                }
-            }
-            if spans.len()>1 && total==spans.len() {
-                let mut seen_taps=Vec::new();
+            if let [span]=spans {
+                let mut seen_layouts=Vec::new();
                 for layout in &self.layouts {
-                    for taps in [layout.taps,layout.kv_taps] {
-                        if taps>0 && !seen_taps.contains(&taps) {
-                            seen_taps.push(taps);
-                            let slots=spans.iter().map(|span|(span.first%taps as u64) as usize).collect::<Vec<_>>();
-                            let _=state::step_words(c,&slots)?;
+                    let key=(layout.ring,layout.window,layout.rows);
+                    if !seen_layouts.contains(&key) {
+                        seen_layouts.push(key);
+                        let _=state::many::key_steps(c,layout,span.first,span.count)?;
+                    }
+                }
+            } else if rows.keeps() || total!=spans.len() {
+                let mut seen_layouts=Vec::new();
+                for layout in &self.layouts {
+                    let key=(layout.ring,layout.window,layout.rows);
+                    if !seen_layouts.contains(&key) {
+                        seen_layouts.push(key);
+                        let any_wraps=rows.keeps() && layout.ring && spans.iter().any(|s|s.first+s.count as u64>layout.rows as u64);
+                        if !any_wraps && spans.len()>=2 {
+                            let all_pos:Vec<u64>=spans.iter().flat_map(|s|(0..s.count).map(move |r|s.first+r as u64)).collect();
+                            for chunk in all_pos.chunks(spark_gpu_probe::flash_window::FW_SPLIT_ROWS_MAX) {
+                                let mut steps_v=Vec::with_capacity(2*chunk.len());
+                                for &pos in chunk {
+                                    steps_v.extend([layout.live(pos)?,layout.slot(pos)?]);
+                                }
+                                let _=state::step_words(c,&steps_v)?;
+                            }
+                        } else {
+                            for span in spans {
+                                let _=state::many::key_steps_both(c,layout,span.first,span.count)?;
+                            }
                         }
                     }
                 }
-            } else if spans.len()>1 && total>spans.len() {
                 let mut seen_taps=Vec::new();
                 for layout in &self.layouts {
                     for taps in [layout.kv_taps,layout.taps] {
-                        if taps>0 && !seen_taps.contains(&taps) {
+                        let direct_multi=rows.keeps()
+                            && total<=spark_gpu_probe::fast_ops::SHORT_CONV_MULTI_ROWS_MAX
+                            && spans.len()<=spark_gpu_probe::fast_ops::SHORT_CONV_MULTI_CHATS_MAX
+                            && (2..=4).contains(&taps);
+                        if taps>0 && !direct_multi && !seen_taps.contains(&taps) {
                             seen_taps.push(taps);
                             let table=state::many::gather(spans,taps)?;
                             let _=state::step_words(c,&table.rows)?;
@@ -525,12 +552,35 @@ impl<'a,C:Compute,W:Weights<C>> Driver<'a,C,W> {
                         }
                     }
                 }
+            } else {
+                let mut seen_layouts=Vec::new();
+                let mut seen_taps=Vec::new();
+                for layout in &self.layouts {
+                    let key=(layout.ring,layout.window,layout.rows);
+                    if !seen_layouts.contains(&key) {
+                        seen_layouts.push(key);
+                        for chunk in spans.chunks(spark_gpu_probe::flash_window::FW_SPLIT_ROWS_MAX) {
+                            let mut steps_v=Vec::with_capacity(2*chunk.len());
+                            for span in chunk {
+                                steps_v.extend([layout.live(span.first)?,layout.slot(span.first)?]);
+                            }
+                            let _=state::step_words(c,&steps_v)?;
+                        }
+                    }
+                    for taps in [layout.taps,layout.kv_taps] {
+                        if taps>0 && !seen_taps.contains(&taps) {
+                            seen_taps.push(taps);
+                            let slots=spans.iter().map(|span|(span.first%taps as u64) as usize).collect::<Vec<_>>();
+                            let _=state::step_words(c,&slots)?;
+                        }
+                    }
+                }
             }
         }
         // The stored rows of all tokens of the step in one value, then one norm launch for all rows.
         let tokens=chats.iter().flat_map(|chat|chat.tokens.iter().copied()).collect::<Vec<_>>();
         let mut stream=rounded_norm(c,&self.stored(&tokens)?,total,width,d.epsilon,Some(w.words(Weight::EmbeddingNorm)?))?;
-        let mut mix=Token::new();
+        let mut mix=if phase==experts::Phase::Decode {Token::for_decode()} else {Token::new()};
         for (place,visit) in d.visits.iter().enumerate() {
             let slot=state::size(visit.slot)?;let layout=&self.layouts[slot];
             let mut kept=chats.iter_mut().map(|chat|&mut chat.state.visits[slot]).collect::<Vec<_>>();
@@ -560,13 +610,22 @@ impl<'a,C:Compute,W:Weights<C>> Driver<'a,C,W> {
         let tapped=tapped.into_iter().map(|tap|tap.ok_or_else(||"loop decoder: a draft tap names no state of the step".to_owned())).collect::<Result<Vec<_>>>()?;
         if wanted.is_empty() {return Ok((StepRows {tops:Vec::new(),logits:None},tapped));}
         let all_wanted=wanted.len()==total && wanted.iter().enumerate().all(|(i,&row)|i==row);
+        if asked.is_empty() {
+            let tops=match &normed {
+                Some(normed) if wanted.len()==total=>self.headed_greedy(normed,total)?,
+                Some(normed)=>self.headed_greedy(&gather(c,normed,&wanted,width)?,wanted.len())?,
+                None if all_wanted=>self.headed_greedy(&mix.end_mix_normed(run,&stream)?,total)?,
+                None=>self.headed_greedy(&rounded_norm(c,&mix.end_mix_rows(run,&stream,&wanted)?,wanted.len(),width,d.epsilon,Some(w.words(Weight::LastNorm)?))?,wanted.len())?,
+            };
+            return Ok((StepRows {tops,logits:None},tapped));
+        }
         let (logits,tops)=match &normed {
             Some(normed) if wanted.len()==total=>self.headed(normed,total)?,
             Some(normed)=>self.headed(&gather(c,normed,&wanted,width)?,wanted.len())?,
             None if all_wanted=>self.headed(&mix.end_mix_normed(run,&stream)?,total)?,
             None=>self.capped(&mix.end_mix_rows(run,&stream,&wanted)?,wanted.len())?,
         };
-        Ok((StepRows {tops,logits:if asked.is_empty() {None} else {Some(gather(c,&logits,&asked,state::size(d.head_rows)?)?)}},tapped))
+        Ok((StepRows {tops,logits:Some(gather(c,&logits,&asked,state::size(d.head_rows)?)?)},tapped))
     }
     /// The embedding of the token at `state.position` and every visit of the description in its order. It gives the
     /// mix state of the token and the stream after the last visit. The position does not move here.
@@ -576,7 +635,7 @@ impl<'a,C:Compute,W:Weights<C>> Driver<'a,C,W> {
         need(state.visits.len()==self.layouts.len() && d.visits.len()==self.layouts.len(),"the state differs from the visits of the description")?;
         need(state.position<d.max_positions,"the chat is at the model's longest length")?;
         let position=state.position;
-        let (mut mix,mut stream)=(Token::new(),self.embedding(token)?);
+        let (mut mix,mut stream)=(if phase==experts::Phase::Decode {Token::for_decode()} else {Token::new()},self.embedding(token)?);
         for (place,visit) in d.visits.iter().enumerate() {
             let slot=state::size(visit.slot)?;let (layout,kept)=(&self.layouts[slot],&mut state.visits[slot]);
             let keep=mix.enter(run,visit,stream)?;

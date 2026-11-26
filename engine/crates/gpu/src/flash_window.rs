@@ -132,6 +132,36 @@ pub const fn flash_window_blocks_gqa(rows: usize, heads: usize, kv_heads: usize)
     ((heads / gpack) * rows.div_ceil(bq)) as u32
 }
 
+/// Query positions per CTA for high-occupancy 2-stage `PREFILL_FLASH_WINDOW` (kind 122).
+pub const FW_PREFILL_BQ_POS: usize = 64;
+
+/// Threads per block for `PREFILL_FLASH_WINDOW`: `gpack * 128` (`384` for 3:1 GQA, `256` for 2:1, `128` for 1:1).
+#[inline(always)]
+pub const fn flash_window_prefill_threads(heads: usize, kv_heads: usize) -> usize {
+    if kv_heads == 0 || heads % kv_heads != 0 { return 0; }
+    flash_window_gpack(heads, kv_heads) * FW_THREADS
+}
+
+/// Grid blocks for `PREFILL_FLASH_WINDOW`: `(heads / gpack) * ceil(rows / 64)`.
+#[inline(always)]
+pub const fn flash_window_prefill_blocks(rows: usize, heads: usize, kv_heads: usize) -> u32 {
+    let gpack = flash_window_gpack(heads, kv_heads);
+    ((heads / gpack) * rows.div_ceil(FW_PREFILL_BQ_POS)) as u32
+}
+
+/// Device/host admission guard for `PREFILL_FLASH_WINDOW` (kind 122).
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+pub const fn flash_window_prefill_admitted(
+    rows: usize, heads: usize, kv_heads: usize, view: usize, extent: usize,
+    q: usize, k: usize, v: usize, moved: usize, rel_table: usize, gate: usize, output: usize, threads: usize,
+) -> bool {
+    rows >= FW_PREFILL_BQ_POS
+        && flash_window_shape_admitted(rows, heads, kv_heads, FW_HEAD_DIM, FW_REL_DIM, view, extent)
+        && threads == flash_window_prefill_threads(heads, kv_heads)
+        && (q | k | v | moved | rel_table | gate | output) & 15 == 0
+}
+
 /// Split-KV GQA-packed tensor-core decode/verify attention (`FLASH_WINDOW_SPLIT16`, `FLASH_WINDOW_SPLIT32`,
 /// `FLASH_WINDOW_REDUCE`): handles M=1..16 contiguous rows (including zero-copy provisional sliding-window deltas)
 /// and C2..C16 independent per-chat planes with identical per-token floating-point arithmetic across M and C.

@@ -197,17 +197,12 @@ pub struct RouteFoldConv<'a,V> {
 pub struct ConvFinish<'a,V> {
     pub shape:Shape,pub finish:Op,pub param:f32,pub fixed:&'a [f32],pub made:Option<&'a V>,pub step:&'a V,pub product:&'a V,pub plane_word:usize,
 }
-/// A prefill tile's convolution and packed KV write. The old ring is read-only.
 pub struct PrefillKv<'a, V> {
-    pub shape: Shape,
-    pub rows: usize,
-    pub ring_first: usize,
-    pub ring: &'a V,
-    pub input: &'a V,
-    pub made: Option<&'a V>,
-    pub fixed: &'a [f32],
-    pub write: spark_gpu_probe::fast_ops::KvWrite,
+    pub shape: Shape, pub rows: usize, pub ring_first: usize, pub ring: &'a V, pub input: &'a V,
+    pub made: Option<&'a V>, pub fixed: &'a [f32], pub write: spark_gpu_probe::fast_ops::KvWrite,
 }
+#[path="bounded_decoder/c8_fast.rs"] mod c8_fast;
+pub use c8_fast::{KvDirectTarget,KvFinishDirect,ShortConvDirect};
 
 pub trait Compute {
     /// Set the loop arithmetic phase and return the previous setting.
@@ -281,6 +276,8 @@ pub trait Compute {
     /// tie, a logit that is not finite refused (the pick of `greedy_logits`). None: this backend has no such form and the caller
     /// reads the logits. No default body: a wrapper must hand this on.
     fn rows_greedy(&self,logits:&Self::Value,rows:usize)->Result<Option<Vec<u32>>>;
+    /// Fused `Op::Softcap` (`cap(rn(x), eps, bound)`) + `rows_greedy` without writing capped logits; `None` falls back.
+    fn rows_softcap_greedy(&self,_raw:&Self::Value,_rows:usize,_bound:f32,_eps:f32)->Result<Option<Vec<u32>>> {Ok(None)}
     /// The dots of each query row of `queries` (host words, `[queries][width]`) with each of the `count` rows of `stack`
     /// (`[count][width]`): `[queries][count]`, query then stack row. Each dot is one chain over the width in rising order
     /// from +0.0, each product rounded before its add. The body here is one launch of arm `RowDots` (`row_dots_shape`).
@@ -330,15 +327,13 @@ pub trait Compute {
     /// Convolve, clip or norm, and pack a prompt tile directly into its KV plane in one launch.
     /// Returns false before any writes when the operands do not fit the launch.
     fn prefill_kv(&self, _: &PrefillKv<'_, Self::Value>, _: &mut Self::Value) -> Result<bool> { Ok(false) }
-    /// Arm `ShortConv` directly from `inputs` and `ring` (`x`: `[inputs, token, addend, ring]`) for the rows of a step
-    /// that keeps each row, writing the ring after each row (`[rows][taps][channels]`) in the same launch.
-    /// `Ok(None)`: no such launch here; the caller falls back to `conv_rings`.
-    fn short_conv_keep(&self, _:Shape, _:usize, _:usize, _:[Option<&Self::Value>;4], _:&[f32]) -> Result<Option<(Self::Value,Self::Value)>> { Ok(None) }
-    /// Multi-row paired KV finish: Key (`ShortConv` + `HeadClip` + `PackBf16` + `every`) and Value (`ShortConv` +
-    /// `RoundedNorm` + `PackBf16` + `every`) for `head_dim == 128` in one launch.
-    /// Returns `(packed_key, key_every, packed_val, val_every)`, or `Ok(None)` to fall back.
+    /// Arm `ShortConv` directly from `inputs` and `ring` (`[inputs, token, addend, ring]`), writing `every`; `None` falls back.
+    fn short_conv_keep(&self, _:Shape, _:usize, _:spark_gpu_probe::fast_ops::ShortConvRing, _:[Option<&Self::Value>;4], _:&[f32]) -> Result<Option<(Self::Value,Self::Value)>> { Ok(None) }
+    /// Direct multi-chat ring-pointer `short_conv_keep` (`[inputs, token, addend]`, per-chat `rings`), avoiding `join` copies.
+    fn short_conv_keep_multi(&self, _:Shape, _:usize, _:spark_gpu_probe::fast_ops::ShortConvMulti, _:[Option<&Self::Value>;3], _:&[&Self::Value], _:&[f32]) -> Result<Option<(Self::Value,Self::Value)>> { Ok(None) }
     fn kv_finish_pair(&self, _:&KvFinishPair<'_,Self::Value>) -> Result<Option<[Self::Value;4]>> { Ok(None) }
-    /// Fused multi-row `RouteFold` + `AfterExperts` `ShortConv` + `every` + `Residual` + `Round`.
+    fn kv_finish_direct(&self, _:&KvFinishDirect<'_,Self::Value>, _:&mut [KvDirectTarget<'_,Self::Value>]) -> Result<Option<[Self::Value;2]>> { Ok(None) }
+    fn short_conv_direct(&self, _:&ShortConvDirect<'_,Self::Value>) -> Result<Option<(Self::Value,Self::Value)>> { Ok(None) }
     fn route_fold_conv(&self, _:&RouteFoldConv<'_,Self::Value>) -> Result<Option<(Self::Value,Self::Value)>> { Ok(None) }
     fn router_pick_compact(&self, _:Shape, _:usize, _:&Self::Value, _:&[f32]) -> Result<Option<(Self::Value,Self::Value)>> { Ok(None) }
     /// SM121a BF16 tensor-core fused causal/sliding-window attention (`FLASH_WINDOW_ATTN`, kind 101 in `kernels-inkling`).

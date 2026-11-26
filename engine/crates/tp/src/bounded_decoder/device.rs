@@ -890,6 +890,9 @@ if start==0 && v.pending.as_ref().and_then(|p|p.borrow().state_prefix)==Some(len
         let picked=self.read(&self.value(result,rows*3)?)?;drop(partials);
         picked.as_chunks::<3>().0.iter().map(|row|if row[2]!=1.0 || !row[0].is_finite() || !row[1].is_finite() {Err("nonfinite logits".into())} else {Ok(row[1] as u32)}).collect::<Result<Vec<_>>>().map(Some)
     }
+    fn rows_softcap_greedy(&self,raw:&Value<'b,'d>,rows:usize,bound:f32,eps:f32)->Result<Option<Vec<u32>>> {
+        self.try_rows_softcap_greedy(raw,rows,bound,eps)
+    }
     fn greedy_projection(&self,_:&CheckpointAdmission,name:&str,x:&Value<'b,'d>)->Result<u32> {
         self.ready(x)?;self.weights.borrow().check_exchange()?;if let Some(error)=self.backend.fatal_error() {return Err(error);}
         self.check_selection(None)?;let best=self.weights.borrow_mut().apply_greedy(name,self.backend,&x.vector,false)?.0;
@@ -1003,10 +1006,15 @@ if start==0 && v.pending.as_ref().and_then(|p|p.borrow().state_prefix)==Some(len
     fn prefill_kv(&self, conv: &super::PrefillKv<'_, Value<'b, 'd>>, plane: &mut Value<'b, 'd>) -> Result<bool> {
         self.try_prefill_kv(conv, plane)
     }
-    fn short_conv_keep(&self,s:Shape,rows:usize,first:usize,x:[Option<&Value<'b,'d>>;4],w:&[f32])->Result<Option<(Value<'b,'d>,Value<'b,'d>)>> {
+    fn short_conv_keep(&self,s:Shape,rows:usize,first:spark_gpu_probe::fast_ops::ShortConvRing,x:[Option<&Value<'b,'d>>;4],w:&[f32])->Result<Option<(Value<'b,'d>,Value<'b,'d>)>> {
         self.try_short_conv_keep(s,rows,first,x,w)
     }
+    fn short_conv_keep_multi(&self,s:Shape,rows:usize,multi:spark_gpu_probe::fast_ops::ShortConvMulti,x:[Option<&Value<'b,'d>>;3],rings:&[&Value<'b,'d>],w:&[f32])->Result<Option<(Value<'b,'d>,Value<'b,'d>)>> {
+        self.try_short_conv_keep_multi(s,rows,multi,x,rings,w)
+    }
     fn kv_finish_pair(&self,p:&KvFinishPair<'_,Value<'b,'d>>)->Result<Option<[Value<'b,'d>;4]>> { self.try_kv_finish_pair(p) }
+    fn kv_finish_direct(&self,p:&KvFinishDirect<'_,Value<'b,'d>>,t:&mut [KvDirectTarget<'_,Value<'b,'d>>])->Result<Option<[Value<'b,'d>;2]>> { self.try_kv_finish_direct(p,t) }
+    fn short_conv_direct(&self,p:&ShortConvDirect<'_,Value<'b,'d>>)->Result<Option<(Value<'b,'d>,Value<'b,'d>)>> { self.try_short_conv_direct(p) }
     fn route_fold_conv(&self,p:&RouteFoldConv<'_,Value<'b,'d>>)->Result<Option<(Value<'b,'d>,Value<'b,'d>)>> { self.try_route_fold_conv(p) }
     fn router_pick_compact(&self,s:Shape,rows:usize,logits:&Value<'b,'d>,bias:&[f32])->Result<Option<(Value<'b,'d>,Value<'b,'d>)>> { self.try_router_pick_compact(s,rows,logits,bias) }
     #[allow(clippy::too_many_arguments)]
@@ -1017,16 +1025,10 @@ if start==0 && v.pending.as_ref().and_then(|p|p.borrow().state_prefix)==Some(len
     ) -> Result<Option<Value<'b, 'd>>> {
         use spark_gpu_probe::flash_window;
         if rows < flash_window::FW_ROWS_MIN || !self.backend.resident_launches_active()
-            || !flash_window::flash_window_shape_admitted(rows, heads, kv_heads, head_dim, rel_dim, view, extent) {
-            return Ok(None);
-        }
-        for v in [query, keys, values, moved, sink, gate, steps] {
-            if v.vector.is_segmented() { return Ok(None); }
-        }
+            || !flash_window::flash_window_shape_admitted(rows, heads, kv_heads, head_dim, rel_dim, view, extent) { return Ok(None); }
+        if [query, keys, values, moved, sink, gate, steps].iter().any(|v| v.vector.is_segmented()) { return Ok(None); }
         if (query.vector.device_address() | keys.vector.device_address() | values.vector.device_address()
-            | moved.vector.device_address() | gate.vector.device_address()) & 15 != 0 {
-            return Ok(None);
-        }
+            | moved.vector.device_address() | gate.vector.device_address()) & 15 != 0 { return Ok(None); }
         for v in [query, keys, values, moved, sink, gate, steps] { self.ready(v)?; }
         let stamp = self.cost.start(self.backend);
         let table = self.parameters.borrow_mut().resolve(rel_table, None, |values| self.backend.upload_vector(values)?.into_resident_shared())?

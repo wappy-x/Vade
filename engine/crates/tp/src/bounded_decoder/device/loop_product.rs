@@ -731,8 +731,8 @@ impl<'b,'d> Device<'b,'d> {
         entries:&[(&DeviceVector<'d>,std::ops::Range<usize>,&Value<'b,'d>,&Value<'b,'d>,&Value<'b,'d>,Option<&[f32]>)],
         rows:usize,dim:usize,k:usize,eps:f32,half_out:bool,
     )->Result<Option<Vec<Value<'b,'d>>>> {
-        use spark_gpu_probe::tc_rows;
-        if !self.loop_prefill.get() || !self.backend.resident_launches_active()
+        use spark_gpu_probe::{few_product,tc_rows};
+        if (!self.loop_prefill.get() && rows<=few_product::FEW_MAX) || !self.backend.resident_launches_active()
             || !tc_rows::gate_outer_admitted(rows,dim,k,entries.len(),tc_rows::TC_THREADS)
             || !(eps>0.0 && eps.is_finite())
         {
@@ -781,8 +781,8 @@ impl<'b,'d> Device<'b,'d> {
     pub(crate) fn resident_product_rows_half_in(
         &self,weight:&DeviceVector<'d>,words:std::ops::Range<usize>,rows:usize,columns:usize,x:&Value<'b,'d>,inputs:usize,
     )->Result<Option<Value<'b,'d>>> {
-        use spark_gpu_probe::tc_rows;
-        if !self.loop_prefill.get() || !columns.is_multiple_of(2) || weight.is_segmented() || x.vector.is_segmented() {return Ok(None);}
+        use spark_gpu_probe::{few_product,tc_rows};
+        if (!self.loop_prefill.get() && inputs<=few_product::FEW_MAX) || !columns.is_multiple_of(2) || weight.is_segmented() || x.vector.is_segmented() {return Ok(None);}
         if rows==0 || inputs==0 || rows.checked_mul(columns)!=words.len().checked_mul(2) || x.words!=inputs*(columns/2) {return Ok(None);}
         let Some(part)=tc_rows::tc_tile_part(rows,columns,inputs) else {return Ok(None)};
         if part<rows {return Ok(None);}
@@ -798,9 +798,9 @@ impl<'b,'d> Device<'b,'d> {
     pub(crate) fn resident_product_rows_split_half_in(
         &self,weight:&DeviceVector<'d>,words:std::ops::Range<usize>,parts:&[usize],columns:usize,x:&Value<'b,'d>,inputs:usize,
     )->Result<Option<Vec<Value<'b,'d>>>> {
-        use spark_gpu_probe::tc_rows;
+        use spark_gpu_probe::{few_product,tc_rows};
         let rows:usize=parts.iter().sum();
-        if !self.loop_prefill.get() || !columns.is_multiple_of(2) || parts.is_empty() || parts.len()>tc_rows::TC_SPLIT_MAX
+        if (!self.loop_prefill.get() && inputs<=few_product::FEW_MAX) || !columns.is_multiple_of(2) || parts.is_empty() || parts.len()>tc_rows::TC_SPLIT_MAX
             || parts.contains(&0) || parts.iter().any(|&w|!w.is_multiple_of(2))
             || weight.is_segmented() || x.vector.is_segmented() || rows==0 || inputs<tc_rows::TC_ROWS_INPUTS_MIN
             || rows.checked_mul(columns)!=words.len().checked_mul(2) || x.words!=inputs*(columns/2)
@@ -825,8 +825,8 @@ impl<'b,'d> Device<'b,'d> {
     pub(crate) fn resident_product_rows_pair_half_in(
         &self,weight:&DeviceVector<'d>,words:std::ops::Range<usize>,rows:usize,columns:usize,x1:&Value<'b,'d>,x2:&Value<'b,'d>,inputs:usize,
     )->Result<Option<Value<'b,'d>>> {
-        use spark_gpu_probe::tc_rows;
-        if !self.loop_prefill.get() || !columns.is_multiple_of(4) || weight.is_segmented() || x1.vector.is_segmented() || x2.vector.is_segmented() {return Ok(None);}
+        use spark_gpu_probe::{few_product,tc_rows};
+        if (!self.loop_prefill.get() && inputs<=few_product::FEW_MAX) || !columns.is_multiple_of(4) || weight.is_segmented() || x1.vector.is_segmented() || x2.vector.is_segmented() {return Ok(None);}
         let quarter=columns/4;
         if rows==0 || inputs<tc_rows::TC_ROWS_INPUTS_MIN || x1.words!=inputs*quarter || x2.words!=inputs*quarter
             || rows.checked_mul(columns)!=words.len().checked_mul(2)
@@ -875,11 +875,22 @@ impl<'b,'d> Device<'b,'d> {
         };
         let out_words=rows*heads*head_dim/2;
         let mut output=self.backend.vector(out_words)?;
-        self.backend.flash_window_attn_half_into(
-            rows,heads,kv_heads,head_dim,rel_dim,view,extent,a.scale,first_position,
-            &a.query.vector,&a.keys.vector,&a.values.vector,&a.moved.vector,&table,&a.sink.vector,&a.gate.vector,&a.steps.vector,
-            Some(clips),&mut output,
-        )?;
+        if self.backend.prefill_flash_window_ready(
+            rows,heads,kv_heads,view,extent,
+            &a.query.vector,&a.keys.vector,&a.values.vector,&a.moved.vector,&table,&a.gate.vector,&output,
+        ) {
+            self.backend.prefill_flash_window_into(
+                rows,heads,kv_heads,head_dim,rel_dim,view,extent,a.scale,first_position,true,
+                &a.query.vector,&a.keys.vector,&a.values.vector,&a.moved.vector,&table,&a.sink.vector,&a.gate.vector,&a.steps.vector,
+                Some(clips),&mut output,
+            )?;
+        } else {
+            self.backend.flash_window_attn_half_into(
+                rows,heads,kv_heads,head_dim,rel_dim,view,extent,a.scale,first_position,
+                &a.query.vector,&a.keys.vector,&a.values.vector,&a.moved.vector,&table,&a.sink.vector,&a.gate.vector,&a.steps.vector,
+                Some(clips),&mut output,
+            )?;
+        }
         let value=self.value(output,out_words)?;
         self.cost.record(||"window_rows_half".into(),stamp,self.backend,(a.rel_table.len()+a.query_scale.len()+a.moved_scale.len())*4);
         Ok(Some(value))
@@ -892,8 +903,8 @@ impl<'b,'d> Device<'b,'d> {
         queries:&[f32],list:&[&Value<'b,'d>],stream:&Value<'b,'d>,
         post_weight:Option<&[f32]>,post_weight_per_query:bool,
     )->Result<Option<(Option<Value<'b,'d>>,Option<Value<'b,'d>>,Value<'b,'d>)>> {
-        use spark_gpu_probe::fast_ops;
-        if !self.loop_prefill.get() || !self.backend.resident_launches_active() || dim==0 || !dim.is_multiple_of(2) || !queries.len().is_multiple_of(dim) {
+        use spark_gpu_probe::{fast_ops,few_product};
+        if (!self.loop_prefill.get() && rows<=few_product::FEW_MAX) || !self.backend.resident_launches_active() || dim==0 || !dim.is_multiple_of(2) || !queries.len().is_multiple_of(dim) {
             return Ok(None);
         }
         let asked=queries.len()/dim;
@@ -965,5 +976,100 @@ impl<'b,'d> Device<'b,'d> {
         let both=(self.value(out,out_words)?,self.value(normed,norm_words)?);
         self.cost.record(||"fast_mix_list_normed_half".into(),stamp,self.backend,0);
         Ok(Some(both))
+    }
+    /// Prefill `PG_OP_MSG_META` (kind 123, sub-op 0): compact lazy `(msg_weights, msg_nscales)` replacing `MIX_LIST_NORM_HALF`.
+    pub(crate) fn try_prefill_msg_meta(
+        &self,rows:usize,dim:usize,scale:f32,eps:f32,queries:&[f32],list:&[&Value<'b,'d>],
+    )->Result<Option<(Value<'b,'d>,Value<'b,'d>)>> {
+        use spark_gpu_probe::prefill_gate;
+        if !self.loop_prefill.get() || rows<2 || !self.backend.resident_launches_active() || dim==0 || !queries.len().is_multiple_of(dim) {
+            return Ok(None);
+        }
+        let asked=queries.len()/dim;
+        let kept=list.len();
+        if !prefill_gate::msg_meta_admitted(rows,asked,kept,dim,prefill_gate::PG_META_THREADS)
+            || !scale.is_finite() || !(eps>0.0 && eps.is_finite())
+            || list.iter().any(|v|v.vector.is_segmented() || v.words!=rows*dim || v.vector.device_address()&15!=0)
+        {
+            return Ok(None);
+        }
+        for value in list {self.ready(value)?;}
+        let stamp=self.cost.start(self.backend);
+        let q_dev=self.parameters.borrow_mut().resolve(queries,None,|v|self.backend.upload_vector(v)?.into_resident_shared())?.ok_or("prefill msg meta has no queries")?;
+        if q_dev.is_segmented() || q_dev.device_address()&15!=0 {return Ok(None);}
+        let refs:Vec<&DeviceVector<'d>>=list.iter().map(|v|&*v.vector).collect();
+        if !self.backend.prefill_msg_meta_ready(rows,asked,dim,&q_dev,&refs) {return Ok(None);}
+        let (weights,nscales)=self.backend.prefill_msg_meta(rows,dim,scale,eps,&q_dev,&refs)?;
+        let (w_len,n_len)=(weights.len(),nscales.len());
+        let both=(self.value(weights,w_len)?,self.value(nscales,n_len)?);
+        self.cost.record(||"prefill_msg_meta".into(),stamp,self.backend,0);
+        Ok(Some(both))
+    }
+    /// Prefill `PG_OP_FULL` (kind 123, sub-op 1): fused `GateDown + GateOuter + GateBlend + RoundedNorm` over lazy sources.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub(crate) fn resident_prefill_gate_fuse(
+        &self,
+        sources:&[&Value<'b,'d>],
+        entries:&[(&DeviceVector<'d>,std::ops::Range<usize>,&DeviceVector<'d>,std::ops::Range<usize>,&Value<'b,'d>,&Value<'b,'d>,&Value<'b,'d>,&Value<'b,'d>,Option<&[f32]>)],
+        rows:usize,dim:usize,k:usize,eps:f32,half_out:bool,
+    )->Result<Option<Vec<Value<'b,'d>>>> {
+        use spark_gpu_probe::prefill_gate;
+        let (count,kept)=(entries.len(),sources.len());
+        if !self.loop_prefill.get() || !self.backend.resident_launches_active()
+            || !prefill_gate::full_admitted(rows,dim,k,count,kept,prefill_gate::PG_FULL_THREADS)
+            || !(eps>0.0 && eps.is_finite())
+        {
+            return Ok(None);
+        }
+        if sources.iter().any(|s|s.vector.is_segmented() || s.words!=rows*dim || s.vector.device_address()&15!=0) {
+            return Ok(None);
+        }
+        let (wd_words,wo_words,v_words,kh_words,mw_words,mn_words)=(k*dim,dim*k,rows*dim,rows*(dim/2),rows*kept,rows);
+        let out_words=if half_out {kh_words} else {v_words};
+        let mut wd_views=Vec::with_capacity(count);
+        let mut wo_views=Vec::with_capacity(count);
+        for &(wd,ref wd_r,wo,ref wo_r,kv,kh,mw,mn,nw) in entries {
+            if wd_r.len()!=wd_words || wo_r.len()!=wo_words
+                || kv.words!=v_words || kh.words!=kh_words || mw.words!=mw_words || mn.words!=mn_words
+                || wd.is_segmented() || wo.is_segmented() || kv.vector.is_segmented() || kh.vector.is_segmented()
+                || mw.vector.is_segmented() || mn.vector.is_segmented()
+                || nw.is_some_and(|n|n.len()!=dim)
+            {
+                return Ok(None);
+            }
+            let wdv=wd.resident_range(wd_r.clone())?;
+            let wov=wo.resident_range(wo_r.clone())?;
+            if (wdv.device_address()|wov.device_address()|kv.vector.device_address()|kh.vector.device_address())&15!=0 {
+                return Ok(None);
+            }
+            wd_views.push(wdv);
+            wo_views.push(wov);
+        }
+        for s in sources {self.ready(s)?;}
+        for &(_,_,_,_,kv,kh,mw,mn,_) in entries {
+            self.ready(kv)?;self.ready(kh)?;self.ready(mw)?;self.ready(mn)?;
+        }
+        let stamp=self.cost.start(self.backend);
+        let mut nw_devs:Vec<Option<Rc<DeviceVector<'d>>>>=Vec::with_capacity(count);
+        for &(_,_,_,_,_,_,_,_,nw) in entries {
+            let d=match nw {
+                Some(n)=>{
+                    let dev=self.parameters.borrow_mut().resolve(n,None,|v|self.backend.upload_vector(v)?.into_resident_shared())?
+                        .ok_or("prefill gate fuse: missing norm weight")?;
+                    if dev.is_segmented() || dev.device_address()&15!=0 {return Ok(None);}
+                    Some(dev)
+                }
+                None=>None,
+            };
+            nw_devs.push(d);
+        }
+        let src_refs:Vec<&DeviceVector<'d>>=sources.iter().map(|s|&*s.vector).collect();
+        let gate_refs:Vec<_>=wd_views.iter().zip(&wo_views).zip(entries).zip(&nw_devs)
+            .map(|(((wdv,wov),&(_,_,_,_,kv,kh,mw,mn,_)),nw)|(wdv,wov,&*kv.vector,&*kh.vector,&*mw.vector,&*mn.vector,nw.as_deref()))
+            .collect();
+        let outs=self.backend.prefill_gate_fuse(rows,dim,k,eps,half_out,&src_refs,&gate_refs)?;
+        let values=outs.into_iter().map(|v|self.value(v,out_words)).collect::<Result<Vec<_>>>()?;
+        self.cost.record(||"prefill_gate_fuse".into(),stamp,self.backend,0);
+        Ok(Some(values))
     }
 }

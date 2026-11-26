@@ -55,9 +55,12 @@ fn run() -> Result<(), String> {
 /// blocks (16 warps) a multiprocessor; unbounded ptxas takes 138 (one block).
 /// resident_launch_plain_staged_one (128 threads, a 12-tile load ring of 48 registers a thread): 96 keeps five blocks a
 /// multiprocessor (one wave of a 228-block head part); unbounded ptxas takes 108 to 130 with the 2-to-8-row panel form.
-const REGISTER_CAPS: [(&str, u32); 7] = [
+const REGISTER_CAPS: [(&str, u32); 10] = [
     ("resident_launch_plain_packed_tc_rows", 128),
     ("resident_launch_prefill_packed_tc", 128),
+    ("resident_launch_prefill_flash_window", 168),
+    ("resident_launch_prefill_gate_fuse", 128),
+    ("resident_launch_plain_tc_rows", 96),
     ("resident_launch_plain_staged_one", 80),
     ("resident_launch_flash_window", 168),
     ("resident_launch_plain_tc_big", 124),

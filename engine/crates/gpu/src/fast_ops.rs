@@ -13,37 +13,80 @@
 //! - `FAST_ROUTER_PICK` (111): warp-parallel bit-exact `RouterPick` (1 warp/token, computes `sigmoid` once).
 //! - `FAST_STREAM_OPS` (112): zero-stack bit-exact `ShortConv` (window form), `RouteFold`, and `GateBlend`.
 
-/// Multi-chat kept-ring descriptor tag packed into `first` for `STREAM_OP_SHORT_CONV_WIN` (`rows <= 16`, `taps <= 4`):
-/// bits `0..16` hold `start_mask` (bit `r` set iff row `r` starts a chat), bits `16..48` hold 2-bit per-chat `first_slot`.
+/// Multi-chat kept-ring descriptor tag packed into `first` (`word 13` and `word 15`) for `STREAM_OP_SHORT_CONV_WIN`
+/// (`rows <= 256`, `chats <= 64`, `taps in 2..=4`). Low bits hold `chats`; payload words `16, 17, 84, 85` hold
+/// the 256-bit `start_mask[0..4]`, words `18..=19` hold 2-bit per-chat initial ring slots, and words `20..=83` hold
+/// optional per-chat ring device pointers (when word 12 is 0).
 pub const SHORT_CONV_MULTI_TAG: usize = 1usize << 62;
-const _: () = assert!(usize::BITS >= 64);
+pub const SHORT_CONV_MULTI_ROWS_MAX: usize = 256;
+pub const SHORT_CONV_MULTI_CHATS_MAX: usize = 64;
+pub const SHORT_CONV_MULTI_MASK_0: usize = 16;
+pub const SHORT_CONV_MULTI_MASK_1: usize = 17;
+pub const SHORT_CONV_MULTI_SLOTS_LO: usize = 18;
+pub const SHORT_CONV_MULTI_SLOTS_HI: usize = 19;
+/// Optional per-chat ring device pointers in `STREAM_OP_SHORT_CONV_WIN` multi-chat mode when word 12 is 0
+/// (`chats <= SHORT_CONV_MULTI_CHATS_MAX`, eliminating `compute.join` ring copies across 2..=64 chats).
+pub const SHORT_CONV_MULTI_RINGS_AT: usize = 20;
+pub const SHORT_CONV_MULTI_MASK_2: usize = 84;
+pub const SHORT_CONV_MULTI_MASK_3: usize = 85;
+const _: () = assert!(usize::BITS >= 64 && SHORT_CONV_MULTI_RINGS_AT + SHORT_CONV_MULTI_CHATS_MAX <= SHORT_CONV_MULTI_MASK_2 && 8 * (SHORT_CONV_MULTI_MASK_3 + 1) <= 1024);
 
-/// Encode a multi-chat kept-ring descriptor (`2..=16` chats, `rows <= 16`, `taps` in `2..=4`).
-#[inline(always)]
-pub const fn short_conv_multi_encode(rows: usize, taps: usize, start_mask: u16, slots: u32) -> Option<usize> {
-    if rows < 2 || rows > 16 || taps < 2 || taps > 4 { return None; }
-    if (start_mask & 1) == 0 || ((start_mask as u32) >> rows) != 0 { return None; }
-    let chats = start_mask.count_ones() as usize;
-    if chats < 2 || chats > rows { return None; }
-    if chats < 16 && (slots >> (2 * chats)) != 0 { return None; }
-    let mut c = 0usize;
-    while c < chats {
-        if ((slots >> (2 * c)) & 3) as usize >= taps { return None; }
-        c += 1;
-    }
-    Some(SHORT_CONV_MULTI_TAG | (start_mask as usize) | ((slots as usize) << 16))
+/// Multi-chat kept-ring descriptor for `STREAM_OP_SHORT_CONV_WIN` (`2..=64` chats, `2..=256` rows, `taps in 2..=4`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ShortConvMulti {
+    pub start_mask: [u64; 4],
+    pub slots_lo: u64,
+    pub slots_hi: u64,
+    pub chats: usize,
 }
 
-/// Decode and validate a multi-chat kept-ring descriptor, returning `(start_mask, slots, chats)`.
+/// Ring slot descriptor for `short_conv_keep`: single chat (`One`) or packed multi-chat (`Multi`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShortConvRing {
+    One(usize),
+    Multi(ShortConvMulti),
+}
+
+/// Device-side O(1) structural check for `ShortConvMulti` masks and chat count (`2 <= chats <= rows <= 256`, `taps in 2..=4`).
 #[inline(always)]
-pub const fn short_conv_multi_decode(rows: usize, taps: usize, packed: usize) -> Option<(u16, u32, usize)> {
-    if (packed & SHORT_CONV_MULTI_TAG) == 0 || (packed & !(SHORT_CONV_MULTI_TAG | 0xffff_ffff_ffff)) != 0 {
-        return None;
+pub const fn short_conv_multi_valid(rows: usize, taps: usize, chats: usize, m: [u64; 4]) -> bool {
+    if rows < 2 || rows > SHORT_CONV_MULTI_ROWS_MAX || taps < 2 || taps > 4 { return false; }
+    if chats < 2 || chats > SHORT_CONV_MULTI_CHATS_MAX || chats > rows { return false; }
+    if (m[0] & 1) == 0 { return false; }
+    let mut w = 0usize;
+    while w < 4 {
+        let base = w * 64;
+        if rows <= base {
+            if m[w] != 0 { return false; }
+        } else if rows < base + 64 && (m[w] >> (rows - base)) != 0 {
+            return false;
+        }
+        w += 1;
     }
-    let start_mask = (packed & 0xffff) as u16;
-    let slots = ((packed >> 16) & 0xffff_ffff) as u32;
-    if short_conv_multi_encode(rows, taps, start_mask, slots).is_none() { return None; }
-    Some((start_mask, slots, start_mask.count_ones() as usize))
+    (m[0].count_ones() + m[1].count_ones() + m[2].count_ones() + m[3].count_ones()) as usize == chats
+}
+
+impl ShortConvMulti {
+    /// Validate and construct a multi-chat kept-ring descriptor (`2..=64` chats, `2..=256` rows, `taps in 2..=4`).
+    #[inline(always)]
+    pub const fn encode(rows: usize, taps: usize, m: [u64; 4], s_lo: u64, s_hi: u64) -> Option<Self> {
+        let chats = (m[0].count_ones() + m[1].count_ones() + m[2].count_ones() + m[3].count_ones()) as usize;
+        if !short_conv_multi_valid(rows, taps, chats, m) { return None; }
+        if chats < 32 {
+            if (s_lo >> (2 * chats)) != 0 || s_hi != 0 { return None; }
+        } else if chats == 32 {
+            if s_hi != 0 { return None; }
+        } else if chats < 64 && (s_hi >> (2 * (chats - 32))) != 0 {
+            return None;
+        }
+        let mut c = 0usize;
+        while c < chats {
+            let sw = if c < 32 { s_lo } else { s_hi };
+            if ((sw >> (2 * (c & 31))) & 3) as usize >= taps { return None; }
+            c += 1;
+        }
+        Some(Self { start_mask: m, slots_lo: s_lo, slots_hi: s_hi, chats })
+    }
 }
 
 /// Sub-operation selector for `FAST_STREAM_OPS` (kind 112).
@@ -55,6 +98,21 @@ pub const STREAM_OP_GATE_BLEND_NORM: u64 = 4;
 pub const STREAM_OP_RING_CONV_ONE: u64 = 5;
 /// Prefill fused `RouteFold (FOLD_HALF)` + `AfterExperts ShortConv` + `next_ring` over 64-row channel tiles.
 pub const STREAM_OP_ROUTE_FOLD_CONV_PREFILL: u64 = 6;
+/// Fused `Softcap` (`cap(rn(x), eps, bound)`) + greedy argmax (`[rows][3]`: `best, id, finite`),
+/// eliminating the `[rows][vocab]` capped-logits DRAM write/read on greedy decode and verify steps.
+pub const STREAM_OP_SOFTCAP_ARGMAX: u64 = 7;
+pub const SOFTCAP_ARGMAX_COLS_MAX: usize = 1 << 24;
+pub const SOFTCAP_ARGMAX_PARTS_MAX: usize = 256;
+/// Row-split factor for `STREAM_OP_SOFTCAP_ARGMAX`: 1 block/row once `rows >= 48` (single launch, no partials),
+/// or enough parts to saturate 48 SMs when `rows < 48` (followed by a tiny 1-block/row finish launch).
+#[inline(always)]
+pub const fn softcap_argmax_parts(rows: usize, cols: usize) -> usize {
+    if rows == 0 || cols == 0 || rows >= 48 { return 1; }
+    let target = 192 / rows;
+    let by_cols = cols.div_ceil(4096);
+    let p = if target < by_cols { target } else { by_cols };
+    if p < 1 { 1 } else if p > SOFTCAP_ARGMAX_PARTS_MAX { SOFTCAP_ARGMAX_PARTS_MAX } else { p }
+}
 /// Rows processed per CTA in 2D channel-tiled prefill `ShortConv` and `STREAM_OP_ROUTE_FOLD_CONV_PREFILL`.
 pub const SHORT_CONV_PREFILL_TILE: usize = 64;
 /// Maximum number of gates batched in one `STREAM_OP_GATE_BLEND_NORM` launch (`grid.y`).
@@ -129,6 +187,13 @@ pub const FAST_DIM_MAX: usize = 16_384;
 pub const ROUTER_EXPERTS_MAX: usize = 128;
 pub const ROUTER_PICKS_MAX: usize = 32;
 pub const NORM_CHUNKS_MAX: usize = 32;
+/// Extra sub-modes dispatched inside `FAST_NORM` (kind 109, word 5).
+pub const NORM_MODE_KV_DIRECT: u64 = 3;
+pub const NORM_MODE_SHORT_CONV_DIRECT: u64 = 4;
+/// Maximum independent chats per `NORM_MODE_KV_DIRECT` / `NORM_MODE_SHORT_CONV_DIRECT` launch.
+pub const DIRECT_CHATS_MAX: usize = 16;
+/// Maximum convolution taps for `NORM_MODE_KV_DIRECT` / `NORM_MODE_SHORT_CONV_DIRECT`.
+pub const DIRECT_TAPS_MAX: usize = 4;
 
 /// Blocks of one `(row, query)` of the mix blend: one channel a thread (a 2,304-wide row is 9 blocks). Each block makes
 /// the same `kept` weights (thread 0, the same exp, sum and divisions in the same order) and blends its own channels,
@@ -261,6 +326,24 @@ pub const fn head_clip_admitted(heads: usize, dim: usize, threads: usize) -> boo
 }
 
 #[inline(always)]
+pub const fn kv_finish_direct_admitted(rows: usize, kv_heads: usize, taps: usize, threads: usize) -> bool {
+    threads == NORM_THREADS
+        && rows >= 2 && rows <= DIRECT_CHATS_MAX
+        && kv_heads >= 1 && kv_heads <= 64
+        && taps >= 2 && taps <= DIRECT_TAPS_MAX
+}
+
+#[inline(always)]
+pub const fn short_conv_direct_admitted(rows: usize, heads: usize, dim: usize, taps: usize, form: u32, threads: usize) -> bool {
+    let width = heads.saturating_mul(dim);
+    threads == NORM_THREADS
+        && rows >= 2 && rows <= DIRECT_CHATS_MAX
+        && heads >= 1 && dim >= 1 && width >= 1 && width <= FAST_DIM_MAX
+        && taps >= 2 && taps <= DIRECT_TAPS_MAX
+        && form < 8 && (form & 4 == 0 || form & 2 != 0)
+}
+
+#[inline(always)]
 pub const fn capped_gate_admitted(picks: usize, dim: usize, threads: usize) -> bool {
     threads == CAPPED_GATE_THREADS && picks >= 1 && picks <= 65_536 && dim >= 1 && dim <= FAST_DIM_MAX
 }
@@ -299,6 +382,12 @@ pub const fn gate_blend_norm_threads(dim: usize) -> usize {
 }
 #[inline(always)]
 pub const fn stream_ops_admitted(subop: u64, rows: usize, dim: usize, aux: usize, threads: usize) -> bool {
+    if subop == STREAM_OP_SOFTCAP_ARGMAX {
+        return rows >= 1 && rows <= FAST_ROWS_MAX
+            && dim >= 1 && dim <= SOFTCAP_ARGMAX_COLS_MAX
+            && aux >= 1 && aux <= SOFTCAP_ARGMAX_PARTS_MAX
+            && threads == STREAM_OPS_THREADS;
+    }
     if rows == 0 || rows > FAST_ROWS_MAX || dim == 0 || dim > FAST_DIM_MAX {
         return false;
     }
@@ -547,14 +636,101 @@ pub fn check_router_pick_compact(
 #[cfg(not(target_arch = "nvptx64"))]
 #[allow(clippy::too_many_arguments, reason = "shape and four spans")]
 pub fn check_short_conv_win(rows: usize, heads: usize, dim: usize, taps: usize, form: u32, bound: f32, window: Span, token_taps: Option<Span>, addend: Option<Span>, fixed_taps: Span, ring: Option<(Span, usize)>, output: Span, every: Option<(Span, usize)>) -> Result<(), &'static str> {
-    check_short_conv_form(rows, heads, dim, taps, form, bound, window, token_taps, addend, fixed_taps, ring, output, every, None)
+    check_short_conv_form(rows, heads, dim, taps, form, bound, window, token_taps, addend, fixed_taps, ring, output, every, None, None)
+}
+
+#[cfg(not(target_arch = "nvptx64"))]
+#[allow(clippy::too_many_arguments, reason = "shape, multi-chat descriptor and operand spans")]
+pub fn check_short_conv_multi(rows: usize, heads: usize, dim: usize, taps: usize, form: u32, bound: f32, window: Span, token_taps: Option<Span>, addend: Option<Span>, fixed_taps: Span, ring: Span, output: Span, every: Span, multi: ShortConvMulti) -> Result<(), &'static str> {
+    check_short_conv_form(rows, heads, dim, taps, form, bound, window, token_taps, addend, fixed_taps, Some((ring, 0)), output, Some((every, 0)), None, Some(multi))
+}
+
+#[cfg(not(target_arch = "nvptx64"))]
+#[allow(clippy::too_many_arguments, reason = "shape, multi-chat descriptor, direct per-chat rings and operand spans")]
+pub fn check_short_conv_multi_rings(
+    rows: usize, heads: usize, dim: usize, taps: usize, form: u32, bound: f32,
+    window: Span, token_taps: Option<Span>, addend: Option<Span>, fixed_taps: Span,
+    rings: &[Span], output: Span, every: Span, multi: ShortConvMulti,
+) -> Result<(), &'static str> {
+    let width = heads.checked_mul(dim).ok_or("fast short conv: width overflow")?;
+    if !stream_ops_admitted(STREAM_OP_SHORT_CONV_WIN, rows, width, taps, STREAM_OPS_THREADS) {
+        return Err("fast short conv: shape outside envelope");
+    }
+    if !(bound > 0.0 && bound.is_finite()) || form >= 8 || (form & 4 != 0 && form & 2 == 0) {
+        return Err("fast short conv: bad form or bound");
+    }
+    if ShortConvMulti::encode(rows, taps, multi.start_mask, multi.slots_lo, multi.slots_hi) != Some(multi)
+        || rings.len() != multi.chats
+    {
+        return Err("fast short conv: invalid multi-chat kept ring descriptor");
+    }
+    let w_b = rows.checked_mul(width).and_then(f32_bytes);
+    let f_b = width.checked_mul(taps).and_then(f32_bytes);
+    let r_b = taps.checked_mul(width).and_then(f32_bytes);
+    let e_b = rows.checked_mul(taps).and_then(|n| n.checked_mul(width)).and_then(f32_bytes);
+    if !window.valid(w_b) || !fixed_taps.valid(f_b) || !output.valid(w_b) || !every.valid(e_b) {
+        return Err("fast short conv: operand size or alignment mismatch");
+    }
+    if (form & 1 != 0) != token_taps.is_some() || (form & 2 != 0) != addend.is_some() {
+        return Err("fast short conv: optional operand mismatch");
+    }
+    if let Some(tt) = token_taps {
+        if !tt.valid(rows.checked_mul(heads).and_then(|n| n.checked_mul(taps)).and_then(f32_bytes))
+            || output.meets(tt) || every.meets(tt)
+        {
+            return Err("fast short conv: bad token_taps span");
+        }
+    }
+    if let Some(ad) = addend {
+        if !ad.valid(w_b) || output.meets(ad) || every.meets(ad) {
+            return Err("fast short conv: bad addend span");
+        }
+    }
+    if output.meets(window) || output.meets(fixed_taps)
+        || every.meets(window) || every.meets(fixed_taps) || every.meets(output)
+    {
+        return Err("fast short conv: output overlaps input");
+    }
+    for &ring in rings {
+        if !ring.valid(r_b) || output.meets(ring) || every.meets(ring) {
+            return Err("fast short conv: bad ring span or overlap");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(target_arch = "nvptx64"))]
+#[allow(clippy::too_many_arguments, reason = "shape, softcap parameters and operand spans")]
+pub fn check_softcap_argmax(
+    rows: usize, cols: usize, parts: usize, finish: bool, bound: f32, eps: f32, input: Span, output: Span,
+) -> Result<(), &'static str> {
+    if !stream_ops_admitted(STREAM_OP_SOFTCAP_ARGMAX, rows, cols, parts, STREAM_OPS_THREADS) {
+        return Err("fast softcap argmax: shape outside envelope");
+    }
+    if !(bound > 0.0 && bound.is_finite() && eps > 0.0 && eps.is_finite()) {
+        return Err("fast softcap argmax: bad cap or reciprocal");
+    }
+    let in_w = if finish {
+        rows.checked_mul(parts).and_then(|n| n.checked_mul(3))
+    } else {
+        rows.checked_mul(cols)
+    };
+    let out_w = if finish {
+        rows.checked_mul(3)
+    } else {
+        rows.checked_mul(parts).and_then(|n| n.checked_mul(3))
+    };
+    if !input.valid(in_w.and_then(f32_bytes)) || !output.valid(out_w.and_then(f32_bytes)) || output.meets(input) {
+        return Err("fast softcap argmax: operand mismatch or overlap");
+    }
+    Ok(())
 }
 
 #[cfg(not(target_arch = "nvptx64"))]
 #[allow(clippy::too_many_arguments, reason = "shape, form and operand spans")]
 pub(crate) fn check_short_conv_form(rows: usize, heads: usize, dim: usize, taps: usize, form: u32, bound: f32,
     window: Span, token_taps: Option<Span>, addend: Option<Span>, fixed_taps: Span, ring: Option<(Span, usize)>,
-    output: Span, every: Option<(Span, usize)>, kv: Option<KvWrite>,
+    output: Span, every: Option<(Span, usize)>, kv: Option<KvWrite>, multi: Option<ShortConvMulti>,
 ) -> Result<(), &'static str> {
 
     let width = heads.checked_mul(dim).ok_or("fast short conv: width overflow")?;
@@ -590,10 +766,16 @@ pub(crate) fn check_short_conv_form(rows: usize, heads: usize, dim: usize, taps:
         if !ad.valid(o_w.and_then(f32_bytes)) || output.meets(ad) { return Err("fast short conv: bad addend span"); }
     }
     if output.meets(window) || output.meets(fixed_taps) { return Err("fast short conv: output overlaps input"); }
+    if let Some(m) = multi {
+        if ShortConvMulti::encode(rows, taps, m.start_mask, m.slots_lo, m.slots_hi) != Some(m)
+            || kv.is_some() || ring.is_none() || every.is_none()
+        {
+            return Err("fast short conv: invalid multi-chat kept ring descriptor");
+        }
+    }
     if let Some((ring, first)) = ring {
-        let ring_chats = if let Some((_, _, chats)) = short_conv_multi_decode(rows, taps, first) {
-            if kv.is_some() || every.is_none() { return Err("fast short conv: multi-chat ring requires kept output without kv"); }
-            chats
+        let ring_chats = if let Some(m) = multi {
+            m.chats
         } else {
             if first >= taps { return Err("fast short conv: bad ring span or slot"); }
             1
@@ -606,9 +788,10 @@ pub(crate) fn check_short_conv_form(rows: usize, heads: usize, dim: usize, taps:
     // Supported both with a joined window and with a separate ring + inputs (same first slot or multi-chat descriptor).
     if let Some((every, first)) = every {
         let spans = [Some(window), token_taps, addend, Some(fixed_taps), ring.map(|(s, _)| s), Some(output)];
-        let multi = short_conv_multi_decode(rows, taps, first).is_some();
-        if ring.is_some_and(|(_, r_first)| r_first != first) || (!multi && first >= taps) || (multi && ring.is_none())
-            || !every.valid(rows.checked_mul(taps).and_then(|n| n.checked_mul(width)).and_then(f32_bytes))
+        if multi.is_none() && (ring.is_some_and(|(_, r_first)| r_first != first) || first >= taps) {
+            return Err("fast short conv: bad kept rings span or slot");
+        }
+        if !every.valid(rows.checked_mul(taps).and_then(|n| n.checked_mul(width)).and_then(f32_bytes))
             || spans.iter().flatten().any(|s| every.meets(*s))
         {
             return Err("fast short conv: bad kept rings span or slot");
@@ -812,6 +995,113 @@ pub fn check_gate_blend_norm(
     Ok(())
 }
 
+/// Host operand check for `NORM_MODE_KV_DIRECT` (multi-chat decode KV finish + direct plane row writes).
+#[cfg(not(target_arch = "nvptx64"))]
+#[allow(clippy::too_many_arguments, reason = "paired key/value shapes, scalars, and per-chat ring/plane spans")]
+pub fn check_kv_finish_direct(
+    rows: usize, kv_heads: usize, taps: usize, plane_rows: usize,
+    key_bound: f32, val_eps: f32, key_scale: f32, val_scale: f32,
+    key_in: Span, key_fixed: Span, key_made: Option<Span>, key_every: Span,
+    val_in: Span, val_fixed: Span, val_made: Option<Span>, val_every: Span,
+    chats: &[(Span, Span, usize, Span, Span, usize)],
+) -> Result<(), &'static str> {
+    if !kv_finish_direct_admitted(rows, kv_heads, taps, NORM_THREADS) || chats.len() != rows || plane_rows == 0 {
+        return Err("fast kv direct: shape or chat count outside envelope");
+    }
+    if !(key_bound > 0.0 && key_bound.is_finite() && val_eps > 0.0 && val_eps.is_finite()
+        && key_scale > 0.0 && key_scale.is_finite() && val_scale > 0.0 && val_scale.is_finite())
+    {
+        return Err("fast kv direct: non-finite or non-positive scalar");
+    }
+    let width = kv_heads.checked_mul(KV_FINISH_HEAD_DIM).ok_or("fast kv direct: width overflow")?;
+    let in_b = rows.checked_mul(width).and_then(f32_bytes);
+    let ring_b = taps.checked_mul(width).and_then(f32_bytes);
+    let fixed_b = width.checked_mul(taps).and_then(f32_bytes);
+    let made_b = rows.checked_mul(kv_heads).and_then(|n| n.checked_mul(taps)).and_then(f32_bytes);
+    let every_b = rows.checked_mul(taps).and_then(|n| n.checked_mul(width)).and_then(f32_bytes);
+    let plane_b = plane_rows.checked_mul(width / 2).and_then(f32_bytes);
+    let row_b = f32_bytes(width / 2).ok_or("fast kv direct: row byte overflow")?;
+    for (inp, fix, mad, ev) in [(key_in, key_fixed, key_made, key_every), (val_in, val_fixed, val_made, val_every)] {
+        if !inp.valid(in_b) || !fix.valid(fixed_b) || !ev.valid(every_b) {
+            return Err("fast kv direct: operand size or alignment mismatch");
+        }
+        if let Some(m) = mad { if !m.valid(made_b) { return Err("fast kv direct: bad made taps span"); } }
+    }
+    let mut reads = [Span { address: 0, bytes: 0 }; 6 + 2 * DIRECT_CHATS_MAX];
+    let mut n_reads = 0usize;
+    for s in [Some(key_in), Some(key_fixed), key_made, Some(val_in), Some(val_fixed), val_made].into_iter().flatten() {
+        reads[n_reads] = s; n_reads += 1;
+    }
+    let mut writes = [Span { address: 0, bytes: 0 }; 2 + 2 * DIRECT_CHATS_MAX];
+    writes[0] = key_every;
+    writes[1] = val_every;
+    let mut n_writes = 2usize;
+    for &(kr, vr, rslot, kp, vp, pslot) in chats {
+        if rslot >= taps || pslot >= plane_rows || !kr.valid(ring_b) || !vr.valid(ring_b) || !kp.valid(plane_b) || !vp.valid(plane_b) {
+            return Err("fast kv direct: chat ring, plane, or slot mismatch");
+        }
+        let k_row = Span { address: kp.address + (pslot as u64) * row_b, bytes: row_b };
+        let v_row = Span { address: vp.address + (pslot as u64) * row_b, bytes: row_b };
+        reads[n_reads] = kr; n_reads += 1;
+        reads[n_reads] = vr; n_reads += 1;
+        writes[n_writes] = k_row; n_writes += 1;
+        writes[n_writes] = v_row; n_writes += 1;
+    }
+    for i in 0..n_writes {
+        let ws = writes[i];
+        if reads[..n_reads].iter().any(|r| ws.meets(*r)) {
+            return Err("fast kv direct: output overlaps input");
+        }
+        if writes[i + 1..n_writes].iter().any(|ow| ws.meets(*ow)) {
+            return Err("fast kv direct: outputs overlap");
+        }
+    }
+    Ok(())
+}
+
+/// Host operand check for `NORM_MODE_SHORT_CONV_DIRECT` (multi-chat decode ShortConv without `row_rings` join).
+#[cfg(not(target_arch = "nvptx64"))]
+#[allow(clippy::too_many_arguments, reason = "shape, form, scalars, and per-chat ring spans")]
+pub fn check_short_conv_direct(
+    rows: usize, heads: usize, dim: usize, taps: usize, form: u32, bound: f32,
+    inputs: Span, token_taps: Option<Span>, addend: Option<Span>, fixed_taps: Span,
+    output: Span, every: Span, chat_rings: &[(Span, usize)],
+) -> Result<(), &'static str> {
+    if !short_conv_direct_admitted(rows, heads, dim, taps, form, NORM_THREADS) || chat_rings.len() != rows {
+        return Err("fast short conv direct: shape or chat count outside envelope");
+    }
+    if !(bound > 0.0 && bound.is_finite()) { return Err("fast short conv direct: bad bound"); }
+    if (form & 1 != 0) != token_taps.is_some() || (form & 2 != 0) != addend.is_some() {
+        return Err("fast short conv direct: optional operand mismatch");
+    }
+    let width = heads.checked_mul(dim).ok_or("fast short conv direct: width overflow")?;
+    let io_b = rows.checked_mul(width).and_then(f32_bytes);
+    let fixed_b = width.checked_mul(taps).and_then(f32_bytes);
+    let ring_b = taps.checked_mul(width).and_then(f32_bytes);
+    let every_b = rows.checked_mul(taps).and_then(|n| n.checked_mul(width)).and_then(f32_bytes);
+    if !inputs.valid(io_b) || !fixed_taps.valid(fixed_b) || !output.valid(io_b) || !every.valid(every_b) {
+        return Err("fast short conv direct: operand size or alignment mismatch");
+    }
+    if let Some(tt) = token_taps {
+        if !tt.valid(rows.checked_mul(heads).and_then(|n| n.checked_mul(taps)).and_then(f32_bytes)) {
+            return Err("fast short conv direct: bad token taps span");
+        }
+    }
+    if let Some(ad) = addend {
+        if !ad.valid(io_b) { return Err("fast short conv direct: bad addend span"); }
+    }
+    if output.meets(every) { return Err("fast short conv direct: outputs overlap"); }
+    for s in [Some(inputs), token_taps, addend, Some(fixed_taps)].into_iter().flatten() {
+        if output.meets(s) || every.meets(s) { return Err("fast short conv direct: output overlaps input"); }
+    }
+    for &(ring, slot) in chat_rings {
+        if slot >= taps || !ring.valid(ring_b) || output.meets(ring) || every.meets(ring) {
+            return Err("fast short conv direct: bad chat ring span or overlap");
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -876,12 +1166,16 @@ mod tests {
         assert!(!stream_ops_admitted(STREAM_OP_RING_CONV_ONE, 2, 2304, 4, ROUTE_FOLD_CONV_THREADS));
         assert!(!stream_ops_admitted(STREAM_OP_RING_CONV_ONE, 1, 2304, 5, ROUTE_FOLD_CONV_THREADS));
         assert_eq!(check_short_conv_win(4096, 1, 2304, 4, 6, 0.2, span(1 << 20, 4099 * 2304), None, Some(span(1 << 28, 4096 * 2304)), span(1 << 29, 4 * 2304), None, span(1 << 30, 4096 * 2304), None), Ok(()));
-        let packed = short_conv_multi_encode(16, 3, 0x5555, 0x0000_2102).unwrap();
-        assert_eq!(short_conv_multi_decode(16, 3, packed), Some((0x5555, 0x0000_2102, 8)));
-        assert_eq!(check_short_conv_win(16, 1, 2304, 3, 6, 0.2, span(1 << 20, 16 * 2304), None, Some(span(1 << 22, 16 * 2304)), span(1 << 24, 3 * 2304),
-            Some((span(1 << 26, 8 * 3 * 2304), packed)), span(1 << 28, 16 * 2304), Some((span(1 << 30, 16 * 3 * 2304), packed))), Ok(()));
-        assert!(short_conv_multi_encode(16, 3, 0x5555, 0x0000_3000).is_none());
-        assert!(short_conv_multi_encode(17, 3, 0x0003, 0).is_none());
+        let m16 = ShortConvMulti::encode(16, 3, [0x5555, 0, 0, 0], 0x0000_2102, 0).unwrap();
+        assert_eq!(m16.chats, 8);
+        assert_eq!(check_short_conv_multi(16, 1, 2304, 3, 6, 0.2, span(1 << 20, 16 * 2304), None, Some(span(1 << 22, 16 * 2304)), span(1 << 24, 3 * 2304),
+            span(1 << 26, 8 * 3 * 2304), span(1 << 28, 16 * 2304), span(1 << 30, 16 * 3 * 2304), m16), Ok(()));
+        let m256 = ShortConvMulti::encode(256, 4, [0x0101_0101_0101_0101; 4], 0x1b1b_1b1b_1b1b_1b1b, 0).unwrap();
+        assert_eq!(m256.chats, 32);
+        assert_eq!(check_short_conv_multi(256, 1, 2304, 4, 6, 0.2, span(1 << 20, 256 * 2304), None, Some(span(1 << 22, 256 * 2304)), span(1 << 24, 4 * 2304),
+            span(1 << 26, 32 * 4 * 2304), span(1 << 28, 256 * 2304), span(1 << 30, 256 * 4 * 2304), m256), Ok(()));
+        assert!(ShortConvMulti::encode(16, 3, [0x5555, 0, 0, 0], 0x0000_3000, 0).is_none());
+        assert!(ShortConvMulti::encode(257, 3, [0x0003, 0, 0, 0], 0, 0).is_none());
         assert_eq!(check_route_fold(4096, 8, 2304, span(1 << 20, 4096 * 8), span(1 << 24, 4096 * 8 * 2304), span(1 << 30, 4096 * 2304)), Ok(()));
         // Half downs: two BF16 values a word; the FP32 size, or an odd width, is refused.
         assert_eq!(check_route_fold_strided(4096, 8, 2304, 8, 0, span(1 << 20, 4096 * 8), span(1 << 24, 4096 * 8 * 2304 / 2), span(1 << 30, 4096 * 2304), true), Ok(()));
@@ -901,5 +1195,50 @@ mod tests {
             span(1 << 26, 4 * 2304), None, None, Some(span(1 << 28, 12 * 2304)), Some(span(1 << 30, 3 * 2304)), true), Ok(()));
         assert!(check_mix_rows_normed(4, 1, 2304, 0.02, 1e-6, None, span(1 << 20, 2304), &[span(1 << 24, 4 * 2304)],
             span(1 << 26, 4 * 2304), None, None, None, None, false).is_err(), "missing both outputs");
+        let direct_rings: Vec<Span> = (0..8).map(|c| span((1 << 26) + (c as u64) * 65_536, 3 * 2304)).collect();
+        assert_eq!(check_short_conv_multi_rings(16, 1, 2304, 3, 6, 0.2, span(1 << 20, 16 * 2304), None, Some(span(1 << 22, 16 * 2304)),
+            span(1 << 24, 3 * 2304), &direct_rings, span(1 << 28, 16 * 2304), span(1 << 30, 16 * 3 * 2304), m16), Ok(()));
+        assert!(check_short_conv_multi_rings(16, 1, 2304, 3, 6, 0.2, span(1 << 20, 16 * 2304), None, Some(span(1 << 22, 16 * 2304)),
+            span(1 << 24, 3 * 2304), &direct_rings[..7], span(1 << 28, 16 * 2304), span(1 << 30, 16 * 3 * 2304), m16).is_err());
+        assert_eq!(check_softcap_argmax(128, 200_058, 1, false, 30.0, 1.0 / 30.0, span(1 << 20, 128 * 200_058), span(1 << 32, 128 * 3)), Ok(()));
+        assert_eq!(check_softcap_argmax(16, 200_058, 12, false, 30.0, 1.0 / 30.0, span(1 << 20, 16 * 200_058), span(1 << 32, 16 * 12 * 3)), Ok(()));
+        assert_eq!(check_softcap_argmax(16, 200_058, 12, true, 30.0, 1.0 / 30.0, span(1 << 32, 16 * 12 * 3), span(1 << 33, 16 * 3)), Ok(()));
+        assert!(check_softcap_argmax(16, 200_058, 0, false, 30.0, 1.0 / 30.0, span(1 << 20, 16 * 200_058), span(1 << 32, 16 * 3)).is_err());
+        assert!(check_softcap_argmax(16, 200_058, 1, false, 0.0, 1.0 / 30.0, span(1 << 20, 16 * 200_058), span(1 << 32, 16 * 3)).is_err());
+        assert_eq!(softcap_argmax_parts(128, 200_058), 1);
+        assert_eq!(softcap_argmax_parts(64, 200_058), 1);
+        assert_eq!(softcap_argmax_parts(16, 200_058), 12);
+        assert_eq!(softcap_argmax_parts(1, 200_058), 49);
+        let chats_kv = [
+            (span(1 << 20, 4 * 1024), span(1 << 21, 4 * 1024), 1usize, span(1 << 22, 64 * 512), span(1 << 23, 64 * 512), 5usize),
+            (span(1 << 24, 4 * 1024), span(1 << 25, 4 * 1024), 2usize, span(1 << 26, 64 * 512), span(1 << 27, 64 * 512), 7usize),
+        ];
+        assert_eq!(check_kv_finish_direct(2, 8, 4, 64, 1.0, 1e-6, 0.5, 0.5,
+            span(1 << 28, 2 * 1024), span(1 << 29, 4 * 1024), None, span(1 << 30, 8 * 1024),
+            span(1 << 31, 2 * 1024), span(1 << 32, 4 * 1024), None, span(1 << 33, 8 * 1024), &chats_kv), Ok(()));
+        let chats_sc = [(span(1 << 20, 4 * 2304), 0usize), (span(1 << 21, 4 * 2304), 3usize)];
+        assert_eq!(check_short_conv_direct(2, 1, 2304, 4, 6, 0.5, span(1 << 22, 2 * 2304), None, Some(span(1 << 23, 2 * 2304)),
+            span(1 << 24, 4 * 2304), span(1 << 25, 2 * 2304), span(1 << 26, 8 * 2304), &chats_sc), Ok(()));
+    }
+    /// Exhaustively verify that for every finite BF16 value in `[1e-6 / eps, 5.0 / eps]`, `tanh(r * eps) * bound`
+    /// is strictly increasing across adjacent BF16 values — proving the skip bound of `STREAM_OP_SOFTCAP_ARGMAX`
+    /// never alters any argmax or tie-break bit-for-bit.
+    #[test]
+    fn softcap_bf16_strictly_increasing_below_skip_threshold() {
+        for bound in [1.0f32, 10.0, 30.0, 32.0, 50.0, 100.0] {
+            let eps = (1.0f64 / f64::from(bound)) as f32;
+            let lo = 1.0e-6f32 / eps;
+            let hi = 5.0f32 / eps;
+            let mut prev = f32::NEG_INFINITY;
+            for b in 0u16..=0x7f7fu16 {
+                let r = f32::from_bits(u32::from(b) << 16);
+                let c = crate::fixed_math::tanh(r * eps) * bound;
+                assert!(c >= prev, "non-monotonic cap at bound={bound} r={r}");
+                if r >= lo && r <= hi {
+                    assert!(c > prev, "cap tie inside skip window at bound={bound} r={r} c={c}");
+                }
+                prev = c;
+            }
+        }
     }
 }

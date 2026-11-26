@@ -539,7 +539,137 @@ impl<'a> Backend<'a> {
         fixed_taps: &DeviceVector<'_>, ring: Option<(&DeviceVector<'_>, usize)>, output: &mut DeviceVector<'_>,
         every: Option<(&mut DeviceVector<'_>, usize)>,
     ) -> Result<(), String> {
-        self.record_short_conv(rows, heads, dim, taps, form, bound, window, token_taps, addend, fixed_taps, ring, output, every, None)
+        self.record_short_conv(rows, heads, dim, taps, form, bound, window, token_taps, addend, fixed_taps, ring, output, every, None, None)
+    }
+
+    #[allow(clippy::too_many_arguments, reason = "shape, multi-chat descriptor and device operands")]
+    pub fn fast_short_conv_multi_into(
+        &self, rows: usize, heads: usize, dim: usize, taps: usize, form: u32, bound: f32,
+        window: &DeviceVector<'_>, token_taps: Option<&DeviceVector<'_>>, addend: Option<&DeviceVector<'_>>,
+        fixed_taps: &DeviceVector<'_>, ring: &DeviceVector<'_>, output: &mut DeviceVector<'_>,
+        every: &mut DeviceVector<'_>, multi: fast_ops::ShortConvMulti,
+    ) -> Result<(), String> {
+        self.record_short_conv(rows, heads, dim, taps, form, bound, window, token_taps, addend, fixed_taps, Some((ring, 0)), output, Some((every, 0)), None, Some(multi))
+    }
+
+    /// Direct per-chat ring pointer form of `fast_short_conv_multi_into`: passes up to `SHORT_CONV_MULTI_CHATS_MAX`
+    /// (64) chat ring device pointers in payload words `20..20 + chats`, eliminating `compute.join` ring copies.
+    #[allow(clippy::too_many_arguments, reason = "shape, multi-chat descriptor, direct per-chat rings and device operands")]
+    pub fn fast_short_conv_multi_rings_into(
+        &self, rows: usize, heads: usize, dim: usize, taps: usize, form: u32, bound: f32,
+        window: &DeviceVector<'_>, token_taps: Option<&DeviceVector<'_>>, addend: Option<&DeviceVector<'_>>,
+        fixed_taps: &DeviceVector<'_>, rings: &[&DeviceVector<'_>], output: &mut DeviceVector<'_>,
+        every: &mut DeviceVector<'_>, multi: fast_ops::ShortConvMulti,
+    ) -> Result<(), String> {
+        if self.arm_capture() { return Err("fast short conv: refused inside a stream capture".into()); }
+        self.require_resident_stream()?;
+        let span = |v: &DeviceVector<'_>| Span { address: v.device_address(), bytes: v.len() as u64 * 4 };
+        let ring_spans: Vec<Span> = rings.iter().map(|&v| span(v)).collect();
+        fast_ops::check_short_conv_multi_rings(
+            rows, heads, dim, taps, form, bound, span(window), token_taps.map(span), addend.map(span),
+            span(fixed_taps), &ring_spans, span(output), span(every), multi,
+        )?;
+        let width = heads * dim;
+        self.check_vector(window, rows * width)?;
+        if let Some(tt) = token_taps { self.check_vector(tt, rows * heads * taps)?; if tt.is_segmented() { return Err("fast short conv: token_taps segmented".into()); } }
+        if let Some(ad) = addend { self.check_vector(ad, rows * width)?; if ad.is_segmented() { return Err("fast short conv: addend segmented".into()); } }
+        self.check_vector(fixed_taps, width * taps)?;
+        self.check_vector(output, rows * width)?;
+        self.check_vector(every, rows * taps * width)?;
+        if window.is_segmented() || fixed_taps.is_segmented() { return Err("fast short conv: operand must be contiguous".into()); }
+        if output.is_segmented() || !output.writable_from(0) { return Err("fast short conv: output requires private contiguous storage".into()); }
+        if every.is_segmented() || !every.writable_from(0) { return Err("fast short conv: kept rings require private contiguous storage".into()); }
+        for &r in rings {
+            self.check_vector(r, taps * width)?;
+            if r.is_segmented() { return Err("fast short conv: ring segmented".into()); }
+        }
+        self.require_arm_kernels(&[Kind::FastStreamOps.kernel()])?;
+        self.resident_completion()?;
+        let mut command = Command::new(Kind::FastStreamOps);
+        let tag = (fast_ops::SHORT_CONV_MULTI_TAG | multi.chats) as u64;
+        let words = [
+            fast_ops::STREAM_OP_SHORT_CONV_WIN,
+            window.device_address(),
+            token_taps.map_or(0, DeviceVector::device_address),
+            addend.map_or(0, DeviceVector::device_address),
+            fixed_taps.device_address(),
+            output.device_address(),
+            rows as u64, width as u64, taps as u64, heads as u64, u64::from(form), u64::from(bound.to_bits()),
+            0, tag,
+            every.device_address(), tag,
+        ];
+        for (i, w) in words.into_iter().enumerate() { command.word(i, w); }
+        command.word(fast_ops::SHORT_CONV_MULTI_MASK_0, multi.start_mask[0]);
+        command.word(fast_ops::SHORT_CONV_MULTI_MASK_1, multi.start_mask[1]);
+        command.word(fast_ops::SHORT_CONV_MULTI_SLOTS_LO, multi.slots_lo);
+        command.word(fast_ops::SHORT_CONV_MULTI_SLOTS_HI, multi.slots_hi);
+        command.word(fast_ops::SHORT_CONV_MULTI_MASK_2, multi.start_mask[2]);
+        command.word(fast_ops::SHORT_CONV_MULTI_MASK_3, multi.start_mask[3]);
+        for (c, &r) in rings.iter().enumerate() {
+            command.word(fast_ops::SHORT_CONV_MULTI_RINGS_AT + c, r.device_address());
+        }
+        let blocks = fast_ops::stream_ops_blocks(rows, width);
+        let grid = [u32::try_from(blocks).map_err(|_| "fast short conv: grid overflow")?, 1, 1, fast_ops::STREAM_OPS_THREADS as u32, 0];
+        if !self.record_resident_block(Kind::FastStreamOps, command, grid)? {
+            return Err("fast short conv: launches are not recorded now".into());
+        }
+        self.resident_completion()
+    }
+
+    /// Fused `Softcap` (`cap(rn(x), eps, bound)`) + greedy argmax (`[rows][3]`: `best, id, finite`),
+    /// eliminating the `[rows][cols]` capped-logits write and reload on greedy decode & verify steps.
+    #[allow(clippy::too_many_arguments, reason = "shape, softcap parameters and device operands")]
+    pub fn fast_softcap_argmax_into(
+        &self, rows: usize, cols: usize, bound: f32, eps: f32,
+        input: &DeviceVector<'_>, output: &mut DeviceVector<'_>,
+    ) -> Result<(), String> {
+        if self.arm_capture() { return Err("fast softcap argmax: refused inside a stream capture".into()); }
+        self.require_resident_stream()?;
+        let parts = fast_ops::softcap_argmax_parts(rows, cols);
+        let span = |v: &DeviceVector<'_>| Span { address: v.device_address(), bytes: v.len() as u64 * 4 };
+        self.check_vector(input, rows * cols)?;
+        self.check_vector(output, rows * 3)?;
+        if input.is_segmented() { return Err("fast softcap argmax: input must be contiguous".into()); }
+        if output.is_segmented() || !output.writable_from(0) {
+            return Err("fast softcap argmax: output requires private contiguous storage".into());
+        }
+        self.require_arm_kernels(&[Kind::FastStreamOps.kernel()])?;
+        self.resident_completion()?;
+        let make_cmd = |src: u64, dst: u64, finish: bool| {
+            let mut command = Command::new(Kind::FastStreamOps);
+            let words = [
+                fast_ops::STREAM_OP_SOFTCAP_ARGMAX,
+                src, 0, 0, 0, dst,
+                rows as u64, cols as u64, parts as u64, u64::from(finish),
+                u64::from(eps.to_bits()), u64::from(bound.to_bits()),
+            ];
+            for (i, w) in words.into_iter().enumerate() { command.word(i, w); }
+            command
+        };
+        if parts == 1 {
+            fast_ops::check_softcap_argmax(rows, cols, 1, false, bound, eps, span(input), span(output))?;
+            let command = make_cmd(input.device_address(), output.device_address(), false);
+            let grid = [u32::try_from(rows).map_err(|_| "fast softcap argmax: grid overflow")?, 1, 1, fast_ops::STREAM_OPS_THREADS as u32, 0];
+            if !self.record_resident_block(Kind::FastStreamOps, command, grid)? {
+                return Err("fast softcap argmax: launches are not recorded now".into());
+            }
+            return self.resident_completion();
+        }
+        let partials = self.vector(rows * parts * 3)?;
+        fast_ops::check_softcap_argmax(rows, cols, parts, false, bound, eps, span(input), span(&partials))?;
+        fast_ops::check_softcap_argmax(rows, cols, parts, true, bound, eps, span(&partials), span(output))?;
+        let scan_cmd = make_cmd(input.device_address(), partials.device_address(), false);
+        let fin_cmd = make_cmd(partials.device_address(), output.device_address(), true);
+        let r_u32 = u32::try_from(rows).map_err(|_| "fast softcap argmax: grid overflow")?;
+        let p_u32 = u32::try_from(parts).map_err(|_| "fast softcap argmax: grid overflow")?;
+        let scan_grid = [r_u32, p_u32, 1, fast_ops::STREAM_OPS_THREADS as u32, 0];
+        let fin_grid = [r_u32, 1, 1, fast_ops::STREAM_OPS_THREADS as u32, 0];
+        if !self.record_resident_block(Kind::FastStreamOps, scan_cmd, scan_grid)?
+            || !self.record_resident_block(Kind::FastStreamOps, fin_cmd, fin_grid)?
+        {
+            return Err("fast softcap argmax: launches are not recorded now".into());
+        }
+        self.resident_completion()
     }
 
     /// Convolve prompt keys or values, finish each head and store its packed words directly in the KV plane.
@@ -549,7 +679,7 @@ impl<'a> Backend<'a> {
         fixed_taps: &DeviceVector<'_>, ring: (&DeviceVector<'_>, usize), plane: &mut DeviceVector<'_>, kv: fast_ops::KvWrite,
     ) -> Result<(), String> {
         self.record_short_conv(rows, shape.heads as usize, shape.dim as usize, shape.taps as usize, shape.cols, shape.bound,
-            window, token_taps, None, fixed_taps, Some(ring), plane, None, Some(kv))
+            window, token_taps, None, fixed_taps, Some(ring), plane, None, Some(kv), None)
     }
 
     #[allow(clippy::too_many_arguments, reason = "shape, form and device operands")]
@@ -557,18 +687,18 @@ impl<'a> Backend<'a> {
         &self, rows: usize, heads: usize, dim: usize, taps: usize, form: u32, bound: f32,
         window: &DeviceVector<'_>, token_taps: Option<&DeviceVector<'_>>, addend: Option<&DeviceVector<'_>>,
         fixed_taps: &DeviceVector<'_>, ring: Option<(&DeviceVector<'_>, usize)>, output: &mut DeviceVector<'_>,
-        every: Option<(&mut DeviceVector<'_>, usize)>, kv: Option<fast_ops::KvWrite>,
+        every: Option<(&mut DeviceVector<'_>, usize)>, kv: Option<fast_ops::KvWrite>, multi: Option<fast_ops::ShortConvMulti>,
     ) -> Result<(), String> {
         if self.arm_capture() { return Err("fast short conv: refused inside a stream capture".into()); }
         self.require_resident_stream()?;
         let span = |v: &DeviceVector<'_>| Span { address: v.device_address(), bytes: v.len() as u64 * 4 };
         fast_ops::check_short_conv_form(rows, heads, dim, taps, form, bound, span(window), token_taps.map(span), addend.map(span),
-            span(fixed_taps), ring.map(|(v, first)| (span(v), first)), span(output), every.as_ref().map(|(v, first)| (span(v), *first)), kv)?;
+            span(fixed_taps), ring.map(|(v, first)| (span(v), first)), span(output), every.as_ref().map(|(v, first)| (span(v), *first)), kv, multi)?;
         let width = heads * dim;
         let history = if ring.is_some() { 0 } else { taps - 1 };
         self.check_vector(window, (rows + history) * width)?;
-        if let Some((v, first)) = ring {
-            let chats = fast_ops::short_conv_multi_decode(rows, taps, first).map_or(1, |(_, _, c)| c);
+        if let Some((v, _)) = ring {
+            let chats = multi.map_or(1, |m| m.chats);
             self.check_vector(v, chats * taps * width)?;
             if v.is_segmented() { return Err("fast short conv: ring segmented".into()); }
         }
@@ -586,6 +716,8 @@ impl<'a> Backend<'a> {
         self.require_arm_kernels(&[kind.kernel()])?;
         self.resident_completion()?;
         let mut command = Command::new(kind);
+        let ring_first = multi.map_or_else(|| ring.map_or(0, |(_, first)| first as u64), |m| (fast_ops::SHORT_CONV_MULTI_TAG | m.chats) as u64);
+        let every_first = multi.map_or_else(|| every.as_ref().map_or(0, |(_, first)| *first as u64), |m| (fast_ops::SHORT_CONV_MULTI_TAG | m.chats) as u64);
         let words = [
             fast_ops::STREAM_OP_SHORT_CONV_WIN,
             window.device_address(),
@@ -594,10 +726,18 @@ impl<'a> Backend<'a> {
             fixed_taps.device_address(),
             output.device_address(),
             rows as u64, width as u64, taps as u64, heads as u64, u64::from(form), u64::from(bound.to_bits()),
-            ring.map_or(0, |(v, _)| v.device_address()), ring.map_or(0, |(_, first)| first as u64),
-            every.as_ref().map_or(0, |(v, _)| v.device_address()), every.as_ref().map_or(0, |(_, first)| *first as u64),
+            ring.map_or(0, |(v, _)| v.device_address()), ring_first,
+            every.as_ref().map_or(0, |(v, _)| v.device_address()), every_first,
         ];
         for (i, w) in words.into_iter().enumerate() { command.word(i, w); }
+        if let Some(m) = multi {
+            command.word(fast_ops::SHORT_CONV_MULTI_MASK_0, m.start_mask[0]);
+            command.word(fast_ops::SHORT_CONV_MULTI_MASK_1, m.start_mask[1]);
+            command.word(fast_ops::SHORT_CONV_MULTI_SLOTS_LO, m.slots_lo);
+            command.word(fast_ops::SHORT_CONV_MULTI_SLOTS_HI, m.slots_hi);
+            command.word(fast_ops::SHORT_CONV_MULTI_MASK_2, m.start_mask[2]);
+            command.word(fast_ops::SHORT_CONV_MULTI_MASK_3, m.start_mask[3]);
+        }
         let threads = if kv.is_some() { fast_ops::ROW_DOTS_THREADS } else { fast_ops::STREAM_OPS_THREADS };
         let tiled = kv.is_none() && ring.is_some() && every.is_none()
             && heads == 1 && (form & crate::block_stream::CONV_TOKEN_TAPS) == 0
@@ -974,5 +1114,146 @@ impl<'a> Backend<'a> {
         }
         self.resident_completion()?;
         Ok(outputs)
+    }
+
+    /// Multi-chat decode direct KV finish (`FAST_NORM`, `NORM_MODE_KV_DIRECT`): fuses Key (`ShortConv` + `HeadClip`
+    /// and `PackBf16`) and Value (`ShortConv` + `RoundedNorm` and `PackBf16`), writing packed BF16 rows directly into
+    /// each chat's KV planes and writing next rings to `key_every` / `val_every` in one launch.
+    #[allow(clippy::too_many_arguments, reason = "paired key/value shapes, scalars, and per-chat ring/plane targets")]
+    pub fn fast_kv_finish_direct_into(
+        &self, rows: usize, kv_heads: usize, taps: usize, plane_rows: usize,
+        key_bound: f32, val_eps: f32, key_scale: f32, val_scale: f32,
+        key_in: &DeviceVector<'_>, key_fixed: &DeviceVector<'_>, key_made: Option<&DeviceVector<'_>>, key_every: &mut DeviceVector<'_>,
+        val_in: &DeviceVector<'_>, val_fixed: &DeviceVector<'_>, val_made: Option<&DeviceVector<'_>>, val_every: &mut DeviceVector<'_>,
+        chats: &[(&DeviceVector<'_>, &DeviceVector<'_>, usize, &DeviceVector<'_>, &DeviceVector<'_>, usize)],
+    ) -> Result<(), String> {
+        if self.arm_capture() { return Err("fast kv direct: refused inside a stream capture".into()); }
+        self.require_resident_stream()?;
+        let span = |v: &DeviceVector<'_>| Span { address: v.device_address(), bytes: v.len() as u64 * 4 };
+        let width = kv_heads.checked_mul(fast_ops::KV_FINISH_HEAD_DIM).ok_or("fast kv direct: width overflow")?;
+        let chat_spans: Vec<_> = chats.iter().map(|&(kr, vr, rs, kp, vp, ps)| (span(kr), span(vr), rs, span(kp), span(vp), ps)).collect();
+        fast_ops::check_kv_finish_direct(
+            rows, kv_heads, taps, plane_rows, key_bound, val_eps, key_scale, val_scale,
+            span(key_in), span(key_fixed), key_made.map(span), span(key_every),
+            span(val_in), span(val_fixed), val_made.map(span), span(val_every), &chat_spans,
+        )?;
+        for (inp, fix, mad, ev) in [(key_in, key_fixed, key_made, &*key_every), (val_in, val_fixed, val_made, &*val_every)] {
+            self.check_vector(inp, rows * width)?;
+            self.check_vector(fix, width * taps)?;
+            self.check_vector(ev, rows * taps * width)?;
+            if inp.is_segmented() || fix.is_segmented() || ev.is_segmented() || !ev.writable_from(0) {
+                return Err("fast kv direct: contiguous private storage required".into());
+            }
+            if let Some(m) = mad {
+                self.check_vector(m, rows * kv_heads * taps)?;
+                if m.is_segmented() { return Err("fast kv direct: made taps segmented".into()); }
+            }
+        }
+        let row_words = width / 2;
+        let plane_words = plane_rows.checked_mul(row_words).ok_or("fast kv direct: plane overflow")?;
+        let mut ring_slots = 0u64;
+        for (r, &(kr, vr, rs, kp, vp, _)) in chats.iter().enumerate() {
+            for ring in [kr, vr] {
+                self.check_vector(ring, taps * width)?;
+                if ring.is_segmented() { return Err("fast kv direct: chat ring segmented".into()); }
+            }
+            for plane in [kp, vp] {
+                self.check_vector(plane, plane_words)?;
+                if plane.is_segmented() || !plane.writable_from(0) {
+                    return Err("fast kv direct: chat plane requires private contiguous storage".into());
+                }
+            }
+            ring_slots |= (rs as u64) << (4 * r);
+        }
+        self.require_arm_kernels(&[Kind::FastNorm.kernel()])?;
+        self.resident_completion()?;
+        let mut command = Command::new(Kind::FastNorm);
+        let words = [
+            key_in.device_address(), val_in.device_address(), key_fixed.device_address(),
+            rows as u64, kv_heads as u64, fast_ops::NORM_MODE_KV_DIRECT,
+            u64::from(key_bound.to_bits()) | (u64::from(val_eps.to_bits()) << 32),
+            u64::from(key_scale.to_bits()) | (u64::from(val_scale.to_bits()) << 32),
+            taps as u64, val_fixed.device_address(),
+            key_made.map_or(0, DeviceVector::device_address), val_made.map_or(0, DeviceVector::device_address),
+            key_every.device_address(), val_every.device_address(), ring_slots, 0,
+        ];
+        for (i, w) in words.into_iter().enumerate() { command.word(i, w); }
+        let row_bytes = (row_words as u64) * 4;
+        for (r, &(kr, vr, _, kp, vp, ps)) in chats.iter().enumerate() {
+            command.word(16 + 4 * r, kr.device_address());
+            command.word(16 + 4 * r + 1, vr.device_address());
+            command.word(16 + 4 * r + 2, kp.device_address() + (ps as u64) * row_bytes);
+            command.word(16 + 4 * r + 3, vp.device_address() + (ps as u64) * row_bytes);
+        }
+        let blocks = u32::try_from((2 * rows * kv_heads).div_ceil(4)).map_err(|_| "fast kv direct: grid overflow")?;
+        let grid = [blocks, 1, 1, fast_ops::NORM_THREADS as u32, 0];
+        if !self.record_resident_block(Kind::FastNorm, command, grid)? {
+            return Err("fast kv direct: launches are not recorded now".into());
+        }
+        self.resident_completion()
+    }
+
+    /// Multi-chat decode direct `ShortConv` (`FAST_NORM`, `NORM_MODE_SHORT_CONV_DIRECT`): reads each chat's ring
+    /// directly without a `row_rings` join copy and writes output + per-chat next rings in one launch.
+    #[allow(clippy::too_many_arguments, reason = "shape, form, scalars, and per-chat ring operands")]
+    pub fn fast_short_conv_direct_into(
+        &self, rows: usize, heads: usize, dim: usize, taps: usize, form: u32, bound: f32,
+        inputs: &DeviceVector<'_>, token_taps: Option<&DeviceVector<'_>>, addend: Option<&DeviceVector<'_>>,
+        fixed_taps: &DeviceVector<'_>, output: &mut DeviceVector<'_>, every: &mut DeviceVector<'_>,
+        chat_rings: &[(&DeviceVector<'_>, usize)],
+    ) -> Result<(), String> {
+        if self.arm_capture() { return Err("fast short conv direct: refused inside a stream capture".into()); }
+        self.require_resident_stream()?;
+        let span = |v: &DeviceVector<'_>| Span { address: v.device_address(), bytes: v.len() as u64 * 4 };
+        let ring_spans: Vec<_> = chat_rings.iter().map(|&(r, s)| (span(r), s)).collect();
+        fast_ops::check_short_conv_direct(
+            rows, heads, dim, taps, form, bound,
+            span(inputs), token_taps.map(span), addend.map(span), span(fixed_taps),
+            span(output), span(every), &ring_spans,
+        )?;
+        let width = heads * dim;
+        self.check_vector(inputs, rows * width)?;
+        self.check_vector(fixed_taps, width * taps)?;
+        self.check_vector(output, rows * width)?;
+        self.check_vector(every, rows * taps * width)?;
+        if inputs.is_segmented() || fixed_taps.is_segmented()
+            || output.is_segmented() || !output.writable_from(0)
+            || every.is_segmented() || !every.writable_from(0)
+        {
+            return Err("fast short conv direct: contiguous private storage required".into());
+        }
+        if let Some(tt) = token_taps {
+            self.check_vector(tt, rows * heads * taps)?;
+            if tt.is_segmented() { return Err("fast short conv direct: token taps segmented".into()); }
+        }
+        if let Some(ad) = addend {
+            self.check_vector(ad, rows * width)?;
+            if ad.is_segmented() { return Err("fast short conv direct: addend segmented".into()); }
+        }
+        for &(r, _) in chat_rings {
+            self.check_vector(r, taps * width)?;
+            if r.is_segmented() { return Err("fast short conv direct: chat ring segmented".into()); }
+        }
+        self.require_arm_kernels(&[Kind::FastNorm.kernel()])?;
+        self.resident_completion()?;
+        let mut command = Command::new(Kind::FastNorm);
+        let words = [
+            inputs.device_address(), fixed_taps.device_address(), output.device_address(),
+            rows as u64, dim as u64, fast_ops::NORM_MODE_SHORT_CONV_DIRECT, u64::from(bound.to_bits()),
+            heads as u64, taps as u64, u64::from(form),
+            token_taps.map_or(0, DeviceVector::device_address), addend.map_or(0, DeviceVector::device_address),
+            every.device_address(), 0, 0, 0,
+        ];
+        for (i, w) in words.into_iter().enumerate() { command.word(i, w); }
+        for (r, &(ring, slot)) in chat_rings.iter().enumerate() {
+            command.word(16 + 2 * r, ring.device_address());
+            command.word(16 + 2 * r + 1, slot as u64);
+        }
+        let gx = u32::try_from(width.div_ceil(fast_ops::NORM_THREADS)).map_err(|_| "fast short conv direct: grid overflow")?;
+        let grid = [gx, rows as u32, 1, fast_ops::NORM_THREADS as u32, 0];
+        if !self.record_resident_block(Kind::FastNorm, command, grid)? {
+            return Err("fast short conv direct: launches are not recorded now".into());
+        }
+        self.resident_completion()
     }
 }

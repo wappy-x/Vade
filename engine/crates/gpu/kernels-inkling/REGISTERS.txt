@@ -132,6 +132,12 @@ resident_launch_plain_packed_tc_rows 256  128           40960             0
 # Bit-exact W4A16/W8A16 BF16 tensor-core prefill MoE GEMM (PAIR_M=128, BN=128, 42,016 B SMEM), vectorized
 # BF16 activation packer, and vectorized BF16 RouteFold (kind 121). Capped at 128 registers (2 blk/SM, 0 stack, 0 spill).
 resident_launch_prefill_packed_tc    256  128           42016             0
+# High-occupancy 2-stage prefill causal/sliding-window attention (BQ_POS=64, 3:1 GQA -> 384 threads, 101,184 B SMEM,
+# kind 122). Capped at 168 registers (1 blk/SM = 12 warps/SM, 0 stack, 0 spill).
+resident_launch_prefill_flash_window 384  168          101184             0
+# Fused prefill lazy message-meta and GateDown+GateOuter+GateBlend+RoundedNorm (BM=8, 8 warps = 256 threads,
+# 47,424 B SMEM, kind 123). Capped at 128 registers (2 blk/SM = 16 warps/SM, 0 stack, 0 spill).
+resident_launch_prefill_gate_fuse    256  128           47424             0
 # Fast Inkling block-op kernels (kinds 107..=112, 0 spill; 48 B call frame on tanh kernels, 0 stack elsewhere).
 # Measured (CUDA 13.0 ptxas): mix_blend 40, row_dots 40, norm 38, capped_gate 40, router_pick 38, stream_ops 48.
 # fast_mix_blend (W-SC2-POST, 2026-11-24): the one-row mix (`fast_ops::MIX_ONE`) stages the stream row (10,240 shared

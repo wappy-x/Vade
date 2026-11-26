@@ -54,22 +54,53 @@ impl<'a> Backend<'a> {
         }
         Ok(packed)
     }
-    /// The kind, mode, and grid of a dense product: `TC_MODE_NARROW_HALF` on `PLAIN_TC_BIG` for narrow packed-BF16
-    /// (`half_in`) prefill, direct-FP32 `PLAIN_TC_ROWS` (zero pack) for FP32 narrow (`rows <= 128`) and short-K
-    /// (`cols == 64`, `GateOuter`), `PLAIN_TC_BIG` for large non-short-K prefill products, else packed `PLAIN_TC_ROWS`
-    /// with wave-matched dynamic SMEM.
-    fn tc_dense_launch(rows: usize, cols: usize, inputs: usize, split: bool, pair: bool, half_in: bool) -> (Kind, u64, [u32; 5], bool) {
-        if half_in && !split && tc_rows::tc_narrow_wanted(rows, inputs) {
-            (Kind::PlainTcBig, tc_rows::TC_MODE_NARROW_HALF, [tc_rows::tc_narrow_half_blocks(inputs), 1, 1, tc_rows::TC_THREADS as u32, 0], true)
-        } else if !half_in && tc_rows::tc_fp32_direct_wanted(rows, cols, inputs, split, pair) {
+    /// The kind, mode, and grid of a dense product: direct-FP32 `PLAIN_TC_ROWS` (zero pack) for FP32 narrow
+    /// (`rows <= 128`), short-K (`cols == 64`, `GateOuter`), and K/V prefill (`512 <= rows <= 1280`), 1-warp narrow
+    /// packed-BF16 (`TC_FLAG_HALF_IN`) for `half_in` narrow `inputs <= 256`, `TC_MODE_NARROW_HALF` for `half_in`
+    /// narrow `inputs >= 257`, `PLAIN_TC_BIG` for large prefill products, else packed `PLAIN_TC_ROWS` with
+    /// wave-matched dynamic SMEM (sized for lossless Vade-BF11-BP `bf16_panels` when registered).
+    fn tc_dense_launch(rows: usize, cols: usize, inputs: usize, split: bool, pair: bool, half_in: bool, panel_slices: Option<usize>) -> (Kind, u64, [u32; 5], bool, u64) {
+        if !half_in && tc_rows::tc_fp32_direct_wanted(rows, cols, inputs, split, pair) {
             let (threads, blocks, smem) = tc_rows::tc_dense_spec(rows, cols, inputs, true);
-            (Kind::PlainTcRows, tc_rows::TC_MODE_DENSE_FP32, [blocks, 1, 1, threads as u32, smem as u32], true)
+            (Kind::PlainTcRows, tc_rows::TC_MODE_DENSE_FP32, [blocks, 1, 1, threads as u32, smem as u32], true, 0)
+        } else if half_in && !split && tc_rows::tc_narrow_1w_wanted(rows, inputs) {
+            let (threads, blocks, smem) = tc_rows::tc_dense_spec(rows, cols, inputs, true);
+            (Kind::PlainTcRows, tc_rows::TC_MODE_DENSE_FP32, [blocks, 1, 1, threads as u32, smem as u32], false, tc_rows::TC_FLAG_HALF_IN)
+        } else if half_in && !split && tc_rows::tc_narrow_wanted(rows, inputs) {
+            (Kind::PlainTcBig, tc_rows::TC_MODE_NARROW_HALF, [tc_rows::tc_narrow_half_blocks(inputs), 1, 1, tc_rows::TC_THREADS as u32, 0], false, 0)
         } else if !pair && tc_rows::tc_big_wanted(rows, inputs) {
-            (Kind::PlainTcBig, tc_rows::TC_MODE_DENSE, [tc_rows::tc_big_blocks(rows, inputs), 1, 1, tc_rows::TC_THREADS as u32, 0], false)
+            (Kind::PlainTcBig, tc_rows::TC_MODE_DENSE, [tc_rows::tc_big_blocks(rows, inputs), 1, 1, tc_rows::TC_THREADS as u32, 0], false, 0)
         } else {
-            let (threads, blocks, smem) = tc_rows::tc_dense_spec(rows, cols, inputs, false);
-            (Kind::PlainTcRows, tc_rows::TC_MODE_DENSE, [blocks, 1, 1, threads as u32, smem as u32], false)
+            let (threads, blocks, raw_smem) = tc_rows::tc_dense_spec(rows, cols, inputs, false);
+            let smem = match panel_slices {
+                Some(slices) => tc_rows::tc_dense_panel_smem(rows, cols, inputs, slices),
+                None => raw_smem,
+            };
+            (Kind::PlainTcRows, tc_rows::TC_MODE_DENSE, [blocks, 1, 1, threads as u32, smem as u32], false, 0)
         }
+    }
+    /// Attach registered lossless Vade-BF11-BP `bf16_panels` `(base, first_band | (slices << 32))` to Mode 0 commands.
+    fn attach_tc_panels(command: &mut Command, panels: Option<(u64, u64, usize)>, kind: Kind, mode: u64) {
+        if kind == Kind::PlainTcRows && mode == tc_rows::TC_MODE_DENSE {
+            if let Some((base, meta, _)) = panels {
+                command.word(tc_rows::TC_PANEL_WORD, base);
+                command.word(tc_rows::TC_PANEL_WORD + 1, meta);
+            }
+        }
+    }
+    fn tc_panels_for(&self, weight: &DeviceVector<'_>, rows: usize, cols: usize, inputs: usize) -> Option<(u64, u64, usize)> {
+        // Small-row projections (`rows <= 1280`, e.g. K/V 1024 and K+KTap 1056) are L2-resident and faster on raw
+        // `LDG.128`; larger matrices (`O_proj` 2304, `QKV` 6552/8600, `LM Head` 200k) stream Vade-BF11-BP panels.
+        if rows <= 1280 || inputs > tc_rows::TC_SMALL_BM { return None; }
+        let chunks = cols / crate::bf16_panels::CHUNK_COLS;
+        let (base, first_band, slices) = self.panel_at(weight, cols)?;
+        if base == 0 || (base & 15) != 0 || !matches!(slices, 1 | 4 | 8) || !chunks.is_multiple_of(slices) {
+            return None;
+        }
+        if tc_rows::tc_coop_w_wanted(rows, cols, inputs) && (slices < 4 || !chunks.is_multiple_of(4)) {
+            return None;
+        }
+        Some((base, (first_band as u64) | ((slices as u64) << 32), slices))
     }
     /// True when `project_tc_rows_into` can run this dense BF16 matrix with `inputs` rows now.
     pub fn tc_rows_ready(&self, rows: usize, cols: usize, inputs: usize, input: &DeviceVector<'_>, weight: &DeviceVector<'_>) -> bool {
@@ -85,7 +116,7 @@ impl<'a> Backend<'a> {
             && (input.device_address() | weight.device_address()) & 15 == 0 && self.resident_launches_active()
     }
 
-    /// True when `project_tc_rows_pair_into` / `project_tc_rows_pair_form_into` can run now.
+    /// True when `project_tc_rows_pair_into` / `project_tc_rows_pair_form_into` can run over two `[inputs, cols/2]` inputs now.
     #[allow(clippy::too_many_arguments, reason = "shape and three operands")]
     pub fn tc_rows_pair_ready(&self, rows: usize, cols: usize, inputs: usize, input1: &DeviceVector<'_>, input2: &DeviceVector<'_>, weight: &DeviceVector<'_>) -> bool {
         tc_rows::tc_shape_admitted(rows, cols, inputs) && (cols / 2).is_multiple_of(tc_rows::TC_BK)
@@ -113,23 +144,23 @@ impl<'a> Backend<'a> {
     /// concatenation `[input1[t], input2[t]]` (`inputs x cols/2` each) without copying or swapping inputs.
     #[allow(clippy::too_many_arguments, reason = "shape and four operands")]
     pub fn project_tc_rows_pair_into(&self, rows: usize, cols: usize, inputs: usize, input1: &DeviceVector<'_>, input2: &DeviceVector<'_>, weight: &DeviceVector<'_>, output: &mut DeviceVector<'_>) -> Result<(), String> {
-        self.project_tc_rows_pair_impl(rows, cols, inputs, false, false, input1, input2, weight, output)
-    }
-
-    /// Dual-input tensor-core BF16 product directly from two packed BF16 half-width inputs (`inputs * cols / 4` words each).
-    #[allow(clippy::too_many_arguments, reason = "shape and four operands")]
-    pub fn project_tc_rows_pair_half_in_into(&self, rows: usize, cols: usize, inputs: usize, input1: &DeviceVector<'_>, input2: &DeviceVector<'_>, weight: &DeviceVector<'_>, output: &mut DeviceVector<'_>) -> Result<(), String> {
-        self.project_tc_rows_pair_impl(rows, cols, inputs, true, false, input1, input2, weight, output)
+        self.project_tc_rows_pair_inner(rows, cols, inputs, false, false, input1, input2, weight, output)
     }
 
     /// Dual-input tensor-core BF16 product with optional fused BF16 (`rn`) output rounding.
     #[allow(clippy::too_many_arguments, reason = "shape, rounding flag and four operands")]
     pub fn project_tc_rows_pair_form_into(&self, rows: usize, cols: usize, inputs: usize, round_out: bool, input1: &DeviceVector<'_>, input2: &DeviceVector<'_>, weight: &DeviceVector<'_>, output: &mut DeviceVector<'_>) -> Result<(), String> {
-        self.project_tc_rows_pair_impl(rows, cols, inputs, false, round_out, input1, input2, weight, output)
+        self.project_tc_rows_pair_inner(rows, cols, inputs, false, round_out, input1, input2, weight, output)
+    }
+
+    /// Dual-input tensor-core BF16 product directly from two packed BF16 half-width inputs (`inputs * cols / 4` words each).
+    #[allow(clippy::too_many_arguments, reason = "shape and four operands")]
+    pub fn project_tc_rows_pair_half_in_into(&self, rows: usize, cols: usize, inputs: usize, input1: &DeviceVector<'_>, input2: &DeviceVector<'_>, weight: &DeviceVector<'_>, output: &mut DeviceVector<'_>) -> Result<(), String> {
+        self.project_tc_rows_pair_inner(rows, cols, inputs, true, false, input1, input2, weight, output)
     }
 
     #[allow(clippy::too_many_arguments, reason = "shape, input/rounding flags and four operands")]
-    fn project_tc_rows_pair_impl(&self, rows: usize, cols: usize, inputs: usize, half_in: bool, round_out: bool, input1: &DeviceVector<'_>, input2: &DeviceVector<'_>, weight: &DeviceVector<'_>, output: &mut DeviceVector<'_>) -> Result<(), String> {
+    fn project_tc_rows_pair_inner(&self, rows: usize, cols: usize, inputs: usize, half_in: bool, round_out: bool, input1: &DeviceVector<'_>, input2: &DeviceVector<'_>, weight: &DeviceVector<'_>, output: &mut DeviceVector<'_>) -> Result<(), String> {
         if self.arm_capture() { return Err("tc rows pair: refused inside a stream capture".into()); }
         self.require_resident_stream()?;
         let span = |v: &DeviceVector<'_>| Span { address: v.device_address(), bytes: v.len() as u64 * 4 };
@@ -142,20 +173,22 @@ impl<'a> Backend<'a> {
         self.check_vector(output, inputs * rows)?;
         if weight.is_segmented() || input1.is_segmented() || input2.is_segmented() { return Err("tc rows pair: operand must be contiguous".into()); }
         if output.is_segmented() || !output.writable_from(0) { return Err("tc rows pair: output requires private contiguous storage".into()); }
-        let (kind, mode, grid, direct) = Self::tc_dense_launch(rows, cols, inputs, false, true, half_in);
-        if round_out && (half_in || !direct) { return Err("tc rows pair: fused rounding requires direct-FP32 narrow shape".into()); }
+        let panels = self.tc_panels_for(weight, rows, cols, inputs);
+        let (kind, mode, grid, direct, extra_flags) = Self::tc_dense_launch(rows, cols, inputs, false, true, half_in, panels.map(|p| p.2));
+        if round_out && !direct { return Err("tc rows pair: fused rounding requires direct-FP32 narrow shape".into()); }
         self.require_arm_kernels(&[Kind::PlainTcRows.kernel(), kind.kernel()])?;
         self.resident_completion()?;
         let mut command = Command::new(kind);
-        let packed = if half_in || direct { None } else { Some((self.pack_tc_input(input1, inputs, half)?, self.pack_tc_input(input2, inputs, half)?)) };
+        let packed = if direct || half_in { None } else { Some((self.pack_tc_input(input1, inputs, half)?, self.pack_tc_input(input2, inputs, half)?)) };
         let (first, second) = packed.as_ref().map_or((input1.device_address(), input2.device_address()), |(p1, p2)| (p1.device_address(), p2.device_address()));
-        let flags = if round_out { tc_rows::TC_FLAG_ROUND_OUT } else { 0 };
+        let flags = extra_flags | if round_out { tc_rows::TC_FLAG_ROUND_OUT } else { 0 };
         let words = [
             weight.device_address(), first, output.device_address(),
             rows as u64, cols as u64, inputs as u64, rows as u64,
             mode, 0, inputs as u64, 0, inputs as u64, second, flags, 0, 0,
         ];
         for (i, w) in words.into_iter().enumerate() { command.word(i, w); }
+        Self::attach_tc_panels(&mut command, panels, kind, mode);
         if !self.record_resident_block(kind, command, grid)? {
             return Err("tc rows pair: launches are not recorded now".into());
         }
@@ -235,17 +268,19 @@ impl<'a> Backend<'a> {
         self.check_vector(output, (inputs - 1) * stride + rows)?;
         if weight.is_segmented() || input.is_segmented() { return Err("tc rows: operand must be contiguous".into()); }
         if output.is_segmented() || !output.writable_from(0) { return Err("tc rows: output requires private contiguous storage".into()); }
-        let (kind, mode, grid, direct) = Self::tc_dense_launch(rows, cols, inputs, false, false, half_in);
+        let panels = self.tc_panels_for(weight, rows, cols, inputs);
+        let (kind, mode, grid, direct, extra_flags) = Self::tc_dense_launch(rows, cols, inputs, false, false, half_in, panels.map(|p| p.2));
         self.require_arm_kernels(&[Kind::PlainTcRows.kernel(), kind.kernel()])?;
         self.resident_completion()?;
         let mut command = Command::new(kind);
-        let packed = if half_in || direct { None } else { Some(self.pack_tc_input(input, inputs, cols)?) };
+        let packed = if direct || half_in { None } else { Some(self.pack_tc_input(input, inputs, cols)?) };
         let words = [
             weight.device_address(), packed.as_ref().map_or(input.device_address(), |p| p.device_address()), output.device_address(),
             rows as u64, cols as u64, inputs as u64, stride as u64,
-            mode, 0, inputs as u64, 0, inputs as u64, 0, 0, 0, 0,
+            mode, 0, inputs as u64, 0, inputs as u64, 0, extra_flags, 0, 0,
         ];
         for (i, w) in words.into_iter().enumerate() { command.word(i, w); }
+        Self::attach_tc_panels(&mut command, panels, kind, mode);
         if !self.record_resident_block(kind, command, grid)? {
             return Err("tc rows: launches are not recorded now".into());
         }
@@ -278,17 +313,19 @@ impl<'a> Backend<'a> {
             self.check_vector(v, inputs * *w)?;
             if v.is_segmented() || !v.writable_from(0) { return Err("tc rows split: output requires private contiguous storage".into()); }
         }
-        let (kind, mode, grid, direct) = Self::tc_dense_launch(rows, cols, inputs, true, false, half_in);
+        let panels = self.tc_panels_for(weight, rows, cols, inputs);
+        let (kind, mode, grid, direct, extra_flags) = Self::tc_dense_launch(rows, cols, inputs, true, false, half_in, panels.map(|p| p.2));
         self.require_arm_kernels(&[Kind::PlainTcRows.kernel(), kind.kernel()])?;
         self.resident_completion()?;
         let mut command = Command::new(kind);
-        let packed = if half_in || direct { None } else { Some(self.pack_tc_input(input, inputs, cols)?) };
+        let packed = if direct || half_in { None } else { Some(self.pack_tc_input(input, inputs, cols)?) };
         let head = [
             weight.device_address(), packed.as_ref().map_or(input.device_address(), DeviceVector::device_address), 0,
             rows as u64, cols as u64, inputs as u64, 0,
-            mode, 0, inputs as u64, 0, inputs as u64, 0, 0, 0, outputs.len() as u64,
+            mode, 0, inputs as u64, 0, inputs as u64, 0, extra_flags, 0, outputs.len() as u64,
         ];
         for (i, w) in head.into_iter().enumerate() { command.word(i, w); }
+        Self::attach_tc_panels(&mut command, panels, kind, mode);
         let mut col_start = 0u64;
         for (s, (v, width)) in outputs.iter().enumerate() {
             command.word(16 + 2 * s, v.device_address());

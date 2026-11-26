@@ -84,9 +84,9 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
         let shared_bytes: u32;
         asm!("mov.u32 {bytes}, %dynamic_smem_size;", bytes = out(reg32) shared_bytes);
         if is_panel {
-            let coop = mode == 2;
-            let slices_want = if coop { 4usize } else { 1usize };
-            if !(mode == 1 || mode == 2) { core::arch::nvptx::trap(); }
+            let coop = mode == 2 || mode == 3;
+            let slices_want = if mode == 3 { 8usize } else if mode == 2 { 4usize } else { 1usize };
+            if !(mode == 1 || mode == 2 || mode == 3) { core::arch::nvptx::trap(); }
             let flags = *words.add(ONE_FLAGS_WORD);
             let split_count = if flags & FEW_SPLIT_OUT != 0 { *words.add(ONE_FLAGS_WORD + 1) as usize } else { 0 };
             let part_chunks = *words.add(ONE_PART_WORD) as usize;
@@ -119,6 +119,9 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
             } else {
                 input as usize
             };
+            if !matches!(threads, 32 | 64 | 96 | 128 | 256) {
+                core::arch::nvptx::trap();
+            }
             let warps_per_block = threads / 32;
             let bands = rows.div_ceil(16);
             let chunks = cols / 64;
@@ -129,8 +132,7 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
             } else {
                 rows.div_ceil(16 * warps_per_block)
             };
-            if !matches!(threads, 32 | 64 | 96 | 128)
-                || inputs == 0 || inputs > ONE_PANEL_INPUTS
+            if inputs == 0 || inputs > ONE_PANEL_INPUTS
                 || (bands_a == 0 && stride < rows)
                 || !crate::few_product::one_panel_rows_admitted(rows, cols, inputs)
                 || (weights as usize | input_check | panels_base as usize) & 15 != 0
@@ -138,12 +140,14 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
                 || flags & !FEW_SPLIT_OUT != 0
                 || (split_count == 0 && (flags & FEW_SPLIT_OUT != 0 || (bands_a == 0 && output.is_null())))
                 || split_count > FEW_SPLIT_MAX
-                || (coop && threads != 128)
+                || (mode == 2 && threads != 128)
+                || (mode == 3 && threads != 256)
+                || (!coop && threads > 128)
                 || (bands_ab != 0 && (bands_a == 0 || bands_ab <= bands_a))
-                || (bands_a != 0 && (split_count != 0 || !(coop || threads == 32) || bidx >= bands))
+                || (bands_a != 0 && (split_count != 0 || !(mode == 2 || threads == 32) || bidx >= bands))
                 || !chunks.is_multiple_of(slices_want)
-                || part_chunks == 0 || !chunks.is_multiple_of(part_chunks)
-                || (coop && !part_chunks.is_multiple_of(4))
+                || part_chunks == 0 || part_chunks > chunks
+                || (coop && !part_chunks.is_multiple_of(slices_want))
                 || crate::few_product::one_panel_shared_slices(inputs, part_chunks, slices_want) > shared_bytes as usize
                 || core::arch::nvptx::_grid_dim_x() as usize != expected_blocks
             {
@@ -185,7 +189,8 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
             } else if q_stream == 2 {
                 (meta0[3] >> 16) as usize
             } else {
-                (ld_global_nc_u32(meta_ptr.add(4)) & 0xFFFF) as usize
+                let w = ld_global_nc_u32(meta_ptr.add(4 + ((q_stream - 3) >> 1)));
+                ((w >> (((q_stream - 3) & 1) * 16)) & 0xFFFF) as usize
             };
             let mut esc_ptr = panels_base.add(esc_off + (((esc_meta >> 1) as usize) + start_rel) * ESC_STEP_WORDS + lane as usize);
             // Prime 2 x 4-byte escape words (8 escapes = ~400 weights ahead) before `griddepcontrol.wait`.
@@ -318,13 +323,15 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
             }
 
             let w_u32 = warp_id as u32;
+            let s_u32 = slices_want as u32;
+            let coop8 = mode == 3;
             let mut r0 = fetch_chunk!(if coop { w_u32 } else { 0u32 });
-            let mut r1 = fetch_chunk!(if coop { w_u32 + 4 } else { 1u32 });
-            // In 4-warp cooperative mode, Warps 1..3 decode chunks 1..3 into SMEM slot 0 and prime chunks 9..11
+            let mut r1 = fetch_chunk!(if coop { w_u32 + s_u32 } else { 1u32 });
+            // In cooperative mode, Warps 1..slices decode chunks 1..slices into SMEM slot 0 and prime next chunks
             // BEFORE `griddepcontrol.wait`, fully overlapping static weight decode with the preceding norm/mix.
             if coop && !is_raw_exp && warp_id > 0 {
                 decode_chunk_to_smem!(r0, w_smem_base + (w_u32 - 1) * 2048);
-                r0 = fetch_chunk!(w_u32 + 8);
+                r0 = fetch_chunk!(w_u32 + 2 * s_u32);
             }
 
             // Wait for any preceding norm/mix/stream-op in a dependent launch before reading coherent `input`.
@@ -337,7 +344,10 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
                     let sx_ch: u32 = $start_ch;
                     let sx_ba = words.add(ONE_PAIR_WORD + 5).read_volatile() as u32;
                     let sx_bab = words.add(ONE_TRIPLE_WORD + 5).read_volatile() as u32;
-                    let sx_bidx = core::arch::nvptx::_block_idx_x() as u32;
+                    let (sx_bidx, sx_tid, sx_step): (u32, u32, u32);
+                    asm!("mov.u32 {b}, %ctaid.x; mov.u32 {t}, %tid.x; mov.u32 {n}, %ntid.x;",
+                         b = out(reg32) sx_bidx, t = out(reg32) sx_tid, n = out(reg32) sx_step,
+                         options(nomem, nostack));
                     let sx_input = if sx_bab != 0 && sx_bidx >= sx_bab {
                         words.add(ONE_TRIPLE_WORD + 2).read_volatile() as *const f32
                     } else if sx_ba != 0 && sx_bidx >= sx_ba {
@@ -349,9 +359,8 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
                     let sx_inputs = words.add(5).read_volatile() as u32;
                     let sx_pc = words.add(ONE_PART_WORD).read_volatile() as u32;
                     let sx_rb = sx_pc * 128 + if sx_inputs > 1 { 64 } else { 0 };
-                    let sx_items = sx_pc * 16;
-                    let sx_tid = core::arch::nvptx::_thread_idx_x() as u32;
-                    let sx_step = core::arch::nvptx::_block_dim_x() as u32;
+                    let sx_take = sx_pc.min((sx_cols >> 6) - sx_ch);
+                    let sx_items = sx_take * 16;
                     let mut t = 0u32;
                     while t < sx_inputs {
                         let src_row = sx_input.add((t * sx_cols + sx_ch * 64) as usize);
@@ -385,7 +394,7 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
             let _ = stage_x!(0u32);
 
             let mut ch = 0u32;
-            let mut part_end = part_chunks_u32;
+            let mut part_end = part_chunks_u32.min(chunks_u32);
             let mut acc = [0.0f32; 4];
 
             macro_rules! consume_chunk {
@@ -456,7 +465,7 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
                         };
                         let rx_w = (core::arch::nvptx::_thread_idx_x() as usize) / 32;
                         let rx_wpb = (core::arch::nvptx::_block_dim_x() as usize) / 32;
-                        let rx_lb = if rx_mode == 2 { rx_bi } else { rx_bi * rx_wpb + rx_w };
+                        let rx_lb = if rx_mode >= 2 { rx_bi } else { rx_bi * rx_wpb + rx_w };
                         let rx_abs = rx_fb + rx_lb.min(rx_rows.div_ceil(16) - 1);
                         let rx_h = ld_global_nc_v4_u32(rx_pbase);
                         let rx_em = ld_global_nc_u32(rx_pbase.add(rx_h[0] as usize + rx_abs * BAND_META_WORDS + 2));
@@ -488,6 +497,32 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
                         }
                     } else {
                         ch = part_end;
+                    }
+                } else if coop8 {
+                    // 8-warp single-buffered cooperative ascending-K (14 KB W_SMEM -> 3 blk/SM = 24 warps/SM on O_proj
+                    // across all M=1..8): Warp 0 consumes chunk ch + 7 decoded chunks in SMEM, then Warps 1..7 refill.
+                    while ch < part_end {
+                        if warp_id == 0 {
+                            consume_chunk!(r0, x_cur);
+                            r0 = r1;
+                            r1 = fetch_chunk!(ch + 16);
+                            let mut p = 0u32;
+                            while p < 7 {
+                                consume_smem_chunk!(w_smem_base + p * 2048, x_cur + (p + 1) * 128);
+                                p += 1;
+                            }
+                            x_cur += 1024;
+                        }
+                        core::arch::nvptx::_syncthreads();
+                        if warp_id > 0 && ch + 8 < chunks_u32 {
+                            decode_chunk_to_smem!(r1, w_smem_base + (w_u32 - 1) * 2048);
+                            r1 = r0;
+                            r0 = fetch_chunk!(ch + 24 + w_u32);
+                        }
+                        ch += 8;
+                        if ch < chunks_u32 {
+                            core::arch::nvptx::_syncthreads();
+                        }
                     }
                 } else if coop {
                     // 4-warp cooperative ascending-K: Warps 1..3 decode chunks `ch+4+w` into `W_SMEM[nxt_slot]`
@@ -543,7 +578,9 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
                 }
                 if ch >= chunks_u32 { break; }
                 if !coop {
-                    if (core::arch::nvptx::_block_dim_x() as u32) == 32 {
+                    let ntid_u: u32;
+                    asm!("mov.u32 {n}, %ntid.x;", n = out(reg32) ntid_u, options(nomem, nostack));
+                    if ntid_u == 32 {
                         asm!("bar.warp.sync 0xffffffff;");
                     } else {
                         core::arch::nvptx::_syncthreads();
@@ -552,7 +589,7 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
                     core::arch::nvptx::_syncthreads();
                 }
                 let pc = stage_x!(ch);
-                part_end = ch + pc;
+                part_end = (ch + pc).min(chunks_u32);
                 if !coop || warp_id == 0 {
                     x_cur -= pc * 128;
                 }
@@ -563,16 +600,21 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
             }
             let _ = (esc_ptr, esc_cur, esc_nxt, esc_rem);
 
-            // Reload epilogue metadata from `words` via read_volatile so it occupies zero registers in the hot loop.
-            let ep_tid = core::arch::nvptx::_thread_idx_x() as usize;
+            // Reload epilogue metadata from `words` via read_volatile and non-pure SReg moves so prologue
+            // `tid`/`block_idx`/`threads` are never kept live across the hot loop.
+            let (ep_tid_u, ep_bidx_u, ep_ntid_u): (u32, u32, u32);
+            asm!("mov.u32 {t}, %tid.x; mov.u32 {b}, %ctaid.x; mov.u32 {n}, %ntid.x;",
+                 t = out(reg32) ep_tid_u, b = out(reg32) ep_bidx_u, n = out(reg32) ep_ntid_u,
+                 options(nomem, nostack));
+            let ep_tid = ep_tid_u as usize;
             let ep_warp = ep_tid / 32;
             let ep_lane = ep_tid & 31;
             let (ep_g, ep_s) = (ep_lane >> 2, ep_lane & 3);
             let ep_mode = words.add(7).read_volatile();
-            let ep_coop = ep_mode == 2;
+            let ep_coop = ep_mode >= 2;
             if ep_coop && ep_warp != 0 { return; }
             let ep_inputs = words.add(5).read_volatile() as usize;
-            let ep_bidx = core::arch::nvptx::_block_idx_x() as usize;
+            let ep_bidx = ep_bidx_u as usize;
             let ep_bands_a = words.add(ONE_PAIR_WORD + 5).read_volatile() as usize;
             let ep_bands_ab = words.add(ONE_TRIPLE_WORD + 5).read_volatile() as usize;
             let ep_use_c = ep_bands_ab != 0 && ep_bidx >= ep_bands_ab;
@@ -584,7 +626,7 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
                 let br = words.add(ONE_PAIR_WORD + 1).read_volatile() as usize;
                 (words.add(ONE_PAIR_WORD).read_volatile() as *mut f32, br, br, ep_bidx - ep_bands_a)
             } else {
-                let w_per_b = (core::arch::nvptx::_block_dim_x() as usize) / 32;
+                let w_per_b = (ep_ntid_u as usize) / 32;
                 let lb = if ep_coop { ep_bidx } else { ep_bidx * w_per_b + ep_warp };
                 (
                     words.add(2).read_volatile() as *mut f32,
@@ -661,7 +703,7 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
             while i < 4 {
                 let r = i * 4 + r_base;
                 let dst = w_warp + swiz128(r, w_chunk);
-                crate::ptx::copy16(dst, gw.add((first_row + r) * 64 + w_chunk * 8).cast());
+                crate::ptx::copy16_stream(dst, gw.add((first_row + r) * 64 + w_chunk * 8).cast());
                 i += 1;
             }
             crate::ptx::commit();
@@ -719,7 +761,7 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
             while i < 4 {
                 let r = i * 4 + r_base;
                 let dst = w_warp + swiz128(r, w_chunk);
-                crate::ptx::copy16(dst, weights.add((first_row + r) * 64 + w_chunk * 8).cast());
+                crate::ptx::copy16_stream(dst, weights.add((first_row + r) * 64 + w_chunk * 8).cast());
                 i += 1;
             }
             crate::ptx::commit();

@@ -140,12 +140,35 @@ pub fn convolve<C:Compute>(
     shape:spark_gpu_probe::block_ops::Shape, inputs:&C::Value, token:Option<&C::Value>, addend:Option<&C::Value>, fixed:&[f32],
 )->Result<C::Value> {
     let ((channels,taps),rows)=(layout.ring_size(which),step.total());
-    if let ([span], [state])=(step.chats(),&mut *states) && rows>=taps && rows>1 && taps>1 {
-        let first=(span.first%taps as u64) as usize;
-        let ring=&state.rings[which as usize];
-        if let Some(output)=compute.short_conv_prefill(shape,rows,first,[Some(inputs),token,addend,Some(ring)],fixed)? {
-            state.next[which as usize]=Some(prefill_ring_after(compute,inputs,rows,channels,taps,first)?);
-            return Ok(output);
+    if !step.keeps() && taps>1 && step.chats().iter().all(|s|s.count>=taps && s.count>1) {
+        if let ([span], [state])=(step.chats(),&mut *states) {
+            let first=(span.first%taps as u64) as usize;
+            let ring=&state.rings[which as usize];
+            if let Some(output)=compute.short_conv_prefill(shape,rows,first,[Some(inputs),token,addend,Some(ring)],fixed)? {
+                state.next[which as usize]=Some(prefill_ring_after(compute,inputs,rows,channels,taps,first)?);
+                return Ok(output);
+            }
+        } else if step.chats().len()==states.len() && compute.words(inputs)==rows*channels {
+            let heads=shape.heads as usize;
+            let mut outputs=Vec::with_capacity(step.chats().len());
+            let mut chat_inputs=Vec::with_capacity(step.chats().len());
+            let mut ok=true;
+            for (chat,(span,state)) in step.chats().iter().zip(states.iter()).enumerate() {
+                let (off,count,first)=(step.offset(chat),span.count,(span.first%taps as u64) as usize);
+                let in_c=compute.range(inputs,off*channels,count*channels)?;
+                let tok_c=token.map(|t|compute.range(t,off*heads*taps,count*heads*taps)).transpose()?;
+                let add_c=addend.map(|a|compute.range(a,off*channels,count*channels)).transpose()?;
+                match compute.short_conv_prefill(shape,count,first,[Some(&in_c),tok_c.as_ref(),add_c.as_ref(),Some(&state.rings[which as usize])],fixed)? {
+                    Some(out)=>{outputs.push(out);chat_inputs.push((in_c,count,first));}
+                    None=>{ok=false;break;}
+                }
+            }
+            if ok {
+                for (state,(in_c,count,first)) in states.iter_mut().zip(&chat_inputs) {
+                    state.next[which as usize]=Some(prefill_ring_after(compute,in_c,*count,channels,taps,*first)?);
+                }
+                return compute.join(&outputs.iter().collect::<Vec<_>>());
+            }
         }
     }
     // A step that keeps each row (a single-chat or multi-chat check pass): one `FastStreamOps` launch reads `ring` +
@@ -154,24 +177,35 @@ pub fn convolve<C:Compute>(
         if let ([span], [state])=(step.chats(),&mut *states) && compute.words(&state.rings[which as usize])==taps*channels {
             let first=(span.first%taps as u64) as usize;
             let ring=&state.rings[which as usize];
-            if let Some((output,every))=compute.short_conv_keep(shape,rows,first,[Some(inputs),token,addend,Some(ring)],fixed)? {
+            if let Some((output,every))=compute.short_conv_keep(shape,rows,spark_gpu_probe::fast_ops::ShortConvRing::One(first),[Some(inputs),token,addend,Some(ring)],fixed)? {
                 need(compute.words(&output)==rows*channels && compute.words(&every)==rows*taps*channels,"the kept convolution differs from the rows of the step")?;
                 state.next[which as usize]=Some(compute.range(&every,(rows-1)*taps*channels,taps*channels)?);
                 state.every[which as usize]=Some(every);
                 return Ok(output);
             }
-        } else if step.chats().len()>1 && step.chats().len()==states.len() && rows<=16 && taps<=4
+        } else if step.chats().len()>1 && step.chats().len()==states.len()
+            && rows<=spark_gpu_probe::fast_ops::SHORT_CONV_MULTI_ROWS_MAX
+            && step.chats().len()<=spark_gpu_probe::fast_ops::SHORT_CONV_MULTI_CHATS_MAX
+            && taps<=4
             && states.iter().all(|state|compute.words(&state.rings[which as usize])==taps*channels)
         {
-            let mut start_mask=0u16;
-            let mut slots=0u32;
+            let (mut mask,mut s_lo,mut s_hi)=([0u64;4],0u64,0u64);
             for (chat,span) in step.chats().iter().enumerate() {
-                start_mask|=1u16<<step.offset(chat);
-                slots|=((span.first%taps as u64) as u32)<<(2*chat);
+                let off=step.offset(chat);
+                mask[off>>6]|=1u64<<(off&63);
+                let slot=span.first%taps as u64;
+                if chat<32 {s_lo|=slot<<(2*chat);} else {s_hi|=slot<<(2*(chat-32));}
             }
-            if let Some(packed)=spark_gpu_probe::fast_ops::short_conv_multi_encode(rows,taps,start_mask,slots) {
-                let rings_joined=compute.join(&states.iter().map(|s|&s.rings[which as usize]).collect::<Vec<_>>())?;
-                if let Some((output,every))=compute.short_conv_keep(shape,rows,packed,[Some(inputs),token,addend,Some(&rings_joined)],fixed)? {
+            if let Some(multi)=spark_gpu_probe::fast_ops::ShortConvMulti::encode(rows,taps,mask,s_lo,s_hi) {
+                let ring_refs=states.iter().map(|s|&s.rings[which as usize]).collect::<Vec<_>>();
+                let direct=match compute.short_conv_keep_multi(shape,rows,multi,[Some(inputs),token,addend],&ring_refs,fixed)? {
+                    Some(pair)=>Some(pair),
+                    None=>{
+                        let rings_joined=compute.join(&ring_refs)?;
+                        compute.short_conv_keep(shape,rows,spark_gpu_probe::fast_ops::ShortConvRing::Multi(multi),[Some(inputs),token,addend,Some(&rings_joined)],fixed)?
+                    }
+                };
+                if let Some((output,every))=direct {
                     need(compute.words(&output)==rows*channels && compute.words(&every)==rows*taps*channels,"the kept convolution differs from the rows of the step")?;
                     for (chat,state) in states.iter_mut().enumerate() {
                         let (off,count)=(step.offset(chat),step.chats()[chat].count);
@@ -181,6 +215,24 @@ pub fn convolve<C:Compute>(
                     return Ok(output);
                 }
             }
+        }
+    }
+    // Multi-chat decode (`!step.keeps()`, 1 row per chat, up to 16 chats): read each chat's ring directly without `row_rings`.
+    if !step.keeps() && step.chats().len() > 1 && step.chats().len() == rows && rows <= spark_gpu_probe::fast_ops::DIRECT_CHATS_MAX
+        && (2..=spark_gpu_probe::fast_ops::DIRECT_TAPS_MAX).contains(&taps) && compute.words(inputs) == rows * channels
+        && states.iter().all(|s| compute.words(&s.rings[which as usize]) == taps * channels)
+    {
+        let chat_rings: Vec<_> = states.iter().zip(step.chats())
+            .map(|(st, sp)| (&st.rings[which as usize], (sp.first % taps as u64) as usize)).collect();
+        let req = crate::bounded_decoder::ShortConvDirect { shape, rows, inputs, token, addend, fixed, chat_rings: &chat_rings };
+        if let Some((output, every)) = compute.short_conv_direct(&req)? {
+            let ring_words = taps * channels;
+            need(compute.words(&output) == rows * channels && compute.words(&every) == rows * ring_words,
+                "the direct convolution differs from the rows of the step")?;
+            for (row, state) in states.iter_mut().enumerate() {
+                state.next[which as usize] = Some(compute.range(&every, row * ring_words, ring_words)?);
+            }
+            return Ok(output);
         }
     }
     let (rings,steps,window)=conv_rings(compute,layout,which,step,states,inputs)?;

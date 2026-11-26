@@ -12,17 +12,17 @@
 use core::arch::asm;
 use crate::fixed_math::rn;
 use crate::tc_ptx::{
-    cp_async_wait_one, cp_async_wait_two, cp_async_wait_zero, cvt_bf16x2, l2_evict_first, ld_global_nc_v2_u32,
-    ld_global_nc_v4, ld_global_nc_v4_u32_hint, ldmatrix_x4, load_u32, mma_m16n8k16_bf16,
-    st_global_f32_hint, st_shared_v4, st_shared_zero16,
+    cp_async_wait_one, cp_async_wait_two, cp_async_wait_zero, cvt_bf16x2, l2_evict_first, ld_global_nc_u32,
+    ld_global_nc_v2_u32, ld_global_nc_v4, ld_global_nc_v4_u32_hint, ldmatrix_x4, load_u32,
+    mma_m16n8k16_bf16, st_global_f32_hint, st_shared_v4, st_shared_zero16,
 };
 use crate::tc_rows::{
-    BIG_BN, TC_BIG_FP32_SMEM, TC_BK, TC_BM, TC_FLAG_GROUP_PAIR, TC_FLAG_ROUND_OUT, TC_GEN_SMEM, TC_GEN_STAGES,
-    TC_GROUP_MAX, TC_GROUP_WORD, TC_MODE_DENSE, TC_MODE_DENSE_FP32, TC_MODE_MOE, TC_MODE_PACK, TC_N1_BK, TC_N1_BM,
-    TC_N1_BN, TC_N1_SMEM, TC_N4_BM, TC_N4_BN, TC_N4_SMEM, TC_N8_BN, TC_N8_SMEM, TC_PLAIN_BN as TC_BN, TC_SMALL_BM,
-    TC_SPLIT_MAX, TC_THREADS, tc_big_fp32_wanted, tc_coop_w_wanted, tc_dense_admitted, tc_dense_fp32_admitted,
-    tc_dense_spec, tc_med_w2_wanted, tc_moe_admitted, tc_narrow_1w_wanted, tc_narrow_4w_wanted, tc_short_k_wanted,
-    tc_small_wanted,
+    BIG_BN, TC_BIG_FP32_SMEM, TC_BK, TC_BM, TC_FLAG_GROUP_PAIR, TC_FLAG_HALF_IN, TC_FLAG_ROUND_OUT, TC_GEN_SMEM,
+    TC_GEN_STAGES, TC_GROUP_MAX, TC_GROUP_WORD, TC_MODE_DENSE, TC_MODE_DENSE_FP32, TC_MODE_MOE, TC_MODE_PACK,
+    TC_N1_BK, TC_N1_BM, TC_N1_BN, TC_N1_SMEM, TC_N4_BM, TC_N4_BN, TC_N4_SMEM, TC_N8_BN, TC_N8_SMEM,
+    TC_PANEL_WORD, TC_PLAIN_BN as TC_BN, TC_SMALL_BM, TC_SPLIT_MAX, TC_THREADS, tc_big_fp32_wanted, tc_coop_w_wanted,
+    tc_dense_admitted, tc_dense_fp32_admitted, tc_dense_panel_smem, tc_dense_spec, tc_med_w2_wanted, tc_moe_admitted,
+    tc_narrow_1w_wanted, tc_narrow_4w_wanted, tc_short_k_wanted, tc_small_wanted,
 };
 
 const GEN_A_BYTES: usize = TC_BM * TC_BK * 2; // 4,096 bytes
@@ -97,9 +97,6 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
         let inputs = *words.add(5) as usize;
         let stride = *words.add(6) as usize;
         let mode = *words.add(7);
-        let in_table = *words.add(8) as *const u32;
-        let in_count = *words.add(9) as usize;
-        let out_table = *words.add(10) as *const u32;
         let threads = core::arch::nvptx::_block_dim_x() as usize;
         let block = core::arch::nvptx::_block_idx_x() as usize;
 
@@ -119,7 +116,7 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
             return;
         }
 
-        if (in_table as usize | out_table as usize) & 3 != 0 { core::arch::nvptx::trap(); }
+        if ((*words.add(8) | *words.add(10)) as usize) & 3 != 0 { core::arch::nvptx::trap(); }
         let smem = 0u32;
         let shared_bytes: u32;
         asm!("mov.u32 {bytes}, %dynamic_smem_size;", bytes = out(reg32) shared_bytes);
@@ -179,10 +176,12 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
             let split_count = *words.add(15) as usize;
             let round_out = (flags & TC_FLAG_ROUND_OUT) != 0;
             let grouped = (flags & TC_FLAG_GROUP_PAIR) != 0;
-            if !in_table.is_null() || !out_table.is_null() || split_count > TC_SPLIT_MAX
+            let half_in = (flags & TC_FLAG_HALF_IN) != 0;
+            if (*words.add(8) | *words.add(10)) != 0 || split_count > TC_SPLIT_MAX
                 || (split_count == 0 && stride < rows)
-                || (flags & !(TC_FLAG_ROUND_OUT | TC_FLAG_GROUP_PAIR)) != 0
-                || (grouped && split_count != 0)
+                || (flags & !(TC_FLAG_ROUND_OUT | TC_FLAG_GROUP_PAIR | TC_FLAG_HALF_IN)) != 0
+                || (grouped && (split_count != 0 || half_in))
+                || (half_in && (split_count != 0 || !tc_narrow_1w_wanted(rows, inputs)))
                 || (!input2_0.is_null() && (split_count != 0 || (input2_0 as usize & 15) != 0 || (k / 2) % TC_BK != 0))
                 || !tc_dense_fp32_admitted(rows, k, inputs, weights_base as usize, input as usize, threads, shared_bytes as usize)
             {
@@ -298,6 +297,10 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
                 }
                 crate::ptx::wait();
 
+                let tid_e = core::arch::nvptx::_thread_idx_x() as usize;
+                let (warp_e, lane_e) = (tid_e >> 5, tid_e & 31);
+                let (warp_m, warp_n) = (warp_e >> 2, warp_e & 3);
+                let block_e = core::arch::nvptx::_block_idx_x() as usize;
                 let output = words.add(2).read_volatile() as *mut f32;
                 let rows = words.add(3).read_volatile() as usize;
                 let inputs = words.add(5).read_volatile() as usize;
@@ -306,16 +309,16 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
                 let m_tiles = inputs.div_ceil(TC_BM);
                 let n_tiles = rows.div_ceil(BIG_BN);
                 let group_size = 8 * n_tiles;
-                let first_m = (block / group_size) * 8;
+                let first_m = (block_e / group_size) * 8;
                 let height = (m_tiles - first_m).min(8);
-                let within = block % group_size;
+                let within = block_e % group_size;
                 let tile_m = first_m + within % height;
                 let tile_n = within / height;
                 if split_count > TC_SPLIT_MAX || (split_count == 0 && stride < rows) || tile_n * BIG_BN >= rows {
                     core::arch::nvptx::trap();
                 }
                 let evict = l2_evict_first();
-                let (g, t) = (lane / 4, lane % 4);
+                let (g, t) = (lane_e / 4, lane_e % 4);
                 let m_base = tile_m * TC_BM + warp_m * 32 + g;
                 let target = |ni: usize| -> (*mut f32, usize, bool) {
                     let col = tile_n * BIG_BN + warp_n * 32 + ni * 8 + t * 2;
@@ -416,10 +419,20 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
                         }
                     }};
                 }
+                let half_w = half / 2;
                 macro_rules! prefetch_x_n1 {
                     ($ch:expr) => {{
                         let ch: usize = $ch;
-                        if lane < 16 && ch < chunks {
+                        if half_in {
+                            if lane < 8 && ch < chunks {
+                                let pr = m_base + lane;
+                                if pr < inputs {
+                                    let kb = ch * TC_N1_BK;
+                                    let (src, off) = if kb < half { (x1_ptr.cast::<u32>(), kb / 2) } else { (x2_ptr.cast::<u32>(), (kb - half) / 2) };
+                                    asm!("prefetch.global.L1 [{a}];", a = in(reg64) src.add(pr * half_w + off) as u64);
+                                }
+                            }
+                        } else if lane < 16 && ch < chunks {
                             let pr = m_base + (lane >> 1);
                             if pr < inputs {
                                 let kb = ch * TC_N1_BK + (lane & 1) * 32;
@@ -441,52 +454,74 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
 
                 let mut acc = [0.0f32; 4];
                 let m_safe = m_row.min(inputs - 1);
-                let x1_row = x1_ptr.add(m_safe * half + 2 * s).cast::<u32>();
-                let x2_row = if x2_ptr.is_null() { x1_row } else { x2_ptr.add(m_safe * half + 2 * s).cast::<u32>() };
                 let mut c_idx = 0usize;
-                while c_idx < chunks {
-                    let ahead = c_idx + N1_STAGES - 1;
-                    if ahead < chunks { issue_w_n1!(ahead, smem + ((ahead % N1_STAGES) * N1_STAGE_BYTES) as u32); }
-                    crate::ptx::commit();
-                    let pc = c_idx + N1_STAGES + 2;
-                    if lane < 4 && pc < chunks && n_base + lane < rows {
-                        asm!("prefetch.global.L2 [{a}];", a = in(reg64) w_ptr.add((n_base + lane) * kw + pc * 32) as u64);
+                if half_in {
+                    let x1_row_h = x1_ptr.cast::<u32>().add(m_safe * half_w + s);
+                    let x2_row_h = if x2_ptr.is_null() { x1_row_h } else { x2_ptr.cast::<u32>().add(m_safe * half_w + s) };
+                    while c_idx < chunks {
+                        let ahead = c_idx + N1_STAGES - 1;
+                        if ahead < chunks { issue_w_n1!(ahead, smem + ((ahead % N1_STAGES) * N1_STAGE_BYTES) as u32); }
+                        crate::ptx::commit();
+                        let pc = c_idx + N1_STAGES + 2;
+                        if lane < 4 && pc < chunks && n_base + lane < rows {
+                            asm!("prefetch.global.L2 [{a}];", a = in(reg64) w_ptr.add((n_base + lane) * kw + pc * 32) as u64);
+                        }
+                        prefetch_x_n1!(c_idx + 2);
+                        let kb = c_idx * TC_N1_BK;
+                        let stg = smem + ((c_idx % N1_STAGES) * N1_STAGE_BYTES) as u32 + b_row_off;
+                        let h_off = kb / 2;
+                        let src_lo = if kb < half { x1_row_h.add(h_off) } else { x2_row_h.add(h_off - half_w) };
+                        let src_hi = if kb + 32 < half { x1_row_h.add(h_off + 16) } else { x2_row_h.add(h_off + 16 - half_w) };
+                        let (a00, a02) = (ld_global_nc_u32(src_lo), ld_global_nc_u32(src_lo.add(4)));
+                        let (a10, a12) = (ld_global_nc_u32(src_lo.add(8)), ld_global_nc_u32(src_lo.add(12)));
+                        let (a20, a22) = (ld_global_nc_u32(src_hi), ld_global_nc_u32(src_hi.add(4)));
+                        let (a30, a32) = (ld_global_nc_u32(src_hi.add(8)), ld_global_nc_u32(src_hi.add(12)));
+                        asm!("cp.async.wait_group 6;");
+                        crate::ptx::warp_sync();
+                        macro_rules! kstep_n1h {
+                            ($ks:literal, $a0:expr, $a2:expr) => {{
+                                let (b0, b1) = if b_valid { (load_u32(stg + ($ks * 32) as u32), load_u32(stg + ($ks * 32 + 16) as u32)) } else { (0u32, 0u32) };
+                                acc = mma_m16n8k16_bf16([$a0, 0u32, $a2, 0u32], [b0, b1], acc);
+                            }};
+                        }
+                        kstep_n1h!(0, a00, a02); kstep_n1h!(1, a10, a12); kstep_n1h!(2, a20, a22); kstep_n1h!(3, a30, a32);
+                        crate::ptx::warp_sync();
+                        c_idx += 1;
                     }
-                    prefetch_x_n1!(c_idx + 2);
-                    // Issue all 8 unconditional LDG.64 for X BEFORE wait_group so X latency overlaps W arrival.
-                    let kb = c_idx * TC_N1_BK;
-                    let src_lo = if kb < half { x1_row.add(kb) } else { x2_row.add(kb - half) };
-                    let src_hi = if kb + 32 < half { x1_row.add(kb + 32) } else { x2_row.add(kb + 32 - half) };
-                    let p0 = ld_global_nc_v2_u32(src_lo);
-                    let p1 = ld_global_nc_v2_u32(src_lo.add(8));
-                    let p2 = ld_global_nc_v2_u32(src_lo.add(16));
-                    let p3 = ld_global_nc_v2_u32(src_lo.add(24));
-                    let p4 = ld_global_nc_v2_u32(src_hi);
-                    let p5 = ld_global_nc_v2_u32(src_hi.add(8));
-                    let p6 = ld_global_nc_v2_u32(src_hi.add(16));
-                    let p7 = ld_global_nc_v2_u32(src_hi.add(24));
-                    asm!("cp.async.wait_group 6;");
-                    crate::ptx::warp_sync();
-
-                    let stg = smem + ((c_idx % N1_STAGES) * N1_STAGE_BYTES) as u32 + b_row_off;
-                    macro_rules! kstep_n1 {
-                        ($ks:literal, $pa:ident, $pb:ident) => {{
-                            let (b0, b1) = if b_valid {
-                                (load_u32(stg + ($ks * 32) as u32), load_u32(stg + ($ks * 32 + 16) as u32))
-                            } else {
-                                (0u32, 0u32)
-                            };
-                            let a0 = cvt_bf16x2(f32::from_bits($pa[0]), f32::from_bits($pa[1]));
-                            let a2 = cvt_bf16x2(f32::from_bits($pb[0]), f32::from_bits($pb[1]));
-                            acc = mma_m16n8k16_bf16([a0, 0u32, a2, 0u32], [b0, b1], acc);
-                        }};
+                } else {
+                    let x1_row = x1_ptr.add(m_safe * half + 2 * s).cast::<u32>();
+                    let x2_row = if x2_ptr.is_null() { x1_row } else { x2_ptr.add(m_safe * half + 2 * s).cast::<u32>() };
+                    while c_idx < chunks {
+                        let ahead = c_idx + N1_STAGES - 1;
+                        if ahead < chunks { issue_w_n1!(ahead, smem + ((ahead % N1_STAGES) * N1_STAGE_BYTES) as u32); }
+                        crate::ptx::commit();
+                        let pc = c_idx + N1_STAGES + 2;
+                        if lane < 4 && pc < chunks && n_base + lane < rows {
+                            asm!("prefetch.global.L2 [{a}];", a = in(reg64) w_ptr.add((n_base + lane) * kw + pc * 32) as u64);
+                        }
+                        prefetch_x_n1!(c_idx + 2);
+                        let kb = c_idx * TC_N1_BK;
+                        let stg = smem + ((c_idx % N1_STAGES) * N1_STAGE_BYTES) as u32 + b_row_off;
+                        let src_lo = if kb < half { x1_row.add(kb) } else { x2_row.add(kb - half) };
+                        let src_hi = if kb + 32 < half { x1_row.add(kb + 32) } else { x2_row.add(kb + 32 - half) };
+                        let p0 = ld_global_nc_v2_u32(src_lo); let p1 = ld_global_nc_v2_u32(src_lo.add(8));
+                        let p2 = ld_global_nc_v2_u32(src_lo.add(16)); let p3 = ld_global_nc_v2_u32(src_lo.add(24));
+                        let p4 = ld_global_nc_v2_u32(src_hi); let p5 = ld_global_nc_v2_u32(src_hi.add(8));
+                        let p6 = ld_global_nc_v2_u32(src_hi.add(16)); let p7 = ld_global_nc_v2_u32(src_hi.add(24));
+                        asm!("cp.async.wait_group 6;");
+                        crate::ptx::warp_sync();
+                        macro_rules! kstep_n1 {
+                            ($ks:literal, $pa:ident, $pb:ident) => {{
+                                let (b0, b1) = if b_valid { (load_u32(stg + ($ks * 32) as u32), load_u32(stg + ($ks * 32 + 16) as u32)) } else { (0u32, 0u32) };
+                                let a0 = cvt_bf16x2(f32::from_bits($pa[0]), f32::from_bits($pa[1]));
+                                let a2 = cvt_bf16x2(f32::from_bits($pb[0]), f32::from_bits($pb[1]));
+                                acc = mma_m16n8k16_bf16([a0, 0u32, a2, 0u32], [b0, b1], acc);
+                            }};
+                        }
+                        kstep_n1!(0, p0, p1); kstep_n1!(1, p2, p3); kstep_n1!(2, p4, p5); kstep_n1!(3, p6, p7);
+                        crate::ptx::warp_sync();
+                        c_idx += 1;
                     }
-                    kstep_n1!(0, p0, p1);
-                    kstep_n1!(1, p2, p3);
-                    kstep_n1!(2, p4, p5);
-                    kstep_n1!(3, p6, p7);
-                    crate::ptx::warp_sync();
-                    c_idx += 1;
                 }
                 crate::ptx::wait();
 
@@ -826,12 +861,24 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
         }
 
         // ============================================================================================================
-        // MODE 0 (packed BF16 dense / split) & MODE 1 (device-routed MoE)
+        // MODE 0 (packed BF16 dense / split, optional lossless bf16_panels) & MODE 1 (device-routed MoE)
         // ============================================================================================================
         let (weights, base, m, tile_m_off, tile_n, input2) = if mode == TC_MODE_DENSE {
             let split_count = *words.add(15) as usize;
             let input2 = *words.add(12) as *const f32;
-            let (_, _, want_smem) = tc_dense_spec(rows, k, inputs, false);
+            let (use_panels, panel_slices) = {
+                let pb = *words.add(TC_PANEL_WORD);
+                let pm = *words.add(TC_PANEL_WORD + 1);
+                if pb == 0 {
+                    if pm != 0 { core::arch::nvptx::trap(); }
+                    (false, 0usize)
+                } else {
+                    let sl = (pm >> 32) as usize;
+                    if (pb & 15) != 0 || !matches!(sl, 1 | 4 | 8) { core::arch::nvptx::trap(); }
+                    (true, sl)
+                }
+            };
+            let want_smem = if use_panels { tc_dense_panel_smem(rows, k, inputs, panel_slices) } else { tc_dense_spec(rows, k, inputs, false).2 };
             if split_count > TC_SPLIT_MAX || (split_count == 0 && stride < rows) || (shared_bytes as usize) < want_smem {
                 core::arch::nvptx::trap();
             }
@@ -840,11 +887,80 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
             }
             if !tc_dense_admitted(rows, k, inputs, weights_base as usize, input as usize, threads) { core::arch::nvptx::trap(); }
 
+            macro_rules! mma_x4 {
+                ($a:expr, $xb:expr, $xo:expr, $xm:literal, $c0:ident, $h1:expr, $c1:ident, $h2:expr, $c2:ident, $h3:expr, $c3:ident) => {{
+                    let a: [u32; 4] = $a;
+                    let x0: u32 = ($xb + $xo) ^ $xm;
+                    let x1: u32 = x0 ^ 16;
+                    $c0 = mma_m16n8k16_bf16(a, [load_u32(x0), load_u32(x1)], $c0);
+                    if $h1 { $c1 = mma_m16n8k16_bf16(a, [load_u32(x0 + 1024), load_u32(x1 + 1024)], $c1); }
+                    if $h2 { $c2 = mma_m16n8k16_bf16(a, [load_u32(x0 + 2048), load_u32(x1 + 2048)], $c2); }
+                    if $h3 { $c3 = mma_m16n8k16_bf16(a, [load_u32(x0 + 3072), load_u32(x1 + 3072)], $c3); }
+                }};
+            }
+            macro_rules! emit_w_as_a {
+                ($coop:literal, $c0:expr, $h1:expr, $c1:expr, $h2:expr, $c2:expr, $h3:expr, $c3:expr) => {{
+                    let output = words.add(2).read_volatile() as *mut f32;
+                    let rows = words.add(3).read_volatile() as usize;
+                    let inputs = words.add(5).read_volatile() as usize;
+                    let stride = words.add(6).read_volatile() as usize;
+                    let split_count = words.add(15).read_volatile() as usize;
+                    let tid_e = core::arch::nvptx::_thread_idx_x() as usize;
+                    let (warp_e, lane_e) = (tid_e >> 5, tid_e & 31);
+                    let (g_e, s_e) = (lane_e >> 2, lane_e & 3);
+                    let blk_e = core::arch::nvptx::_block_idx_x() as usize;
+                    let first_row_e = if $coop {
+                        blk_e * 16
+                    } else {
+                        (blk_e * (core::arch::nvptx::_block_dim_x() as usize >> 5) + warp_e) * 16
+                    };
+                    let m_w_e = if $coop { warp_e * if inputs <= TC_SMALL_BM { 8 } else { 32 } } else { 0 };
+                    let evict = l2_evict_first();
+                    let resolve = |r: usize| -> (*mut f32, usize) {
+                        if r >= rows { return (core::ptr::null_mut(), 0); }
+                        if split_count == 0 { return (output.add(r), stride); }
+                        let mut seg = 0usize;
+                        while seg < split_count {
+                            let meta = *words.add(16 + 2 * seg + 1);
+                            let seg_start = (meta & 0xffff_ffff) as usize;
+                            let seg_len = (meta >> 32) as usize;
+                            if r >= seg_start && r < seg_start + seg_len {
+                                let seg_ptr = *words.add(16 + 2 * seg) as *mut f32;
+                                return (seg_ptr.add(r - seg_start), seg_len);
+                            }
+                            seg += 1;
+                        }
+                        core::arch::nvptx::trap();
+                    };
+                    let (p0, s0) = resolve(first_row_e + g_e);
+                    let (p1, s1) = resolve(first_row_e + g_e + 8);
+                    let t0 = m_w_e + 2 * s_e;
+                    macro_rules! emit_tile {
+                        ($t_add:literal, $c:expr) => {{
+                            let ta = t0 + $t_add;
+                            let tb = ta + 1;
+                            if !p0.is_null() {
+                                if ta < inputs { st_global_f32_hint(p0.add(ta * s0), $c[0], evict); }
+                                if tb < inputs { st_global_f32_hint(p0.add(tb * s0), $c[1], evict); }
+                            }
+                            if !p1.is_null() {
+                                if ta < inputs { st_global_f32_hint(p1.add(ta * s1), $c[2], evict); }
+                                if tb < inputs { st_global_f32_hint(p1.add(tb * s1), $c[3], evict); }
+                            }
+                        }};
+                    }
+                    emit_tile!(0, $c0);
+                    if $h1 { emit_tile!(8, $c1); }
+                    if $h2 { emit_tile!(16, $c2); }
+                    if $h3 { emit_tile!(24, $c3); }
+                }};
+            }
+
             // Path 4b: 4-warp Cooperative-W `BN=16, BK=64` `evict_first` (`m_tiles=1`, W read ONCE, 2-chunk-ahead W!).
-            // - `17..=32` (`O_proj`, `K/V`, `K+KTap`): 4 warps x 8 tok, 2-stage W + 2-stage X = 12,288 B, 1 barrier/chunk (12 warps/SM on O_proj!).
-            // - `33..=128` (`M=125` C32 prefill on `QKV`, `O_proj`, `K/V`): 4 warps x 32 tok, 2-stage W + 1-stage X = 20,480 B (4 blk/SM = 16 warps/SM!).
+            // - With `bf16_panels`: warp `w` loads tile `c*4+w` (-25% DRAM), decodes once into linear lane-order SMEM;
+            //   all 4 warps read `ptx::load4` (0 bank conflicts, 0 `ldmatrix`).
             if tc_coop_w_wanted(rows, k, inputs) {
-                if !in_table.is_null() || !out_table.is_null() { core::arch::nvptx::trap(); }
+                if (*words.add(8) | *words.add(10)) != 0 { core::arch::nvptx::trap(); }
                 let n_tiles = rows.div_ceil(16);
                 if block >= n_tiles { return; }
                 let first_row = block * 16;
@@ -858,163 +974,100 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
                 let (w_r, w_c) = (tid >> 3, tid & 7);
                 let m_w = warp * bm_w;
                 let kw = k / 2;
-                let half = if input2.is_null() { k } else { k / 2 };
-                let half_w = half / 2;
                 let chunks = k / 64;
-
-                let w_dst = swiz128(w_r, w_c);
-                let x_base = smem + 4096;
-                let x_stride = (bm * 128) as u32;
-                let off0 = swiz128(lane & 15, lane >> 4);
-                let x_off0 = swiz128(g, 0) + (s * 4) as u32;
-                let evict = l2_evict_first();
-                let w_row_ptr = weights_base.add((first_row + w_r).min(rows - 1) * kw + w_c * 4);
                 let last_c = chunks - 1;
 
+                let x_base = if use_panels && x_2stage { smem + 8192 } else { smem + 4096 };
+                let x_stride = (bm * 128) as u32;
+                let x_off0 = swiz128(g, 0) + (s * 4) as u32;
+                let evict = l2_evict_first();
+
                 {
+                    let z_slabs = if use_panels && x_2stage { 4u32 } else if x_2stage { 2u32 } else { 1u32 };
                     let mut rl = w_r;
                     while rl < bm {
                         if rl >= inputs {
                             let dst = swiz128(rl, w_c);
-                            st_shared_zero16(x_base + dst);
-                            if x_2stage { st_shared_zero16(x_base + x_stride + dst); }
+                            let mut zi = 0u32;
+                            while zi < z_slabs {
+                                st_shared_zero16(x_base + zi * x_stride + dst);
+                                zi += 1;
+                            }
                         }
                         rl += 16;
                     }
                 }
                 let issue_x = |x_stg: u32, ch: usize| {
+                    let in2 = words.add(12).read_volatile() as *const u32;
+                    let half = if in2.is_null() { k } else { k >> 1 };
                     let k_col = ch * 64 + w_c * 8;
-                    let (src_x, x_col) = if k_col < half { (input.cast::<u32>(), k_col) } else { (input2.cast::<u32>(), k_col - half) };
-                    let x_word_off = x_col / 2;
+                    let (src_x, x_col) = if k_col < half { (input.cast::<u32>(), k_col) } else { (in2, k_col - half) };
+                    let x_word_off = x_col >> 1;
                     let mut rl = w_r;
-                    while rl < bm {
-                        if rl < inputs {
-                            crate::ptx::copy16_cached(x_stg + swiz128(rl, w_c), src_x.add(rl * half_w + x_word_off));
-                        }
+                    while rl < inputs {
+                        crate::ptx::copy16_cached(x_stg + swiz128(rl, w_c), src_x.add(rl * (half >> 1) + x_word_off));
                         rl += 16;
                     }
                 };
-                // Unconditional clamped LDG.128.EF so ptxas never stalls before MMAs on a branch-merge MOV.
-                let load_w = |ch: usize| -> [u32; 4] {
-                    ld_global_nc_v4_u32_hint(w_row_ptr.add(ch * 32), evict)
-                };
-                let prefetch_w = |ch: usize| {
-                    if tid < 16 && ch < chunks && first_row + tid < rows {
-                        asm!("prefetch.global.L2 [{a}];", a = in(reg64) weights_base.add((first_row + tid) * kw + ch * 32) as u64);
-                    }
-                };
-
-                issue_x(x_base, 0);
-                crate::ptx::commit();
-                let w0 = load_w(0);
-                let mut w_nxt = load_w(1usize.min(last_c));
-                prefetch_w(2);
-                prefetch_w(3);
-                prefetch_w(4);
-                st_shared_v4(smem + w_dst, w0);
 
                 let (mut c0, mut c1, mut c2, mut c3) = ([0.0f32; 4], [0.0f32; 4], [0.0f32; 4], [0.0f32; 4]);
                 let has_m1 = !x_2stage && m_w + 8 < inputs;
                 let has_m2 = !x_2stage && m_w + 16 < inputs;
                 let has_m3 = !x_2stage && m_w + 24 < inputs;
-                let mut c_idx = 0usize;
-                while c_idx < chunks {
-                    cp_async_wait_zero();
-                    core::arch::nvptx::_syncthreads();
-                    let cur_w = smem + ((c_idx & 1) as u32) * 2048;
-                    let nxt_w = smem + (((c_idx + 1) & 1) as u32) * 2048;
-                    let cur_x = if x_2stage { x_base + ((c_idx & 1) as u32) * x_stride } else { x_base };
-                    let nxt_x = x_base + (((c_idx + 1) & 1) as u32) * x_stride;
-                    if x_2stage && c_idx + 1 < chunks {
-                        issue_x(nxt_x, c_idx + 1);
-                        crate::ptx::commit();
-                    }
-                    let w_after = load_w((c_idx + 2).min(last_c));
-                    prefetch_w(c_idx + 5);
 
-                    let x_w = cur_x + (m_w * 128) as u32;
-                    macro_rules! kstep_coop {
-                        ($xm:literal) => {{
-                            let a = ldmatrix_x4(cur_w + (off0 ^ $xm));
-                            let b0 = [load_u32(x_w + (x_off0 ^ $xm)), load_u32(x_w + (x_off0 ^ ($xm ^ 16)))];
-                            c0 = mma_m16n8k16_bf16(a, b0, c0);
-                            if has_m1 {
-                                let b1 = [load_u32(x_w + 1024 + (x_off0 ^ $xm)), load_u32(x_w + 1024 + (x_off0 ^ ($xm ^ 16)))];
-                                c1 = mma_m16n8k16_bf16(a, b1, c1);
-                            }
-                            if has_m2 {
-                                let b2 = [load_u32(x_w + 2048 + (x_off0 ^ $xm)), load_u32(x_w + 2048 + (x_off0 ^ ($xm ^ 16)))];
-                                c2 = mma_m16n8k16_bf16(a, b2, c2);
-                            }
-                            if has_m3 {
-                                let b3 = [load_u32(x_w + 3072 + (x_off0 ^ $xm)), load_u32(x_w + 3072 + (x_off0 ^ ($xm ^ 16)))];
-                                c3 = mma_m16n8k16_bf16(a, b3, c3);
-                            }
-                        }};
-                    }
-                    kstep_coop!(0u32);
-                    kstep_coop!(32u32);
-                    kstep_coop!(64u32);
-                    kstep_coop!(96u32);
-                    st_shared_v4(nxt_w + w_dst, w_nxt);
-                    w_nxt = w_after;
-                    if !x_2stage && c_idx + 1 < chunks {
+                if use_panels && x_2stage {
+                    tc_coop_w_panels!(
+                        words, k, block, warp, lane,
+                        m_w, smem, x_base, x_stride, x_off0, evict,
+                        issue_x, c0
+                    );
+                } else {
+                    let w_dst = swiz128(w_r, w_c);
+                    let off0 = swiz128(lane & 15, lane >> 4);
+                    let w_row_ptr = weights_base.add((first_row + w_r).min(rows - 1) * kw + w_c * 4);
+                    let load_w = |ch: usize| -> [u32; 4] { ld_global_nc_v4_u32_hint(w_row_ptr.add(ch * 32), evict) };
+                    let prefetch_w = |ch: usize| {
+                        if tid < 16 && ch < chunks && first_row + tid < rows {
+                            asm!("prefetch.global.L2 [{a}];", a = in(reg64) weights_base.add((first_row + tid) * kw + ch * 32) as u64);
+                        }
+                    };
+                    issue_x(x_base, 0);
+                    crate::ptx::commit();
+                    let w0 = load_w(0);
+                    let mut w_nxt = load_w(1usize.min(last_c));
+                    prefetch_w(2); prefetch_w(3); prefetch_w(4);
+                    st_shared_v4(smem + w_dst, w0);
+
+                    let mut c_idx = 0usize;
+                    while c_idx < chunks {
+                        cp_async_wait_zero();
                         core::arch::nvptx::_syncthreads();
-                        issue_x(x_base, c_idx + 1);
-                        crate::ptx::commit();
+                        let cur_w = smem + ((c_idx & 1) as u32) * 2048;
+                        let nxt_w = smem + (((c_idx + 1) & 1) as u32) * 2048;
+                        let cur_x = if x_2stage { x_base + ((c_idx & 1) as u32) * x_stride } else { x_base };
+                        if x_2stage && c_idx + 1 < chunks { issue_x(x_base + (((c_idx + 1) & 1) as u32) * x_stride, c_idx + 1); crate::ptx::commit(); }
+                        let w_after = load_w((c_idx + 2).min(last_c));
+                        prefetch_w(c_idx + 5);
+                        let x_w = cur_x + (m_w * 128) as u32;
+                        mma_x4!(ldmatrix_x4(cur_w + off0), x_w, x_off0, 0u32, c0, has_m1, c1, has_m2, c2, has_m3, c3);
+                        mma_x4!(ldmatrix_x4(cur_w + (off0 ^ 32)), x_w, x_off0, 32u32, c0, has_m1, c1, has_m2, c2, has_m3, c3);
+                        mma_x4!(ldmatrix_x4(cur_w + (off0 ^ 64)), x_w, x_off0, 64u32, c0, has_m1, c1, has_m2, c2, has_m3, c3);
+                        mma_x4!(ldmatrix_x4(cur_w + (off0 ^ 96)), x_w, x_off0, 96u32, c0, has_m1, c1, has_m2, c2, has_m3, c3);
+                        st_shared_v4(nxt_w + w_dst, w_nxt);
+                        w_nxt = w_after;
+                        if !x_2stage && c_idx + 1 < chunks { core::arch::nvptx::_syncthreads(); issue_x(x_base, c_idx + 1); crate::ptx::commit(); }
+                        c_idx += 1;
                     }
-                    c_idx += 1;
                 }
-
-                let output = words.add(2).read_volatile() as *mut f32;
-                let stride = words.add(6).read_volatile() as usize;
-                let split_count = words.add(15).read_volatile() as usize;
-                let resolve = |r: usize| -> (*mut f32, usize) {
-                    if r >= rows { return (core::ptr::null_mut(), 0); }
-                    if split_count == 0 { return (output.add(r), stride); }
-                    let mut seg = 0usize;
-                    while seg < split_count {
-                        let meta = *words.add(16 + 2 * seg + 1);
-                        let seg_start = (meta & 0xffff_ffff) as usize;
-                        let seg_len = (meta >> 32) as usize;
-                        if r >= seg_start && r < seg_start + seg_len {
-                            let seg_ptr = *words.add(16 + 2 * seg) as *mut f32;
-                            return (seg_ptr.add(r - seg_start), seg_len);
-                        }
-                        seg += 1;
-                    }
-                    core::arch::nvptx::trap();
-                };
-                let (p0, s0) = resolve(first_row + g);
-                let (p1, s1) = resolve(first_row + g + 8);
-                let t0 = m_w + 2 * s;
-                macro_rules! emit_coop {
-                    ($t_add:literal, $c:expr) => {{
-                        let ta = t0 + $t_add;
-                        let tb = ta + 1;
-                        if !p0.is_null() {
-                            if ta < inputs { st_global_f32_hint(p0.add(ta * s0), $c[0], evict); }
-                            if tb < inputs { st_global_f32_hint(p0.add(tb * s0), $c[1], evict); }
-                        }
-                        if !p1.is_null() {
-                            if ta < inputs { st_global_f32_hint(p1.add(ta * s1), $c[2], evict); }
-                            if tb < inputs { st_global_f32_hint(p1.add(tb * s1), $c[3], evict); }
-                        }
-                    }};
-                }
-                emit_coop!(0, c0);
-                if has_m1 { emit_coop!(8, c1); }
-                if has_m2 { emit_coop!(16, c2); }
-                if has_m3 { emit_coop!(24, c3); }
+                emit_w_as_a!(true, c0, has_m1, c1, has_m2, c2, has_m3, c3);
                 return;
             }
 
-            // Path 4: Small-M Wide `BK=64` Weights-as-A (ONE compact body for 1w/2w/4w, m_tiles=1, zero code bloat!):
-            // - W streamed via unconditional clamped `ld.global.nc.L2::cache_hint.v4.u32` (evict_first) into 1-stage
-            //   private-per-warp SMEM (swiz128), overlapped across the 4 k-substeps with 5-chunk-ahead L2 prefetch.
-            // - Packed BF16 X double-buffered in 2-stage SMEM (swiz128) via coalesced 128B `copy16_cached`.
+            // Path 4: Small-M Wide `BK=64` Weights-as-A (1w/2w/4w, m_tiles=1):
+            // - With `bf16_panels`: 0 B W SMEM, 4-tile sliding register ring decoded directly into MMA A fragments!
+            // - Without panels: unconditional clamped `LDG.128.EF` -> 1-stage private W SMEM + `ldmatrix_x4`.
             if tc_small_wanted(inputs) {
-                if !in_table.is_null() || !out_table.is_null() { core::arch::nvptx::trap(); }
+                if (*words.add(8) | *words.add(10)) != 0 { core::arch::nvptx::trap(); }
                 let warps = threads / 32;
                 let bm = if inputs <= 16 { 16usize } else { 32usize };
                 let bn = warps * 16;
@@ -1025,174 +1078,108 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
                 let tid = core::arch::nvptx::_thread_idx_x() as usize;
                 let (warp, lane) = (tid / 32, tid % 32);
                 let (g, s) = (lane >> 2, lane & 3);
-                let (r_base, w_chunk) = (lane >> 3, lane & 7);
-                let first_row = tile_n * bn + warp * 16;
                 let kw = k / 2;
-                let half = if input2.is_null() { k } else { k / 2 };
-                let half_w = half / 2;
-                let chunks = k / 64;
+                let chunks = (k / 64) as u32;
 
-                let w_warp = smem + (warp * 2048) as u32;
-                let x_base = smem + (warps * 2048) as u32;
+                let x_base = if use_panels { smem } else { smem + (warps * 2048) as u32 };
                 let x_stride = (bm * 128) as u32;
-                let w_dst0 = swiz128(r_base, w_chunk);
-                let off0 = swiz128(lane & 15, lane >> 4);
                 let x_off0 = swiz128(g, 0) + (s * 4) as u32;
                 let (x_row0, x_chunk) = (tid >> 3, tid & 7);
                 let x_row_step = warps * 4;
                 let evict = l2_evict_first();
 
-                // Zero padded X rows once in both X slots.
-                {
-                    let mut rl = x_row0;
-                    while rl < bm {
-                        if rl >= inputs {
-                            let dst = swiz128(rl, x_chunk);
-                            st_shared_zero16(x_base + dst);
-                            st_shared_zero16(x_base + x_stride + dst);
+                let init_slabs = if use_panels { chunks.min(if bm == 16 { 4 } else { 3 }) } else { 2 };
+                let mut rl = x_row0;
+                while rl < bm {
+                    if rl >= inputs {
+                        let dst = swiz128(rl, x_chunk);
+                        let mut si = 0u32;
+                        while si < init_slabs {
+                            st_shared_zero16(x_base + si * x_stride + dst);
+                            si += 1;
                         }
-                        rl += x_row_step;
                     }
+                    rl += x_row_step;
                 }
-                let issue_x = |x_stg: u32, ch: usize| {
-                    let k_col = ch * 64 + x_chunk * 8;
-                    let (src_x, x_col) = if k_col < half { (input.cast::<u32>(), k_col) } else { (input2.cast::<u32>(), k_col - half) };
-                    let x_word_off = x_col / 2;
-                    let mut rl = x_row0;
-                    while rl < bm {
-                        if rl < inputs {
-                            crate::ptx::copy16_cached(x_stg + swiz128(rl, x_chunk), src_x.add(rl * half_w + x_word_off));
-                        }
-                        rl += x_row_step;
+                let issue_x = |x_stg: u32, ch: u32| {
+                    let in2 = words.add(12).read_volatile() as *const u32;
+                    let half = if in2.is_null() { k } else { k >> 1 };
+                    let tid_x = core::arch::nvptx::_thread_idx_x() as usize;
+                    let (xr0, xc) = (tid_x >> 3, tid_x & 7);
+                    let x_step = (core::arch::nvptx::_block_dim_x() as usize) >> 3;
+                    let k_col = (ch as usize) * 64 + xc * 8;
+                    let (src_x, x_col) = if k_col < half { (input.cast::<u32>(), k_col) } else { (in2, k_col - half) };
+                    let mut rl = xr0;
+                    while rl < inputs {
+                        crate::ptx::copy16_cached(x_stg + swiz128(rl, xc), src_x.add(rl * (half >> 1) + (x_col >> 1)));
+                        rl += x_step;
                     }
                 };
-                let wp0 = weights_base.add((first_row + r_base).min(rows - 1) * kw + w_chunk * 4);
-                let wp1 = weights_base.add((first_row + r_base + 4).min(rows - 1) * kw + w_chunk * 4);
-                let wp2 = weights_base.add((first_row + r_base + 8).min(rows - 1) * kw + w_chunk * 4);
-                let wp3 = weights_base.add((first_row + r_base + 12).min(rows - 1) * kw + w_chunk * 4);
-                let last_c = chunks - 1;
-                // Unconditional clamped LDG.128.EF so ptxas overlaps all 4 W loads with the 16 MMAs (zero branch-merge stall).
-                let load_w = |ch: usize| -> ([u32; 4], [u32; 4], [u32; 4], [u32; 4]) {
-                    let off = ch * 32;
-                    (
-                        ld_global_nc_v4_u32_hint(wp0.add(off), evict),
-                        ld_global_nc_v4_u32_hint(wp1.add(off), evict),
-                        ld_global_nc_v4_u32_hint(wp2.add(off), evict),
-                        ld_global_nc_v4_u32_hint(wp3.add(off), evict),
-                    )
-                };
-                let prefetch_w = |ch: usize| {
-                    if lane < 16 && ch < chunks && first_row + lane < rows {
-                        asm!("prefetch.global.L2 [{a}];", a = in(reg64) weights_base.add((first_row + lane) * kw + ch * 32) as u64);
-                    }
-                };
-
-                // Prologue: issue X(0) async, load W(0), prefetch W(1..=4) 5 chunks ahead.
-                issue_x(x_base, 0);
-                crate::ptx::commit();
-                let (mut w0, mut w1, mut w2, mut w3) = load_w(0);
-                prefetch_w(1);
-                prefetch_w(2);
-                prefetch_w(3);
-                prefetch_w(4);
 
                 let (mut c0, mut c1, mut c2, mut c3) = ([0.0f32; 4], [0.0f32; 4], [0.0f32; 4], [0.0f32; 4]);
-                let has_m1 = inputs > 8;
-                let has_m2 = bm > 16 && inputs > 16;
-                let has_m3 = bm > 16 && inputs > 24;
-                let mut c_idx = 0usize;
-                while c_idx < chunks {
-                    st_shared_v4(w_warp + w_dst0, w0);
-                    st_shared_v4(w_warp + ((w_dst0 + 512) ^ 64), w1);
-                    st_shared_v4(w_warp + w_dst0 + 1024, w2);
-                    st_shared_v4(w_warp + ((w_dst0 + 1536) ^ 64), w3);
-                    cp_async_wait_zero();
-                    if warps == 1 { crate::ptx::warp_sync(); } else { core::arch::nvptx::_syncthreads(); }
+                let (has_m1, has_m2, has_m3) = (inputs > 8, bm > 16 && inputs > 16, bm > 16 && inputs > 24);
 
-                    let cur_x = x_base + ((c_idx & 1) as u32) * x_stride;
-                    let nxt_x = x_base + (((c_idx + 1) & 1) as u32) * x_stride;
-                    if c_idx + 1 < chunks {
-                        issue_x(nxt_x, c_idx + 1);
-                        crate::ptx::commit();
-                    }
-                    let nw = load_w((c_idx + 1).min(last_c));
-                    w0 = nw.0; w1 = nw.1; w2 = nw.2; w3 = nw.3;
-                    prefetch_w(c_idx + 5);
+                if use_panels {
+                    tc_path4_panels!(
+                        words, rows, k,
+                        warps, tile_n, warp, lane,
+                        init_slabs, x_stride, x_off0, evict,
+                        c0, has_m1, c1, has_m2, c2, has_m3, c3
+                    );
+                } else {
+                    let first_row = tile_n * bn + warp * 16;
+                    let (r_base, w_chunk) = (lane >> 3, lane & 7);
+                    let w_warp = smem + (warp * 2048) as u32;
+                    let w_dst0 = swiz128(r_base, w_chunk);
+                    let off0 = swiz128(lane & 15, lane >> 4);
+                    let wp0 = weights_base.add((first_row + r_base).min(rows - 1) * kw + w_chunk * 4);
+                    let wp1 = weights_base.add((first_row + r_base + 4).min(rows - 1) * kw + w_chunk * 4);
+                    let wp2 = weights_base.add((first_row + r_base + 8).min(rows - 1) * kw + w_chunk * 4);
+                    let wp3 = weights_base.add((first_row + r_base + 12).min(rows - 1) * kw + w_chunk * 4);
+                    let last_c = chunks - 1;
+                    let load_w = |ch: u32| -> ([u32; 4], [u32; 4], [u32; 4], [u32; 4]) {
+                        let off = (ch as usize) * 32;
+                        (ld_global_nc_v4_u32_hint(wp0.add(off), evict), ld_global_nc_v4_u32_hint(wp1.add(off), evict),
+                         ld_global_nc_v4_u32_hint(wp2.add(off), evict), ld_global_nc_v4_u32_hint(wp3.add(off), evict))
+                    };
+                    let prefetch_w = |ch: u32| {
+                        if lane < 16 && ch < chunks && first_row + lane < rows {
+                            asm!("prefetch.global.L2 [{a}];", a = in(reg64) weights_base.add((first_row + lane) * kw + (ch as usize) * 32) as u64);
+                        }
+                    };
+                    issue_x(x_base, 0);
+                    crate::ptx::commit();
+                    let (mut w0, mut w1, mut w2, mut w3) = load_w(0);
+                    prefetch_w(1); prefetch_w(2); prefetch_w(3); prefetch_w(4);
 
-                    macro_rules! kstep_p4 {
-                        ($xm:literal) => {{
-                            let a = ldmatrix_x4(w_warp + (off0 ^ $xm));
-                            let b0 = [load_u32(cur_x + (x_off0 ^ $xm)), load_u32(cur_x + (x_off0 ^ ($xm ^ 16)))];
-                            c0 = mma_m16n8k16_bf16(a, b0, c0);
-                            if has_m1 {
-                                let b1 = [load_u32(cur_x + 1024 + (x_off0 ^ $xm)), load_u32(cur_x + 1024 + (x_off0 ^ ($xm ^ 16)))];
-                                c1 = mma_m16n8k16_bf16(a, b1, c1);
-                            }
-                            if has_m2 {
-                                let b2 = [load_u32(cur_x + 2048 + (x_off0 ^ $xm)), load_u32(cur_x + 2048 + (x_off0 ^ ($xm ^ 16)))];
-                                c2 = mma_m16n8k16_bf16(a, b2, c2);
-                            }
-                            if has_m3 {
-                                let b3 = [load_u32(cur_x + 3072 + (x_off0 ^ $xm)), load_u32(cur_x + 3072 + (x_off0 ^ ($xm ^ 16)))];
-                                c3 = mma_m16n8k16_bf16(a, b3, c3);
-                            }
-                        }};
+                    let mut c_idx = 0u32;
+                    while c_idx < chunks {
+                        st_shared_v4(w_warp + w_dst0, w0);
+                        st_shared_v4(w_warp + ((w_dst0 + 512) ^ 64), w1);
+                        st_shared_v4(w_warp + w_dst0 + 1024, w2);
+                        st_shared_v4(w_warp + ((w_dst0 + 1536) ^ 64), w3);
+                        cp_async_wait_zero();
+                        if warps == 1 { crate::ptx::warp_sync(); } else { core::arch::nvptx::_syncthreads(); }
+                        let cur_x = x_base + (c_idx & 1) * x_stride;
+                        if c_idx + 1 < chunks { issue_x(x_base + ((c_idx + 1) & 1) * x_stride, c_idx + 1); crate::ptx::commit(); }
+                        let nw = load_w((c_idx + 1).min(last_c));
+                        w0 = nw.0; w1 = nw.1; w2 = nw.2; w3 = nw.3;
+                        prefetch_w(c_idx + 5);
+                        mma_x4!(ldmatrix_x4(w_warp + off0), cur_x, x_off0, 0u32, c0, has_m1, c1, has_m2, c2, has_m3, c3);
+                        mma_x4!(ldmatrix_x4(w_warp + (off0 ^ 32)), cur_x, x_off0, 32u32, c0, has_m1, c1, has_m2, c2, has_m3, c3);
+                        mma_x4!(ldmatrix_x4(w_warp + (off0 ^ 64)), cur_x, x_off0, 64u32, c0, has_m1, c1, has_m2, c2, has_m3, c3);
+                        mma_x4!(ldmatrix_x4(w_warp + (off0 ^ 96)), cur_x, x_off0, 96u32, c0, has_m1, c1, has_m2, c2, has_m3, c3);
+                        crate::ptx::warp_sync();
+                        c_idx += 1;
                     }
-                    kstep_p4!(0u32);
-                    kstep_p4!(32u32);
-                    kstep_p4!(64u32);
-                    kstep_p4!(96u32);
-                    crate::ptx::warp_sync();
-                    c_idx += 1;
                 }
-
-                // Weights-as-A epilogue: resolve split segment once per weight row, evict_first stores.
-                let output = words.add(2).read_volatile() as *mut f32;
-                let stride = words.add(6).read_volatile() as usize;
-                let split_count = words.add(15).read_volatile() as usize;
-                let resolve = |r: usize| -> (*mut f32, usize) {
-                    if r >= rows { return (core::ptr::null_mut(), 0); }
-                    if split_count == 0 { return (output.add(r), stride); }
-                    let mut seg = 0usize;
-                    while seg < split_count {
-                        let meta = *words.add(16 + 2 * seg + 1);
-                        let seg_start = (meta & 0xffff_ffff) as usize;
-                        let seg_len = (meta >> 32) as usize;
-                        if r >= seg_start && r < seg_start + seg_len {
-                            let seg_ptr = *words.add(16 + 2 * seg) as *mut f32;
-                            return (seg_ptr.add(r - seg_start), seg_len);
-                        }
-                        seg += 1;
-                    }
-                    core::arch::nvptx::trap();
-                };
-                let (p0, s0) = resolve(first_row + g);
-                let (p1, s1) = resolve(first_row + g + 8);
-                let t0 = 2 * s;
-                macro_rules! emit_m {
-                    ($t_add:literal, $c:expr) => {{
-                        let ta = t0 + $t_add;
-                        let tb = ta + 1;
-                        if !p0.is_null() {
-                            if ta < inputs { st_global_f32_hint(p0.add(ta * s0), $c[0], evict); }
-                            if tb < inputs { st_global_f32_hint(p0.add(tb * s0), $c[1], evict); }
-                        }
-                        if !p1.is_null() {
-                            if ta < inputs { st_global_f32_hint(p1.add(ta * s1), $c[2], evict); }
-                            if tb < inputs { st_global_f32_hint(p1.add(tb * s1), $c[3], evict); }
-                        }
-                    }};
-                }
-                emit_m!(0, c0);
-                if has_m1 { emit_m!(8, c1); }
-                if has_m2 { emit_m!(16, c2); }
-                if has_m3 { emit_m!(24, c3); }
+                emit_w_as_a!(false, c0, has_m1, c1, has_m2, c2, has_m3, c3);
                 return;
             }
 
             // Path 5a: Medium-M 2-warp `32x32x32` x 4 stages (`129..=256, 128 < rows <= 2560, cols > 64`).
             if tc_med_w2_wanted(rows, k, inputs) {
-                if !in_table.is_null() || !out_table.is_null() { core::arch::nvptx::trap(); }
+                if (*words.add(8) | *words.add(10)) != 0 { core::arch::nvptx::trap(); }
                 let m_tiles = inputs.div_ceil(32);
                 let n_tiles = rows.div_ceil(32);
                 if block >= m_tiles * n_tiles { return; }
@@ -1325,6 +1312,8 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
         };
 
         // Path 5b: General 8-warp 64x64x32 x 4 stages (medium dense & MoE).
+        let in_table = *words.add(8) as *const u32;
+        let in_count = *words.add(9) as usize;
         let place = |tbl: *const u32, count: usize, t: usize| -> usize {
             let row = if tbl.is_null() { t } else { tbl.add(t).read() as usize };
             if row >= count { core::arch::nvptx::trap(); }

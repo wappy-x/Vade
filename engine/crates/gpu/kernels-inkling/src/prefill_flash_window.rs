@@ -1,0 +1,895 @@
+//! SM121a BF16 tensor-core high-occupancy 2-stage prefill causal/sliding-window attention
+//! (`resident_launch_prefill_flash_window`, kind `PREFILL_FLASH_WINDOW = 122`).
+//!
+//! Produces bit-for-bit identical output to `FLASH_WINDOW_ATTN` (kind 105) with:
+//! - `BQ_POS = 64` query positions x `gpack` GQA heads (`192` Q rows for 3:1 GQA, `384` threads = `12` warps,
+//!   `1` blk/SM): 2x K/V/T reuse per query row vs `BQ_POS = 32` while keeping 12 warps/SM occupancy at 168 regs.
+//! - True 2-stage double-buffered `K`, `V`, and 16B-aligned `T` (`101,120 B <= 101,376 B` static SMEM):
+//!   **1 single `_syncthreads()` per 32 keys** (eliminating the mid-tile barrier so Tensor Core `Q*K^T`/`P*V`
+//!   overlaps softmax ALU across all 12 warps and `K/V/T[next]` copies overlap the entire tile).
+//! - Global LPT scheduling (`q_tile_rev` outermost across all KV heads) for zero tail skew and 6x cross-CTA L2 reuse.
+//! - Branchless bit-exact `exp_nonpos` (eliminating saturating `f32 as i32` `F2I` + `FSETP` + `BRA`), `cvt.rn.bf16x2`
+//!   paired BF16 rounding, zero-branch `interior_rel` fast path for sliding-window layers, XOR-swizzled bank-free `M`,
+//!   single-pass `RelBias`, and coalesced dead-SMEM `st.global.v4.b32` BF16 epilogue.
+
+use crate::fixed_math::{rn, sigmoid};
+use crate::flash_window_abi::{
+    FW_BKV, FW_CLIP_IN, FW_CLIP_WORD, FW_HALF_OUT, FW_HEAD_DIM, FW_PREFILL_BQ_POS, FW_REL_DIM,
+    flash_window_gpack, flash_window_prefill_admitted,
+};
+use crate::tc_ptx::{
+    cp_async_wait_zero, cvt_bf16x2, ld_global_nc_v4, ldmatrix_x4, ldmatrix_x4_trans, load_u32,
+    mma_m16n8k16_bf16, shfl_xor_f32, shfl_xor_u32, st_shared_v4, st_shared_zero16, store_u16,
+    store_u32,
+};
+
+const MAX_Q_ROWS: usize = 3 * FW_PREFILL_BQ_POS; // 192
+const K_BYTES: usize = FW_BKV * FW_HEAD_DIM * 2; // 8,192
+const V_BYTES: usize = FW_BKV * FW_HEAD_DIM * 2; // 8,192
+const Q_BYTES: usize = MAX_Q_ROWS * FW_HEAD_DIM * 2; // 49,152
+const M_BYTES: usize = MAX_Q_ROWS * FW_REL_DIM * 2; // 6,144 (XOR-swizzled, bank-conflict-free)
+const L_BYTES: usize = FW_PREFILL_BQ_POS * 4; // 256
+/// 100 floats = 25 x 16B chunks covers 95 distances + up to 3-float 16B-alignment shift (`0..98 < 100`).
+const T_PITCH: usize = 100;
+const T_STAGE_BYTES: usize = FW_REL_DIM * T_PITCH * 4; // 6,400
+const C_BYTES: usize = 64; // 16 x u32 CTA constants (keeps loop-live regs <= 168 with 0 spills)
+const SMEM_BYTES: usize = Q_BYTES + 2 * K_BYTES + 2 * V_BYTES + M_BYTES + L_BYTES + 2 * T_STAGE_BYTES + C_BYTES; // 101,184
+
+const Q_OFF: u32 = 0;
+const K_OFF: u32 = Q_BYTES as u32; // 49,152
+const V_OFF: u32 = K_OFF + (2 * K_BYTES) as u32; // 65,536
+const M_OFF: u32 = V_OFF + (2 * V_BYTES) as u32; // 81,920
+const L_OFF: u32 = M_OFF + M_BYTES as u32; // 88,064
+const T_OFF: u32 = L_OFF + L_BYTES as u32; // 88,320
+const C_OFF: u32 = T_OFF + (2 * T_STAGE_BYTES) as u32; // 101,120
+
+const _: () = assert!(FW_PREFILL_BQ_POS == 64 && FW_BKV == 32 && FW_HEAD_DIM == 128 && FW_REL_DIM == 16);
+const _: () = assert!(SMEM_BYTES == 101_184 && SMEM_BYTES <= 101_376);
+const _: () = assert!(K_OFF % 16 == 0 && V_OFF % 16 == 0 && M_OFF % 16 == 0 && T_OFF % 16 == 0 && C_OFF % 16 == 0);
+/// Dead SMEM reused by coalesced BF16 epilogue: 12 warps x 16 rows x 68 u32 (272 B/row, bank-free) = 52,224 B.
+const EPI_ROW_BYTES: usize = 68 * 4; // 272 B
+const EPI_WARP_BYTES: usize = 16 * EPI_ROW_BYTES; // 4,352 B
+const _: () = assert!(12 * EPI_WARP_BYTES <= SMEM_BYTES);
+const _: () = assert!(core::f32::consts::LOG2_E.to_bits() == 0x3fb8_aa3b && 12_582_912.0f32.to_bits() == 0x4b40_0000);
+
+/// Zero-bank-conflict XOR-swizzled byte offset within a 256-byte-stride BF16 tile (`row`, 16B `chunk` in 0..16).
+#[inline(always)]
+const fn swiz128(row: usize, chunk: usize) -> u32 {
+    (row * 256 + ((chunk ^ (row & 7)) * 16)) as u32
+}
+
+/// Zero-bank-conflict XOR-swizzled byte offset within `M` (`row`, `u32` pair `j2` in 0..8).
+#[inline(always)]
+const fn swiz_m(row: usize, j2: usize) -> u32 {
+    ((row * 8 + (j2 ^ (row & 7))) * 4) as u32
+}
+
+#[inline(always)]
+fn fmax(a: f32, b: f32) -> f32 {
+    if b > a { b } else { a }
+}
+
+/// Paired BF16 round-to-nearest-even via single `cvt.rn.bf16x2.f32` (bit-identical to `(rn(a), rn(b))` for finite inputs).
+/// SAFETY: pure register instructions, touches no memory.
+#[inline(always)]
+unsafe fn rn2(a: f32, b: f32) -> (f32, f32) {
+    let p = cvt_bf16x2(a, b);
+    (f32::from_bits(p << 16), f32::from_bits(p & 0xffff_0000))
+}
+
+/// Bit-exact `fixed_math::exp(t)` for non-positive inputs `t <= 0.0` (including `-0.0` and `-87.0` clamping),
+/// eliminating the dead `t > 87.0` branch and Rust's saturating `f32 as i32` `F2I`/`FSETP`/`BRA` sequence.
+/// SAFETY: pure register instructions, touches no memory.
+#[inline(always)]
+unsafe fn exp_nonpos(t: f32) -> f32 {
+    let t = if t < -87.0f32 { -87.0f32 } else { t };
+    let k: f32;
+    let n: f32;
+    core::arch::asm!(
+        "{{ .reg .f32 p; \
+         mul.rn.f32 p, {t}, 0f3fb8aa3b; \
+         add.rn.f32 {k}, p, 0f4b400000; \
+         add.rn.f32 {n}, {k}, 0fcb400000; }}",
+        k = out(reg32) k,
+        n = out(reg32) n,
+        t = in(reg32) t,
+        options(pure, nomem, nostack),
+    );
+    let r = core::f32::math::mul_add(-n, 0.693145751953125f32, t);
+    let r = core::f32::math::mul_add(-n, 0.0000014286068f32, r);
+    let p = core::f32::math::mul_add(1.0 / 5040.0f32, r, 1.0 / 720.0);
+    let p = core::f32::math::mul_add(p, r, 1.0 / 120.0);
+    let p = core::f32::math::mul_add(p, r, 1.0 / 24.0);
+    let p = core::f32::math::mul_add(p, r, 1.0 / 6.0);
+    let p = core::f32::math::mul_add(p, r, 0.5);
+    let p = core::f32::math::mul_add(p, r, 1.0);
+    let p = core::f32::math::mul_add(p, r, 1.0);
+    p * f32::from_bits(k.to_bits().wrapping_add(127) << 23)
+}
+
+/// Replay one recorded command of kind `PREFILL_FLASH_WINDOW` (kind 122).
+/// SAFETY (caller contract, `resident_launch_prefill_flash_window`): `table` and `index` point to an initialized
+/// 16-byte aligned `Command` of kind `PREFILL_FLASH_WINDOW` recorded by `Backend::prefill_flash_window_into` after
+/// `flash_window::check_flash_window_form` verified every extent, alignment, and non-overlap.
+#[inline(always)]
+pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index: u64) {
+    // SAFETY:
+    // - `table[index]` is one initialized, read-only, 16-byte aligned Command recorded in the resident queue.
+    //   Wrong kind traps before reading payload words.
+    // - Host verified via `check_flash_window_form` and `flash_window_prefill_admitted` that `query`/`gate` hold
+    //   `rows * heads * 128` FP32, `keys`/`values` hold `view * kv_heads * 64` u32 packed BF16, `moved` holds
+    //   `rows * heads * 16` FP32, `rel_table` holds `16 * extent` FP32 (16B aligned), `sink` holds `rows * heads`
+    //   FP32, `steps` holds `rows * 2` FP32, `output` holds `rows * heads * 128` FP32 (or `/ 2` u32 packed BF16,
+    //   16B aligned), and `output` is disjoint from all inputs.
+    // - Device re-checks `flash_window_prefill_admitted`, contiguous chat step invariants (`1 <= live <= view`,
+    //   `slot < view`, `slot_r == (slot_0 + r) % view`, `arc_len <= view`), and traps on any malformed step.
+    // - Shared memory stays strictly inside the block's static `SMEM_BYTES` (101,120 bytes <= 101,376 bytes).
+    // - All `threads` threads participate in every `_syncthreads()` and `cp.async.wait_group`; every warp participates
+    //   uniformly in every `ldmatrix`/`mma`/`shfl`/`bar.warp.sync`.
+    unsafe {
+        let c = &*table.add(index as usize);
+        if c.kind != crate::inkling_launch::PREFILL_FLASH_WINDOW {
+            core::arch::nvptx::trap();
+        }
+        let w = c.payload.as_ptr().cast::<u64>();
+        let query = *w as *const f32;
+        let keys = *w.add(1) as *const u32;
+        let values = *w.add(2) as *const u32;
+        let moved = *w.add(3) as *const f32;
+        let rel_table = *w.add(4) as *const f32;
+        let sink = *w.add(5) as *const f32;
+        let gate = *w.add(6) as *const f32;
+        let steps = *w.add(7) as *const f32;
+        let output = *w.add(8) as *mut f32;
+        let rows = *w.add(9) as usize;
+        let heads = *w.add(10) as usize;
+        let kv_heads = *w.add(11) as usize;
+        let view = *w.add(12) as usize;
+        let extent = *w.add(13) as usize;
+        let scale = f32::from_bits(*w.add(14) as u32);
+        let first_key_phase = *w.add(15) as usize;
+        let threads = core::arch::nvptx::_block_dim_x() as usize;
+        let block = core::arch::nvptx::_block_idx_x() as usize;
+
+        if !flash_window_prefill_admitted(
+            rows, heads, kv_heads, view, extent,
+            query as usize, keys as usize, values as usize, moved as usize,
+            rel_table as usize, gate as usize, output as usize, threads,
+        ) {
+            core::arch::nvptx::trap();
+        }
+
+        let gpack = flash_window_gpack(heads, kv_heads);
+        let group = heads / kv_heads;
+        let sub_groups = group / gpack;
+        let q_tiles = rows.div_ceil(FW_PREFILL_BQ_POS);
+        // Global LPT scheduling: `q_tile_rev` outermost so deepest Q tiles run first across ALL KV heads
+        // simultaneously (zero wave tail skew + 6x cross-CTA L2 reuse of K/V).
+        let sub_g = block % sub_groups;
+        let tmp = block / sub_groups;
+        let kv_head = tmp % kv_heads;
+        let q_tile_rev = tmp / kv_heads;
+        if q_tile_rev >= q_tiles {
+            return;
+        }
+        let q_tile = q_tiles - 1 - q_tile_rev;
+        let head_base = kv_head * group + sub_g * gpack;
+        let q0 = q_tile * FW_PREFILL_BQ_POS;
+        let m_cnt = (rows - q0).min(FW_PREFILL_BQ_POS);
+
+        let parse_count = |v: f32, max_v: usize| -> usize {
+            let n = v as usize;
+            if n as f32 != v || n > max_v {
+                core::arch::nvptx::trap();
+            }
+            n
+        };
+        let live0 = parse_count(*steps.add(2 * q0), view);
+        let slot0 = parse_count(*steps.add(2 * q0 + 1), view - 1);
+        if live0 == 0 {
+            core::arch::nvptx::trap();
+        }
+        let arc_start = if live0 - 1 <= slot0 { slot0 - (live0 - 1) } else { slot0 + view - (live0 - 1) };
+        let arc_len = (live0 - 1) + m_cnt;
+        if arc_len > view {
+            core::arch::nvptx::trap();
+        }
+        let pad = (first_key_phase % FW_BKV + q0 + FW_BKV - (live0 - 1) % FW_BKV) % FW_BKV;
+        let arc_end = pad + arc_len;
+
+        let smem = crate::ptx::shared::<SMEM_BYTES>();
+        let tid = core::arch::nvptx::_thread_idx_x() as usize;
+        let (warp, lane) = (tid >> 5, tid & 31);
+        let g = lane >> 2;
+        let q_rows = gpack * FW_PREFILL_BQ_POS;
+        let h_local = warp >> 2;
+        let w_pos = warp & 3;
+        let head = head_base + h_local;
+        let q_row_base = h_local * FW_PREFILL_BQ_POS;
+
+        let q_base = smem + Q_OFF;
+        let m_base = smem + M_OFF;
+        let l_base = smem + L_OFF;
+        let c_base = smem + C_OFF;
+
+        // Warp 0 validates all m_cnt step rows (2 per lane), stores `live_r` into L, reduces `max_min_col`,
+        // and writes all CTA-uniform constants into `c_base` before the single prologue `_syncthreads()`.
+        if tid < 32 {
+            let r_a = tid;
+            let r_b = tid + 32;
+            let mc_a = if r_a < m_cnt {
+                let lr = parse_count(*steps.add(2 * (q0 + r_a)), view);
+                let sr = parse_count(*steps.add(2 * (q0 + r_a) + 1), view - 1);
+                let expect_s = { let s = slot0 + r_a; if s >= view { s - view } else { s } };
+                if lr == 0 || lr > live0 + r_a || sr != expect_s {
+                    core::arch::nvptx::trap();
+                }
+                store_u32(l_base + (r_a * 4) as u32, lr as u32);
+                (pad + live0 + r_a - lr) as u32
+            } else {
+                store_u32(l_base + (r_a * 4) as u32, 0);
+                0
+            };
+            let mc_b = if r_b < m_cnt {
+                let lr = parse_count(*steps.add(2 * (q0 + r_b)), view);
+                let sr = parse_count(*steps.add(2 * (q0 + r_b) + 1), view - 1);
+                let expect_s = { let s = slot0 + r_b; if s >= view { s - view } else { s } };
+                if lr == 0 || lr > live0 + r_b || sr != expect_s {
+                    core::arch::nvptx::trap();
+                }
+                store_u32(l_base + (r_b * 4) as u32, lr as u32);
+                (pad + live0 + r_b - lr) as u32
+            } else {
+                store_u32(l_base + (r_b * 4) as u32, 0);
+                0
+            };
+            let mut max_mc = if mc_b > mc_a { mc_b } else { mc_a };
+            let mut sh = 16u32;
+            while sh > 0 {
+                let o = shfl_xor_u32(max_mc, sh);
+                if o > max_mc { max_mc = o; }
+                sh >>= 1;
+            }
+            if tid == 0 {
+                store_u32(c_base, view as u32);
+                store_u32(c_base + 4, extent as u32);
+                store_u32(c_base + 8, pad as u32);
+                store_u32(c_base + 12, arc_start as u32);
+                store_u32(c_base + 16, arc_end as u32);
+                store_u32(c_base + 20, live0 as u32);
+                store_u32(c_base + 24, (kv_heads * 64) as u32);
+                store_u32(c_base + 28, m_cnt as u32);
+                store_u32(c_base + 32, q0 as u32);
+                store_u32(c_base + 36, head_base as u32);
+                store_u32(c_base + 40, heads as u32);
+                store_u32(c_base + 44, kv_head as u32);
+                store_u32(c_base + 48, max_mc);
+                store_u32(c_base + 52, threads as u32);
+            }
+        }
+
+        // Load Q and M (with optional inline `FW_CLIP_IN` HeadClip, bit-exact with `fast_norm` mode 2).
+        if (*w.add(FW_CLIP_WORD) & FW_CLIP_IN) != 0 {
+            let (query_scale, moved_scale, position) = (*w.add(17) as *const f32, *w.add(18) as *const f32, *w.add(19) as *const f32);
+            let (query_bound, moved_bound) = (f32::from_bits(*w.add(20) as u32), f32::from_bits(*w.add(21) as u32));
+            let (grp, l) = (lane >> 3, lane & 7);
+            macro_rules! group_zero {
+                ($sum:expr) => {{
+                    let mut sum: f32 = $sum;
+                    sum += shfl_xor_f32(sum, 4);
+                    sum += shfl_xor_f32(sum, 2);
+                    sum += shfl_xor_f32(sum, 1);
+                    let bits: u32;
+                    core::arch::asm!(
+                        "shfl.sync.idx.b32 {got}, {v}, {src}, 31, 0xffffffff;",
+                        got = out(reg32) bits, v = in(reg32) sum.to_bits(), src = in(reg32) (lane & 24) as u32
+                    );
+                    f32::from_bits(bits)
+                }};
+            }
+            let mut pass = 0usize;
+            while pass < 4 {
+                let r = w_pos * 16 + pass * 4 + grp;
+                let qr = q_row_base + r;
+                let live = r < m_cnt;
+                let factor = if position.is_null() || !live { 0.0f32 } else { *position.add(q0 + r) };
+                let finish = |v: f32, sc: f32| {
+                    let clipped = rn(v * sc);
+                    if position.is_null() { clipped } else { rn(clipped * factor) }
+                };
+                let x = query.add(((q0 + r) * heads + head) * FW_HEAD_DIM);
+                let value = |j: usize| {
+                    let v = rn(*x.add(j));
+                    if query_scale.is_null() { v } else { v * *query_scale.add(head * FW_HEAD_DIM + j) }
+                };
+                let v: [f32; 16] = if live {
+                    [value(l), value(l + 8), value(l + 16), value(l + 24), value(l + 32), value(l + 40), value(l + 48), value(l + 56),
+                     value(l + 64), value(l + 72), value(l + 80), value(l + 88), value(l + 96), value(l + 104), value(l + 112), value(l + 120)]
+                } else { [0.0f32; 16] };
+                macro_rules! chain {
+                    ($k:literal) => {{
+                        let mut sum = 0.0f32;
+                        sum += v[$k] * v[$k];
+                        sum += v[$k + 4] * v[$k + 4];
+                        sum += v[$k + 8] * v[$k + 8];
+                        sum += v[$k + 12] * v[$k + 12];
+                        sum
+                    }};
+                }
+                let (low, high) = (chain!(0) + chain!(2), chain!(1) + chain!(3));
+                let qscale = crate::block_attention::clip_factor(crate::block_ops::root(group_zero!(low + high)), query_bound);
+                macro_rules! put {
+                    ($($m:literal)*) => {$(
+                        let word = if live { finish(v[$m], qscale).to_bits() } else { 0 };
+                        store_u16(q_base + swiz128(qr, $m) + (2 * l) as u32, (word >> 16) as u16);
+                    )*};
+                }
+                put!(0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15);
+                let mrow = moved.add(((q0 + r) * heads + head) * FW_REL_DIM);
+                let mvalue = |j: usize| {
+                    let v = rn(*mrow.add(j));
+                    if moved_scale.is_null() { v } else { v * *moved_scale.add(head * FW_REL_DIM + j) }
+                };
+                let (mv0, mv1) = if live { (mvalue(l), mvalue(l + 8)) } else { (0.0f32, 0.0f32) };
+                let (mut s0, mut s1) = (0.0f32, 0.0f32);
+                s0 += mv0 * mv0;
+                s1 += mv1 * mv1;
+                let mscale = crate::block_attention::clip_factor(crate::block_ops::root(group_zero!((s0 + 0.0f32) + (s1 + 0.0f32))), moved_bound);
+                let (word0, word1) = if live { (rn(finish(mv0, mscale)).to_bits() >> 16, rn(finish(mv1, mscale)).to_bits() >> 16) } else { (0, 0) };
+                store_u16(m_base + swiz_m(qr, l >> 1) + ((l & 1) * 2) as u32, word0 as u16);
+                store_u16(m_base + swiz_m(qr, (l + 8) >> 1) + ((l & 1) * 2) as u32, word1 as u16);
+                pass += 1;
+            }
+        } else {
+            let mut idx = tid;
+            let total_q = q_rows * 16;
+            while idx < total_q {
+                let qr = idx >> 4;
+                let ch = idx & 15;
+                let hl = qr >> 6;
+                let r = qr & 63;
+                let dst = q_base + swiz128(qr, ch);
+                if r < m_cnt {
+                    let p = query.add(((q0 + r) * heads + head_base + hl) * FW_HEAD_DIM + ch * 8);
+                    let v0 = ld_global_nc_v4(p);
+                    let v1 = ld_global_nc_v4(p.add(4));
+                    st_shared_v4(dst, [
+                        cvt_bf16x2(v0[0], v0[1]),
+                        cvt_bf16x2(v0[2], v0[3]),
+                        cvt_bf16x2(v1[0], v1[1]),
+                        cvt_bf16x2(v1[2], v1[3]),
+                    ]);
+                } else {
+                    st_shared_zero16(dst);
+                }
+                idx += threads;
+            }
+            let mut midx = tid;
+            let total_m = q_rows * FW_REL_DIM;
+            while midx < total_m {
+                let qr = midx >> 4;
+                let j = midx & 15;
+                let hl = qr >> 6;
+                let r = qr & 63;
+                let bits = if r < m_cnt {
+                    rn(*moved.add(((q0 + r) * heads + head_base + hl) * FW_REL_DIM + j)).to_bits() >> 16
+                } else { 0 };
+                store_u16(m_base + swiz_m(qr, j >> 1) + ((j & 1) * 2) as u32, bits as u16);
+                midx += threads;
+            }
+        }
+
+        macro_rules! issue_kvt {
+            ($st:expr, $tb:expr, $view:expr, $ext:expr, $pad:expr, $asrt:expr, $aend:expr, $l0:expr, $kvs:expr, $kvh:expr, $thr:expr) => {{
+                let st: u32 = $st;
+                let tb: u32 = $tb;
+                let view_c: u32 = $view;
+                let ext_c: u32 = $ext;
+                let pad_c: u32 = $pad;
+                let asrt_c: u32 = $asrt;
+                let aend_c: u32 = $aend;
+                let l0_c: u32 = $l0;
+                let kvs_c: u32 = $kvs;
+                let kvh_off: usize = ($kvh as usize) * 64;
+                let thr_c: u32 = $thr;
+                let tid_c = core::arch::nvptx::_thread_idx_x() as u32;
+                let keys_h = (*w.add(1) as *const u32).add(kvh_off);
+                let values_h = (*w.add(2) as *const u32).add(kvh_off);
+                let k_dst = smem + K_OFF + st * K_BYTES as u32;
+                let v_dst = smem + V_OFF + st * V_BYTES as u32;
+                let mut idx = tid_c;
+                if tb >= pad_c && tb + FW_BKV as u32 <= aend_c {
+                    let p0 = { let x = asrt_c + tb - pad_c; if x >= view_c { x - view_c } else { x } };
+                    if p0 + FW_BKV as u32 <= view_c {
+                        while idx < (FW_BKV * 16) as u32 {
+                            let r = idx >> 4;
+                            let ch = idx & 15;
+                            let sw = swiz128(r as usize, ch as usize);
+                            let off = ((p0 + r) * kvs_c + ch * 4) as usize;
+                            crate::ptx::copy16(k_dst + sw, keys_h.add(off));
+                            crate::ptx::copy16(v_dst + sw, values_h.add(off));
+                            idx += thr_c;
+                        }
+                    } else {
+                        while idx < (FW_BKV * 16) as u32 {
+                            let r = idx >> 4;
+                            let ch = idx & 15;
+                            let sw = swiz128(r as usize, ch as usize);
+                            let mut phys = p0 + r;
+                            if phys >= view_c { phys -= view_c; }
+                            let off = (phys * kvs_c + ch * 4) as usize;
+                            crate::ptx::copy16(k_dst + sw, keys_h.add(off));
+                            crate::ptx::copy16(v_dst + sw, values_h.add(off));
+                            idx += thr_c;
+                        }
+                    }
+                } else {
+                    while idx < (FW_BKV * 16) as u32 {
+                        let r = idx >> 4;
+                        let ch = idx & 15;
+                        let sw = swiz128(r as usize, ch as usize);
+                        let col = tb + r;
+                        if col >= pad_c && col < aend_c {
+                            let mut phys = asrt_c + col - pad_c;
+                            if phys >= view_c { phys -= view_c; }
+                            let off = (phys * kvs_c + ch * 4) as usize;
+                            crate::ptx::copy16(k_dst + sw, keys_h.add(off));
+                            crate::ptx::copy16(v_dst + sw, values_h.add(off));
+                        } else {
+                            st_shared_zero16(k_dst + sw);
+                            st_shared_zero16(v_dst + sw);
+                        }
+                        idx += thr_c;
+                    }
+                }
+                if tb + FW_BKV as u32 + ext_c > pad_c + l0_c {
+                    let rel_p = *w.add(4) as *const f32;
+                    let t_dst_stage = smem + T_OFF + st * T_STAGE_BYTES as u32;
+                    let first = (pad_c + l0_c - 1) as i32 - (tb + FW_BKV as u32 - 1) as i32;
+                    let first4 = first & !3;
+                    let chunks_per_row = (T_PITCH / 4) as u32; // 25
+                    let total_chunks = (FW_REL_DIM as u32) * chunks_per_row; // 400
+                    let mut kc = tid_c;
+                    while kc < total_chunks {
+                        let j = kc / chunks_per_row;
+                        let c = kc % chunks_per_row;
+                        let d4 = first4 + (c * 4) as i32;
+                        let dst = t_dst_stage + kc * 16;
+                        if d4 >= 0 && (d4 as u32) + 4 <= ext_c && (ext_c & 3) == 0 {
+                            crate::ptx::copy16(dst, rel_p.add((j * ext_c + d4 as u32) as usize).cast::<u32>());
+                        } else if d4 + 4 <= 0 || d4 >= ext_c as i32 {
+                            st_shared_zero16(dst);
+                        } else {
+                            let mut o = 0u32;
+                            while o < 4 {
+                                let d = d4 + o as i32;
+                                if d >= 0 && (d as u32) < ext_c {
+                                    crate::ptx::copy4(dst + o * 4, rel_p.add((j * ext_c + d as u32) as usize).cast::<u32>());
+                                } else {
+                                    store_u32(dst + o * 4, 0);
+                                }
+                                o += 1;
+                            }
+                        }
+                        kc += thr_c;
+                    }
+                }
+            }};
+        }
+
+        // Prologue: issue stage 0 (K[0], V[0], T[0]), wait and sync so Q, M, L, C, and stage 0 are visible.
+        issue_kvt!(
+            0, 0, view as u32, extent as u32, pad as u32, arc_start as u32, arc_end as u32,
+            live0 as u32, (kv_heads * 64) as u32, kv_head as u32, threads as u32
+        );
+        crate::ptx::commit();
+        cp_async_wait_zero();
+        core::arch::nvptx::_syncthreads();
+
+        // Compute per-warp `(warp_min_col, warp_max_col)` so warps outside their causal/sliding-window range skip
+        // tiles completely (exact bit parity with BQ_POS=32).
+        let lane32 = lane as u32;
+        let pad_init = load_u32(c_base + 8);
+        let arc_end_loop = load_u32(c_base + 16);
+        let live0_init = load_u32(c_base + 20);
+        let m_cnt_init = load_u32(c_base + 28);
+        let w_min_row_init = (w_pos * 16) as u32;
+        let w_row_probe = w_min_row_init + (lane32 & 15);
+        let mut warp_min_col = if w_row_probe < m_cnt_init {
+            pad_init + live0_init + w_row_probe - load_u32(l_base + w_row_probe * 4)
+        } else {
+            u32::MAX
+        };
+        let mut ws = 8u32;
+        while ws > 0 {
+            let o = shfl_xor_u32(warp_min_col, ws);
+            if o < warp_min_col { warp_min_col = o; }
+            ws >>= 1;
+        }
+        let w_last_row = if m_cnt_init > w_min_row_init { (w_min_row_init + 15).min(m_cnt_init - 1) } else { 0 };
+        let warp_max_col = pad_init + (live0_init - 1) + w_last_row;
+
+        let r0_init = w_min_row_init + (g as u32);
+        let mut m_r0 = if r0_init < m_cnt_init { rn(*sink.add((q0 + r0_init as usize) * heads + head)) } else { 0.0f32 };
+        let mut m_r1 = if r0_init + 8 < m_cnt_init { rn(*sink.add((q0 + r0_init as usize + 8) * heads + head)) } else { 0.0f32 };
+        let mut l_r0 = 1.0f32;
+        let mut l_r1 = 1.0f32;
+
+        // 16 output MMA accumulators (`16 x 128` per warp) strictly in registers (0 stack, 0 spill).
+        let (mut o0, mut o1, mut o2, mut o3) = ([0.0f32; 4], [0.0f32; 4], [0.0f32; 4], [0.0f32; 4]);
+        let (mut o4, mut o5, mut o6, mut o7) = ([0.0f32; 4], [0.0f32; 4], [0.0f32; 4], [0.0f32; 4]);
+        let (mut o8, mut o9, mut o10, mut o11) = ([0.0f32; 4], [0.0f32; 4], [0.0f32; 4], [0.0f32; 4]);
+        let (mut o12, mut o13, mut o14, mut o15) = ([0.0f32; 4], [0.0f32; 4], [0.0f32; 4], [0.0f32; 4]);
+
+        let mut stage = 0u32;
+        let mut t_base = 0u32;
+        while t_base < arc_end_loop {
+            let next_t = t_base + FW_BKV as u32;
+            // Issue stage `stage ^ 1` (K, V, T) for `next_t` overlapped with ALL 64 HMMAs + softmax of `t_base`!
+            if next_t < arc_end_loop {
+                let cb = smem + C_OFF;
+                issue_kvt!(
+                    stage ^ 1, next_t,
+                    load_u32(cb), load_u32(cb + 4), load_u32(cb + 8), load_u32(cb + 12),
+                    arc_end_loop, load_u32(cb + 20), load_u32(cb + 24), load_u32(cb + 44), load_u32(cb + 52)
+                );
+                crate::ptx::commit();
+            }
+
+            let tid_l = core::arch::nvptx::_thread_idx_x() as u32;
+            let lane_l = tid_l & 31;
+            let warp_l = tid_l >> 5;
+            let h_loc = warp_l >> 2;
+            let w_pos_l = warp_l & 3;
+            let w_min_r = w_pos_l * 16;
+            let cb = smem + C_OFF;
+            let m_cnt32 = load_u32(cb + 28);
+
+            if w_min_r < m_cnt32 && t_base <= warp_max_col && t_base + FW_BKV as u32 > warp_min_col {
+                // 1. S = Q * K[stage]^T (`16 x 32` per warp = 32 HMMAs) in ascending d = 0, 16, ..., 112.
+                let q_ld_row = h_loc * 64 + w_min_r + (lane_l & 15);
+                let mut q_cur = smem + Q_OFF + q_ld_row * 256;
+                let mut qs = ((q_ld_row & 7) ^ (lane_l >> 4)) * 16;
+                let k_ld_row0 = ((lane_l >> 4) * 8) + (lane_l & 7);
+                let mut k_cur = smem + K_OFF + stage * K_BYTES as u32 + k_ld_row0 * 256;
+                let mut ks_m = ((k_ld_row0 & 7) ^ ((lane_l >> 3) & 1)) * 16;
+                core::arch::asm!("/* {0} {1} {2} {3} */", inout(reg32) q_cur, inout(reg32) k_cur, inout(reg32) qs, inout(reg32) ks_m, options(nomem, nostack));
+                let (mut s0, mut s1, mut s2, mut s3) = ([0.0f32; 4], [0.0f32; 4], [0.0f32; 4], [0.0f32; 4]);
+                let mut ks = 0u32;
+                while ks < 8 {
+                    let qa = ldmatrix_x4(q_cur + ((ks * 32) ^ qs));
+                    let k_off = (ks * 32) ^ ks_m;
+                    let kb0 = ldmatrix_x4(k_cur + k_off);
+                    s0 = mma_m16n8k16_bf16(qa, [kb0[0], kb0[1]], s0);
+                    s1 = mma_m16n8k16_bf16(qa, [kb0[2], kb0[3]], s1);
+                    let kb1 = ldmatrix_x4(k_cur + 4096 + k_off);
+                    s2 = mma_m16n8k16_bf16(qa, [kb1[0], kb1[1]], s2);
+                    s3 = mma_m16n8k16_bf16(qa, [kb1[2], kb1[3]], s3);
+                    ks += 1;
+                }
+
+                // 2. Scale, optional relative bias, and masking (zero-branch Fast Interior for both full & sliding window!).
+                let extent32 = load_u32(cb + 4);
+                let pad32 = load_u32(cb + 8);
+                let live0_32 = load_u32(cb + 20);
+                let max_min_col = load_u32(cb + 48);
+                let need_rel = t_base + FW_BKV as u32 + extent32 > pad32 + live0_32;
+                let interior_geom = m_cnt32 == FW_PREFILL_BQ_POS as u32
+                    && t_base >= max_min_col
+                    && t_base >= pad32
+                    && t_base + FW_BKV as u32 <= pad32 + live0_32;
+
+                if interior_geom && !need_rel {
+                    macro_rules! sc_fast {
+                        ($s:ident) => {{
+                            let (a0, a1) = rn2($s[0], $s[1]);
+                            let (a2, a3) = rn2($s[2], $s[3]);
+                            let (b0, b1) = rn2(a0 * scale, a1 * scale);
+                            let (b2, b3) = rn2(a2 * scale, a3 * scale);
+                            $s = [b0, b1, b2, b3];
+                        }};
+                    }
+                    sc_fast!(s0);
+                    sc_fast!(s1);
+                    sc_fast!(s2);
+                    sc_fast!(s3);
+                } else {
+                    let r0 = w_min_r + (lane_l >> 2);
+                    let t32 = lane_l & 3;
+                    let qpos_r0 = pad32 + (live0_32 - 1) + r0;
+                    let fast_rel = interior_geom && need_rel && (pad32 + live0_32 + (FW_PREFILL_BQ_POS as u32 - 2) - t_base) < extent32;
+                    let live_r0 = if fast_rel { 0 } else { load_u32(smem + L_OFF + r0 * 4) };
+                    let live_r1 = if fast_rel { 0 } else { load_u32(smem + L_OFF + (r0 + 8) * 4) };
+                    macro_rules! finalize_s {
+                        ($s:ident, $col_off:expr, $b:expr) => {{
+                            let [b00, b01, b10, b11]: [f32; 4] = $b;
+                            if fast_rel {
+                                let (a0, a1) = rn2($s[0], $s[1]);
+                                let (a2, a3) = rn2($s[2], $s[3]);
+                                let (c0, c1) = rn2(a0 * scale, a1 * scale);
+                                let (c2, c3) = rn2(a2 * scale, a3 * scale);
+                                let (rb0, rb1) = rn2(b00, b01);
+                                let (rb2, rb3) = rn2(b10, b11);
+                                let (d0, d1) = rn2(c0 + rb0, c1 + rb1);
+                                let (d2, d3) = rn2(c2 + rb2, c3 + rb3);
+                                $s = [d0, d1, d2, d3];
+                            } else {
+                                let c0 = t_base + $col_off + t32 * 2;
+                                let c1 = c0 + 1;
+                                macro_rules! eval_sc {
+                                    ($val:expr, $row_local:expr, $qpos:expr, $live_r:expr, $col:expr, $bsum:expr) => {{
+                                        let val: f32 = $val;
+                                        let col: u32 = $col;
+                                        let qpos: u32 = $qpos;
+                                        if $row_local >= m_cnt32 || col >= arc_end_loop || col > qpos {
+                                            f32::NEG_INFINITY
+                                        } else {
+                                            let dist = qpos - col;
+                                            if dist >= $live_r {
+                                                f32::NEG_INFINITY
+                                            } else {
+                                                let scaled = rn(rn(val) * scale);
+                                                if need_rel && dist < extent32 { rn(scaled + rn($bsum)) } else { scaled }
+                                            }
+                                        }
+                                    }};
+                                }
+                                $s[0] = eval_sc!($s[0], r0, qpos_r0, live_r0, c0, b00);
+                                $s[1] = eval_sc!($s[1], r0, qpos_r0, live_r0, c1, b01);
+                                $s[2] = eval_sc!($s[2], r0 + 8, qpos_r0 + 8, live_r1, c0, b10);
+                                $s[3] = eval_sc!($s[3], r0 + 8, qpos_r0 + 8, live_r1, c1, b11);
+                            }
+                        }};
+                    }
+                    if need_rel {
+                        // Two-pass relative bias (fragments 0,1 then 2,3): keeps live bias accumulators at 8 floats
+                        // (0 stack, 0 spill at 168 regs) while reading XOR-swizzled bank-free M and 16B-staged T.
+                        let first = (pad32 + live0_32 - 1) as i32 - (t_base + FW_BKV as u32 - 1) as i32;
+                        let shift = (first - (first & !3)) as u32;
+                        let t_rel_off = 4 * (r0 + FW_BKV as u32 - 1 - t32 * 2);
+                        let mut t_start = smem + T_OFF + stage * T_STAGE_BYTES as u32 + t_rel_off + shift * 4;
+                        let qr0_u = h_loc * 64 + r0;
+                        let mut m_row0 = smem + M_OFF + qr0_u * 32;
+                        let mut m_swz = (qr0_u & 7) * 4;
+                        core::arch::asm!("/* {0} {1} {2} */", inout(reg32) t_start, inout(reg32) m_row0, inout(reg32) m_swz, options(nomem, nostack));
+                        let t_row_stride = (T_PITCH * 4) as u32;
+                        let (mut b00, mut b01, mut b02, mut b03) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+                        let (mut b10, mut b11, mut b12, mut b13) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+                        let mut j2 = 0u32;
+                        let mut at = t_start;
+                        while j2 < 8 {
+                            let m_off = (j2 * 4) ^ m_swz;
+                            let mp0 = load_u32(m_row0 + m_off);
+                            let mp1 = load_u32(m_row0 + 256 + m_off);
+                            let (a0, a1) = (f32::from_bits(mp0 << 16), f32::from_bits(mp0 & 0xffff_0000));
+                            let (m0, m1) = (f32::from_bits(mp1 << 16), f32::from_bits(mp1 & 0xffff_0000));
+                            let p0 = f32::from_bits(load_u32(at + 32)); let q0v = f32::from_bits(load_u32(at + 28));
+                            let p1 = f32::from_bits(load_u32(at));      let q1v = f32::from_bits(load_u32(at - 4));
+                            let p2 = f32::from_bits(load_u32(at - 32)); let q2v = f32::from_bits(load_u32(at - 36));
+                            b00 += a0 * p1; b01 += a0 * q1v; b02 += m0 * p0; b03 += m0 * q0v;
+                            b10 += a0 * p2; b11 += a0 * q2v; b12 += m0 * p1; b13 += m0 * q1v;
+                            at += t_row_stride;
+                            let p0 = f32::from_bits(load_u32(at + 32)); let q0v = f32::from_bits(load_u32(at + 28));
+                            let p1 = f32::from_bits(load_u32(at));      let q1v = f32::from_bits(load_u32(at - 4));
+                            let p2 = f32::from_bits(load_u32(at - 32)); let q2v = f32::from_bits(load_u32(at - 36));
+                            b00 += a1 * p1; b01 += a1 * q1v; b02 += m1 * p0; b03 += m1 * q0v;
+                            b10 += a1 * p2; b11 += a1 * q2v; b12 += m1 * p1; b13 += m1 * q1v;
+                            at += t_row_stride;
+                            j2 += 1;
+                        }
+                        finalize_s!(s0, 0, [b00, b01, b02, b03]);
+                        finalize_s!(s1, 8, [b10, b11, b12, b13]);
+                        let (mut b20, mut b21, mut b22, mut b23) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+                        let (mut b30, mut b31, mut b32, mut b33) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+                        j2 = 0;
+                        at = t_start;
+                        while j2 < 8 {
+                            let m_off = (j2 * 4) ^ m_swz;
+                            let mp0 = load_u32(m_row0 + m_off);
+                            let mp1 = load_u32(m_row0 + 256 + m_off);
+                            let (a0, a1) = (f32::from_bits(mp0 << 16), f32::from_bits(mp0 & 0xffff_0000));
+                            let (m0, m1) = (f32::from_bits(mp1 << 16), f32::from_bits(mp1 & 0xffff_0000));
+                            let p2 = f32::from_bits(load_u32(at - 32)); let q2v = f32::from_bits(load_u32(at - 36));
+                            let p3 = f32::from_bits(load_u32(at - 64)); let q3v = f32::from_bits(load_u32(at - 68));
+                            let p4 = f32::from_bits(load_u32(at - 96)); let q4v = f32::from_bits(load_u32(at - 100));
+                            b20 += a0 * p3; b21 += a0 * q3v; b22 += m0 * p2; b23 += m0 * q2v;
+                            b30 += a0 * p4; b31 += a0 * q4v; b32 += m0 * p3; b33 += m0 * q3v;
+                            at += t_row_stride;
+                            let p2 = f32::from_bits(load_u32(at - 32)); let q2v = f32::from_bits(load_u32(at - 36));
+                            let p3 = f32::from_bits(load_u32(at - 64)); let q3v = f32::from_bits(load_u32(at - 68));
+                            let p4 = f32::from_bits(load_u32(at - 96)); let q4v = f32::from_bits(load_u32(at - 100));
+                            b20 += a1 * p3; b21 += a1 * q3v; b22 += m1 * p2; b23 += m1 * q2v;
+                            b30 += a1 * p4; b31 += a1 * q4v; b32 += m1 * p3; b33 += m1 * q3v;
+                            at += t_row_stride;
+                            j2 += 1;
+                        }
+                        finalize_s!(s2, 16, [b20, b21, b22, b23]);
+                        finalize_s!(s3, 24, [b30, b31, b32, b33]);
+                    } else {
+                        finalize_s!(s0, 0, [0.0; 4]);
+                        finalize_s!(s1, 8, [0.0; 4]);
+                        finalize_s!(s2, 16, [0.0; 4]);
+                        finalize_s!(s3, 24, [0.0; 4]);
+                    }
+                }
+
+                // 3. Online softmax: warp-butterfly max + single-copy predicated branchless `exp_nonpos`.
+                let mut mt0 = fmax(fmax(fmax(s0[0], s0[1]), fmax(s1[0], s1[1])), fmax(fmax(s2[0], s2[1]), fmax(s3[0], s3[1])));
+                mt0 = fmax(mt0, shfl_xor_f32(mt0, 1));
+                mt0 = fmax(mt0, shfl_xor_f32(mt0, 2));
+                let mut mt1 = fmax(fmax(fmax(s0[2], s0[3]), fmax(s1[2], s1[3])), fmax(fmax(s2[2], s2[3]), fmax(s3[2], s3[3])));
+                mt1 = fmax(mt1, shfl_xor_f32(mt1, 1));
+                mt1 = fmax(mt1, shfl_xor_f32(mt1, 2));
+                let m_new0 = fmax(m_r0, mt0);
+                let m_new1 = fmax(m_r1, mt1);
+                let alpha0 = exp_nonpos(m_r0 - m_new0);
+                let alpha1 = exp_nonpos(m_r1 - m_new1);
+                m_r0 = m_new0;
+                m_r1 = m_new1;
+
+                macro_rules! to_p {
+                    ($v:expr, $mn:expr) => {{
+                        let v: f32 = $v;
+                        let e = exp_nonpos(v - $mn);
+                        if !interior_geom && v == f32::NEG_INFINITY { 0.0f32 } else { e }
+                    }};
+                }
+                let p00 = to_p!(s0[0], m_new0); let p01 = to_p!(s0[1], m_new0);
+                let p02 = to_p!(s0[2], m_new1); let p03 = to_p!(s0[3], m_new1);
+                let p10 = to_p!(s1[0], m_new0); let p11 = to_p!(s1[1], m_new0);
+                let p12 = to_p!(s1[2], m_new1); let p13 = to_p!(s1[3], m_new1);
+                let pa0 = [cvt_bf16x2(p00, p01), cvt_bf16x2(p02, p03), cvt_bf16x2(p10, p11), cvt_bf16x2(p12, p13)];
+                let s0_a = (p00 + p01) + (p10 + p11);
+                let s1_a = (p02 + p03) + (p12 + p13);
+                let p20 = to_p!(s2[0], m_new0); let p21 = to_p!(s2[1], m_new0);
+                let p22 = to_p!(s2[2], m_new1); let p23 = to_p!(s2[3], m_new1);
+                let p30 = to_p!(s3[0], m_new0); let p31 = to_p!(s3[1], m_new0);
+                let p32 = to_p!(s3[2], m_new1); let p33 = to_p!(s3[3], m_new1);
+                let pa1 = [cvt_bf16x2(p20, p21), cvt_bf16x2(p22, p23), cvt_bf16x2(p30, p31), cvt_bf16x2(p32, p33)];
+                let mut sum0 = s0_a + ((p20 + p21) + (p30 + p31));
+                sum0 += shfl_xor_f32(sum0, 1);
+                sum0 += shfl_xor_f32(sum0, 2);
+                let mut sum1 = s1_a + ((p22 + p23) + (p32 + p33));
+                sum1 += shfl_xor_f32(sum1, 1);
+                sum1 += shfl_xor_f32(sum1, 2);
+
+                l_r0 = l_r0 * alpha0 + sum0;
+                l_r1 = l_r1 * alpha1 + sum1;
+
+                if alpha0 != 1.0f32 {
+                    macro_rules! scale_o0 { ($($o:ident)*) => { $($o[0] *= alpha0; $o[1] *= alpha0;)* }; }
+                    scale_o0!(o0 o1 o2 o3 o4 o5 o6 o7 o8 o9 o10 o11 o12 o13 o14 o15);
+                }
+                if alpha1 != 1.0f32 {
+                    macro_rules! scale_o1 { ($($o:ident)*) => { $($o[2] *= alpha1; $o[3] *= alpha1;)* }; }
+                    scale_o1!(o0 o1 o2 o3 o4 o5 o6 o7 o8 o9 o10 o11 o12 o13 o14 o15);
+                }
+
+                // 4. O += P * V[stage] (`16 x 128 x 32`, 32 HMMAs) — ZERO mid-tile barrier!
+                let v_ld_r0 = lane_l & 15;
+                let mut v_cur = smem + V_OFF + stage * V_BYTES as u32 + v_ld_r0 * 256;
+                let mut vs = ((v_ld_r0 & 7) ^ (lane_l >> 4)) * 16;
+                core::arch::asm!("/* {0} {1} */", inout(reg32) v_cur, inout(reg32) vs, options(nomem, nostack));
+                macro_rules! pv_pair {
+                    ($pair:expr, $oa:ident, $ob:ident) => {
+                        let v_off = ($pair * 32) ^ vs;
+                        let vb0 = ldmatrix_x4_trans(v_cur + v_off);
+                        $oa = mma_m16n8k16_bf16(pa0, [vb0[0], vb0[1]], $oa);
+                        $ob = mma_m16n8k16_bf16(pa0, [vb0[2], vb0[3]], $ob);
+                        let vb1 = ldmatrix_x4_trans(v_cur + 4096 + v_off);
+                        $oa = mma_m16n8k16_bf16(pa1, [vb1[0], vb1[1]], $oa);
+                        $ob = mma_m16n8k16_bf16(pa1, [vb1[2], vb1[3]], $ob);
+                    };
+                }
+                pv_pair!(0, o0, o1);
+                pv_pair!(1, o2, o3);
+                pv_pair!(2, o4, o5);
+                pv_pair!(3, o6, o7);
+                pv_pair!(4, o8, o9);
+                pv_pair!(5, o10, o11);
+                pv_pair!(6, o12, o13);
+                pv_pair!(7, o14, o15);
+            }
+
+            if next_t < arc_end_loop {
+                cp_async_wait_zero();
+                core::arch::nvptx::_syncthreads();
+            }
+            stage ^= 1;
+            t_base = next_t;
+        }
+
+        // Epilogue: load CTA constants from `C_OFF` (zero divisions, zero panics, zero loop-live epilogue regs).
+        let cb = smem + C_OFF;
+        let m_cntu = load_u32(cb + 28) as usize;
+        let q0u = load_u32(cb + 32) as usize;
+        let head_base_u = load_u32(cb + 36) as usize;
+        let heads_e = load_u32(cb + 40) as usize;
+        let gate_e = *w.add(6) as *const f32;
+        let output_e = *w.add(8) as *mut f32;
+        let half_out = (*w.add(FW_CLIP_WORD) & FW_HALF_OUT) != 0;
+        let tid_e = core::arch::nvptx::_thread_idx_x() as usize;
+        let (warp_e, lane_e) = (tid_e >> 5, tid_e & 31);
+        let (g_e, tu) = (lane_e >> 2, lane_e & 3);
+        let (h_local_e, w_pos_e) = (warp_e >> 2, warp_e & 3);
+        let headu = head_base_u + h_local_e;
+        let r0u = w_pos_e * 16 + g_e;
+        let r1u = r0u + 8;
+        let inv0 = 1.0f32 / l_r0;
+        let inv1 = 1.0f32 / l_r1;
+        let gate_r0 = gate_e.add(((q0u + r0u) * heads_e + headu) * FW_HEAD_DIM + tu * 2);
+        let gate_r1 = gate_e.add(((q0u + r1u) * heads_e + headu) * FW_HEAD_DIM + tu * 2);
+
+        if half_out {
+            // Reclaim dead SMEM [0 .. 52,224 B] (leaving `C_OFF` at 101,120 B untouched) -> coalesced `st.global.v4.b32`!
+            core::arch::nvptx::_syncthreads();
+            let warp_smem = smem + (warp_e * EPI_WARP_BYTES) as u32;
+            let row0_smem = warp_smem + (g_e * EPI_ROW_BYTES) as u32;
+            let row1_smem = warp_smem + ((g_e + 8) * EPI_ROW_BYTES) as u32;
+            macro_rules! stage_o {
+                ($ni:expr, $o:ident) => {{
+                    let col_u32 = ($ni * 4 + tu) as u32;
+                    if r0u < m_cntu {
+                        let gp = gate_r0.add($ni * 8);
+                        let v0 = rn(rn($o[0] * inv0) * sigmoid(rn(*gp)));
+                        let v1 = rn(rn($o[1] * inv0) * sigmoid(rn(*gp.add(1))));
+                        store_u32(row0_smem + col_u32 * 4, cvt_bf16x2(v0, v1));
+                    }
+                    if r1u < m_cntu {
+                        let gp = gate_r1.add($ni * 8);
+                        let v0 = rn(rn($o[2] * inv1) * sigmoid(rn(*gp)));
+                        let v1 = rn(rn($o[3] * inv1) * sigmoid(rn(*gp.add(1))));
+                        store_u32(row1_smem + col_u32 * 4, cvt_bf16x2(v0, v1));
+                    }
+                }};
+            }
+            stage_o!(0, o0); stage_o!(1, o1); stage_o!(2, o2); stage_o!(3, o3);
+            stage_o!(4, o4); stage_o!(5, o5); stage_o!(6, o6); stage_o!(7, o7);
+            stage_o!(8, o8); stage_o!(9, o9); stage_o!(10, o10); stage_o!(11, o11);
+            stage_o!(12, o12); stage_o!(13, o13); stage_o!(14, o14); stage_o!(15, o15);
+            crate::ptx::warp_sync();
+            let output_u32 = output_e.cast::<u32>();
+            let r_valid = m_cntu.saturating_sub(w_pos_e * 16).min(16);
+            let mut p = 0usize;
+            while p < 8 {
+                let cidx = p * 32 + lane_e;
+                let rl = cidx >> 4;
+                let ch = cidx & 15;
+                if rl < r_valid {
+                    let vals = crate::ptx::load4(warp_smem + (rl * EPI_ROW_BYTES + ch * 16) as u32);
+                    let dst = output_u32.add(((q0u + w_pos_e * 16 + rl) * heads_e + headu) * 64 + ch * 4);
+                    core::arch::asm!(
+                        "st.global.v4.b32 [{dst}], {{{a0}, {a1}, {a2}, {a3}}};",
+                        dst = in(reg64) dst,
+                        a0 = in(reg32) vals[0], a1 = in(reg32) vals[1], a2 = in(reg32) vals[2], a3 = in(reg32) vals[3],
+                        options(nostack),
+                    );
+                }
+                p += 1;
+            }
+        } else {
+            let out_r0 = output_e.add(((q0u + r0u) * heads_e + headu) * FW_HEAD_DIM + tu * 2);
+            let out_r1 = output_e.add(((q0u + r1u) * heads_e + headu) * FW_HEAD_DIM + tu * 2);
+            macro_rules! store_o_f32 {
+                ($ni:expr, $o:ident) => {{
+                    if r0u < m_cntu {
+                        let gp = gate_r0.add($ni * 8);
+                        let op = out_r0.add($ni * 8);
+                        *op = rn(rn($o[0] * inv0) * sigmoid(rn(*gp)));
+                        *op.add(1) = rn(rn($o[1] * inv0) * sigmoid(rn(*gp.add(1))));
+                    }
+                    if r1u < m_cntu {
+                        let gp = gate_r1.add($ni * 8);
+                        let op = out_r1.add($ni * 8);
+                        *op = rn(rn($o[2] * inv1) * sigmoid(rn(*gp)));
+                        *op.add(1) = rn(rn($o[3] * inv1) * sigmoid(rn(*gp.add(1))));
+                    }
+                }};
+            }
+            store_o_f32!(0, o0); store_o_f32!(1, o1); store_o_f32!(2, o2); store_o_f32!(3, o3);
+            store_o_f32!(4, o4); store_o_f32!(5, o5); store_o_f32!(6, o6); store_o_f32!(7, o7);
+            store_o_f32!(8, o8); store_o_f32!(9, o9); store_o_f32!(10, o10); store_o_f32!(11, o11);
+            store_o_f32!(12, o12); store_o_f32!(13, o13); store_o_f32!(14, o14); store_o_f32!(15, o15);
+        }
+    }
+}

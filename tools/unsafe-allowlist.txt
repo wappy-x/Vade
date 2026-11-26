@@ -2564,6 +2564,11 @@ engine/crates/gpu/kernels-inkling	src/lib.rs	fn:resident_launch_plain_packed_tc_
 engine/crates/gpu/kernels-inkling	src/lib.rs	fn:resident_launch_prefill_packed_tc	fn:1	ruling 2026-11-23 23:00
 engine/crates/gpu/kernels-inkling	src/prefill_packed_tc.rs	fn:replay	fn:1	ruling 2026-11-23 23:00
 engine/crates/gpu/kernels-inkling	src/prefill_packed_tc.rs	fn:replay	block:1	ruling 2026-11-23 23:00
+engine/crates/gpu/kernels-inkling	src/lib.rs	fn:resident_launch_prefill_flash_window	fn:1	ruling 2026-11-23 23:00
+engine/crates/gpu/kernels-inkling	src/prefill_flash_window.rs	fn:rn2	fn:1	ruling 2026-11-23 23:00
+engine/crates/gpu/kernels-inkling	src/prefill_flash_window.rs	fn:exp_nonpos	fn:1	ruling 2026-11-23 23:00
+engine/crates/gpu/kernels-inkling	src/prefill_flash_window.rs	fn:replay	fn:1	ruling 2026-11-23 23:00
+engine/crates/gpu/kernels-inkling	src/prefill_flash_window.rs	fn:replay	block:1	ruling 2026-11-23 23:00
 # Zero-stack fast Inkling block-op kernels in kernels-inkling (kinds 107..=112; Ruling R6h).
 engine/crates/gpu/kernels-inkling	src/fast_mix.rs	fn:replay_mix_blend	fn:1	ruling 2026-11-23 23:00
 engine/crates/gpu/kernels-inkling	src/fast_mix.rs	fn:replay_mix_blend	block:1	ruling 2026-11-23 23:00
@@ -2608,3 +2613,11 @@ engine/crates/gpu/kernels-inkling	src/draft_panel.rs	fn:run	block:1	ruling 2026-
 # Specialize ordinary and combined tiles. Both entries share the checked body tested against separate projections in few-check.
 engine/crates/gpu/kernels-inkling	src/draft_panel.rs	fn:run	fn:1	ruling 2026-11-25 05:39
 engine/crates/gpu/kernels-inkling	src/draft_panel.rs	fn:inkling_draft_head_fold	fn:1	ruling 2026-11-25 05:39
+# Fused prefill lazy message-meta and GateDown+GateOuter+GateBlend+RoundedNorm (kind 123). Checked bit-exact against MIX_LIST_NORM_HALF + TC_MODE_NARROW_HALF + TC_MODE_GATE_BLEND_NORM in tc-rows-check.
+engine/crates/gpu/kernels-inkling	src/lib.rs	fn:resident_launch_prefill_gate_fuse	fn:1	ruling 2026-11-25 21:44
+engine/crates/gpu/kernels-inkling	src/prefill_gate.rs	fn:replay	fn:1	ruling 2026-11-25 21:44
+engine/crates/gpu/kernels-inkling	src/prefill_gate.rs	fn:replay	block:1	ruling 2026-11-25 21:44
+engine/crates/gpu/kernels-inkling	src/prefill_gate.rs	fn:replay_msg_meta	fn:1	ruling 2026-11-25 21:44
+engine/crates/gpu/kernels-inkling	src/prefill_gate.rs	fn:replay_msg_meta	block:1	ruling 2026-11-25 21:44
+engine/crates/gpu/kernels-inkling	src/prefill_gate.rs	fn:replay_full	fn:1	ruling 2026-11-25 21:44
+engine/crates/gpu/kernels-inkling	src/prefill_gate.rs	fn:replay_full	block:1	ruling 2026-11-25 21:44

@@ -358,7 +358,7 @@ pub(crate) unsafe fn replay_split<const Q_GROUPS: usize, const SP_SMEM_BYTES: us
                     if col >= k_min_u32 && col <= k_max_u32 {
                         if has_delta && col >= first_pos_u32 {
                             let row_off = ((col - first_pos_u32) * kv_heads_u32 + kv_head_u32) as usize * 64 + (ch * 4) as usize;
-                            crate::ptx::copy16(dst, $delta.add(row_off));
+                            crate::ptx::copy16_stream(dst, $delta.add(row_off));
                         } else {
                             let phys = if is_ring {
                                 if view_pow2 { col & view_mask } else { col % view_u32 }
@@ -366,7 +366,7 @@ pub(crate) unsafe fn replay_split<const Q_GROUPS: usize, const SP_SMEM_BYTES: us
                                 col
                             };
                             let row_off = (phys * kv_heads_u32 + kv_head_u32) as usize * 64 + (ch * 4) as usize;
-                            crate::ptx::copy16(dst, $plane.add(row_off));
+                            crate::ptx::copy16_stream(dst, $plane.add(row_off));
                         }
                     } else {
                         st_shared_zero16(dst);
@@ -460,6 +460,15 @@ pub(crate) unsafe fn replay_split<const Q_GROUPS: usize, const SP_SMEM_BYTES: us
         let v_ld_r1 = 16 + v_ld_r0;
         let v_ld_sub = lane >> 4;
 
+        let has_hi = q_cnt_u32 > 8;
+        let has_r3 = Q_GROUPS == 2 && q_cnt_u32 > 24;
+        if !has_hi {
+            store_u32(p_base + swiz64(r1 as usize, warp) + (t_u32 << 2), 0);
+        }
+        if Q_GROUPS == 2 && !has_r3 {
+            store_u32(p_base + swiz64(r3 as usize, warp) + (t_u32 << 2), 0);
+        }
+
         let mut t_base = first_t_u32;
         while t_base < last_t_u32 {
             let next_t = t_base + FW_SPLIT_BKV as u32;
@@ -492,20 +501,26 @@ pub(crate) unsafe fn replay_split<const Q_GROUPS: usize, const SP_SMEM_BYTES: us
                 while j < FW_REL_DIM as u32 {
                     let trow = t_smem + j * (SP_T_PITCH as u32 * 4);
                     let a0 = f32::from_bits(load_u32(mrow0 + (j << 2)));
-                    let a1 = f32::from_bits(load_u32(mrow1 + (j << 2)));
                     let t00 = f32::from_bits(load_u32(trow + (rel_i0 << 2)));
                     let t01 = f32::from_bits(load_u32(trow + ((rel_i0 - 1) << 2)));
-                    let t10 = f32::from_bits(load_u32(trow + (rel_i1 << 2)));
-                    let t11 = f32::from_bits(load_u32(trow + ((rel_i1 - 1) << 2)));
-                    b0[0] += a0 * t00; b0[1] += a0 * t01; b0[2] += a1 * t10; b0[3] += a1 * t11;
+                    b0[0] += a0 * t00; b0[1] += a0 * t01;
+                    if has_hi {
+                        let a1 = f32::from_bits(load_u32(mrow1 + (j << 2)));
+                        let t10 = f32::from_bits(load_u32(trow + (rel_i1 << 2)));
+                        let t11 = f32::from_bits(load_u32(trow + ((rel_i1 - 1) << 2)));
+                        b0[2] += a1 * t10; b0[3] += a1 * t11;
+                    }
                     if Q_GROUPS == 2 {
                         let a2 = f32::from_bits(load_u32(mrow2 + (j << 2)));
-                        let a3 = f32::from_bits(load_u32(mrow3 + (j << 2)));
                         let t20 = f32::from_bits(load_u32(trow + (rel_i2 << 2)));
                         let t21 = f32::from_bits(load_u32(trow + ((rel_i2 - 1) << 2)));
-                        let t30 = f32::from_bits(load_u32(trow + (rel_i3 << 2)));
-                        let t31 = f32::from_bits(load_u32(trow + ((rel_i3 - 1) << 2)));
-                        b1[0] += a2 * t20; b1[1] += a2 * t21; b1[2] += a3 * t30; b1[3] += a3 * t31;
+                        b1[0] += a2 * t20; b1[1] += a2 * t21;
+                        if has_r3 {
+                            let a3 = f32::from_bits(load_u32(mrow3 + (j << 2)));
+                            let t30 = f32::from_bits(load_u32(trow + (rel_i3 << 2)));
+                            let t31 = f32::from_bits(load_u32(trow + ((rel_i3 - 1) << 2)));
+                            b1[2] += a3 * t30; b1[3] += a3 * t31;
+                        }
                     }
                     j += 1;
                 }
@@ -526,13 +541,17 @@ pub(crate) unsafe fn replay_split<const Q_GROUPS: usize, const SP_SMEM_BYTES: us
             }
             s0[0] = eval_sc!(s0[0], klo0, khi0, c0, b0[0]);
             s0[1] = eval_sc!(s0[1], klo0, khi0, c1, b0[1]);
-            s0[2] = eval_sc!(s0[2], klo1, khi1, c0, b0[2]);
-            s0[3] = eval_sc!(s0[3], klo1, khi1, c1, b0[3]);
+            if has_hi {
+                s0[2] = eval_sc!(s0[2], klo1, khi1, c0, b0[2]);
+                s0[3] = eval_sc!(s0[3], klo1, khi1, c1, b0[3]);
+            }
             if Q_GROUPS == 2 {
                 s1[0] = eval_sc!(s1[0], klo2, khi2, c0, b1[0]);
                 s1[1] = eval_sc!(s1[1], klo2, khi2, c1, b1[1]);
-                s1[2] = eval_sc!(s1[2], klo3, khi3, c0, b1[2]);
-                s1[3] = eval_sc!(s1[3], klo3, khi3, c1, b1[3]);
+                if has_r3 {
+                    s1[2] = eval_sc!(s1[2], klo3, khi3, c0, b1[2]);
+                    s1[3] = eval_sc!(s1[3], klo3, khi3, c1, b1[3]);
+                }
             }
 
             // 3. Cross-warp deterministic max reduction across all 32 keys.
@@ -545,17 +564,25 @@ pub(crate) unsafe fn replay_split<const Q_GROUPS: usize, const SP_SMEM_BYTES: us
                 }};
             }
             let mw0 = warp_max!(s0[0], s0[1]);
-            let mw1 = warp_max!(s0[2], s0[3]);
             if t_u32 == 0 {
                 store_u32(red_m + ((warp_u32 * qt_u32 + r0) << 2), mw0.to_bits());
-                store_u32(red_m + ((warp_u32 * qt_u32 + r1) << 2), mw1.to_bits());
+            }
+            if has_hi {
+                let mw1 = warp_max!(s0[2], s0[3]);
+                if t_u32 == 0 {
+                    store_u32(red_m + ((warp_u32 * qt_u32 + r1) << 2), mw1.to_bits());
+                }
             }
             if Q_GROUPS == 2 {
                 let mw2 = warp_max!(s1[0], s1[1]);
-                let mw3 = warp_max!(s1[2], s1[3]);
                 if t_u32 == 0 {
                     store_u32(red_m + ((warp_u32 * qt_u32 + r2) << 2), mw2.to_bits());
-                    store_u32(red_m + ((warp_u32 * qt_u32 + r3) << 2), mw3.to_bits());
+                }
+                if has_r3 {
+                    let mw3 = warp_max!(s1[2], s1[3]);
+                    if t_u32 == 0 {
+                        store_u32(red_m + ((warp_u32 * qt_u32 + r3) << 2), mw3.to_bits());
+                    }
                 }
             }
             // Barrier #1: all warps finished reading K[t_base] & T[t_base] and writing red_m.
@@ -584,34 +611,43 @@ pub(crate) unsafe fn replay_split<const Q_GROUPS: usize, const SP_SMEM_BYTES: us
                 }};
             }
             let mt0 = tile_max!(r0);
-            let mt1 = tile_max!(r1);
             let mn0 = if mt0 == f32::NEG_INFINITY { m_r0 } else { fmax(m_r0, mt0) };
-            let mn1 = if mt1 == f32::NEG_INFINITY { m_r1 } else { fmax(m_r1, mt1) };
             let p00 = to_p!(s0[0], mn0); let p01 = to_p!(s0[1], mn0);
-            let p02 = to_p!(s0[2], mn1); let p03 = to_p!(s0[3], mn1);
             store_u32(p_base + swiz64(r0 as usize, warp) + (t_u32 << 2), cvt_bf16x2(p00, p01));
-            store_u32(p_base + swiz64(r1 as usize, warp) + (t_u32 << 2), cvt_bf16x2(p02, p03));
             let mut lw0 = p00 + p01; lw0 += shfl_xor_f32(lw0, 1); lw0 += shfl_xor_f32(lw0, 2);
-            let mut lw1 = p02 + p03; lw1 += shfl_xor_f32(lw1, 1); lw1 += shfl_xor_f32(lw1, 2);
             if t_u32 == 0 {
                 store_u32(red_l + ((warp_u32 * qt_u32 + r0) << 2), lw0.to_bits());
-                store_u32(red_l + ((warp_u32 * qt_u32 + r1) << 2), lw1.to_bits());
+            }
+            let (mut mt1, mut mn1) = (f32::NEG_INFINITY, m_r1);
+            if has_hi {
+                mt1 = tile_max!(r1);
+                mn1 = if mt1 == f32::NEG_INFINITY { m_r1 } else { fmax(m_r1, mt1) };
+                let p02 = to_p!(s0[2], mn1); let p03 = to_p!(s0[3], mn1);
+                store_u32(p_base + swiz64(r1 as usize, warp) + (t_u32 << 2), cvt_bf16x2(p02, p03));
+                let mut lw1 = p02 + p03; lw1 += shfl_xor_f32(lw1, 1); lw1 += shfl_xor_f32(lw1, 2);
+                if t_u32 == 0 {
+                    store_u32(red_l + ((warp_u32 * qt_u32 + r1) << 2), lw1.to_bits());
+                }
             }
             let (mut mt2, mut mt3, mut mn2, mut mn3) = (f32::NEG_INFINITY, f32::NEG_INFINITY, m_r2, m_r3);
             if Q_GROUPS == 2 {
                 mt2 = tile_max!(r2);
-                mt3 = tile_max!(r3);
                 mn2 = if mt2 == f32::NEG_INFINITY { m_r2 } else { fmax(m_r2, mt2) };
-                mn3 = if mt3 == f32::NEG_INFINITY { m_r3 } else { fmax(m_r3, mt3) };
                 let p10 = to_p!(s1[0], mn2); let p11 = to_p!(s1[1], mn2);
-                let p12 = to_p!(s1[2], mn3); let p13 = to_p!(s1[3], mn3);
                 store_u32(p_base + swiz64(r2 as usize, warp) + (t_u32 << 2), cvt_bf16x2(p10, p11));
-                store_u32(p_base + swiz64(r3 as usize, warp) + (t_u32 << 2), cvt_bf16x2(p12, p13));
                 let mut lw2 = p10 + p11; lw2 += shfl_xor_f32(lw2, 1); lw2 += shfl_xor_f32(lw2, 2);
-                let mut lw3 = p12 + p13; lw3 += shfl_xor_f32(lw3, 1); lw3 += shfl_xor_f32(lw3, 2);
                 if t_u32 == 0 {
                     store_u32(red_l + ((warp_u32 * qt_u32 + r2) << 2), lw2.to_bits());
-                    store_u32(red_l + ((warp_u32 * qt_u32 + r3) << 2), lw3.to_bits());
+                }
+                if has_r3 {
+                    mt3 = tile_max!(r3);
+                    mn3 = if mt3 == f32::NEG_INFINITY { m_r3 } else { fmax(m_r3, mt3) };
+                    let p12 = to_p!(s1[2], mn3); let p13 = to_p!(s1[3], mn3);
+                    store_u32(p_base + swiz64(r3 as usize, warp) + (t_u32 << 2), cvt_bf16x2(p12, p13));
+                    let mut lw3 = p12 + p13; lw3 += shfl_xor_f32(lw3, 1); lw3 += shfl_xor_f32(lw3, 2);
+                    if t_u32 == 0 {
+                        store_u32(red_l + ((warp_u32 * qt_u32 + r3) << 2), lw3.to_bits());
+                    }
                 }
             }
 
@@ -669,10 +705,14 @@ pub(crate) unsafe fn replay_split<const Q_GROUPS: usize, const SP_SMEM_BYTES: us
                 };
             }
             update_row_lo!(mt0, mn0, m_r0, l_r0, r0, o00, o01, o02, o03);
-            update_row_hi!(mt1, mn1, m_r1, l_r1, r1, o00, o01, o02, o03);
+            if has_hi {
+                update_row_hi!(mt1, mn1, m_r1, l_r1, r1, o00, o01, o02, o03);
+            }
             if Q_GROUPS == 2 {
                 update_row_lo!(mt2, mn2, m_r2, l_r2, r2, o10, o11, o12, o13);
-                update_row_hi!(mt3, mn3, m_r3, l_r3, r3, o10, o11, o12, o13);
+                if has_r3 {
+                    update_row_hi!(mt3, mn3, m_r3, l_r3, r3, o10, o11, o12, o13);
+                }
             }
 
             // 4. O += P * V for warp's 32 columns (`d = 32*warp .. +32`), kt = 0 (keys 0..16) then kt = 1 (keys 16..32).
@@ -800,13 +840,17 @@ pub(crate) unsafe fn replay_reduce(table: *const crate::inkling_launch::Command,
             let m_s = *ml_base.add(slot * 2);
             let l_s = *ml_base.add(slot * 2 + 1);
             if l_s != 0.0f32 {
-                let m_new = fmax(m, m_s);
-                let alpha = exp(m - m_new);
-                let beta = exp(m_s - m_new);
                 let o_s = *partials.add(slot * FW_HEAD_DIM + tid);
-                acc = acc * alpha + o_s * beta;
-                l = l * alpha + l_s * beta;
-                m = m_new;
+                if m_s > m {
+                    let alpha = exp(m - m_s);
+                    acc = acc * alpha + o_s;
+                    l = l * alpha + l_s;
+                    m = m_s;
+                } else {
+                    let beta = exp(m_s - m);
+                    acc += o_s * beta;
+                    l += l_s * beta;
+                }
             }
             s += 1;
         }

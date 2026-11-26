@@ -214,8 +214,6 @@ impl<'a,C:Compute,W:Weights<C>> Service<'a,C,W> {
     /// What the chats can use: the room less the values of one step.
     pub fn pool(&self)->usize {self.pool}
     pub fn with_prompt_keep(mut self,keep:bool)->Self {self.keep=keep;self}
-    /// Maximum rows verified in one drafted pass (`VERIFY_ROW_CAP = 16` when drafting is enabled).
-    pub(super) fn verify_row_cap(&self)->usize {if self.depth>0 {mtp_batch::VERIFY_ROW_CAP.min(self.driver.limits().step_rows)} else {1}}
     /// Retention shares the session pool. The scheduler evicts idle snapshots before it admits more live bytes.
     pub fn schedule(&self)->(CacheLimits,Config) {
         let pool=self.pool;
@@ -532,7 +530,9 @@ impl<'a,C:Compute,W:Weights<C>> spark_serve::Engine for Service<'a,C,W> {
     /// With two or more chats a tick gives enough rows for either multi-chat verify (`verify_row_cap`) or plain cohort decode (`self.chats`).
     fn shared_decode_rows(&self)->usize {if self.depth>0 {self.chats.max(self.verify_row_cap())} else {self.chats}}
     fn decode_row_limit(&self,chats:usize)->usize {
-        if self.depth>0 && chats<=self.draft_chat_limit_value() {self.verify_row_cap()} else {chats.max(1)}
+        if self.depth>0 && chats<=self.draft_chat_limit_value() {
+            if chats<=1 {16.min(self.driver.limits().step_rows)} else {self.verify_row_cap()}
+        } else {chats.max(1)}
     }
     fn prefill_batch<'s>(&'s self,rows:&mut [BatchRows<'_,Self::Session<'s>>])->std::result::Result<Vec<Predictions>,BatchError> {
         self.batch(rows,super::experts::Phase::Prefill).map_err(|message|BatchError {request:None,message})
@@ -545,7 +545,7 @@ impl<'a,C:Compute,W:Weights<C>> spark_serve::Engine for Service<'a,C,W> {
     fn shared_prefill_limit(&self)->usize {self.driver.limits().step_rows}
     /// The rows of one shared read: the step row limit, which the values of a step are counted for (`Service::new`).
     fn shared_prefill_rows(&self)->usize {self.driver.limits().step_rows}
-    fn lone_chat_rows(&self)->usize {self.verify_row_cap()}
+    fn lone_chat_rows(&self)->usize {if self.depth>0 {16.min(self.driver.limits().step_rows)} else {1}}
     fn step_batch<'s>(&'s self,rows:&mut [BatchRows<'_,Self::Session<'s>>])->std::result::Result<Vec<Predictions>,BatchError> {
         self.batch(rows,super::experts::Phase::Decode).map_err(|message|BatchError {request:None,message})
     }

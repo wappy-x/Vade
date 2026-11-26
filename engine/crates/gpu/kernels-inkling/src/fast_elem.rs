@@ -10,11 +10,13 @@ use crate::block_stream::{CONV_ADDEND, CONV_ROUND_SUM, CONV_TOKEN_TAPS};
 use crate::fast_ops::{
     CAPPED_GATE_TABLE_WORDS, FOLD_FORM_WORD, FOLD_HALF, GATE_BLEND_NORM_TABLE_AT, NORM_CHUNKS_MAX,
     ROUTE_FOLD_CONV_FORM_WORD, ROUTE_FOLD_CONV_TAPS_MAX, ROUTE_FOLD_CONV_WEIGHTS_MAX,
-    ROUTER_PICK_COMPACT_WORD, ROUTER_PICKS_MAX, SHORT_CONV_MULTI_TAG, SHORT_CONV_PREFILL_TILE,
-    STREAM_OP_GATE_BLEND_NORM, STREAM_OP_RING_CONV_ONE, STREAM_OP_ROUTE_FOLD,
-    STREAM_OP_ROUTE_FOLD_CONV, STREAM_OP_ROUTE_FOLD_CONV_PREFILL, STREAM_OP_SHORT_CONV_WIN,
-    capped_gate_admitted, router_pick_admitted, router_pick_compact_admitted,
-    short_conv_multi_decode, stream_ops_admitted, stream_ops_parts,
+    ROUTER_PICK_COMPACT_WORD, ROUTER_PICKS_MAX, SHORT_CONV_MULTI_MASK_0, SHORT_CONV_MULTI_MASK_1,
+    SHORT_CONV_MULTI_MASK_2, SHORT_CONV_MULTI_MASK_3, SHORT_CONV_MULTI_RINGS_AT,
+    SHORT_CONV_MULTI_SLOTS_HI, SHORT_CONV_MULTI_SLOTS_LO, SHORT_CONV_MULTI_TAG,
+    SHORT_CONV_PREFILL_TILE, STREAM_OP_GATE_BLEND_NORM, STREAM_OP_RING_CONV_ONE,
+    STREAM_OP_ROUTE_FOLD, STREAM_OP_ROUTE_FOLD_CONV, STREAM_OP_ROUTE_FOLD_CONV_PREFILL,
+    STREAM_OP_SHORT_CONV_WIN, STREAM_OP_SOFTCAP_ARGMAX, capped_gate_admitted, router_pick_admitted,
+    router_pick_compact_admitted, short_conv_multi_valid, stream_ops_admitted, stream_ops_parts,
 };
 use crate::fixed_math::{rn, sigmoid, tanh};
 use crate::tc_ptx::{ld_global_nc_u32, ld_global_nc_v4, load_u32, shfl_xor_f32, shfl_xor_u32, store_u32};
@@ -466,6 +468,128 @@ pub(crate) unsafe fn replay_stream_ops(table: *const crate::inkling_launch::Comm
         let in2 = *w.add(3) as *const f32;
         let weight = *w.add(4) as *const f32;
         let output = *w.add(5) as *mut f32;
+        if subop == STREAM_OP_SOFTCAP_ARGMAX {
+            // Fused `Softcap` (`cap(rn(x), eps, bound)`) + greedy argmax (`[rows][parts][3]` or `[rows][3]`):
+            // eliminates writing/reading `[rows][vocab]` capped logits on greedy decode & verify steps.
+            // SAFETY: host checked via `fast_ops::check_softcap_argmax` that `in0` and `output` are disjoint,
+            // word-aligned, and sized for `rows * cols` (or `rows * parts * 3` in finish mode). `smem` (512 B)
+            // holds 8 warp triples (`96 B`); all 256 threads participate in warp shuffles and `_syncthreads`.
+            let cols = dim;
+            let parts = aux;
+            let finish = *w.add(9) != 0;
+            let eps = f32::from_bits(*w.add(10) as u32);
+            let row = core::arch::nvptx::_block_idx_x() as usize;
+            let part = core::arch::nvptx::_block_idx_y() as usize;
+            let gy_need = if finish { 1 } else { parts };
+            if !stream_ops_admitted(subop, rows, cols, parts, threads)
+                || core::arch::nvptx::_grid_dim_x() as usize != rows
+                || core::arch::nvptx::_grid_dim_y() as usize != gy_need
+                || row >= rows || part >= gy_need
+                || in0.is_null() || output.is_null()
+                || ((in0 as usize) | (output as usize)) & 3 != 0
+            {
+                core::arch::nvptx::trap();
+            }
+            let tid = core::arch::nvptx::_thread_idx_x() as usize;
+            let (warp, lane) = (tid >> 5, tid & 31);
+            let mut best = f32::NEG_INFINITY;
+            let mut best_id = u32::MAX;
+            let mut valid = 1u32;
+            if finish {
+                if tid < parts {
+                    let p = in0.add((row * parts + tid) * 3);
+                    let vb = *p;
+                    let vi = *p.add(1);
+                    let vv = *p.add(2);
+                    if vv != 1.0 { valid = 0; }
+                    if vi >= 0.0 { best = vb; best_id = vi as u32; }
+                }
+            } else {
+                let chunk = cols.div_ceil(parts);
+                let start = part * chunk;
+                let end = (start + chunk).min(cols);
+                if start < end {
+                    let row_ptr = in0.add(row * cols);
+                    let lo_safe = 1.0e-6f32 / eps;
+                    let hi_safe = 5.0f32 / eps;
+                    let can_skip = lo_safe > 0.0 && lo_safe.is_finite()
+                        && hi_safe > lo_safe && hi_safe.is_finite()
+                        && (1.0e-20f32..=1.0e20f32).contains(&bound);
+                    let mut thresh = f32::NEG_INFINITY;
+                    macro_rules! visit_logit {($val:expr, $idx:expr) => {{
+                        let r = rn($val);
+                        if !(r < thresh) {
+                            let c = tanh(r * eps) * bound;
+                            if !c.is_finite() {
+                                valid = 0;
+                            } else if c > best || (c == best && ($idx) < best_id) {
+                                best = c;
+                                best_id = $idx;
+                                if can_skip && r >= lo_safe {
+                                    thresh = if r < hi_safe { r } else { hi_safe };
+                                }
+                            }
+                        }
+                    }};}
+                    let lead = (4 - (((row_ptr.add(start) as usize) >> 2) & 3)) & 3;
+                    let aligned_start = (start + lead).min(end);
+                    if start + tid < aligned_start {
+                        let idx = start + tid;
+                        visit_logit!(f32::from_bits(ld_global_nc_u32(row_ptr.add(idx).cast())), idx as u32);
+                    }
+                    let aligned_end = aligned_start + ((end - aligned_start) & !3);
+                    let mut j = aligned_start + tid * 4;
+                    while j < aligned_end {
+                        let v = ld_global_nc_v4(row_ptr.add(j));
+                        visit_logit!(v[0], j as u32);
+                        visit_logit!(v[1], (j + 1) as u32);
+                        visit_logit!(v[2], (j + 2) as u32);
+                        visit_logit!(v[3], (j + 3) as u32);
+                        j += threads * 4;
+                    }
+                    if aligned_end + tid < end {
+                        let idx = aligned_end + tid;
+                        visit_logit!(f32::from_bits(ld_global_nc_u32(row_ptr.add(idx).cast())), idx as u32);
+                    }
+                    let _ = thresh;
+                }
+            }
+            let mut dist = 16u32;
+            while dist > 0 {
+                let ov = shfl_xor_f32(best, dist);
+                let oid = shfl_xor_u32(best_id, dist);
+                valid &= shfl_xor_u32(valid, dist);
+                if ov > best || (ov == best && oid < best_id) { best = ov; best_id = oid; }
+                dist >>= 1;
+            }
+            if lane == 0 {
+                let off = (warp * 12) as u32;
+                store_u32(smem + off, best.to_bits());
+                store_u32(smem + off + 4, best_id);
+                store_u32(smem + off + 8, valid);
+            }
+            core::arch::nvptx::_syncthreads();
+            if warp == 0 {
+                let mut wb = if lane < 8 { f32::from_bits(load_u32(smem + (lane * 12) as u32)) } else { f32::NEG_INFINITY };
+                let mut wid = if lane < 8 { load_u32(smem + (lane * 12 + 4) as u32) } else { u32::MAX };
+                let mut wv = if lane < 8 { load_u32(smem + (lane * 12 + 8) as u32) } else { 1 };
+                let mut d = 4u32;
+                while d > 0 {
+                    let ov = shfl_xor_f32(wb, d);
+                    let oid = shfl_xor_u32(wid, d);
+                    wv &= shfl_xor_u32(wv, d);
+                    if ov > wb || (ov == wb && oid < wid) { wb = ov; wid = oid; }
+                    d >>= 1;
+                }
+                if lane == 0 {
+                    let dst = if finish { output.add(row * 3) } else { output.add((row * parts + part) * 3) };
+                    *dst = wb;
+                    *dst.add(1) = if wid == u32::MAX { -1.0f32 } else { wid as f32 };
+                    *dst.add(2) = wv as f32;
+                }
+            }
+            return;
+        }
         if subop == STREAM_OP_RING_CONV_ONE {
             // M=1 fused ring-write (+ optional RouteFold) + 1-head ShortConv + addend + round on a single-wave
             // 36x64 (or 72x32) grid with zero stack frame, vectorized taps, pre-wait PDL staging, and zero RAW reload.
@@ -921,26 +1045,56 @@ pub(crate) unsafe fn replay_stream_ops(table: *const crate::inkling_launch::Comm
         if subop == STREAM_OP_SHORT_CONV_WIN {
             // Window ShortConv: `in0` = window[(rows + taps - 1) * width] (or inputs[rows * width] with `ring`),
             // `in1` = optional token taps, `in2` = optional addend, `weight` = fixed taps [width * taps].
-            // Multi-chat kept-ring mode (`slot_word & SHORT_CONV_MULTI_TAG != 0`): `ring` holds `chats * taps * width`
-            // contiguous words verified by `check_short_conv_form`; `short_conv_multi_decode` re-validates `start_mask`,
-            // per-chat `first_slot < taps`, and `chat < chats` before indexing `ring.add(chat * taps * width)`.
+            // Multi-chat kept-ring mode (`slot_word & SHORT_CONV_MULTI_TAG != 0`, `rows <= 256`, `chats <= 64`):
+            // `ring` holds `chats * taps * width` contiguous words (or null with per-chat pointers in words `20..=83`),
+            // verified by `check_short_conv_multi` / `check_short_conv_multi_rings`; payload words hold 256-bit
+            // `start_mask` (`16, 17, 84, 85`) and 2-bit `slots_{lo,hi}` (`18, 19`). Device re-validates mask/chats
+            // and checks `chat < chats && fslot < taps` before indexing.
             let taps = aux;
             let width = dim;
             if heads == 0 || !width.is_multiple_of(heads) { core::arch::nvptx::trap(); }
             let slot_word = *w.add(13) as usize;
             let multi = (slot_word & SHORT_CONV_MULTI_TAG) != 0;
             let every = every_ptr;
-            let (chat_ring, first_slot, local_row) = if !ring.is_null() && multi {
-                let Some((start_mask, slots, _chats)) = short_conv_multi_decode(rows, taps, slot_word) else {
-                    core::arch::nvptx::trap();
-                };
-                if (ring as usize) & 3 != 0 || every.is_null() || *w.add(15) as usize != slot_word {
+            let (chat_ring, first_slot, local_row) = if multi {
+                let chats = slot_word & !SHORT_CONV_MULTI_TAG;
+                let m0 = *w.add(SHORT_CONV_MULTI_MASK_0);
+                let m1 = *w.add(SHORT_CONV_MULTI_MASK_1);
+                let m2 = *w.add(SHORT_CONV_MULTI_MASK_2);
+                let m3 = *w.add(SHORT_CONV_MULTI_MASK_3);
+                if !short_conv_multi_valid(rows, taps, chats, [m0, m1, m2, m3])
+                    || every.is_null() || *w.add(15) as usize != slot_word
+                {
                     core::arch::nvptx::trap();
                 }
-                let prefix = u32::from(start_mask) & ((2u32 << row) - 1);
-                let chat = (prefix.count_ones() as usize) - 1;
-                let chat_start = 31 - (prefix.leading_zeros() as usize);
-                (ring.add(chat * taps * width), ((slots >> (2 * chat)) & 3) as usize, row - chat_start)
+                let word_idx = row >> 6;
+                let bit_idx = row & 63;
+                let cur = match word_idx { 0 => m0, 1 => m1, 2 => m2, _ => m3 };
+                let masked = if bit_idx == 63 { cur } else { cur & ((2u64 << bit_idx) - 1) };
+                let (chat, chat_start) = if masked != 0 {
+                    let prev = (if word_idx > 0 { m0.count_ones() } else { 0 })
+                        + (if word_idx > 1 { m1.count_ones() } else { 0 })
+                        + (if word_idx > 2 { m2.count_ones() } else { 0 });
+                    ((prev + masked.count_ones()) as usize - 1, (word_idx << 6) + 63 - (masked.leading_zeros() as usize))
+                } else if word_idx == 3 && m2 != 0 {
+                    ((m0.count_ones() + m1.count_ones() + m2.count_ones()) as usize - 1, 128 + 63 - (m2.leading_zeros() as usize))
+                } else if word_idx >= 2 && m1 != 0 {
+                    ((m0.count_ones() + m1.count_ones()) as usize - 1, 64 + 63 - (m1.leading_zeros() as usize))
+                } else {
+                    ((m0.count_ones() as usize) - 1, 63 - (m0.leading_zeros() as usize))
+                };
+                let sw = if chat < 32 { *w.add(SHORT_CONV_MULTI_SLOTS_LO) } else { *w.add(SHORT_CONV_MULTI_SLOTS_HI) };
+                let fslot = ((sw >> (2 * (chat & 31))) & 3) as usize;
+                if chat >= chats || fslot >= taps { core::arch::nvptx::trap(); }
+                let per_chat_ring = if !ring.is_null() {
+                    if (ring as usize) & 3 != 0 { core::arch::nvptx::trap(); }
+                    ring.add(chat * taps * width)
+                } else {
+                    let p = *w.add(SHORT_CONV_MULTI_RINGS_AT + chat) as *const f32;
+                    if p.is_null() || (p as usize) & 3 != 0 { core::arch::nvptx::trap(); }
+                    p
+                };
+                (per_chat_ring, fslot, row - chat_start)
             } else {
                 if !ring.is_null() && (slot_word >= taps || (ring as usize) & 3 != 0) { core::arch::nvptx::trap(); }
                 (ring, slot_word, row)

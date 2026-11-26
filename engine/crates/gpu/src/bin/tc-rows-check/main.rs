@@ -66,6 +66,7 @@ mod check {
 
     pub fn run() -> Result<(), String> {
         spark_gpu_probe::driver::with_backend(0, spark_gpu_probe::layer_ptx()?, usize::MAX, |b| {
+            let panel_fixtures = super::dense_tc::prepare_panels(b)?;
             let queue = b.resident_queue()?;
             b.enable_resident_launches()?;
             let mut total_words = 0usize;
@@ -1362,7 +1363,7 @@ mod check {
                 }
             }
 
-            total_words += super::dense_tc::run(b)?;
+            total_words += super::dense_tc::run(b, &panel_fixtures)?;
 
             // 6. REFUSALS: verify bad shapes/alignments/overlaps record nothing.
             let tc_before = b.stats().recorded_kinds[Kind::PlainTcRows as usize];

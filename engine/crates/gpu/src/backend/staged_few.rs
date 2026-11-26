@@ -69,7 +69,7 @@ impl<'a> Backend<'a> {
     /// The base device address, starting 16-row band, and encoded K-slice count (`panel.slices`) of the registered
     /// Vade-BF11-BP encoding covering `weight` (at a 16-row band boundary). Always launches `panel.slices` rather
     /// than recomputing from sub-view stride so sub-views inside stacked matrices never mismatch `slices_enc`.
-    fn panel_at(&self, weight: &DeviceVector<'_>, cols: usize) -> Option<(u64, usize, usize)> {
+    pub(crate) fn panel_at(&self, weight: &DeviceVector<'_>, cols: usize) -> Option<(u64, usize, usize)> {
         let address = weight.device_address();
         let panels = self.inkling.panels.borrow();
         let (&base, panel) = panels.range(..=address).next_back()?;
@@ -91,8 +91,10 @@ impl<'a> Backend<'a> {
         let bands = rows.div_ceil(16);
         let plan = |(data, first_band, slices): (u64, usize, usize), given: Option<usize>| -> Option<(u64, usize, usize, usize, usize)> {
             let chunks = cols / crate::bf16_panels::CHUNK_COLS;
-            if !matches!(slices, 1 | 4) || !chunks.is_multiple_of(slices) { return None; }
-            let warps = if slices == 4 || force.is_some() {
+            if !matches!(slices, 1 | 4 | 6 | 8) || !chunks.is_multiple_of(slices) { return None; }
+            let warps = if slices > 1 {
+                slices
+            } else if force.is_some() {
                 4
             } else if bands <= 3 * sms {
                 1
@@ -101,29 +103,36 @@ impl<'a> Backend<'a> {
             } else {
                 4
             };
-            let blocks = if slices == 4 { bands } else { bands.div_ceil(warps) };
-            let max_blk = match warps { 4 => 6, 2 => 12, _ => 16 };
+            let blocks = if slices > 1 { bands } else { bands.div_ceil(warps) };
+            let max_blk = match warps { 8 => 3, 6 => 4, 4 => 6, 2 => 12, _ => 16 };
             let eff_blocks = if (slices == 4 || warps == 1) && blocks <= 96 { blocks * 2 } else { blocks };
-            let budget = few_product::one_panel_budget_capped(eff_blocks, sms, max_blk);
             let part_chunks = if let Some(part_tiles) = given {
                 if part_tiles == 0 || !part_tiles.is_multiple_of(4) { return None; }
                 let pc = part_tiles / 4;
-                if slices == 4 {
-                    let mut chosen = pc.max(4) / 4 * 4;
-                    while chosen >= 4 {
-                        if chunks.is_multiple_of(chosen)
-                            && few_product::one_panel_shared_slices(inputs, chosen, 4) <= few_product::ONE_SHARED_MAX
-                        {
+                if slices > 1 {
+                    let mut chosen = pc.min(chunks).max(slices) / slices * slices;
+                    while chosen >= slices {
+                        if few_product::one_panel_shared_slices(inputs, chosen, slices) <= few_product::ONE_SHARED_MAX {
                             break;
                         }
-                        chosen -= 4;
+                        chosen -= slices;
                     }
-                    (chosen >= 4).then_some(chosen)?
+                    (chosen >= slices).then_some(chosen)?
                 } else {
-                    (chunks.is_multiple_of(pc) && few_product::one_panel_shared_slices(inputs, pc, 1) <= few_product::ONE_SHARED_MAX).then_some(pc)?
+                    (pc <= chunks && few_product::one_panel_shared_slices(inputs, pc, 1) <= few_product::ONE_SHARED_MAX).then_some(pc)?
                 }
             } else {
-                few_product::one_panel_part_chunks(inputs, chunks, budget, slices)?
+                let mut found = None;
+                let mut cap = max_blk;
+                while cap >= 1 {
+                    let budget = few_product::one_panel_budget_capped(eff_blocks, sms, cap);
+                    if let Some(pc) = few_product::one_panel_part_chunks(inputs, chunks, budget, slices) {
+                        found = Some(pc);
+                        break;
+                    }
+                    cap -= 1;
+                }
+                found?
             };
             Some((data, first_band, slices, part_chunks, warps))
         };

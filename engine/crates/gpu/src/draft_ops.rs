@@ -1,11 +1,17 @@
 //! Dimensions of the draft lanes. Each operation defines all input, output and grid extents.
-/// Maximum packed activation rows per single `Panel` or `Panels` launch (up to 4 slabs of 8 rows).
-pub const PANEL_INPUTS_MAX:usize=32;
+/// Maximum packed activation rows per single `Panel` or `Panels` launch.
+pub const PANEL_INPUTS_MAX:usize=256;
 /// Maximum concurrent chats per batched draft Markov step (`FoldPickBatch`, `MarkovPrepBatch`, `MarkovStepBatch`).
-pub const DRAFT_BATCH_MAX:usize=8;
+pub const DRAFT_BATCH_MAX:usize=32;
+/// Power-of-2 warp slabs sharing one 16-row NVFP4 panel inside a 128-thread CTA (`1`, `2`, or `4`).
+/// Keeps every panel's slabs in the same CTA so all 4 warps hit L1 on one DRAM pass over up to 64 inputs.
+#[inline(always)]
+pub const fn panel_slabs(inputs:usize)->usize {
+    if inputs<=16 {1} else if inputs<=32 {2} else {4}
+}
 #[derive(Clone,Copy)]
 pub enum DraftOp {
-    /// Multiply lane-interleaved NVFP4 panels by up to 32 activation rows (`PANEL_INPUTS_MAX`).
+    /// Multiply lane-interleaved NVFP4 panels by up to `PANEL_INPUTS_MAX` activation rows.
     PackActivations(usize),
     /// Rounded residual followed by one finite-status triple per warp.
     CheckedSum(usize),
@@ -94,21 +100,24 @@ impl DraftOp {
                     [17,rows,hidden,latent.checked_mul(64)?+inputs*2+usize::from(confidence),epsilon.to_bits() as usize,bound.to_bits() as usize])}
             PackActivations(n) if n>0 && n.is_multiple_of(64)=>([n,0,0],n/64*18,n/16,[16,n/64,0,0,0,0]),
             Panel{rows,columns,inputs} if panel_words(rows,columns).is_some() && (1..=PANEL_INPUTS_MAX).contains(&inputs)=>{
-                ([panel_words(rows,columns)?,(columns/64*18).checked_mul(inputs)?,0],rows.checked_mul(inputs)?,rows.next_multiple_of(16)*2,[13,rows,columns,inputs,0,0])}
+                let slabs=panel_slabs(inputs);
+                ([panel_words(rows,columns)?,(columns/64*18).checked_mul(inputs)?,0],rows.checked_mul(inputs)?,rows.next_multiple_of(16).checked_mul(2)?.checked_mul(slabs)?,[13,rows,columns,inputs,0,0])}
             PanelGated{rows,columns,inputs} if panel_words(rows,columns).is_some() && (1..=16).contains(&inputs)=>{
                 ([panel_words(rows,columns)?,(columns/64*18).checked_mul(inputs)?,1],rows.checked_mul(inputs)?.checked_add(1)?,rows.next_multiple_of(16)*2,[13,rows,columns,inputs,1,0])}
             Panels{rows,columns,inputs} if (1..=PANEL_INPUTS_MAX).contains(&inputs) && rows[0]>0 && rows[1]>0 && rows.iter().all(|r|r.is_multiple_of(64))=>{
                 let mut words=0usize;
                 for r in rows.into_iter().filter(|&r|r>0) {words=words.checked_add(panel_words(r,columns)?)?;}
                 let total=rows[0].checked_add(rows[1])?.checked_add(rows[2])?;
-                ([words,(columns/64*18).checked_mul(inputs)?,0],total.checked_mul(inputs)?,total.checked_mul(2)?,[19,rows[0],columns,inputs,rows[1],rows[2]])}
+                let slabs=panel_slabs(inputs);
+                ([words,(columns/64*18).checked_mul(inputs)?,0],total.checked_mul(inputs)?,total.checked_mul(2)?.checked_mul(slabs)?,[19,rows[0],columns,inputs,rows[1],rows[2]])}
             FoldPick{rows,columns,epsilon,bound,confidence,gated} if epsilon>0.0 && bound>0.0=>{
                 let flags=usize::from(confidence)|(usize::from(gated)<<1);
                 ([panel_words(rows,columns)?.checked_add(rows)?,columns/64*18+usize::from(gated),rows],rows.div_ceil(16)*4,rows.next_multiple_of(16)*2,[14,rows,columns,flags,epsilon.to_bits() as usize,bound.to_bits() as usize])}
             FoldPickBatch{rows,columns,batch,epsilon,bound,confidence} if (1..=DRAFT_BATCH_MAX).contains(&batch) && epsilon>0.0 && bound>0.0=>{
                 let flags=usize::from(confidence)|((batch-1)<<2);
+                let slabs=batch.div_ceil(8);
                 ([panel_words(rows,columns)?.checked_add(rows)?,(columns/64*18).checked_mul(batch)?,rows.checked_mul(batch)?],
-                    batch.checked_mul(rows.div_ceil(16))?.checked_mul(4)?,rows.next_multiple_of(16)*2,[14,rows,columns,flags,epsilon.to_bits() as usize,bound.to_bits() as usize])}
+                    batch.checked_mul(rows.div_ceil(16))?.checked_mul(4)?,rows.next_multiple_of(16).checked_mul(2)?.checked_mul(slabs)?,[14,rows,columns,flags,epsilon.to_bits() as usize,bound.to_bits() as usize])}
             FoldFinish{tiles,confidence,stop_above_sum,gated} if tiles>0 && tiles<=(1<<24)/16 && stop_above_sum>=0.0=>{
                 // One block: the pick, four warp picks, then the exponential of each tile when it sums.
                 ([tiles*4,usize::from(gated),0],20+if confidence {tiles} else {0},128,[15,tiles,usize::from(confidence),stop_above_sum.to_bits() as usize,usize::from(gated),0])}

@@ -32,11 +32,50 @@ fn bf16_round_f32(x: f32) -> f32 {
     f32::from_bits(u32::from(bits) << 16)
 }
 
-fn matrix<'d>(b: &Backend<'d>, values: &[u16]) -> Result<DeviceVector<'d>, String> {
+fn matrix_with_outliers<'d>(b: &Backend<'d>, values: &[u16], rows: usize, cols: usize, register_panels: bool) -> Result<DeviceVector<'d>, String> {
     let mut v = b.vector(values.len() / 2)?;
     let bytes: Vec<u8> = values.iter().flat_map(|w| w.to_le_bytes()).collect();
     b.write_vector_bytes(&mut v, &bytes)?;
+    let v = v.into_resident_shared()?;
+    if register_panels {
+        b.register_bf16_panels(&v, rows, cols, &bytes)?;
+    }
+    Ok(v)
+}
+
+fn panel_weight(r: usize, c: usize, seed: usize) -> u16 {
+    // Tiles where `(r / 16 + c / 16) % 7 == 0` get an intentional wide-exponent outlier (`RAW` fallback);
+    // all other tiles stay within 8 consecutive high-byte magnitudes so `bf16_panels` compresses them!
+    let tr = r / 16;
+    let tc = c / 16;
+    let n = ((r * 131 + c * 17 + seed) as u32).wrapping_mul(2_654_435_761) >> 16;
+    if (tr + tc).is_multiple_of(7) && r % 16 == 3 && c % 16 == 5 {
+        return 0x4580 | (n as u16 & 0x007f);
+    }
+    if (tr + tc).is_multiple_of(7) && r % 16 == 11 && c % 16 == 9 {
+        return 0x3500 | (n as u16 & 0x007f);
+    }
+    let base_mag = (0x38 + ((tr * 5 + tc * 3 + seed) % 6)) as u16;
+    let delta = (n % 8) as u16;
+    let sign = ((n >> 3) & 1) as u16;
+    (sign << 15) | ((base_mag + delta) << 8) | (n as u16 & 0x00ff)
+}
+
+fn pack_bf16_words(x: &[f32]) -> Vec<u32> {
+    x.as_chunks::<2>().0.iter()
+        .map(|p| u32::from(spark_gpu_probe::tc_twin_bf16::bf16(p[0])) | (u32::from(spark_gpu_probe::tc_twin_bf16::bf16(p[1])) << 16))
+        .collect()
+}
+
+fn upload_u32<'d>(b: &Backend<'d>, words: &[u32]) -> Result<DeviceVector<'d>, String> {
+    let mut v = b.vector(words.len())?;
+    let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    b.write_vector_bytes(&mut v, &bytes)?;
     v.into_resident_shared()
+}
+
+fn matrix<'d>(b: &Backend<'d>, values: &[u16]) -> Result<DeviceVector<'d>, String> {
+    matrix_with_outliers(b, values, 0, 0, false)
 }
 
 fn poisoned<'d>(b: &Backend<'d>, words: usize) -> Result<DeviceVector<'d>, String> {
@@ -71,7 +110,51 @@ fn check_buf(b: &Backend<'_>, whole: &DeviceVector<'_>, want: &[f32], label: &st
     Ok(want.len())
 }
 
-pub fn run(b: &Backend<'_>) -> Result<usize, String> {
+pub struct PanelFixtures<'d> {
+    dense: Vec<(usize, usize, usize, Vec<u16>, DeviceVector<'d>)>,
+    split_w_vals: Vec<u16>,
+    split_w_dev: DeviceVector<'d>,
+}
+
+const PANEL_DENSE_SHAPES: &[(usize, usize, usize)] = &[
+    (1024usize, 256usize, 16usize),
+    (1024, 256, 32),
+    (2304, 256, 16),
+    (2304, 256, 32),
+    (2304, 512, 32),
+    (2304, 512, 70),
+    (2304, 3072, 32),
+    (6552, 512, 32),
+    (2305, 192, 29),
+    (2600, 192, 13),
+    (6552, 192, 32),
+    (8600, 192, 16),
+    (1024, 192, 125),
+    (2304, 192, 70),
+    (16_400, 128, 16),
+    (16_400, 128, 32),
+    // PLAIN_TC_BIG M-strip serpentine (`k <= 2304` height 16 / `k > 2304` height 8), partial bands & tail M=388.
+    (2304, 192, 520),
+    (645, 192, 388),
+    (520, 192, 650),
+    (1300, 128, 257),
+];
+
+/// Register all lossless `bf16_panels` matrices while the resident stream is idle (before `enable_resident_launches`).
+pub fn prepare_panels<'d>(b: &Backend<'d>) -> Result<PanelFixtures<'d>, String> {
+    let mut dense = Vec::with_capacity(PANEL_DENSE_SHAPES.len());
+    for &(rows, cols, inputs) in PANEL_DENSE_SHAPES {
+        let w_vals: Vec<u16> = (0..rows).flat_map(|r| (0..cols).map(move |c| panel_weight(r, c, rows + cols + inputs))).collect();
+        let w_dev = matrix_with_outliers(b, &w_vals, rows, cols, true)?;
+        dense.push((rows, cols, inputs, w_vals, w_dev));
+    }
+    let (rows, cols) = (3072usize, 256usize);
+    let split_w_vals: Vec<u16> = (0..rows).flat_map(|r| (0..cols).map(move |c| panel_weight(r, c, 911))).collect();
+    let split_w_dev = matrix_with_outliers(b, &split_w_vals, rows, cols, true)?;
+    Ok(PanelFixtures { dense, split_w_vals, split_w_dev })
+}
+
+pub fn run(b: &Backend<'_>, panels: &PanelFixtures<'_>) -> Result<usize, String> {
     let mut total_words = 0usize;
 
     // 1. Narrow 1-warp (`rows <= 128, inputs <= 256`) & 4-warp prefill (`inputs > 256`): single, pair, rounded.
@@ -222,6 +305,101 @@ pub fn run(b: &Backend<'_>) -> Result<usize, String> {
         }
         total_words += check_buf(b, &out0, &want0, &format!("split_0 {rows}x{cols}x{inputs}"))?;
         total_words += check_buf(b, &out1, &want1, &format!("split_1 {rows}x{cols}x{inputs}"))?;
+    }
+
+    // 6. Narrow `TC_FLAG_HALF_IN` (M <= 256) and `TC_MODE_NARROW_HALF` (`BM = 64`, M >= 257: single + dual-input BF16).
+    for &(rows, cols, inputs) in &[
+        (64usize, 512usize, 32usize),
+        (64, 512, 125),
+        (63, 192, 17),
+        (128, 256, 125),
+        (64, 512, 388),
+        (128, 256, 388),
+        (63, 192, 257),
+        (127, 256, 529),
+    ] {
+        let half = cols / 2;
+        let w_vals: Vec<u16> = (0..rows * cols).map(|i| weight(i + rows * 7 + cols + inputs)).collect();
+        let x1_vals: Vec<f32> = (0..inputs * half).map(|k| input_val(k + rows * 13 + 3)).collect();
+        let x2_vals: Vec<f32> = (0..inputs * half).map(|k| input_val(k + rows * 17 + 71)).collect();
+        let mut x_cat = Vec::with_capacity(inputs * cols);
+        for t in 0..inputs {
+            x_cat.extend_from_slice(&x1_vals[t * half..(t + 1) * half]);
+            x_cat.extend_from_slice(&x2_vals[t * half..(t + 1) * half]);
+        }
+        let w_dev = matrix(b, &w_vals)?;
+        let x_half = upload_u32(b, &pack_bf16_words(&x_cat))?;
+        let x1_half = upload_u32(b, &pack_bf16_words(&x1_vals))?;
+        let x2_half = upload_u32(b, &pack_bf16_words(&x2_vals))?;
+        let want = tc_ref(&w_vals, &x_cat, rows, cols, inputs, false);
+        let whole_s = poisoned(b, inputs * rows)?;
+        b.project_tc_rows_half_in_into(rows, cols, inputs, &x_half, &w_dev, &mut whole_s.resident_range(GUARD..GUARD + inputs * rows)?)?;
+        total_words += check_buf(b, &whole_s, &want, &format!("narrow_half_single {rows}x{cols}x{inputs}"))?;
+        let whole_p = poisoned(b, inputs * rows)?;
+        b.project_tc_rows_pair_half_in_into(rows, cols, inputs, &x1_half, &x2_half, &w_dev, &mut whole_p.resident_range(GUARD..GUARD + inputs * rows)?)?;
+        total_words += check_buf(b, &whole_p, &want, &format!("narrow_half_pair {rows}x{cols}x{inputs}"))?;
+    }
+
+    // 7. Lossless `bf16_panels` in `PLAIN_TC_ROWS` (Path 4 1w/2w/4w, Path 4b 4w Coop-W M=17..=128) + `PLAIN_TC_BIG`,
+    //    with deliberate `RAW` outlier tiles, partial tail bands (`rows % 16 != 0`), split outputs, dual-input pairs,
+    //    and 16-row-aligned + unaligned sub-views.
+    for (rows, cols, inputs, w_vals, w_dev) in &panels.dense {
+        let (rows, cols, inputs) = (*rows, *cols, *inputs);
+        let x_vals: Vec<f32> = (0..inputs * cols).map(|k| input_val(k + rows * 5 + inputs)).collect();
+        let x_dev = b.upload_vector(&x_vals)?.into_resident_shared()?;
+        let whole = poisoned(b, inputs * rows)?;
+        b.project_tc_rows_into(rows, cols, inputs, &x_dev, w_dev, &mut whole.resident_range(GUARD..GUARD + inputs * rows)?)?;
+        let want = tc_ref(w_vals, &x_vals, rows, cols, inputs, false);
+        total_words += check_buf(b, &whole, &want, &format!("panel_dense {rows}x{cols}x{inputs}"))?;
+    }
+    // Registered-panel split outputs (QKV/Coop-W/Big), dual-input pair, and 16-row-aligned / unaligned sub-views.
+    {
+        let (rows, cols) = (3072usize, 256usize);
+        let w_vals = &panels.split_w_vals;
+        let w_dev = &panels.split_w_dev;
+        for &inputs in &[16usize, 32, 125, 520] {
+            let x_vals: Vec<f32> = (0..inputs * cols).map(|k| input_val(k + inputs * 37)).collect();
+            let x_half = upload_u32(b, &pack_bf16_words(&x_vals))?;
+            let (p0, p1) = (1024usize, 2048usize);
+            let out0 = poisoned(b, inputs * p0)?;
+            let out1 = poisoned(b, inputs * p1)?;
+            let mut r0 = out0.resident_range(GUARD..GUARD + inputs * p0)?;
+            let mut r1 = out1.resident_range(GUARD..GUARD + inputs * p1)?;
+            b.project_tc_rows_split_half_in_into(rows, cols, inputs, &x_half, w_dev, &mut [(&mut r0, p0), (&mut r1, p1)])?;
+            let full = tc_ref(w_vals, &x_vals, rows, cols, inputs, false);
+            let mut want0 = Vec::with_capacity(inputs * p0);
+            let mut want1 = Vec::with_capacity(inputs * p1);
+            for m in 0..inputs {
+                want0.extend_from_slice(&full[m * rows..m * rows + p0]);
+                want1.extend_from_slice(&full[m * rows + p0..(m + 1) * rows]);
+            }
+            total_words += check_buf(b, &out0, &want0, &format!("panel_split0 {rows}x{cols}x{inputs}"))?;
+            total_words += check_buf(b, &out1, &want1, &format!("panel_split1 {rows}x{cols}x{inputs}"))?;
+        }
+        // Dual-input pair with panels.
+        for &inputs in &[16usize, 32] {
+            let half = cols / 2;
+            let x1: Vec<f32> = (0..inputs * half).map(|k| input_val(k + 101)).collect();
+            let x2: Vec<f32> = (0..inputs * half).map(|k| input_val(k + 202)).collect();
+            let mut x_cat = Vec::with_capacity(inputs * cols);
+            for t in 0..inputs { x_cat.extend_from_slice(&x1[t * half..(t + 1) * half]); x_cat.extend_from_slice(&x2[t * half..(t + 1) * half]); }
+            let x1_d = b.upload_vector(&x1)?.into_resident_shared()?;
+            let x2_d = b.upload_vector(&x2)?.into_resident_shared()?;
+            let whole = poisoned(b, inputs * rows)?;
+            b.project_tc_rows_pair_into(rows, cols, inputs, &x1_d, &x2_d, w_dev, &mut whole.resident_range(GUARD..GUARD + inputs * rows)?)?;
+            let want = tc_ref(w_vals, &x_cat, rows, cols, inputs, false);
+            total_words += check_buf(b, &whole, &want, &format!("panel_pair {rows}x{cols}x{inputs}"))?;
+        }
+        // 16-row-aligned sub-view (hits `panel_at`) + non-16-aligned sub-view (clean fallback).
+        for &(row_off, sub_rows, inputs) in &[(32usize, 1056usize, 32usize), (32, 1056, 16), (8, 1024, 32)] {
+            let sub_w = w_dev.resident_range(row_off * cols / 2..(row_off + sub_rows) * cols / 2)?;
+            let x_vals: Vec<f32> = (0..inputs * cols).map(|k| input_val(k + row_off * 19 + inputs)).collect();
+            let x_dev = b.upload_vector(&x_vals)?.into_resident_shared()?;
+            let whole = poisoned(b, inputs * sub_rows)?;
+            b.project_tc_rows_into(sub_rows, cols, inputs, &x_dev, &sub_w, &mut whole.resident_range(GUARD..GUARD + inputs * sub_rows)?)?;
+            let want = tc_ref(&w_vals[row_off * cols..(row_off + sub_rows) * cols], &x_vals, sub_rows, cols, inputs, false);
+            total_words += check_buf(b, &whole, &want, &format!("panel_sub off={row_off} {sub_rows}x{cols}x{inputs}"))?;
+        }
     }
 
     println!("DENSE TC WAVE1+2 BIT-EXACT PASS words={total_words}");

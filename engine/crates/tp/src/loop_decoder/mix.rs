@@ -240,6 +240,18 @@ pub trait Weights<C:Compute> {
     fn prefers_half_experts(&self,_layer:usize)->bool {false}
     /// True when loop layers `start..end` can consume packed BF16 gate-normed messages (`TC_MODE_NARROW_HALF`).
     fn prefers_half_messages(&self,_start:usize,_end:usize)->bool {false}
+    /// True when loop layers `start..end` can execute fused lazy message gates (`PREFILL_GATE_FUSE`, kind 123).
+    fn prefers_lazy_messages(&self,_start:usize,_end:usize)->bool {false}
+    /// Prefill lazy message metadata (`PG_OP_MSG_META`): returns `(msg_weights, msg_nscales)` without materializing messages.
+    #[allow(clippy::too_many_arguments)]
+    fn prefill_msg_meta(&self,_compute:&C,_rows:usize,_dim:usize,_scale:f32,_eps:f32,_queries:&[f32],_list:&[&C::Value])->Result<Option<(C::Value,C::Value)>> {Ok(None)}
+    /// Prefill fused `GateDown + GateOuter + GateBlend + RoundedNorm` (`PG_OP_FULL`) for `1..=3` gates over lazy sources.
+    #[allow(clippy::too_many_arguments)]
+    fn prefill_gate_fuse(
+        &self,_compute:&C,_layer:usize,_sources:&[&C::Value],
+        _entries:&[(Message,&C::Value,&C::Value,&C::Value,&C::Value,Option<&[f32]>)],
+        _rows:usize,_eps:f32,_half_out:bool,
+    )->Result<Option<Vec<C::Value>>> {Ok(None)}
     /// True when `Weight::Output(layer)` can consume packed BF16 attention output (`FW_HALF_OUT`) directly.
     fn prefers_half_output(&self,_layer:usize)->bool {false}
     /// Prefill `FLASH_WINDOW_ATTN` emitting packed BF16 output (`FW_HALF_OUT`).
@@ -655,15 +667,20 @@ impl<'a,C:Compute,W:Weights<C>> Run<'a,C,W> {
     }
 }
 
+enum Messages<V> {
+    Materialized(V, V, bool),
+    Lazy { sources: Vec<V>, weights: V, nscales: V },
+}
 /// The mix state of the rows of one step: it lives for one step and holds no chat state. A token step is a step of
 /// one row. Every value that goes in or comes out is `[rows][width]`, row-major, and a row reads its own words only.
 /// The stack holds the plain norm of each vector of the block list, oldest first: the embedding, then each finished
 /// block. Each entry is `[rows][width]`. `messages` holds the messages of the running pass and their gate norms, each
-/// `[messages][rows][width]`, so one message of all rows is one range.
-pub struct Token<V> {stack:Vec<V>,normed:Option<V>,start:Option<(V,usize)>,messages:Option<(V,V,bool)>}
-impl<V> Default for Token<V> {fn default()->Self {Self {stack:Vec::new(),normed:None,start:None,messages:None}}}
+/// `[messages][rows][width]`, or lazy `(sources, weights, nscales)` for fused prefill gates.
+pub struct Token<V> {stack:Vec<V>,normed:Option<V>,start:Option<(V,usize)>,messages:Option<Messages<V>>,decode:bool}
+impl<V> Default for Token<V> {fn default()->Self {Self {stack:Vec::new(),normed:None,start:None,messages:None,decode:false}}}
 impl<V> Token<V> {
     pub fn new()->Self {Self::default()}
+    pub(super) fn for_decode()->Self {Self {decode:true,..Self::default()}}
     /// Vectors on the block list now.
     pub fn blocks(&self)->usize {self.stack.len()}
     /// True when the running pass reads messages.
@@ -688,53 +705,79 @@ impl<V> Token<V> {
         need(queries.len()==(d.core.end-d.core.start) as usize*MESSAGES*width,"the message queries differ from the loop range")?;
         // No visit reads the messages of the pass before again: they go before the new ones are made.
         self.messages=None;
-        // A prompt step of more than `SMALL_PASS_ROWS` rows makes its messages and their gate norms in one launch where
-        // the backend has it: the words of the transposed mix and of `gate_norm` below (the norm's epsilon is the
-        // config's, as in `rounded_norm`). Up to `SMALL_PASS_ROWS` rows (where `Compute::mix_rows` may take the step)
-        // the messages take `norm_blend`.
-        let both=if count>super::SMALL_PASS_ROWS {
+        // A prompt step of more than `SMALL_PASS_ROWS` rows prefers lazy message metadata (`PREFILL_GATE_FUSE`)
+        // to eliminate global `[messages][rows][dim]` materialization, falling back to `MIX_LIST_NORM_HALF`.
+        // Decode passes of any width (including wide multi-chat verify `> 32` rows) stay on `Compute::mix_rows_normed`
+        // (`MIX_ONE`, admitted up to `MIX_ONE_ROWS_MAX`) so decode keeps identical 32-lane warp-butterfly dot order
+        // across `M = 1..=DECODE_PASS_ROWS` without falling back to serial `RowDots`.
+        let built=if !self.decode && count>super::SMALL_PASS_ROWS {
             let last=run.plain_norm(&stream,count)?;
             let mut from=self.stack[*kept+1..].iter().collect::<Vec<_>>();from.push(&last);
-            let want_half=run.weights.prefers_half_messages(d.core.start as usize,d.core.end as usize)
-                && d.layers[d.core.start as usize..d.core.end as usize].iter().all(|l|l.attention_queries>0);
-            if want_half && let Some((m,n))=run.weights.mix_prefill_normed_half(c,count,width,run.scale,d.epsilon as f32,queries,&from)? {
-                Some((m,n,true))
+            let all_attn_queries=d.layers[d.core.start as usize..d.core.end as usize].iter().all(|l|l.attention_queries>0);
+            if all_attn_queries && run.weights.prefers_lazy_messages(d.core.start as usize,d.core.end as usize)
+                && let Some((weights,nscales))=run.weights.prefill_msg_meta(c,count,width,run.scale,d.epsilon as f32,queries,&from)?
+            {
+                let mut sources=Vec::with_capacity(from.len());
+                for s in &self.stack[*kept+1..] {sources.push(c.range(s,0,count*width)?);}
+                sources.push(last);
+                Some(Messages::Lazy {sources,weights,nscales})
             } else {
-                match c.mix_prefill_normed(count,width,run.scale,d.epsilon as f32,queries,&from)? {
-                    Some((m,n))=>Some((m,n,false)),
-                    None=>{
-                        let messages=run.blend_transposed(queries,&from,count)?;
-                        // The gate norm of every message of the pass and every row in one launch: each row is normed alone.
-                        let normed=run.gate_norm(&messages)?;
-                        Some((messages,normed,false))
-                    },
+                let want_half=run.weights.prefers_half_messages(d.core.start as usize,d.core.end as usize) && all_attn_queries;
+                if want_half && let Some((m,n))=run.weights.mix_prefill_normed_half(c,count,width,run.scale,d.epsilon as f32,queries,&from)? {
+                    Some(Messages::Materialized(m,n,true))
+                } else {
+                    match c.mix_prefill_normed(count,width,run.scale,d.epsilon as f32,queries,&from)? {
+                        Some((m,n))=>Some(Messages::Materialized(m,n,false)),
+                        None=>{
+                            let messages=run.blend_transposed(queries,&from,count)?;
+                            let normed=run.gate_norm(&messages)?;
+                            Some(Messages::Materialized(messages,normed,false))
+                        },
+                    }
                 }
             }
         } else {None};
-        let (messages,normed,normed_half)=match both {
-            Some(triple)=>triple,
+        let msg_state=match built {
+            Some(ms)=>ms,
             None=>{
                 let refs:Vec<&V>=self.stack[*kept+1..].iter().collect();
-                if let Some((_,Some(messages),normed))=c.mix_rows_normed(count,width,run.scale,MIX_NORM_EPSILON,d.epsilon as f32,true,false,true,queries,&refs,&stream,None,false)? {
-                    (messages,normed,false)
+                let want_half=self.decode && count>spark_gpu_probe::few_product::FEW_MAX
+                    && run.weights.prefers_half_messages(d.core.start as usize,d.core.end as usize)
+                    && d.layers[d.core.start as usize..d.core.end as usize].iter().all(|l|l.attention_queries>0);
+                if want_half && let Some((_,Some(messages),normed))=run.weights.mix_rows_normed_half(c,count,width,run.scale,MIX_NORM_EPSILON,d.epsilon as f32,true,false,true,queries,&refs,&stream,None,false)? {
+                    Messages::Materialized(messages,normed,true)
+                } else if let Some((_,Some(messages),normed))=c.mix_rows_normed(count,width,run.scale,MIX_NORM_EPSILON,d.epsilon as f32,true,false,true,queries,&refs,&stream,None,false)? {
+                    Messages::Materialized(messages,normed,false)
                 } else {
-                    // The mix gives `[messages][rows][width]` directly when fused or transposed blend is available.
                     let (_,messages)=run.norm_blend(queries,&self.stack[*kept+1..],&stream,count,true,false)?;
-                    // The gate norm of every message of the pass and every row in one launch: each row is normed alone.
                     let normed=run.gate_norm(&messages)?;
-                    (messages,normed,false)
+                    Messages::Materialized(messages,normed,false)
                 }
             },
         };
         let restart=c.range(saved,0,count*width)?;
-        self.stack.truncate(*kept);self.normed=None;self.messages=Some((messages,normed,normed_half));
+        self.stack.truncate(*kept);self.normed=None;self.messages=Some(msg_state);
         Ok(restart)
+    }
+    /// One lazy message's `(msg_weights, msg_nscales)` slices when `Messages::Lazy` is active.
+    fn lazy_message<C:Compute<Value=V>,W:Weights<C>>(&self,run:&Run<'_,C,W>,layer:usize,spec:&LoopLayerDescription,which:Message,count:usize)->Result<Option<(V,V)>> {
+        let start=run.description.core.start as usize;
+        need(spec.message_gates && layer>=start,"a visit with messages names a layer with no gates")?;
+        let Some(Messages::Lazy {sources,weights,nscales})=self.messages.as_ref() else {return Ok(None);};
+        let idx=(layer-start)*MESSAGES+which as usize;
+        let kept=sources.len();
+        Ok(Some((
+            run.compute.range(weights,idx*count*kept,count*kept)?,
+            run.compute.range(nscales,idx*count,count)?,
+        )))
     }
     /// One message of a layer for the `count` rows of the step and its gate norm (`[count][width]`, or `[count][width/2]` if half).
     fn message_form<C:Compute<Value=V>,W:Weights<C>>(&self,run:&Run<'_,C,W>,layer:usize,spec:&LoopLayerDescription,which:Message,count:usize)->Result<(V,V,bool)> {
         let start=run.description.core.start as usize;
         need(spec.message_gates && layer>=start,"a visit with messages names a layer with no gates")?;
-        let (all,normed,half)=self.messages.as_ref().ok_or("loop decoder: a visit reads messages that no pass made")?;
+        let Messages::Materialized(all,normed,half)=self.messages.as_ref().ok_or("loop decoder: a visit reads messages that no pass made")? else {
+            return Err("loop decoder: lazy message state requires fused prefill gate path".into());
+        };
         let idx=(layer-start)*MESSAGES+which as usize;
         let len=count*run.width;
         let n_len=if *half {count*(run.width/2)} else {len};
@@ -761,8 +804,11 @@ impl<V> Token<V> {
         let (layer,spec)=run.layer(visit)?;let c=run.compute;let width=run.width;let count=run.rows(stream)?;
         let rows=spec.attention_queries as usize;self.normed=None;
         let post_eps=run.description.epsilon as f32;
-        let want_half=fuse_norms && count>super::SMALL_PASS_ROWS && run.weights.prefers_half_attention(layer);
-        let msg_half=self.messages.as_ref().is_some_and(|m|m.2);
+        let prefill_wide=(!self.decode && count>super::SMALL_PASS_ROWS)
+            || (self.decode && count>spark_gpu_probe::few_product::FEW_MAX);
+        let want_half=fuse_norms && prefill_wide && run.weights.prefers_half_attention(layer);
+        let msg_lazy=matches!(self.messages,Some(Messages::Lazy {..}));
+        let msg_half=msg_lazy || matches!(self.messages,Some(Messages::Materialized(_,_,true)));
         // The gate norm of a mix, where the mix launch made it (`mix_rows_normed` or `Run::norm_blend_gate`).
         let mut gate_normed=None;
         let mut gate_normed_half=false;
@@ -818,13 +864,13 @@ impl<V> Token<V> {
                 }
             }
             let (normed,mixed,gated,gated_h)=if visit.messages {
-                if msg_half && fuse_norms && count>super::SMALL_PASS_ROWS
+                if msg_half && fuse_norms && prefill_wide
                     && let Some((normed,Some(mixed),post))=run.weights.mix_rows_normed_half(c,count,width,run.scale,MIX_NORM_EPSILON,post_eps,transpose,spec.boundary,true,queries,&refs,stream,None,false)?
                 {
                     (normed,mixed,Some(post),true)
                 } else if let Some((normed,Some(mixed),post))=c.mix_rows_normed(count,width,run.scale,MIX_NORM_EPSILON,post_eps,transpose,spec.boundary,true,queries,&refs,stream,None,false)? {
                     (normed,mixed,Some(post),false)
-                } else if rows==1 {
+                } else if !self.decode && rows==1 {
                     let (n,m,g)=run.norm_blend_gate(queries,&self.stack,stream,count,spec.boundary)?;
                     (n,m,g,false)
                 } else {
@@ -852,6 +898,26 @@ impl<V> Token<V> {
         match &inputs {
             // One norm serves the three gates: it is a function of the value alone.
             Inputs::Same(value)=>{
+                if gate_normed_half && msg_lazy && let Some(nw)=norm_weights {
+                    let normed=gate_normed.take().ok_or("loop decoder: missing half gate norm")?;
+                    let lazy_ms=order.into_iter().map(|which|self.lazy_message(run,layer,spec,which,count)?.ok_or_else(||"loop decoder: missing lazy message".to_owned())).collect::<Result<Vec<_>>>()?;
+                    let Some(Messages::Lazy {sources,..})=self.messages.as_ref() else {return Err("loop decoder: missing lazy sources".into());};
+                    let src_refs:Vec<&V>=sources.iter().collect();
+                    let batch=[
+                        (order[0],value,&normed,&lazy_ms[0].0,&lazy_ms[0].1,Some(nw[0])),
+                        (order[1],value,&normed,&lazy_ms[1].0,&lazy_ms[1].1,Some(nw[1])),
+                        (order[2],value,&normed,&lazy_ms[2].0,&lazy_ms[2].1,Some(nw[2])),
+                    ];
+                    if want_half && let Some(normed_3)=run.weights.prefill_gate_fuse(c,layer,&src_refs,&batch,count,post_eps,true)? {
+                        let out:[V;ATTENTION_INPUTS]=normed_3.try_into().map_err(|_|"loop decoder: a fused lazy half gate result is absent".to_owned())?;
+                        return Ok(Inputs::NormedHalfEach(out));
+                    }
+                    if let Some(normed_3)=run.weights.prefill_gate_fuse(c,layer,&src_refs,&batch,count,post_eps,false)? {
+                        let out:[V;ATTENTION_INPUTS]=normed_3.try_into().map_err(|_|"loop decoder: a fused lazy gate result is absent".to_owned())?;
+                        return Ok(Inputs::NormedEach(out));
+                    }
+                    return Err("loop decoder: fused lazy prefill gate path unavailable".into());
+                }
                 if gate_normed_half && msg_half && let Some(nw)=norm_weights {
                     let normed=gate_normed.take().ok_or("loop decoder: missing half gate norm")?;
                     let msgs=order.into_iter().map(|which|self.message_form(run,layer,spec,which,count)).collect::<Result<Vec<_>>>()?;
@@ -879,7 +945,7 @@ impl<V> Token<V> {
                 let normed=match gate_normed.take() {Some(normed)=>normed,None=>run.gate_norm(value)?};
                 let messages=order.into_iter().map(|which|self.message(run,layer,spec,which,count)).collect::<Result<Vec<_>>>()?;
                 if let Some(nw)=norm_weights {
-                    if count>super::SMALL_PASS_ROWS
+                    if prefill_wide
                         && let (Some(i0),Some(i1),Some(i2))=(
                             run.weights.product_rows_pair(c,Weight::GateDown(layer,order[0]),&normed,&messages[0].1,count)?,
                             run.weights.product_rows_pair(c,Weight::GateDown(layer,order[1]),&normed,&messages[1].1,count)?,
@@ -911,6 +977,28 @@ impl<V> Token<V> {
             },
             // The three inputs of all rows: their gate norms are one launch (or fused into MIX_ONE), each row normed alone.
             Inputs::Each(values)=>{
+                if gate_normed_half && msg_lazy && let Some(nw)=norm_weights {
+                    let part=count*(width/2);
+                    let normed=gate_normed.take().ok_or("loop decoder: missing half gate norm")?;
+                    let normeds=(0..ATTENTION_INPUTS).map(|i|c.range(&normed,i*part,part)).collect::<Result<Vec<_>>>()?;
+                    let lazy_ms=order.into_iter().map(|which|self.lazy_message(run,layer,spec,which,count)?.ok_or_else(||"loop decoder: missing lazy message".to_owned())).collect::<Result<Vec<_>>>()?;
+                    let Some(Messages::Lazy {sources,..})=self.messages.as_ref() else {return Err("loop decoder: missing lazy sources".into());};
+                    let src_refs:Vec<&V>=sources.iter().collect();
+                    let batch=[
+                        (order[0],&values[0],&normeds[0],&lazy_ms[0].0,&lazy_ms[0].1,Some(nw[0])),
+                        (order[1],&values[1],&normeds[1],&lazy_ms[1].0,&lazy_ms[1].1,Some(nw[1])),
+                        (order[2],&values[2],&normeds[2],&lazy_ms[2].0,&lazy_ms[2].1,Some(nw[2])),
+                    ];
+                    if want_half && let Some(normed_3)=run.weights.prefill_gate_fuse(c,layer,&src_refs,&batch,count,post_eps,true)? {
+                        let out:[V;ATTENTION_INPUTS]=normed_3.try_into().map_err(|_|"loop decoder: a fused lazy half gate result is absent".to_owned())?;
+                        return Ok(Inputs::NormedHalfEach(out));
+                    }
+                    if let Some(normed_3)=run.weights.prefill_gate_fuse(c,layer,&src_refs,&batch,count,post_eps,false)? {
+                        let out:[V;ATTENTION_INPUTS]=normed_3.try_into().map_err(|_|"loop decoder: a fused lazy gate result is absent".to_owned())?;
+                        return Ok(Inputs::NormedEach(out));
+                    }
+                    return Err("loop decoder: fused lazy prefill gate path unavailable".into());
+                }
                 if gate_normed_half && msg_half && let Some(nw)=norm_weights {
                     let part=count*(width/2);
                     let normed=gate_normed.take().ok_or("loop decoder: missing half gate norm")?;
@@ -942,7 +1030,7 @@ impl<V> Token<V> {
                 let normeds=(0..ATTENTION_INPUTS).map(|i|c.range(&normed,i*part,part)).collect::<Result<Vec<_>>>()?;
                 let messages=order.into_iter().map(|which|self.message(run,layer,spec,which,count)).collect::<Result<Vec<_>>>()?;
                 if let Some(nw)=norm_weights {
-                    if count>super::SMALL_PASS_ROWS
+                    if prefill_wide
                         && let (Some(i0),Some(i1),Some(i2))=(
                             run.weights.product_rows_pair(c,Weight::GateDown(layer,order[0]),&normeds[0],&messages[0].1,count)?,
                             run.weights.product_rows_pair(c,Weight::GateDown(layer,order[1]),&normeds[1],&messages[1].1,count)?,
@@ -989,7 +1077,7 @@ impl<V> Token<V> {
         if spec.boundary {self.stack.push(match normed {Some(row)=>row,None=>run.plain_norm(stream,count)?});}
         let query=run.weights.words(Weight::MixExperts(layer))?;need(query.len()==width,"the expert mix takes one query")?;
         if !visit.messages {return Ok(run.norm_blend(query,&self.stack,residual,count,false,false)?.1);}
-        let (_,mixed,gated)=run.norm_blend_gate(query,&self.stack,residual,count,false)?;
+        let (_,mixed,gated)=if self.decode {let (n,m)=run.norm_blend(query,&self.stack,residual,count,false,false)?;(n,m,None)} else {run.norm_blend_gate(query,&self.stack,residual,count,false)?};
         let (m,n)=self.message(run,layer,spec,Message::Expert,count)?;
         let normed=match gated {Some(normed)=>normed,None=>run.gate_norm(&mixed)?};
         run.gate(layer,Message::Expert,&mixed,&normed,(&m,&n))
@@ -1004,7 +1092,9 @@ impl<V> Token<V> {
         let query=run.weights.words(Weight::MixExperts(layer))?;need(query.len()==width,"the expert mix takes one query")?;
         let post_eps=run.description.epsilon as f32;
         let expert_w=run.weights.words(Weight::ExpertNorm(layer))?;
-        let want_half=count>super::SMALL_PASS_ROWS && run.weights.prefers_half_experts(layer);
+        let prefill_wide=(!self.decode && count>super::SMALL_PASS_ROWS)
+            || (self.decode && count>spark_gpu_probe::few_product::FEW_MAX);
+        let want_half=prefill_wide && run.weights.prefers_half_experts(layer);
         if !visit.messages {
             let refs:Vec<&V>=self.stack.iter().collect();
             if want_half && let Some((_,_,z))=run.weights.mix_rows_normed_half(c,count,width,run.scale,MIX_NORM_EPSILON,post_eps,false,false,false,query,&refs,residual,Some(expert_w),false)? {
@@ -1015,22 +1105,40 @@ impl<V> Token<V> {
             }
             return Ok((run.norm_blend(query,&self.stack,residual,count,false,false)?.1,ExpertNorm::Raw));
         }
-        let msg_half=self.messages.as_ref().is_some_and(|m|m.2);
+        let msg_lazy=matches!(self.messages,Some(Messages::Lazy {..}));
+        let msg_half=msg_lazy || matches!(self.messages,Some(Messages::Materialized(_,_,true)));
         let (_,mixed,gated,gated_h)={
             let refs:Vec<&V>=self.stack.iter().collect();
-            if msg_half && count>super::SMALL_PASS_ROWS
+            if msg_half && prefill_wide
                 && let Some((_,Some(mixed),post))=run.weights.mix_rows_normed_half(c,count,width,run.scale,MIX_NORM_EPSILON,post_eps,false,false,true,query,&refs,residual,None,false)?
             {
                 (None,mixed,Some(post),true)
             } else if let Some((_,Some(mixed),post))=c.mix_rows_normed(count,width,run.scale,MIX_NORM_EPSILON,post_eps,false,false,true,query,&refs,residual,None,false)? {
                 (None,mixed,Some(post),false)
+            } else if self.decode {
+                let (n,m)=run.norm_blend(query,&self.stack,residual,count,false,false)?;
+                (n,m,None,false)
             } else {
                 let (n,m,g)=run.norm_blend_gate(query,&self.stack,residual,count,false)?;
                 (n,m,g,false)
             }
         };
+        if msg_lazy && gated_h && count>super::SMALL_PASS_ROWS {
+            let normed=gated.ok_or("loop decoder: missing half expert gate norm")?;
+            let (mw,mn)=self.lazy_message(run,layer,spec,Message::Expert,count)?.ok_or("loop decoder: missing lazy expert message")?;
+            let Some(Messages::Lazy {sources,..})=self.messages.as_ref() else {return Err("loop decoder: missing lazy sources".into());};
+            let src_refs:Vec<&V>=sources.iter().collect();
+            let batch=[(Message::Expert,&mixed,&normed,&mw,&mn,Some(expert_w))];
+            if want_half && let Some(mut outs)=run.weights.prefill_gate_fuse(c,layer,&src_refs,&batch,count,post_eps,true)? {
+                return Ok((outs.pop().ok_or_else(||"loop decoder: fused lazy half expert gate output missing".to_owned())?,ExpertNorm::NormedHalf));
+            }
+            if let Some(mut outs)=run.weights.prefill_gate_fuse(c,layer,&src_refs,&batch,count,post_eps,false)? {
+                return Ok((outs.pop().ok_or_else(||"loop decoder: fused lazy expert gate output missing".to_owned())?,ExpertNorm::Normed));
+            }
+            return Err("loop decoder: fused lazy expert gate path unavailable".into());
+        }
         let (m,n,n_half)=self.message_form(run,layer,spec,Message::Expert,count)?;
-        if gated_h && n_half && count>super::SMALL_PASS_ROWS {
+        if gated_h && n_half && prefill_wide {
             let normed=gated.ok_or("loop decoder: missing half expert gate norm")?;
             if let Some(inner)=run.weights.product_rows_pair_half_in(c,Weight::GateDown(layer,Message::Expert),&normed,&n,count)? {
                 if want_half && let Some(mut outs)=run.weights.gate_outer_blend_norm(c,layer,&[(Message::Expert,&inner,&mixed,&m,Some(expert_w))],count,post_eps,true)? {
@@ -1044,11 +1152,18 @@ impl<V> Token<V> {
         }
         need(!gated_h && !n_half,"loop decoder: mismatched half gate norm state")?;
         let normed=match gated {Some(normed)=>normed,None=>run.gate_norm(&mixed)?};
-        if count>super::SMALL_PASS_ROWS
-            && let Some(inner)=run.weights.product_rows_pair(c,Weight::GateDown(layer,Message::Expert),&normed,&n,count)?
-            && let Some(mut outs)=run.weights.gate_outer_blend_norm(c,layer,&[(Message::Expert,&inner,&mixed,&m,Some(expert_w))],count,post_eps,false)?
-        {
-            return Ok((outs.pop().ok_or_else(||"loop decoder: fused expert gate output missing".to_owned())?,ExpertNorm::Normed));
+        if count>1 {
+            if prefill_wide
+                && let Some(inner)=run.weights.product_rows_pair(c,Weight::GateDown(layer,Message::Expert),&normed,&n,count)?
+                && let Some(mut outs)=run.weights.gate_outer_blend_norm(c,layer,&[(Message::Expert,&inner,&mixed,&m,Some(expert_w))],count,post_eps,false)?
+            {
+                return Ok((outs.pop().ok_or_else(||"loop decoder: fused expert gate output missing".to_owned())?,ExpertNorm::Normed));
+            }
+            let pair=run.gate_pair_outer(layer,Message::Expert,count,&normed,(&m,&n))?;
+            if let Some(mut outs)=c.gate_blend_norm(count,width,post_eps,&[(&pair,&mixed,&m,Some(expert_w))])? {
+                return Ok((outs.pop().ok_or_else(||"loop decoder: fused expert gate output missing".to_owned())?,ExpertNorm::Normed));
+            }
+            return Ok((run.gate_blend_only(&pair,&mixed,&m)?,ExpertNorm::Raw));
         }
         let pair=run.gate_pair_outer(layer,Message::Expert,count,&normed,(&m,&n))?;
         if let Some(mut outs)=c.gate_blend_norm(count,width,post_eps,&[(&pair,&mixed,&m,Some(expert_w))])? {

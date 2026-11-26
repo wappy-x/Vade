@@ -27,8 +27,8 @@ pub const TC_BK: usize = 32;
 pub const BIG_BM: usize = 128;
 pub const BIG_BN: usize = 128;
 /// The fewest input rows and weight rows of a dense product that takes `PLAIN_TC_BIG` (smaller products, every decode
-/// product among them, stay on `PLAIN_TC_ROWS`).
-pub const TC_BIG_INPUTS_MIN: usize = 512;
+/// product among them, stay on `PLAIN_TC_ROWS`). Lowered to 257 so Cold 8K tail chunks (`M = 388`) also run `PLAIN_TC_BIG`.
+pub const TC_BIG_INPUTS_MIN: usize = 257;
 pub const TC_BIG_ROWS_MIN: usize = 512;
 /// Mode word of a `PLAIN_TC_BIG` command for a narrow product (at most `NARROW_BN` weight rows): the input is the FP32
 /// rows (one input, or the two halves of a pair), rounded with `cvt.rn.bf16x2.f32` as they are read (the rounding of
@@ -41,9 +41,9 @@ pub const NARROW_BN: usize = 128;
 /// the `[rows, 2 * dim]` intermediate gate buffer, and the separate `STREAM_OP_GATE_BLEND_NORM` launch.
 pub const TC_MODE_GATE_BLEND_NORM: u64 = 4;
 /// Mode word of a `PLAIN_TC_BIG` command for narrow BF16-input products (`rows <= NARROW_BN`, single or dual half-width
-/// packed BF16 inputs): `NARROW_HALF_BM = 32` rows/CTA, 4 `cp.async` stages, `ldmatrix_x4` on both A and B, all 8 warps active.
+/// packed BF16 inputs): `NARROW_HALF_BM = 64` rows/CTA, 4 `cp.async` stages (`49,152 B` exact), `ldmatrix_x4` on A & B.
 pub const TC_MODE_NARROW_HALF: u64 = 5;
-pub const NARROW_HALF_BM: usize = 32;
+pub const NARROW_HALF_BM: usize = 64;
 pub const GATE_OUTER_BM: usize = 8;
 pub const GATE_OUTER_K_MAX: usize = 64;
 /// Maximum hidden width supported by `TC_MODE_GATE_BLEND_NORM` (`11` SMEM chunks + `8` register chunks = `19 * 128`).
@@ -83,6 +83,12 @@ pub const TC_MODE_DENSE_FP32: u64 = 4;
 /// Payload word 13 flags for `TC_MODE_DENSE_FP32`.
 pub const TC_FLAG_ROUND_OUT: u64 = 1;
 pub const TC_FLAG_GROUP_PAIR: u64 = 2;
+/// Bit 2 of payload word 13 in `TC_MODE_DENSE_FP32`: narrow 1-warp path reads packed BF16 input(s) directly.
+pub const TC_FLAG_HALF_IN: u64 = 4;
+/// Payload word offset of optional lossless Vade-BF11-BP `bf16_panels` descriptor `(panels_base, first_band | (slices << 32))`
+/// for dense `PLAIN_TC_ROWS` Mode 0 commands (past the 8-segment split table at words 16..32; zero = raw BF16).
+pub const TC_PANEL_WORD: usize = 32;
+const _: () = assert!(16 + 2 * TC_SPLIT_MAX <= TC_PANEL_WORD && 8 * (TC_PANEL_WORD + 2) <= 1024);
 
 /// Narrow 1-warp deep-pipelined direct-FP32 tile (`BM=8, BN=4, BK=64`: 8 stages of `4 x 144 B` padded W = 4,608 B).
 pub const TC_N1_BM: usize = 8;
@@ -246,6 +252,32 @@ pub const fn tc_dense_spec(rows: usize, cols: usize, inputs: usize, fp32_direct:
     }
 }
 
+/// Dynamic shared bytes for `PLAIN_TC_ROWS` Mode 0 when streaming lossless Vade-BF11-BP `bf16_panels`:
+/// - Path 4 (`tc_small_wanted` without `tc_coop_w_wanted`): zero W SMEM (panels decode directly into registers);
+///   stages `part_slabs` 64-col slabs of BF16 `X` (`<= 12,288 B`, 4 slabs for `M <= 16`, 3 slabs for `M <= 32`)
+///   followed by per-warp escape cursor tables (`warps * slices * 128 B`).
+/// - Path 4b (`tc_coop_w_wanted`): 4-chunk decoded W (`8,192 B`) + 4-chunk X (`16,384 B`) + escape cursor table
+///   (`slices * 128 B`) for `inputs <= TC_SMALL_BM`, else raw `TC_COOP_M128_SMEM`.
+#[inline(always)]
+pub const fn tc_dense_panel_smem(rows: usize, cols: usize, inputs: usize, slices: usize) -> usize {
+    if tc_coop_w_wanted(rows, cols, inputs) {
+        if inputs <= TC_SMALL_BM {
+            8_192 + 16_384 + slices * 128
+        } else {
+            TC_COOP_M128_SMEM
+        }
+    } else if tc_small_wanted(inputs) {
+        let bm = if inputs <= 16 { 16 } else { 32 };
+        let warps = if rows <= TC_TINY_ROWS_MAX { 1 } else if rows <= 16_384 { 2 } else { 4 };
+        let max_slabs = if bm == 16 { 4 } else { 3 };
+        let chunks = cols / 64;
+        let part_slabs = if chunks < max_slabs { chunks } else { max_slabs };
+        part_slabs * bm * 128 + warps * slices * 128
+    } else {
+        tc_dense_spec(rows, cols, inputs, false).2
+    }
+}
+
 /// Threads per block for `PLAIN_TC_ROWS` Mode 0 (packed BF16 dense).
 #[inline(always)]
 pub const fn tc_dense_threads(rows: usize, inputs: usize) -> usize {
@@ -308,7 +340,7 @@ pub const fn tc_narrow_blocks(inputs: usize) -> u32 {
     inputs.div_ceil(NARROW_BM) as u32
 }
 
-/// Grid blocks for `TC_MODE_NARROW_HALF`: one block per `NARROW_HALF_BM` (32) packed-BF16 input rows.
+/// Grid blocks for `TC_MODE_NARROW_HALF`: one block per `NARROW_HALF_BM` (64) packed-BF16 input rows.
 #[inline(always)]
 pub const fn tc_narrow_half_blocks(inputs: usize) -> u32 {
     inputs.div_ceil(NARROW_HALF_BM) as u32
@@ -811,6 +843,12 @@ mod tests {
         assert_eq!(tc_dense_spec(2304, 3072, 125, false), (128, 144, TC_COOP_M128_SMEM));
         assert_eq!(tc_dense_spec(8600, 2304, 125, false), (128, 538, TC_COOP_M128_SMEM));
         assert_eq!(tc_dense_spec(1024, 2304, 180, false), (64, 6 * 32, TC_MED_W2_SMEM));
+        assert_eq!(tc_dense_panel_smem(2304, 3072, 16, 8), 4 * 16 * 128 + 8 * 128);
+        assert_eq!(tc_dense_panel_smem(6656, 2304, 16, 4), 4 * 16 * 128 + 2 * 4 * 128);
+        assert_eq!(tc_dense_panel_smem(6656, 2304, 32, 4), 3 * 32 * 128 + 2 * 4 * 128);
+        assert_eq!(tc_dense_panel_smem(200_058, 2304, 32, 1), 3 * 32 * 128 + 4 * 128);
+        assert_eq!(tc_dense_panel_smem(2304, 3072, 32, 8), 8_192 + 16_384 + 8 * 128);
+        assert_eq!(tc_dense_panel_smem(2304, 3072, 125, 8), TC_COOP_M128_SMEM);
         assert_eq!(tc_tile_part(200_058, 2304, 1024), Some(200_058));
         assert_eq!(tc_tile_part(200_058, 2304, 32), Some(200_058));
         assert_eq!(tc_tile_part(TC_DENSE_ROWS_MAX + 128, 2304, 32), Some(131_200));

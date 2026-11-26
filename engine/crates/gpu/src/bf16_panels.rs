@@ -34,14 +34,22 @@ pub const HEADER_WORDS: usize = 4;
 /// where `rel_s` (`s = 1..8`) is the `u16` escape-step offset of slice `s` relative to `esc_step_q0`.
 pub const BAND_META_WORDS: usize = 8;
 /// Number of interleaved escape streams per band:
-/// - `4` for decode-sized matrices (`rows <= 10_000` and `chunks` a multiple of 4), enabling 4-warp
-///   cooperative parallel chunk decode with Warp 0 running all MMAs in strictly ascending K order
-///   (100% bit-exact with `slices == 1` and `main`).
+/// - `8` for low-band wide matrices (`rows <= 3_072`, `chunks >= 48` and divisible by 8, e.g. `O_proj` 2304x3072 = 144
+///   blocks = 3 blk/SM), lifting active warps/SM from 12 to 24 (full SM saturation) with single-buffered 14 KB W_SMEM
+///   in strictly ascending K order (100% bit-exact).
+/// - `4` for other decode-sized matrices (`rows <= 10_000` and `chunks` a multiple of 4, e.g. Q+K+V), enabling 4-warp
+///   cooperative parallel chunk decode and 3-way Q+K+V fusion.
 /// - `1` for huge matrices (`rows > 10_000`, e.g. LM Head, where 4 bands/block already launches >3,000 CTAs)
 ///   or shapes whose chunk count is not a multiple of 4.
 #[inline(always)]
 pub const fn slice_count(rows: usize, chunks: usize) -> usize {
-    if rows <= 10_000 && chunks >= 8 && chunks.is_multiple_of(4) { 4 } else { 1 }
+    if rows <= 3_072 && chunks >= 48 && chunks.is_multiple_of(8) {
+        8
+    } else if rows <= 10_000 && chunks >= 8 && chunks.is_multiple_of(4) {
+        4
+    } else {
+        1
+    }
 }
 /// Words of one 64-column chunk: `sm0(128) + sm1(128) + e3_lo(64) + e3_hi(32) = 352` words (1,408 B).
 pub const CHUNK_WORDS: usize = 352;
@@ -524,8 +532,9 @@ mod tests {
         assert_eq!(slice_count(1056, 36), 4);
         assert_eq!(slice_count(6552, 36), 4);
         assert_eq!(slice_count(8632, 36), 4);
-        assert_eq!(slice_count(2304, 48), 4);
-        assert_eq!(slice_count(2304, 64), 4);
+        assert_eq!(slice_count(2304, 48), 8);
+        assert_eq!(slice_count(2304, 64), 8);
+        assert_eq!(slice_count(4096, 48), 4);
         assert_eq!(slice_count(33, 1), 1);
         assert_eq!(slice_count(200_058, 36), 1);
 

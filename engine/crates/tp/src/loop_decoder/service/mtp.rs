@@ -162,7 +162,7 @@ const PROBE_FIRST:usize=8;
 const PROBE_MOST:usize=64;
 /// Floor on adaptive neural propose depth during sustained short-chain stretches.
 const MIN_PROPOSE:usize=3;
-/// The draft depth of a batched chat whose recent rounds were short, and of a probe.
+/// Shallow multi-chat propose cap while recent cohort rounds were short.
 pub(super) const SHALLOW_PROPOSE:usize=MIN_PROPOSE;
 /// Base single-block neural propose depth (`block_size - 1`); chats open past this (`11..=15`)
 /// only on ceiling hits when wide neural acceptance pays its own draft+verify cost.
@@ -200,7 +200,7 @@ pub(super) struct Chooser {
     cond_chain:f64,propose_d:usize,short_streak:u32,wide_miss:u32,wide_streak:u32,deep_ewma:f64,consec_drops:u32,
     dir_first_h:f64,dir_first_t:f64,dir_cont_h:f64,dir_cont_t:f64,dir_rounds:u32,dir_skipped:u32,
     ext_hits:[[f64;EXT_OFFS];EXT_BUCKETS],ext_trials:[[f64;EXT_OFFS];EXT_BUCKETS],
-    pub(super) wide:bool,low_streak:u32,
+    multi_wide:bool,multi_low_streak:u32,
     paused:bool,plain_run:usize,gap:usize,probing:bool,
 }
 impl Chooser {
@@ -218,13 +218,15 @@ impl Chooser {
             cond_chain:2.5,propose_d:BASE_PROPOSE,short_streak:0,wide_miss:0,wide_streak:0,deep_ewma:0.0,consec_drops:0,
             dir_first_h:2.5,dir_first_t:3.0,dir_cont_h:2.7,dir_cont_t:3.0,dir_rounds:0,dir_skipped:0,
             ext_hits,ext_trials,
-            wide:false,low_streak:0,
+            multi_wide:false,multi_low_streak:0,
             paused:false,plain_run:0,gap:PROBE_FIRST,probing:false,
         }
     }
-    /// Update only the online logistic calibration and multi-chat `wide` state after a batched verify round
-    /// without mixing cohort timing into single-chat `neural_ms` / `paused`.
-    pub(super) fn observe_band(&mut self,probs:&[f32],rows:usize,keep:usize) {
+    /// Whether this chat has shown sustained multi-token acceptance in a multi-chat cohort.
+    pub(super) fn is_multi_wide(&self)->bool {self.multi_wide}
+    /// Update online IRLS calibration and multi-chat widen flag after a multi-chat verify round without mixing
+    /// cohort timing into single-chat `neural_ms` / `paused`.
+    pub(super) fn observe_multi_chat(&mut self,probs:&[f32],rows:usize,keep:usize) {
         if rows>1 {
             let accepted=keep.saturating_sub(1);
             let checked=(rows-1).min(probs.len()).min(MAX_POS);
@@ -244,9 +246,9 @@ impl Chooser {
             if self.fit_rounds>=target_fit {self.refit_irls();}
         }
         let hit_end=rows>SHALLOW_PROPOSE && (keep==rows || (keep>=SHALLOW_PROPOSE && probs.get(rows-2).is_some_and(|&p|p>=0.78)));
-        if hit_end {self.wide=true;self.low_streak=0;}
-        else if keep<=3 {self.low_streak+=1;if self.low_streak>=4 {self.wide=false;}}
-        else {self.low_streak=0;}
+        if hit_end {self.multi_wide=true;self.multi_low_streak=0;}
+        else if keep<=3 {self.multi_low_streak+=1;if self.multi_low_streak>=4 {self.multi_wide=false;}}
+        else {self.multi_low_streak=0;}
     }
     /// Calibrated acceptance probability of neural draft position `pos` with top-1 probability `p`.
     pub(super) fn cal_pos(&self,pos:usize,p:f32)->f64 {
@@ -684,7 +686,7 @@ impl<C:Compute,W:Weights<C>> Target for Chat<'_,'_,C,W> {
         if let Some(t)=d.tally.get_mut(d.rows) {t[1]+=keep as u32;}
         if let Some(round_id)=batch_round {
             if d.last_neural {
-                d.choose.observe_band(&d.last_probs,d.rows,keep);
+                d.choose.observe_multi_chat(&d.last_probs,d.rows,keep);
                 d.last_neural=false;
             }
             s.cohort.borrow_mut().finish_chat(round_id,keep);
