@@ -82,11 +82,39 @@ macro_rules! tc_fetch_bp_rest {
     }};
 }
 
+/// `prmt.b32` with a register selector (default mode: selector nibble `i` in `0..=7` picks source byte `{b, a}[nibble]`
+/// for result byte `i`; every caller keeps each nibble below 8, so the sign-replicate mode is never selected).
+#[macro_export]
+macro_rules! tc_prmt_r32 {
+    ($lo:expr, $hi:expr, $sel:expr) => {{
+        let w: u32;
+        core::arch::asm!(
+            "prmt.b32 {w}, {lo}, {hi}, {s};",
+            w = out(reg32) w, lo = in(reg32) $lo, hi = in(reg32) $hi, s = in(reg32) $sel,
+            options(pure, nomem, nostack)
+        );
+        w
+    }};
+}
+
+/// Decode one 16 x 16 tile (two 4-weight halves a lane) of a Vade-BF11-BP chunk into its `m16n8k16` A fragment.
+///
+/// Escapes (`code == 7`) are resolved without a branch or a loop. `$pos` is the lane's byte cursor in the escape
+/// stream of the chunk's slice (`$esc_lane` points at this lane's word of step 0). A half has at most 4 escapes, so
+/// its bytes lie in two stream words: half 0 reads words `q = pos >> 2` and `q + 1`; half 1 starts `pc0` bytes later
+/// and reads `q + 1` and `q + 2` when it starts in word `q + 1`, else `q` and `q + 1`. `m * 0x1110` gives, in nibble
+/// `j`, the count of escapes below position `j`; with the byte phase added it is the `prmt` selector that moves each
+/// stream byte to its position, and `0x3210 + (m << 2)` picks that byte in place of the table byte.
+/// The words are the bytes the sequential walk reads, in the same order, so every decoded value is unchanged.
+/// In bounds: `pos` never passes the lane's escape count `n`, and the slice holds `ceil(max n / 4)` steps, so `q` and
+/// `q + 1` lie in the slice or in the two guard steps the encoder appends; `q + 2` is read only when half 0 has
+/// consumed the last byte of word `q`, which proves the slice holds step `q`, so `q + 2` is at most the second
+/// step after the slice.
 #[macro_export]
 macro_rules! tc_decode_bp_tile {
     ($sm_lo:expr, $sm_hi:expr, $lo0:expr, $hi0:expr, $lo1:expr, $hi1:expr,
-     $lut0:expr, $lut1:expr, $is_raw:expr, $words:expr, $esc_off:expr, $eq0:expr, $esc_slot:expr, $ch:expr, $h0:literal, $lane:expr) => {{
-        let (mut er0, mut er1): (u32, u32);
+     $lut0:expr, $lut1:expr, $is_raw:expr, $words:expr, $esc_off:expr, $eq0:expr, $esc_lane:expr, $pos:ident, $ch:expr, $h0:literal, $lane:expr) => {{
+        let (er0, er1): (u32, u32);
         if $is_raw {
             let esc_base = ($words.add(crate::tc_rows::TC_PANEL_WORD).read_volatile() as *const u32).add($esc_off as usize);
             let rbase = ($eq0 as usize) * crate::bf16_panels::ESC_STEP_WORDS
@@ -95,44 +123,30 @@ macro_rules! tc_decode_bp_tile {
             er0 = crate::tc_ptx::ld_global_nc_u32(esc_base.add(rbase));
             er1 = crate::tc_ptx::ld_global_nc_u32(esc_base.add(rbase + 1));
         } else {
+            let step: *const u32 = ($esc_lane).add((($pos >> 2) as usize) * crate::bf16_panels::ESC_STEP_WORDS);
+            let wa = crate::tc_ptx::ld_global_nc_u32(step);
+            let wb = crate::tc_ptx::ld_global_nc_u32(step.add(crate::bf16_panels::ESC_STEP_WORDS));
             let sel0 = tc_lop3_b32!(($lo0) & 0x3333u32, $hi0, 0x4444u32, 0xF8);
             let sel1 = tc_lop3_b32!(($lo1) & 0x3333u32, $hi1, 0x4444u32, 0xF8);
-            core::arch::asm!("prmt.b32 {d}, {a}, {b}, {s};",
-                d = out(reg32) er0, a = in(reg32) $lut0, b = in(reg32) $lut1, s = in(reg32) sel0,
-                options(pure, nomem, nostack));
-            core::arch::asm!("prmt.b32 {d}, {a}, {b}, {s};",
-                d = out(reg32) er1, a = in(reg32) $lut0, b = in(reg32) $lut1, s = in(reg32) sel1,
-                options(pure, nomem, nostack));
-            let esc0 = sel0.wrapping_add(0x1111u32) & 0x8888u32;
-            let esc1 = sel1.wrapping_add(0x1111u32) & 0x8888u32;
-            if (esc0 | esc1) != 0 {
-                let esc_base = ($words.add(crate::tc_rows::TC_PANEL_WORD).read_volatile() as *const u32).add($esc_off as usize);
-                let slot: u32 = $esc_slot;
-                let mut pos = crate::tc_ptx::load_u32(slot);
-                let mut m0 = esc0;
-                while m0 != 0 {
-                    let shift = (m0.trailing_zeros() - 3) << 1;
-                    let word = crate::tc_ptx::ld_global_nc_u32(
-                        esc_base.add(((pos >> 2) as usize) * crate::bf16_panels::ESC_STEP_WORDS + ($lane))
-                    );
-                    let b = (word >> ((pos & 3) << 3)) & 0xFF;
-                    er0 = (er0 & !(0xFFu32 << shift)) | (b << shift);
-                    pos += 1;
-                    m0 &= m0 - 1;
-                }
-                let mut m1 = esc1;
-                while m1 != 0 {
-                    let shift = (m1.trailing_zeros() - 3) << 1;
-                    let word = crate::tc_ptx::ld_global_nc_u32(
-                        esc_base.add(((pos >> 2) as usize) * crate::bf16_panels::ESC_STEP_WORDS + ($lane))
-                    );
-                    let b = (word >> ((pos & 3) << 3)) & 0xFF;
-                    er1 = (er1 & !(0xFFu32 << shift)) | (b << shift);
-                    pos += 1;
-                    m1 &= m1 - 1;
-                }
-                crate::tc_ptx::store_u32(slot, pos);
-            }
+            let m0 = (sel0.wrapping_add(0x1111u32) >> 3) & 0x1111u32;
+            let m1 = (sel1.wrapping_add(0x1111u32) >> 3) & 0x1111u32;
+            let t0 = m0.wrapping_mul(0x1111u32);
+            let t1 = m1.wrapping_mul(0x1111u32);
+            let p3 = $pos & 3;
+            let b1 = p3 + ((t0 >> 12) & 7);
+            let wc = crate::tc_ptx::ld_global_nc_u32(
+                step.add(crate::bf16_panels::ESC_STEP_WORDS + ((b1 >> 2) as usize) * crate::bf16_panels::ESC_STEP_WORDS)
+            );
+            let lut_e0 = tc_prmt_r32!($lut0, $lut1, sel0);
+            let lut_e1 = tc_prmt_r32!($lut0, $lut1, sel1);
+            let e0 = tc_prmt_r32!(wa, wb, (t0.wrapping_sub(m0).wrapping_add(p3.wrapping_mul(0x1111u32))) & 0x7777u32);
+            let e1 = tc_prmt_r32!(
+                if b1 >= 4 { wb } else { wa }, wc,
+                (t1.wrapping_sub(m1).wrapping_add((b1 & 3).wrapping_mul(0x1111u32))) & 0x7777u32
+            );
+            er0 = tc_prmt_r32!(lut_e0, e0, 0x3210u32 + (m0 << 2));
+            er1 = tc_prmt_r32!(lut_e1, e1, 0x3210u32 + (m1 << 2));
+            $pos = $pos + (b1 - p3) + ((t1 >> 12) & 7);
         }
         let (a0, a1) = tc_unpack_bf16_bp!($sm_lo, er0);
         let (a2, a3) = tc_unpack_bf16_bp!($sm_hi, er1);
@@ -212,6 +226,8 @@ macro_rules! tc_st_v4_f32_hint {
 /// Lossless Vade-BF11-BP inner K-loop for `PLAIN_TC_ROWS` Path 4 (`M <= 32`):
 /// - Reuses registered Vade-BF11-BP panels (`0 B` extra VRAM, `-30%` DRAM vs raw BF16).
 /// - Per-warp escape cursors sit in tiny SMEM (`slices * 128 B/warp`), keeping register pressure flat (`<= 96` regs).
+///   A chunk reads its slice's cursor once, keeps it in a register for its 4 tiles, and writes it back once; the
+///   first step of every slice and the next step of the next chunk's slice are prefetched (`tc_decode_bp_tile!`).
 /// - Multi-slab pre-staged X (`4` slabs = `256` cols for `M <= 16`, `3` slabs = `192` cols for `M = 17..=32`) +
 ///   split `sm0`/`rest` software pipeline + 3-chunk-ahead L2 prefetch hide DRAM latency with zero W SMEM.
 #[macro_export]
@@ -243,6 +259,7 @@ macro_rules! tc_path4_panels {
         let eq0 = esc_meta >> 1;
         let slices_mask = (slices_want - 1) as u32;
         let esc_smem = $part_slabs * $x_stride + ($warp * slices_want * 128) as u32;
+        let esc_lane = panels_base.add(esc_off as usize + $lane);
         if !is_raw_exp {
             let mut q = 0usize;
             while q < slices_want {
@@ -257,6 +274,11 @@ macro_rules! tc_path4_panels {
                     (w >> (((q - 3) & 1) * 16)) & 0xFFFF
                 };
                 crate::tc_ptx::store_u32(esc_smem + ((q * 32 + $lane) * 4) as u32, (eq0 + rel) << 2);
+                core::arch::asm!(
+                    "prefetch.global.L1 [{a}];",
+                    a = in(reg64) esc_lane.add(((eq0 + rel) as usize) * crate::bf16_panels::ESC_STEP_WORDS) as u64,
+                    options(readonly, nostack)
+                );
                 q += 1;
             }
         }
@@ -323,6 +345,16 @@ macro_rules! tc_path4_panels {
             }
             prefetch_p4!(ch + 4);
             let q_slot = esc_smem + (((ch & slices_mask) * 32 + ($lane as u32)) << 2);
+            let mut pos = if is_raw_exp { 0u32 } else { crate::tc_ptx::load_u32(q_slot) };
+            if !is_raw_exp {
+                // Look-ahead: the next chunk's slice will read steps `q` and `q + 1` of its stream (both in bounds).
+                let nq = crate::tc_ptx::load_u32(esc_smem + ((((ch + 1) & slices_mask) * 32 + ($lane as u32)) << 2));
+                core::arch::asm!(
+                    "prefetch.global.L1 [{a}];",
+                    a = in(reg64) esc_lane.add((((nq >> 2) + 1) as usize) * crate::bf16_panels::ESC_STEP_WORDS) as u64,
+                    options(readonly, nostack)
+                );
+            }
             macro_rules! mma_p4 {
                 ($a:expr, $xm:literal) => {{
                     let a: [u32; 4] = $a;
@@ -334,15 +366,16 @@ macro_rules! tc_path4_panels {
                 }};
             }
             let nxt_c = if ch + 1 < chunks_u { ch + 1 } else { ch };
-            let a0 = tc_decode_bp_tile!(sm0[0], sm0[1], w0, w2, w0 >> 2, w2 >> 1, lut0, lut1, is_raw_exp, $words, esc_off, eq0, q_slot, ch, 0, $lane);
+            let a0 = tc_decode_bp_tile!(sm0[0], sm0[1], w0, w2, w0 >> 2, w2 >> 1, lut0, lut1, is_raw_exp, $words, esc_off, eq0, esc_lane, pos, ch, 0, $lane);
             mma_p4!(a0, 0u32);
-            let a1 = tc_decode_bp_tile!(sm0[2], sm0[3], w0 >> 16, w2 << 2, w0 >> 18, w2 << 1, lut0, lut1, is_raw_exp, $words, esc_off, eq0, q_slot, ch, 2, $lane);
+            let a1 = tc_decode_bp_tile!(sm0[2], sm0[3], w0 >> 16, w2 << 2, w0 >> 18, w2 << 1, lut0, lut1, is_raw_exp, $words, esc_off, eq0, esc_lane, pos, ch, 2, $lane);
             mma_p4!(a1, 32u32);
             sm0 = tc_fetch_bp_sm0!(chunk_band, $lane, nxt_c, $evict);
-            let a2 = tc_decode_bp_tile!(sm1[0], sm1[1], w1, w2 >> 16, w1 >> 2, w2 >> 17, lut0, lut1, is_raw_exp, $words, esc_off, eq0, q_slot, ch, 4, $lane);
+            let a2 = tc_decode_bp_tile!(sm1[0], sm1[1], w1, w2 >> 16, w1 >> 2, w2 >> 17, lut0, lut1, is_raw_exp, $words, esc_off, eq0, esc_lane, pos, ch, 4, $lane);
             mma_p4!(a2, 64u32);
-            let a3 = tc_decode_bp_tile!(sm1[2], sm1[3], w1 >> 16, w2 >> 14, w1 >> 18, w2 >> 15, lut0, lut1, is_raw_exp, $words, esc_off, eq0, q_slot, ch, 6, $lane);
+            let a3 = tc_decode_bp_tile!(sm1[2], sm1[3], w1 >> 16, w2 >> 14, w1 >> 18, w2 >> 15, lut0, lut1, is_raw_exp, $words, esc_off, eq0, esc_lane, pos, ch, 6, $lane);
             mma_p4!(a3, 96u32);
+            if !is_raw_exp { crate::tc_ptx::store_u32(q_slot, pos); }
             let nr = tc_fetch_bp_rest!(chunk_band, $lane, nxt_c, $evict);
             sm1 = nr.0; w0 = nr.1; w1 = nr.2; w2 = nr.3;
             ch += 1;
@@ -400,6 +433,7 @@ macro_rules! tc_coop_w_panels {
             }
         }
         let chunk_band = panels_base.add(chunks_off + abs_band * chunks * crate::bf16_panels::CHUNK_WORDS);
+        let esc_lane = panels_base.add(esc_off as usize + $lane);
         let lane16 = ($lane * 16) as u32;
         let w_dst = $smem + ($warp * 2048) as u32 + lane16;
         let mut base_ch = 0usize;
@@ -418,16 +452,18 @@ macro_rules! tc_coop_w_panels {
                 );
             }
             let q_slot = esc_smem + ((((my_ch as u32) & slices_mask) * 32 + ($lane as u32)) << 2);
+            let mut pos = if is_raw_exp { 0u32 } else { crate::tc_ptx::load_u32(q_slot) };
             let sm0 = tc_fetch_bp_sm0!(chunk_band, $lane, my_ch, $evict);
             let (sm1, w0, w1, w2) = tc_fetch_bp_rest!(chunk_band, $lane, my_ch, $evict);
-            let a0 = tc_decode_bp_tile!(sm0[0], sm0[1], w0, w2, w0 >> 2, w2 >> 1, lut0, lut1, is_raw_exp, $words, esc_off, eq0, q_slot, my_ch, 0, $lane);
+            let a0 = tc_decode_bp_tile!(sm0[0], sm0[1], w0, w2, w0 >> 2, w2 >> 1, lut0, lut1, is_raw_exp, $words, esc_off, eq0, esc_lane, pos, my_ch, 0, $lane);
             crate::tc_ptx::st_shared_v4(w_dst, a0);
-            let a1 = tc_decode_bp_tile!(sm0[2], sm0[3], w0 >> 16, w2 << 2, w0 >> 18, w2 << 1, lut0, lut1, is_raw_exp, $words, esc_off, eq0, q_slot, my_ch, 2, $lane);
+            let a1 = tc_decode_bp_tile!(sm0[2], sm0[3], w0 >> 16, w2 << 2, w0 >> 18, w2 << 1, lut0, lut1, is_raw_exp, $words, esc_off, eq0, esc_lane, pos, my_ch, 2, $lane);
             crate::tc_ptx::st_shared_v4(w_dst + 512, a1);
-            let a2 = tc_decode_bp_tile!(sm1[0], sm1[1], w1, w2 >> 16, w1 >> 2, w2 >> 17, lut0, lut1, is_raw_exp, $words, esc_off, eq0, q_slot, my_ch, 4, $lane);
+            let a2 = tc_decode_bp_tile!(sm1[0], sm1[1], w1, w2 >> 16, w1 >> 2, w2 >> 17, lut0, lut1, is_raw_exp, $words, esc_off, eq0, esc_lane, pos, my_ch, 4, $lane);
             crate::tc_ptx::st_shared_v4(w_dst + 1024, a2);
-            let a3 = tc_decode_bp_tile!(sm1[2], sm1[3], w1 >> 16, w2 >> 14, w1 >> 18, w2 >> 15, lut0, lut1, is_raw_exp, $words, esc_off, eq0, q_slot, my_ch, 6, $lane);
+            let a3 = tc_decode_bp_tile!(sm1[2], sm1[3], w1 >> 16, w2 >> 14, w1 >> 18, w2 >> 15, lut0, lut1, is_raw_exp, $words, esc_off, eq0, esc_lane, pos, my_ch, 6, $lane);
             crate::tc_ptx::st_shared_v4(w_dst + 1536, a3);
+            if !is_raw_exp { crate::tc_ptx::store_u32(q_slot, pos); }
             crate::tc_ptx::cp_async_wait_zero();
             core::arch::nvptx::_syncthreads();
             let mut sub = 0u32;

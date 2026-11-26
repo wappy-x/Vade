@@ -2,6 +2,10 @@
 use crate::fixed_math::{exp,rn,sigmoid,tanh};
 use crate::tc_ptx::{shfl_xor_f32,shfl_xor_u32};
 
+/// Keys of the draft attention walk (operation 20) whose K and V rows a warp prefetches into L1 ahead of the key it
+/// reads: 8 keys of ~150-300 cycles each cover one DRAM read; 8 keys x 1 KB a warp group stays well inside L1.
+const ATTN_PREFETCH_KEYS:usize=8;
+
 /// Pure FP32 rounding helper; non-finite sums or BF16 overflows become NaN.
 #[inline(always)]
 fn round_checked(raw:f32)->f32 {
@@ -252,8 +256,21 @@ pub unsafe extern "ptx-kernel" fn inkling_draft_lanes(table:*const crate::Comman
             let mut m=f32::NEG_INFINITY;
             let mut l=0.0f32;
             let mut o=[0.0f32;4];
+            // The walk over keys is serial (online softmax), so without a prefetch each key waits on its own DRAM
+            // read of K and then V. Each lane asks L1 for its 16 bytes of K and V `ATTN_PREFETCH_KEYS` keys ahead
+            // (keys below `end` only, inside the checked spans); a prefetch moves no value, so every bit is unchanged.
+            let ahead=ATTN_PREFETCH_KEYS*kv_stride;
+            let mut warm=start;
+            while warm<end && warm<start+ATTN_PREFETCH_KEYS {
+                let at=(warm-start)*kv_stride;
+                core::arch::asm!("prefetch.global.L1 [{k}];","prefetch.global.L1 [{v}];",k=in(reg64) k_ptr.add(at),v=in(reg64) v_ptr.add(at),options(readonly,nostack));
+                warm+=1;
+            }
             let mut step=start;
             while step<end {
+                if step+ATTN_PREFETCH_KEYS<end {
+                    core::arch::asm!("prefetch.global.L1 [{k}];","prefetch.global.L1 [{v}];",k=in(reg64) k_ptr.add(ahead),v=in(reg64) v_ptr.add(ahead),options(readonly,nostack));
+                }
                 let k0=crate::tc_ptx::ld_global_nc_v4(k_ptr);
                 let mut dot=q[0]*k0[0]+q[1]*k0[1]+q[2]*k0[2]+q[3]*k0[3];
                 dot+=shfl_xor_f32(dot,16);

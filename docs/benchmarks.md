@@ -144,7 +144,7 @@ Every speed that we have published for Vade is on one of these pages or sections
 
 | Section | What it is for |
 | :---: | :---: |
-| [Inkling 2 Mini on live main and rc.26](results.md#inkling-2-mini-one-spark-rc26) | One Spark at live `main` (`b8d0625e1f`) and `rc.26`, plus unmerged private-branch receipts |
+| [Inkling 2 Mini on live main and rc.26](results.md#inkling-2-mini-one-spark-rc26) | One Spark at live `main` (`315ae0521a`) and `rc.26`, plus unmerged private-branch receipts |
 | [GLM 5.3 Flash at rc.24](results.md#glm-53-flash-two-sparks-rc24) | Two Sparks at `v0.2.0-rc.24` against `rc.23`, drafting on and off |
 | [2026-11-02 morning FP4-Local cards](#current-2026-11-02-morning-main-8976c4f) | One, two and four Sparks at main `8976c4f`, FP4-Local, drafting on and off, with public receipts |
 | [2026-11-01 afternoon FP8 cards](results.md#current-fp8-main-acb49bc-2026-11-01-afternoon) | Two and four Sparks at main `acb49bc`, FP8, drafting on and off, with public receipts |

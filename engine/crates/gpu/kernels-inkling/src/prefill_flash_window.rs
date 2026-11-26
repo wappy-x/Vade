@@ -4,13 +4,14 @@
 //! Produces bit-for-bit identical output to `FLASH_WINDOW_ATTN` (kind 105) with:
 //! - `BQ_POS = 64` query positions x `gpack` GQA heads (`192` Q rows for 3:1 GQA, `384` threads = `12` warps,
 //!   `1` blk/SM): 2x K/V/T reuse per query row vs `BQ_POS = 32` while keeping 12 warps/SM occupancy at 168 regs.
-//! - True 2-stage double-buffered `K`, `V`, and 16B-aligned `T` (`101,120 B <= 101,376 B` static SMEM):
+//! - True 2-stage double-buffered `K`, `V`, and term-quad `T` (`101,184 B <= 101,376 B` static SMEM):
 //!   **1 single `_syncthreads()` per 32 keys** (eliminating the mid-tile barrier so Tensor Core `Q*K^T`/`P*V`
 //!   overlaps softmax ALU across all 12 warps and `K/V/T[next]` copies overlap the entire tile).
 //! - Global LPT scheduling (`q_tile_rev` outermost across all KV heads) for zero tail skew and 6x cross-CTA L2 reuse.
 //! - Branchless bit-exact `exp_nonpos` (eliminating saturating `f32 as i32` `F2I` + `FSETP` + `BRA`), `cvt.rn.bf16x2`
 //!   paired BF16 rounding, zero-branch `interior_rel` fast path for sliding-window layers, XOR-swizzled bank-free `M`,
-//!   single-pass `RelBias`, and coalesced dead-SMEM `st.global.v4.b32` BF16 epilogue.
+//!   two-pass `RelBias` fed by four-term `ld.shared.v4` loads (48 `T` loads per tile, not 192), and coalesced
+//!   dead-SMEM `st.global.v4.b32` BF16 epilogue.
 
 use crate::fixed_math::{rn, sigmoid};
 use crate::flash_window_abi::{
@@ -29,9 +30,13 @@ const V_BYTES: usize = FW_BKV * FW_HEAD_DIM * 2; // 8,192
 const Q_BYTES: usize = MAX_Q_ROWS * FW_HEAD_DIM * 2; // 49,152
 const M_BYTES: usize = MAX_Q_ROWS * FW_REL_DIM * 2; // 6,144 (XOR-swizzled, bank-conflict-free)
 const L_BYTES: usize = FW_PREFILL_BQ_POS * 4; // 256
-/// 100 floats = 25 x 16B chunks covers 95 distances + up to 3-float 16B-alignment shift (`0..98 < 100`).
+/// Staged `T` is distance-major inside four term planes: plane `q` holds, for each tile distance slot, the four
+/// FP32 terms `j = 4q..4q+3` in one 16 B chunk, so one `ld.shared.v4` feeds four terms of the bias sum.
+/// A `64 x 32` tile reads slots `0..=94` (`95` distances); the plane pitch stays 100 slots.
+const T_SLOTS: usize = FW_PREFILL_BQ_POS + FW_BKV - 1; // 95
 const T_PITCH: usize = 100;
-const T_STAGE_BYTES: usize = FW_REL_DIM * T_PITCH * 4; // 6,400
+const T_PLANE_BYTES: usize = T_PITCH * 16; // 1,600
+const T_STAGE_BYTES: usize = (FW_REL_DIM / 4) * T_PLANE_BYTES; // 6,400
 const C_BYTES: usize = 64; // 16 x u32 CTA constants (keeps loop-live regs <= 168 with 0 spills)
 const SMEM_BYTES: usize = Q_BYTES + 2 * K_BYTES + 2 * V_BYTES + M_BYTES + L_BYTES + 2 * T_STAGE_BYTES + C_BYTES; // 101,184
 
@@ -45,6 +50,7 @@ const C_OFF: u32 = T_OFF + (2 * T_STAGE_BYTES) as u32; // 101,120
 
 const _: () = assert!(FW_PREFILL_BQ_POS == 64 && FW_BKV == 32 && FW_HEAD_DIM == 128 && FW_REL_DIM == 16);
 const _: () = assert!(SMEM_BYTES == 101_184 && SMEM_BYTES <= 101_376);
+const _: () = assert!(T_SLOTS == 95 && T_SLOTS <= T_PITCH && FW_REL_DIM == 16 && T_STAGE_BYTES == 6_400);
 const _: () = assert!(K_OFF % 16 == 0 && V_OFF % 16 == 0 && M_OFF % 16 == 0 && T_OFF % 16 == 0 && C_OFF % 16 == 0);
 /// Dead SMEM reused by coalesced BF16 epilogue: 12 warps x 16 rows x 68 u32 (272 B/row, bank-free) = 52,224 B.
 const EPI_ROW_BYTES: usize = 68 * 4; // 272 B
@@ -123,7 +129,10 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
     //   16B aligned), and `output` is disjoint from all inputs.
     // - Device re-checks `flash_window_prefill_admitted`, contiguous chat step invariants (`1 <= live <= view`,
     //   `slot < view`, `slot_r == (slot_0 + r) % view`, `arc_len <= view`), and traps on any malformed step.
-    // - Shared memory stays strictly inside the block's static `SMEM_BYTES` (101,120 bytes <= 101,376 bytes).
+    // - Shared memory stays strictly inside the block's static `SMEM_BYTES` (101,184 bytes <= 101,376 bytes).
+    // - The bias loop reads staged `T` only at slots `0..=94` of the four term planes of the current stage. The
+    //   stage issue writes every one of those `95 x 16` words (a `cp.async` copy or a zero store) before the
+    //   `cp.async.wait_group` and `_syncthreads()` that publish the stage, so no load reads unwritten memory.
     // - All `threads` threads participate in every `_syncthreads()` and `cp.async.wait_group`; every warp participates
     //   uniformly in every `ldmatrix`/`mma`/`shfl`/`bar.warp.sync`.
     unsafe {
@@ -446,32 +455,20 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
                     let rel_p = *w.add(4) as *const f32;
                     let t_dst_stage = smem + T_OFF + st * T_STAGE_BYTES as u32;
                     let first = (pad_c + l0_c - 1) as i32 - (tb + FW_BKV as u32 - 1) as i32;
-                    let first4 = first & !3;
-                    let chunks_per_row = (T_PITCH / 4) as u32; // 25
-                    let total_chunks = (FW_REL_DIM as u32) * chunks_per_row; // 400
-                    let mut kc = tid_c;
-                    while kc < total_chunks {
-                        let j = kc / chunks_per_row;
-                        let c = kc % chunks_per_row;
-                        let d4 = first4 + (c * 4) as i32;
-                        let dst = t_dst_stage + kc * 16;
-                        if d4 >= 0 && (d4 as u32) + 4 <= ext_c && (ext_c & 3) == 0 {
-                            crate::ptx::copy16(dst, rel_p.add((j * ext_c + d4 as u32) as usize).cast::<u32>());
-                        } else if d4 + 4 <= 0 || d4 >= ext_c as i32 {
-                            st_shared_zero16(dst);
+                    // Element `e = slot * 16 + j`: distance `first + slot` of table row `j`, zero outside `0..extent`.
+                    let total = (T_SLOTS * FW_REL_DIM) as u32; // 1,520
+                    let mut e = tid_c;
+                    while e < total {
+                        let slot = e >> 4;
+                        let j = e & 15;
+                        let d = first + slot as i32;
+                        let dst = t_dst_stage + (j >> 2) * T_PLANE_BYTES as u32 + slot * 16 + (j & 3) * 4;
+                        if d >= 0 && (d as u32) < ext_c {
+                            crate::ptx::copy4(dst, rel_p.add((j * ext_c + d as u32) as usize).cast::<u32>());
                         } else {
-                            let mut o = 0u32;
-                            while o < 4 {
-                                let d = d4 + o as i32;
-                                if d >= 0 && (d as u32) < ext_c {
-                                    crate::ptx::copy4(dst + o * 4, rel_p.add((j * ext_c + d as u32) as usize).cast::<u32>());
-                                } else {
-                                    store_u32(dst + o * 4, 0);
-                                }
-                                o += 1;
-                            }
+                            store_u32(dst, 0);
                         }
-                        kc += thr_c;
+                        e += thr_c;
                     }
                 }
             }};
@@ -643,65 +640,69 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
                     }
                     if need_rel {
                         // Two-pass relative bias (fragments 0,1 then 2,3): keeps live bias accumulators at 8 floats
-                        // (0 stack, 0 spill at 168 regs) while reading XOR-swizzled bank-free M and 16B-staged T.
-                        let first = (pad32 + live0_32 - 1) as i32 - (t_base + FW_BKV as u32 - 1) as i32;
-                        let shift = (first - (first & !3)) as u32;
-                        let t_rel_off = 4 * (r0 + FW_BKV as u32 - 1 - t32 * 2);
-                        let mut t_start = smem + T_OFF + stage * T_STAGE_BYTES as u32 + t_rel_off + shift * 4;
+                        // (0 stack, 0 spill at 168 regs) while reading XOR-swizzled bank-free M and term-quad T.
+                        // Shared-memory load count, not arithmetic, bounds this loop: one 16 B load per four terms.
+                        // Lane slot `S = r0 + 31 - 2 * t32`: row `r0` column pair `c` reads slots `S - c`, `S - c - 1`;
+                        // row `r0 + 8` reads `S + 8 - c`, `S + 7 - c`. Each sum keeps its `j = 0..15` order with a
+                        // separate multiply and add, so every bias value is bit-identical to the scalar form.
+                        let t_rel_off = 16 * (r0 + FW_BKV as u32 - 1 - t32 * 2);
+                        let mut t_start = smem + T_OFF + stage * T_STAGE_BYTES as u32 + t_rel_off;
                         let qr0_u = h_loc * 64 + r0;
                         let mut m_row0 = smem + M_OFF + qr0_u * 32;
                         let mut m_swz = (qr0_u & 7) * 4;
                         core::arch::asm!("/* {0} {1} {2} */", inout(reg32) t_start, inout(reg32) m_row0, inout(reg32) m_swz, options(nomem, nostack));
-                        let t_row_stride = (T_PITCH * 4) as u32;
+                        macro_rules! m_quad {
+                            ($row:expr, $jq:expr) => {{
+                                let w0 = load_u32($row + (($jq * 8) ^ m_swz));
+                                let w1 = load_u32($row + (($jq * 8 + 4) ^ m_swz));
+                                [f32::from_bits(w0 << 16), f32::from_bits(w0 & 0xffff_0000),
+                                 f32::from_bits(w1 << 16), f32::from_bits(w1 & 0xffff_0000)]
+                            }};
+                        }
+                        macro_rules! t_quad {
+                            ($at:expr) => {{
+                                let t = crate::ptx::load4($at);
+                                [f32::from_bits(t[0]), f32::from_bits(t[1]), f32::from_bits(t[2]), f32::from_bits(t[3])]
+                            }};
+                        }
+                        macro_rules! acc {
+                            ($b:ident, $m:ident, $t:ident) => {
+                                $b += $m[0] * $t[0]; $b += $m[1] * $t[1]; $b += $m[2] * $t[2]; $b += $m[3] * $t[3];
+                            };
+                        }
                         let (mut b00, mut b01, mut b02, mut b03) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
                         let (mut b10, mut b11, mut b12, mut b13) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
-                        let mut j2 = 0u32;
+                        let mut jq = 0u32;
                         let mut at = t_start;
-                        while j2 < 8 {
-                            let m_off = (j2 * 4) ^ m_swz;
-                            let mp0 = load_u32(m_row0 + m_off);
-                            let mp1 = load_u32(m_row0 + 256 + m_off);
-                            let (a0, a1) = (f32::from_bits(mp0 << 16), f32::from_bits(mp0 & 0xffff_0000));
-                            let (m0, m1) = (f32::from_bits(mp1 << 16), f32::from_bits(mp1 & 0xffff_0000));
-                            let p0 = f32::from_bits(load_u32(at + 32)); let q0v = f32::from_bits(load_u32(at + 28));
-                            let p1 = f32::from_bits(load_u32(at));      let q1v = f32::from_bits(load_u32(at - 4));
-                            let p2 = f32::from_bits(load_u32(at - 32)); let q2v = f32::from_bits(load_u32(at - 36));
-                            b00 += a0 * p1; b01 += a0 * q1v; b02 += m0 * p0; b03 += m0 * q0v;
-                            b10 += a0 * p2; b11 += a0 * q2v; b12 += m0 * p1; b13 += m0 * q1v;
-                            at += t_row_stride;
-                            let p0 = f32::from_bits(load_u32(at + 32)); let q0v = f32::from_bits(load_u32(at + 28));
-                            let p1 = f32::from_bits(load_u32(at));      let q1v = f32::from_bits(load_u32(at - 4));
-                            let p2 = f32::from_bits(load_u32(at - 32)); let q2v = f32::from_bits(load_u32(at - 36));
-                            b00 += a1 * p1; b01 += a1 * q1v; b02 += m1 * p0; b03 += m1 * q0v;
-                            b10 += a1 * p2; b11 += a1 * q2v; b12 += m1 * p1; b13 += m1 * q1v;
-                            at += t_row_stride;
-                            j2 += 1;
+                        while jq < 4 {
+                            let a = m_quad!(m_row0, jq);
+                            let m = m_quad!(m_row0 + 256, jq);
+                            let t = t_quad!(at + 128); acc!(b02, m, t);
+                            let t = t_quad!(at + 112); acc!(b03, m, t);
+                            let t = t_quad!(at);       acc!(b00, a, t); acc!(b12, m, t);
+                            let t = t_quad!(at - 16);  acc!(b01, a, t); acc!(b13, m, t);
+                            let t = t_quad!(at - 128); acc!(b10, a, t);
+                            let t = t_quad!(at - 144); acc!(b11, a, t);
+                            at += T_PLANE_BYTES as u32;
+                            jq += 1;
                         }
                         finalize_s!(s0, 0, [b00, b01, b02, b03]);
                         finalize_s!(s1, 8, [b10, b11, b12, b13]);
                         let (mut b20, mut b21, mut b22, mut b23) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
                         let (mut b30, mut b31, mut b32, mut b33) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
-                        j2 = 0;
+                        jq = 0;
                         at = t_start;
-                        while j2 < 8 {
-                            let m_off = (j2 * 4) ^ m_swz;
-                            let mp0 = load_u32(m_row0 + m_off);
-                            let mp1 = load_u32(m_row0 + 256 + m_off);
-                            let (a0, a1) = (f32::from_bits(mp0 << 16), f32::from_bits(mp0 & 0xffff_0000));
-                            let (m0, m1) = (f32::from_bits(mp1 << 16), f32::from_bits(mp1 & 0xffff_0000));
-                            let p2 = f32::from_bits(load_u32(at - 32)); let q2v = f32::from_bits(load_u32(at - 36));
-                            let p3 = f32::from_bits(load_u32(at - 64)); let q3v = f32::from_bits(load_u32(at - 68));
-                            let p4 = f32::from_bits(load_u32(at - 96)); let q4v = f32::from_bits(load_u32(at - 100));
-                            b20 += a0 * p3; b21 += a0 * q3v; b22 += m0 * p2; b23 += m0 * q2v;
-                            b30 += a0 * p4; b31 += a0 * q4v; b32 += m0 * p3; b33 += m0 * q3v;
-                            at += t_row_stride;
-                            let p2 = f32::from_bits(load_u32(at - 32)); let q2v = f32::from_bits(load_u32(at - 36));
-                            let p3 = f32::from_bits(load_u32(at - 64)); let q3v = f32::from_bits(load_u32(at - 68));
-                            let p4 = f32::from_bits(load_u32(at - 96)); let q4v = f32::from_bits(load_u32(at - 100));
-                            b20 += a1 * p3; b21 += a1 * q3v; b22 += m1 * p2; b23 += m1 * q2v;
-                            b30 += a1 * p4; b31 += a1 * q4v; b32 += m1 * p3; b33 += m1 * q3v;
-                            at += t_row_stride;
-                            j2 += 1;
+                        while jq < 4 {
+                            let a = m_quad!(m_row0, jq);
+                            let m = m_quad!(m_row0 + 256, jq);
+                            let t = t_quad!(at - 128); acc!(b22, m, t);
+                            let t = t_quad!(at - 144); acc!(b23, m, t);
+                            let t = t_quad!(at - 256); acc!(b20, a, t); acc!(b32, m, t);
+                            let t = t_quad!(at - 272); acc!(b21, a, t); acc!(b33, m, t);
+                            let t = t_quad!(at - 384); acc!(b30, a, t);
+                            let t = t_quad!(at - 400); acc!(b31, a, t);
+                            at += T_PLANE_BYTES as u32;
+                            jq += 1;
                         }
                         finalize_s!(s2, 16, [b20, b21, b22, b23]);
                         finalize_s!(s3, 24, [b30, b31, b32, b33]);

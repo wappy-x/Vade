@@ -48,6 +48,8 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
     // - All 256 threads participate in every `bar.sync 0`, and all 32 lanes of a warp in every `match.any.sync` and
     //   `bar.warp.sync` (the loops of passes 2 and 4 run the same count of 32-pick groups on every lane of a warp).
     unsafe {
+        // SAFETY: prefetch hints on `table[index]` and the commands after it in the stage buffer (`warm_command!`).
+        crate::fast_elem::warm_command!(table, index);
         let c = &*table.add(index as usize);
         if c.kind != crate::inkling_launch::MOE_GROUP_ROUTE { core::arch::nvptx::trap(); }
         let words = c.payload.as_ptr().cast::<u64>();

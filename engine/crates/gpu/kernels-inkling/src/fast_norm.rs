@@ -42,6 +42,8 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
     // - Wide rounded prefill rows are a multiple of 128. The vector epilogue also checks
     //   that all non-null bases are 16-byte aligned before accessing four FP32 words.
     unsafe {
+        // SAFETY: prefetch hints on `table[index]` and the commands after it in the stage buffer (`warm_command!`).
+        crate::fast_elem::warm_command!(table, index);
         let c = &*table.add(index as usize);
         if c.kind != crate::inkling_launch::FAST_NORM { core::arch::nvptx::trap(); }
         // The next launch may start now (griddepcontrol.launch_dependents): a launch that the host marks dependent

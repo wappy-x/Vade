@@ -6,6 +6,8 @@ use crate::tc_ptx::{shfl_xor_f32, shfl_xor_u32};
 /// stay L2-resident across consecutive Markov steps on GB10's 24 MiB L2; pinning the tail panels that
 /// `HeadFold` finishes last keeps them warm in L2 right into Markov step 1 (`FoldPick` #1).
 const PIN_FOLD_PANELS: u32 = 9_600;
+/// `draft_ops::PANEL_SPLIT_ROWS_MAX`: rows up to which 9..=32 inputs split a 16-row panel into warps of 8 inputs.
+const PANEL_SPLIT_ROWS_MAX: u32 = 8192;
 
 macro_rules! l2_evict_first {
     () => {{
@@ -288,6 +290,7 @@ macro_rules! project_panel_two {
 /// or `4`) lockstep warps inside the same 128-thread CTA (each warp handling 16-input waves strided by `slabs * 16`)
 /// with a 2-chunk software-pipelined scalar ring (`w0, w1, sa01`, 0 stack, 0 spill): covers up to 64 inputs in ONE
 /// L1-shared DRAM read of every weight byte (`4x` less DRAM traffic on `C8..C32` batched draft panels).
+/// `9..=32` inputs on at most `PANEL_SPLIT_ROWS_MAX` rows take 2 or 4 warps of 8 inputs through `project_panel!`.
 macro_rules! project_panel_wide {
     ($x:expr, $y:expr, $a:expr, $b:expr, $inputs:expr, $panel:expr, $slab:expr, $slabs:expr, $lane:expr, $group:expr, $pair:expr, $pin_l2:expr, $out:expr) => {{
         let (x, y, a, b, inputs, panel, slab, slabs, lane, group, pair, pin_l2, out) = ($x, $y, $a, $b, $inputs, $panel, $slab, $slabs, $lane, $group, $pair, $pin_l2, $out);
@@ -385,8 +388,12 @@ unsafe fn run<const COMBINED: bool>(table: *const crate::Command, index: u64) {
         let c = *cmd.add(8) as u32;
         // SAFETY: operation 19 holds two or three panels of whole 64-row blocks back to back (rows a0, d, e)
         // and writes their outputs back to back without a stack-allocated indexable array.
+        // Warps a 16-row panel, as `draft_ops::panel_slabs`: 9..=32 inputs on at most `PANEL_SPLIT_ROWS_MAX` rows
+        // (all siblings together) split into warps of 8 inputs; other widths take warps of up to 16 inputs.
+        let split = !COMBINED && (kind == 13 || kind == 19) && c > 8 && c <= 32
+            && (if kind == 19 { a0 + *cmd.add(9) as u32 + *cmd.add(10) as u32 } else { a0 }) <= PANEL_SPLIT_ROWS_MAX;
         let panel_slabs = if !COMBINED && (kind == 13 || kind == 19) {
-            if c <= 16 { 1u32 } else if c <= 32 { 2u32 } else { 4u32 }
+            if c <= 8 { 1u32 } else if split { if c <= 16 { 2u32 } else { 4u32 } } else if c <= 16 { 1u32 } else if c <= 32 { 2u32 } else { 4u32 }
         } else {
             1u32
         };
@@ -435,7 +442,31 @@ unsafe fn run<const COMBINED: bool>(table: *const crate::Command, index: u64) {
                 let p_idx = panel >> slab_shift;
                 let s_idx = panel & (panel_slabs - 1);
                 let pin_w = (a as usize).next_multiple_of(64) * (b as usize) <= (1 << 20);
-                project_panel_wide!(x, y, a, b, c, p_idx, s_idx, panel_slabs, lane, group, pair, pin_w, out);
+                if !split {
+                    project_panel_wide!(x, y, a, b, c, p_idx, s_idx, panel_slabs, lane, group, pair, pin_w, out);
+                } else if s_idx * 8 < c {
+                    // Split: each of the panel's 2 or 4 warps (one CTA, so the weight bytes come from DRAM once and
+                    // from L1 for the other warps) runs the 6-chunk pipelined 1..=8-input product on its own 8
+                    // inputs. Each output is the same chunk-ordered MMA chain as in the two-tile product, so every
+                    // bit matches, with twice the warps on the 144- and 320-panel draft layer matrices.
+                    let first = s_idx * 8;
+                    let inputs = (c - first).min(8);
+                    let h = project_panel!(x, y.add((first * (b >> 6) * 18) as usize), a, b, inputs, p_idx, lane, group, pair, pin_w);
+                    let row = p_idx * 16 + group;
+                    let t0 = pair * 2;
+                    if row < a {
+                        if t0 < inputs {
+                            let dst = (out as *mut f32).add(((first + t0) as usize) * (a as usize) + (row as usize));
+                            *dst = rn(h[0]);
+                            if row + 8 < a { *dst.add(8) = rn(h[2]); }
+                        }
+                        if t0 + 1 < inputs {
+                            let dst = (out as *mut f32).add(((first + t0 + 1) as usize) * (a as usize) + (row as usize));
+                            *dst = rn(h[1]);
+                            if row + 8 < a { *dst.add(8) = rn(h[3]); }
+                        }
+                    }
+                }
                 if i == 0 && (*cmd as u32) == 13 && *cmd.add(9) as u32 != 0 {
                     *(out as *mut f32).add((a as usize) * (c as usize)) = 0.0;
                 }

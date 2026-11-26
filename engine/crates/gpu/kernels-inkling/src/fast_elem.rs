@@ -25,6 +25,48 @@ const FOLD_SMEM_BYTES: usize = ROUTE_FOLD_CONV_WEIGHTS_MAX * 4; // 512 bytes
 const ROUTER_COMPACT_SMEM_BYTES: usize = 1152; // 128*8 expert pick bitmasks + 8*4*4 LPT warp bucket counts
 const _: () = assert!((NORM_CHUNKS_MAX + 1) * 4 <= FOLD_SMEM_BYTES);
 
+/// 128-byte steps that cover one command from its first byte (a `Command` is 1,040 bytes, 16-byte aligned: at most 9
+/// lines). Step `k` starts at byte `k * 128` of the command, inside it.
+pub(crate) const COMMAND_LINES: usize = core::mem::size_of::<crate::inkling_launch::Command>().div_ceil(128);
+const _: () = assert!(COMMAND_LINES < 32 && (COMMAND_LINES - 1) * 128 < core::mem::size_of::<crate::inkling_launch::Command>());
+/// Bytes after a launch's command that one bulk prefetch asks L2 for: the next 4 commands (8 or 16 gain no more on the
+/// one-row decode step). A bulk prefetch takes a 16-byte aligned address and a multiple of 16 bytes.
+pub(crate) const AHEAD_BYTES: u32 = (4 * core::mem::size_of::<crate::inkling_launch::Command>()) as u32;
+const _: () = assert!(core::mem::size_of::<crate::inkling_launch::Command>() % 16 == 0 && AHEAD_BYTES % 16 == 0);
+
+/// Warm the command table before a fast launch reads its command (the table is cold after a step's weight stream).
+/// - Lane `k < COMMAND_LINES` of each warp asks L1 for byte `k * 128` of `table[index]` (`prefetch.global.L1`): the
+///   prologue's dependent command reads then wait on one memory trip, not on one trip each.
+/// - Thread `COMMAND_LINES` of block (0, 0) asks L2 for the `AHEAD_BYTES` after it in one bulk prefetch
+///   (`cp.async.bulk.prefetch.L2.global`): the launches that follow, of every kind, find their commands in L2.
+///
+/// Measured on the one-row decode step (64 tokens, traced): exposed kernel time 1066.7 ms, 1057.8 ms with the L1 part
+/// alone, 1048.9 ms with both. Not in `FAST_STREAM_OPS`: its kernel is at its register cap (78), and there the warm-up
+/// made the wide drafted launches slower (1,152 blocks at C32: 41.5 to 49.6 us); the launch before it warms its
+/// command in L2. A macro: it expands inside the caller's own `unsafe` block and adds no unsafe site.
+/// Caller contract (each replay's SAFETY note): `table[index]` is this launch's command, 16-byte aligned, in a table
+/// of the resident recorder. That table ends `COMMAND_BYTES` into a stage buffer of `COMMAND_BYTES + stage::BYTES`
+/// bytes (1 MiB follows it), so the `AHEAD_BYTES` after any of its commands lie in the same allocation; every fast
+/// launch is recorded (the host `fast_ops` refuses one that is not). Both prefetches are hints: they move no value
+/// into a register and write no memory. No `readonly`: each asm keeps its place before the command reads that follow.
+macro_rules! warm_command {($table:expr, $index:expr) => {{
+    let table: *const crate::inkling_launch::Command = $table;
+    let index = $index as usize;
+    let tid = core::arch::nvptx::_thread_idx_x() as usize;
+    let lane = tid & 31;
+    if lane < crate::fast_elem::COMMAND_LINES {
+        let p = table.add(index).cast::<u8>().add(lane * 128);
+        core::arch::asm!("prefetch.global.L1 [{a}];", a = in(reg64) p as u64, options(nostack));
+    } else if tid == crate::fast_elem::COMMAND_LINES
+        && core::arch::nvptx::_block_idx_x() == 0
+        && core::arch::nvptx::_block_idx_y() == 0
+    {
+        core::arch::asm!("cp.async.bulk.prefetch.L2.global [{a}], {n};", a = in(reg64) table.add(index + 1) as u64,
+            n = in(reg32) crate::fast_elem::AHEAD_BYTES, options(nostack));
+    }
+}}}
+pub(crate) use warm_command;
+
 /// Replay one recorded command of kind `FAST_CAPPED_GATE`.
 /// SAFETY (caller contract, `resident_launch_fast_capped_gate`): `table[index]` is a valid command recorded by
 /// `Backend::fast_capped_gate_into` after `fast_ops::check_capped_gate`, or the coefficient-table build recorded by
@@ -43,6 +85,8 @@ pub(crate) unsafe fn replay_capped_gate(table: *const crate::inkling_launch::Com
     // - Prefill vector accesses require aligned bases and a width divisible by four, so each
     //   16-byte load or store stays inside its checked row.
     unsafe {
+        // SAFETY: prefetch hints on `table[index]` and the commands after it in the stage buffer (`warm_command!`).
+        crate::fast_elem::warm_command!(table, index);
         let c = &*table.add(index as usize);
         if c.kind != crate::inkling_launch::FAST_CAPPED_GATE { core::arch::nvptx::trap(); }
         let w = c.payload.as_ptr().cast::<u64>();
@@ -126,6 +170,8 @@ pub(crate) unsafe fn replay_router_pick(table: *const crate::inkling_launch::Com
     // - All 32 lanes of each active warp participate in every `shfl.sync.bfly.b32` and `ballot`; in compact mode
     //   all 256 threads of the single block participate in every `_syncthreads`, and each compacted entry has one writer.
     unsafe {
+        // SAFETY: prefetch hints on `table[index]` and the commands after it in the stage buffer (`warm_command!`).
+        crate::fast_elem::warm_command!(table, index);
         let c = &*table.add(index as usize);
         if c.kind != crate::inkling_launch::FAST_ROUTER_PICK { core::arch::nvptx::trap(); }
         let w = c.payload.as_ptr().cast::<u64>();

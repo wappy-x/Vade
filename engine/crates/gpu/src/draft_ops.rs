@@ -3,11 +3,22 @@
 pub const PANEL_INPUTS_MAX:usize=256;
 /// Maximum concurrent chats per batched draft Markov step (`FoldPickBatch`, `MarkovPrepBatch`, `MarkovStepBatch`).
 pub const DRAFT_BATCH_MAX:usize=32;
+/// Rows (all sibling panels together) up to which `9..=32` inputs split each 16-row panel into warps of 8 inputs.
+/// One warp a panel gives such a matrix at most 512 warps, under half of one wave of resident warps on GB10
+/// (48 SMs x 6 blocks x 4 warps = 1,152), so its few warps' latency sets its time; the larger matrices (`gate_up`,
+/// the vocabulary head) already fill a wave, and a second warp a panel only adds a second wave there.
+pub const PANEL_SPLIT_ROWS_MAX:usize=8192;
 /// Power-of-2 warp slabs sharing one 16-row NVFP4 panel inside a 128-thread CTA (`1`, `2`, or `4`).
-/// Keeps every panel's slabs in the same CTA so all 4 warps hit L1 on one DRAM pass over up to 64 inputs.
+/// Keeps every panel's slabs in the same CTA so its warps read each weight byte from DRAM once and from L1 after.
+/// - `1..=8` inputs: one warp, the pipelined 1..=8-input product.
+/// - `9..=32` inputs and at most `PANEL_SPLIT_ROWS_MAX` rows: 2 or 4 warps of 8 inputs, each the same pipelined
+///   1..=8-input product (the `o` and `down` panels of a 12- or 16-row draft block get twice the warps).
+/// - otherwise: warps of 16 inputs (two MMA tiles a warp), up to 4 warps over up to 64 inputs a pass.
 #[inline(always)]
-pub const fn panel_slabs(inputs:usize)->usize {
-    if inputs<=16 {1} else if inputs<=32 {2} else {4}
+pub const fn panel_slabs(rows:usize,inputs:usize)->usize {
+    if inputs<=8 {1}
+    else if inputs<=32 && rows<=PANEL_SPLIT_ROWS_MAX {if inputs<=16 {2} else {4}}
+    else if inputs<=16 {1} else if inputs<=32 {2} else {4}
 }
 #[derive(Clone,Copy)]
 pub enum DraftOp {
@@ -100,15 +111,15 @@ impl DraftOp {
                     [17,rows,hidden,latent.checked_mul(64)?+inputs*2+usize::from(confidence),epsilon.to_bits() as usize,bound.to_bits() as usize])}
             PackActivations(n) if n>0 && n.is_multiple_of(64)=>([n,0,0],n/64*18,n/16,[16,n/64,0,0,0,0]),
             Panel{rows,columns,inputs} if panel_words(rows,columns).is_some() && (1..=PANEL_INPUTS_MAX).contains(&inputs)=>{
-                let slabs=panel_slabs(inputs);
+                let slabs=panel_slabs(rows,inputs);
                 ([panel_words(rows,columns)?,(columns/64*18).checked_mul(inputs)?,0],rows.checked_mul(inputs)?,rows.next_multiple_of(16).checked_mul(2)?.checked_mul(slabs)?,[13,rows,columns,inputs,0,0])}
             PanelGated{rows,columns,inputs} if panel_words(rows,columns).is_some() && (1..=16).contains(&inputs)=>{
-                ([panel_words(rows,columns)?,(columns/64*18).checked_mul(inputs)?,1],rows.checked_mul(inputs)?.checked_add(1)?,rows.next_multiple_of(16)*2,[13,rows,columns,inputs,1,0])}
+                ([panel_words(rows,columns)?,(columns/64*18).checked_mul(inputs)?,1],rows.checked_mul(inputs)?.checked_add(1)?,rows.next_multiple_of(16)*2*panel_slabs(rows,inputs),[13,rows,columns,inputs,1,0])}
             Panels{rows,columns,inputs} if (1..=PANEL_INPUTS_MAX).contains(&inputs) && rows[0]>0 && rows[1]>0 && rows.iter().all(|r|r.is_multiple_of(64))=>{
                 let mut words=0usize;
                 for r in rows.into_iter().filter(|&r|r>0) {words=words.checked_add(panel_words(r,columns)?)?;}
                 let total=rows[0].checked_add(rows[1])?.checked_add(rows[2])?;
-                let slabs=panel_slabs(inputs);
+                let slabs=panel_slabs(total,inputs);
                 ([words,(columns/64*18).checked_mul(inputs)?,0],total.checked_mul(inputs)?,total.checked_mul(2)?.checked_mul(slabs)?,[19,rows[0],columns,inputs,rows[1],rows[2]])}
             FoldPick{rows,columns,epsilon,bound,confidence,gated} if epsilon>0.0 && bound>0.0=>{
                 let flags=usize::from(confidence)|(usize::from(gated)<<1);
@@ -189,4 +200,33 @@ pub fn panel_words(rows:usize,columns:usize)->Option<usize> {
     if rows==0 || rows>1<<24 || columns==0 || !columns.is_multiple_of(64) {return None;}
     let elements=rows.next_multiple_of(64).checked_mul(columns)?;
     (elements/8).checked_add(elements/64)?.checked_add(2048).filter(|&words|words<=u32::MAX as usize)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    /// The kernel (`draft_panel.rs`, `run`) gives a 16-row panel 1 warp for 1..=8 inputs; 2 or 4 warps of 8 inputs
+    /// for 9..=32 inputs when all sibling rows together are at most `PANEL_SPLIT_ROWS_MAX`; else warps of 16 inputs.
+    /// Every launch grid must hold all of those warps.
+    #[test]
+    fn panel_grids_hold_every_warp_slab() {
+        for inputs in 1..=PANEL_INPUTS_MAX {
+            for (rows,split) in [(100usize,true),(PANEL_SPLIT_ROWS_MAX,true),(PANEL_SPLIT_ROWS_MAX+64,false)] {
+                let warps=if inputs<=8 {1} else if inputs<=32 && split {inputs.div_ceil(16)*2} else if inputs<=16 {1} else if inputs<=32 {2} else {4};
+                assert_eq!(panel_slabs(rows,inputs),warps,"rows={rows} inputs={inputs}");
+                let (_,_,lanes,_)=DraftOp::Panel{rows,columns:128,inputs}.layout().unwrap();
+                assert_eq!(lanes,rows.next_multiple_of(16)*2*warps,"Panel rows={rows} inputs={inputs}");
+                if inputs<=16 {
+                    let (_,_,gated,_)=DraftOp::PanelGated{rows,columns:128,inputs}.layout().unwrap();
+                    assert_eq!(gated,lanes,"PanelGated rows={rows} inputs={inputs}");
+                }
+            }
+            // Siblings split by their rows together: 4096 + 4096 splits, 4096 + 4160 does not.
+            for (sib,split) in [([4096usize,4096,0],true),([4096,4160,0],false)] {
+                let warps=if inputs<=8 {1} else if inputs<=32 && split {inputs.div_ceil(16)*2} else if inputs<=16 {1} else if inputs<=32 {2} else {4};
+                let (_,_,lanes,_)=DraftOp::Panels{rows:sib,columns:128,inputs}.layout().unwrap();
+                assert_eq!(lanes,sib.iter().sum::<usize>()*2*warps,"Panels {sib:?} inputs={inputs}");
+            }
+        }
+    }
 }

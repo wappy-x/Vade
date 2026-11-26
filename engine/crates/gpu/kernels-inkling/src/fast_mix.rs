@@ -50,6 +50,8 @@ pub(crate) unsafe fn replay_mix_blend(table: *const crate::inkling_launch::Comma
     // - Shared memory holds `kept <= MIX_KEPT_MAX` FP32 weights strictly inside `WEIGHT_SMEM_BYTES` (256 B);
     //   all 256 threads participate in `bar.sync 0`.
     unsafe {
+        // SAFETY: prefetch hints on `table[index]` and the commands after it in the stage buffer (`warm_command!`).
+        crate::fast_elem::warm_command!(table, index);
         let c = &*table.add(index as usize);
         if c.kind != crate::inkling_launch::FAST_MIX_BLEND { core::arch::nvptx::trap(); }
         let w = c.payload.as_ptr().cast::<u64>();
@@ -717,6 +719,8 @@ pub(crate) unsafe fn replay_row_dots(table: *const crate::inkling_launch::Comman
     //   Every warp owns one head in a row of the packed plane, disjoint from all its inputs and every other head.
     //   Even lanes write disjoint pairs. No incomplete warp reaches a shuffle.
     unsafe {
+        // SAFETY: prefetch hints on `table[index]` and the commands after it in the stage buffer (`warm_command!`).
+        crate::fast_elem::warm_command!(table, index);
         let c = &*table.add(index as usize);
         if c.kind != crate::inkling_launch::FAST_ROW_DOTS { core::arch::nvptx::trap(); }
         let w = c.payload.as_ptr().cast::<u64>();
