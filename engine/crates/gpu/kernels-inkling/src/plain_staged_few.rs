@@ -310,7 +310,7 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
         let metadata = if grouped { core::ptr::null() } else { *words.add(FEW_PANEL_WORD + 2) as *const u32 };
         let panel_row = if grouped { 0 } else { *words.add(FEW_PANEL_WORD + 1) as usize };
         if flags & FEW_GATE_BLEND != 0 {
-            // The attached gate blend (`few_product::FEW_GATE_BLEND`, 2026-11-25, W-BOSS-SC-DENSE-VERIFY), the 2-to-8-row
+            // The attached gate blend (`few_product::FEW_GATE_BLEND`, 2026-11-25, W-BOSS-SC-DENSE-VERIFY), the 2-to-16-row
             // form of the one-row entry's: block b takes the 32 channels from 32 b. Warps 0 and 1 compute forget rows
             // 32 b .. 32 b + 32 and warps 2 and 3 the gain rows dim + 32 b .. dim + 32 b + 32, with the chains of the
             // product's own blocks (`warp` on the matrix from row `shift`, the same input; with panels, the panel row
@@ -329,7 +329,11 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
             let blended = *words.add(FEW_BLEND_WORD + 2) as *mut f32;
             let first = core::arch::nvptx::_block_idx_x() as usize * 32;
             let shift = if tid >= 64 { dim - 32 } else { 0 };
-            let (c0, _) = warp::<false, false>(weights.add(shift * cols), input, input2, cols, inputs, first, rows - shift, smem, panels, metadata, panel_row + shift);
+            let (c0, c1) = if inputs <= 8 {
+                warp::<false, false>(weights.add(shift * cols), input, input2, cols, inputs, first, rows - shift, smem, panels, metadata, panel_row + shift)
+            } else {
+                warp::<false, true>(weights.add(shift * cols), input, input2, cols, inputs, first, rows - shift, smem, panels, metadata, panel_row + shift)
+            };
             crate::ptx::wait();
             core::arch::nvptx::_syncthreads();
             let lane = tid & 31;
@@ -350,6 +354,13 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
             keep!(j, t1, c0[1]);
             keep!(j + 8, t0, c0[2]);
             keep!(j + 8, t1, c0[3]);
+            if inputs > 8 {
+                let (t2, t3) = (8 + 2 * s, 8 + 2 * s + 1);
+                keep!(j, t2, c1[0]);
+                keep!(j, t3, c1[1]);
+                keep!(j + 8, t2, c1[2]);
+                keep!(j + 8, t3, c1[3]);
+            }
             core::arch::nvptx::_syncthreads();
             let mut i = tid;
             while i < inputs * 32 {
@@ -459,9 +470,6 @@ unsafe fn warp<const NARROW: bool, const TWO: bool>(
     let half = if input2.is_null() { cols } else { cols / 2 };
 
     let compressed = !panels.is_null();
-    macro_rules! tile {($row:expr, $k:expr) => {{
-        ($row + panel_row) / 16 * (cols / 16) + $k / 16
-    }};}
     macro_rules! interleave {($low:expr, $high:expr, $selector:expr) => {{
         let word: u32;
         asm!("prmt.b32 {word}, {low}, {high}, {select};",
@@ -476,58 +484,158 @@ unsafe fn warp<const NARROW: bool, const TWO: bool>(
         [interleave!(low0, high0, 0x5140u32), interleave!(low0, high0, 0x7362u32),
          interleave!(low1, high1, 0x5140u32), interleave!(low1, high1, 0x7362u32)]
     }};}
-    macro_rules! raw_pair {($row:expr, $col:expr) => {{
-        let row = $row;
-        if row < rows { *weights.add(row * cols + $col).cast::<u32>() } else { 0 }
-    }};}
 
-    // When the rounded input fits (up to 8 rows), stage it once. Each warp then owns its
-    // entire ascending-K chain and can read the packed weights independently. Larger batches
-    // (`TWO == true`, 9..=16 rows) share each decoded panel tile across both 8-row MMA slabs below.
-    if compressed && !NARROW && !TWO && inputs * cols * 2 <= FEW_BLOCK_BYTES {
-        for i in (tid..inputs * cols / 4).step_by(FEW_THREADS) {
-            let row = i / (cols / 4);
-            let kb = i % (cols / 4) * 4;
-            let (src, off) = if kb < half { (input, kb) } else { (input2, kb - half) };
-            let v = ld_global_nc_v4(src.add(row * half + off));
-            store_u32(smem + (i * 8) as u32, cvt_bf16x2(v[0], v[1]));
-            store_u32(smem + (i * 8 + 4) as u32, cvt_bf16x2(v[2], v[3]));
-        }
-        core::arch::nvptx::_syncthreads();
+    // Compressed wide BF16 panels (`M = 1..=16`): direct `P_DEPTH`-tile register load ring
+    // with `.L2::evict_first` + `.L2::256B` and part-staged BF16 `X` in the existing 30,720 B SMEM.
+    // Reuses each decoded 16x16 BF16 weight tile across both 8-row MMA N-tiles (`TWO`) in one DRAM pass
+    // with ascending-K `m16n8k16` accumulation (bit-identical to `plain_staged_one` and raw `plain_staged_few`).
+    if compressed && !NARROW {
+        const P_DEPTH: usize = 12;
+        let tiles = cols / 16;
+        let meta_bytes = tiles * 16; // 4 warps * tiles * 4 bytes = cols bytes
+        let x_budget = FEW_BLOCK_BYTES - meta_bytes;
+        let max_part = ((x_budget / inputs).saturating_sub(32)) / 32;
+        let part_tiles = if inputs * (tiles * 32 + 32) <= x_budget {
+            tiles
+        } else {
+            let p = (max_part / P_DEPTH) * P_DEPTH;
+            if p >= P_DEPTH { p } else { P_DEPTH }
+        };
+        let row_bytes = part_tiles * 32 + 32;
+        let headers = smem + (inputs * row_bytes) as u32;
         let first = block_first + warp_id * 16;
-        let mut acc0 = [0.0; 4];
-        let mut acc1 = [0.0; 4];
-        if first < rows {
-            let row = first + g;
-            for kb in (0..cols).step_by(16) {
-                if lane < 3 && kb + 64 < cols {
-                    let tile = tile!(first, kb + 64);
-                    let address = panels.add(tile * DATA_WORDS + lane * 32);
-                    asm!("prefetch.global.L2 [{a}];", a = in(reg64) address as u64);
-                }
-                let tile = tile!(first, kb);
-                let data = panels.add(tile * DATA_WORDS);
-                let base = *metadata.add(tile);
-                let x = smem + ((g * cols + kb + 2 * s) * 2) as u32;
-                let b0 = if g < inputs { [load_u32(x), load_u32(x + 16)] } else { [0; 2] };
-                let col = kb + 2 * s;
-                let a = if base == RAW {
-                    [raw_pair!(row, col), raw_pair!(row + 8, col),
-                     raw_pair!(row, col + 8), raw_pair!(row + 8, col + 8)]
-                } else {
-                    let mut a = decode_tile!(base, *data.add(lane), *data.add(32 + lane), *data.add(64 + lane));
-                    if row >= rows { a[0] = 0; a[2] = 0; }
-                    if row + 8 >= rows { a[1] = 0; a[3] = 0; }
-                    a
-                };
-                acc0 = mma_m16n8k16_bf16(a, b0, acc0);
-                if TWO {
-                    let x1 = smem + (((8 + g) * cols + kb + 2 * s) * 2) as u32;
-                    let b1 = if 8 + g < inputs { [load_u32(x1), load_u32(x1 + 16)] } else { [0; 2] };
-                    acc1 = mma_m16n8k16_bf16(a, b1, acc1);
-                }
-            }
+        let max_band = (rows + panel_row).div_ceil(16) - 1;
+        let own_band = ((first + panel_row) / 16).min(max_band);
+        // Each warp copies its own 16-row band's metadata words into SMEM once; warp-local barrier suffices.
+        let warp_header = headers + (warp_id * tiles * 4) as u32;
+        let mut mi = lane;
+        while mi < tiles / 4 {
+            crate::ptx::copy16(warp_header + (mi * 16) as u32, metadata.add(own_band * tiles + mi * 4).cast());
+            mi += 32;
         }
+        crate::ptx::commit();
+        crate::ptx::wait();
+        asm!("bar.warp.sync 0xffffffff;");
+
+        let policy = crate::tc_ptx::l2_evict_first();
+        let band_tiles = panels.add(own_band * tiles * DATA_WORDS);
+        let row_top = (first + g).min(rows - 1);
+        let row_bottom = (first + g + 8).min(rows - 1);
+        let raw_top = weights.add(row_top * cols + 2 * s).cast::<u32>();
+        let raw_bottom = weights.add(row_bottom * cols + 2 * s).cast::<u32>();
+        let mut next_base = load_u32(warp_header);
+
+        macro_rules! fetch_p {($k:expr) => {{
+            let k: usize = $k;
+            let raw = next_base == RAW;
+            let tile_p = band_tiles.add(k * DATA_WORDS + lane);
+            let a0 = if raw { raw_top.add(k * 8) } else { tile_p };
+            let a1 = if raw { raw_bottom.add(k * 8) } else { tile_p.add(32) };
+            let a2 = if raw { raw_top.add(k * 8 + 4) } else { tile_p.add(64) };
+            let (w0, w1, w2, w3): (u32, u32, u32, u32);
+            asm!(
+                "ld.global.nc.L2::cache_hint.L2::256B.u32 {w0}, [{a0}], {pol};",
+                "ld.global.nc.L2::cache_hint.L2::256B.u32 {w1}, [{a1}], {pol};",
+                "ld.global.nc.L2::cache_hint.L2::256B.u32 {w2}, [{a2}], {pol};",
+                "{{ .reg .pred q; setp.eq.u32 q, {base}, 0xffffffff; mov.u32 {w3}, 0; @q ld.global.nc.L2::cache_hint.u32 {w3}, [{a3}], {pol}; }}",
+                a0 = in(reg64) a0, a1 = in(reg64) a1, a2 = in(reg64) a2, a3 = in(reg64) raw_bottom.add(k * 8 + 4),
+                base = in(reg32) next_base, pol = in(reg64) policy,
+                w0 = out(reg32) w0, w1 = out(reg32) w1, w2 = out(reg32) w2, w3 = out(reg32) w3,
+                options(readonly, nostack)
+            );
+            let ahead = if k + 1 < tiles { k + 1 } else { k };
+            next_base = load_u32(warp_header + (ahead * 4) as u32);
+            [w0, w1, w2, w3]
+        }};}
+
+        macro_rules! stage_p_x {($first_t:expr, $count_t:expr) => {{
+            let first_t = $first_t as usize;
+            let count_t = $count_t as usize;
+            let items = count_t * 4;
+            let mut t = 0usize;
+            while t < inputs {
+                let row_dst = smem + (t * row_bytes) as u32;
+                let mut i = tid;
+                while i < items {
+                    let kb = first_t * 16 + i * 4;
+                    let (src, off) = if kb < half { (input, kb) } else { (input2, kb - half) };
+                    let v = ld_global_nc_v4(src.add(t * half + off));
+                    let at = row_dst + ((i / 4) * 32 + (i & 1) * 16 + (i & 2) * 2) as u32;
+                    store_u32(at, cvt_bf16x2(v[0], v[1]));
+                    store_u32(at + 8, cvt_bf16x2(v[2], v[3]));
+                    i += FEW_THREADS;
+                }
+                t += 1;
+            }
+        }};}
+
+        let last_t = tiles - 1;
+        let mut ring = [[0u32; 4]; P_DEPTH];
+        macro_rules! prime_p {
+            ($($j:literal)*) => {$( ring[$j] = fetch_p!(if $j < last_t { $j } else { last_t }); )*};
+        }
+        prime_p!(0 1 2 3 4 5 6 7 8 9 10 11);
+
+        let init_len = part_tiles.min(tiles);
+        stage_p_x!(0, init_len);
+        core::arch::nvptx::_syncthreads();
+
+        let x_lane0 = smem + (g.min(inputs - 1) * row_bytes + s * 8) as u32;
+        let x_lane1 = if TWO { smem + ((8 + g).min(inputs - 1) * row_bytes + s * 8) as u32 } else { x_lane0 };
+        let mut acc0 = [0.0f32; 4];
+        let mut acc1 = [0.0f32; 4];
+
+        macro_rules! consume_p {($slot:expr, $k:expr, $xoff:expr) => {{
+            let [w0, w1, w2, w3]: [u32; 4] = $slot;
+            let base = load_u32(warp_header + (($k) * 4) as u32);
+            let decoded = decode_tile!(base, w0, w1, w2);
+            let raw = base == RAW;
+            let a = [
+                if raw { w0 } else { decoded[0] },
+                if raw { w1 } else { decoded[1] },
+                if raw { w2 } else { decoded[2] },
+                if raw { w3 } else { decoded[3] },
+            ];
+            let xoff: u32 = $xoff;
+            acc0 = mma_m16n8k16_bf16(a, crate::ptx::load2(x_lane0 + xoff), acc0);
+            if TWO {
+                acc1 = mma_m16n8k16_bf16(a, crate::ptx::load2(x_lane1 + xoff), acc1);
+            }
+        }};}
+
+        let mut x_off = 0u32;
+        let mut part_end = init_len;
+        let mut k = 0usize;
+        while k + P_DEPTH <= tiles {
+            if k == part_end {
+                core::arch::nvptx::_syncthreads();
+                let next_len = part_tiles.min(tiles - k);
+                stage_p_x!(k, next_len);
+                core::arch::nvptx::_syncthreads();
+                part_end = k + next_len;
+                x_off = 0;
+            }
+            macro_rules! step_p {
+                ($($j:literal)*) => {$(
+                    consume_p!(ring[$j], k + $j, x_off + ($j * 32) as u32);
+                    let nxt = k + $j + P_DEPTH;
+                    ring[$j] = fetch_p!(if nxt < last_t { nxt } else { last_t });
+                )*};
+            }
+            step_p!(0 1 2 3 4 5 6 7 8 9 10 11);
+            k += P_DEPTH;
+            x_off += (P_DEPTH * 32) as u32;
+        }
+        if k < tiles && k == part_end {
+            core::arch::nvptx::_syncthreads();
+            stage_p_x!(k, tiles - k);
+            core::arch::nvptx::_syncthreads();
+            x_off = 0;
+        }
+        macro_rules! tail_p {
+            ($($j:literal)*) => {$( if k + $j < tiles { consume_p!(ring[$j], k + $j, x_off + ($j * 32) as u32); } )*};
+        }
+        tail_p!(0 1 2 3 4 5 6 7 8 9 10);
         return (acc0, acc1);
     }
 
@@ -570,11 +678,11 @@ unsafe fn warp<const NARROW: bool, const TWO: bool>(
         }
 
         // The FP32 input words of stage `$chunk` (zeros for an absent input row), loaded when the warp consumes each stage.
-        macro_rules! load_x {($chunk:expr)=>{{
-            if in_valid0 && $chunk < chunks {
+        macro_rules! load_x {($valid:expr, $row_idx:expr, $chunk:expr)=>{{
+            if $valid && $chunk < chunks {
                 let kb = $chunk * BK;
                 let (src, off) = if kb < half { (input, kb) } else { (input2, kb - half) };
-                let base = g * half + off + 2 * s;
+                let base = ($row_idx) * half + off + 2 * s;
                 [ld_global_nc_v2_u32(src.add(base).cast()), ld_global_nc_v2_u32(src.add(base + 8).cast()),
                  ld_global_nc_v2_u32(src.add(base + 16).cast()), ld_global_nc_v2_u32(src.add(base + 24).cast()),
                  ld_global_nc_v2_u32(src.add(base + 32).cast()), ld_global_nc_v2_u32(src.add(base + 40).cast()),
@@ -584,29 +692,18 @@ unsafe fn warp<const NARROW: bool, const TWO: bool>(
             }
         }};}
         let mut acc = [0.0f32; 4];
-        macro_rules! kstep_n {($stage:expr, $k_base:expr, $x0:expr, $ks:literal)=>{{
+        macro_rules! kstep_n {($stage:expr, $x0:expr, $x1:expr, $ks:literal)=>{{
             let (b0, b1) = if b_valid {
                 (load_u32($stage + ($ks * 32) as u32), load_u32($stage + ($ks * 32 + 16) as u32))
             } else {
                 (0u32, 0u32)
             };
-            let (a1, a3) = if TWO && in_valid1 {
-                let (src, off) = if $k_base < half { (input, $k_base) } else { (input2, $k_base - half) };
-                let base = (8 + g) * half + off + $ks * 16 + 2 * s;
-                let p0 = ld_global_nc_v2_u32(src.add(base).cast());
-                let p1 = ld_global_nc_v2_u32(src.add(base + 8).cast());
-                (cvt_bf16x2(f32::from_bits(p0[0]), f32::from_bits(p0[1])), cvt_bf16x2(f32::from_bits(p1[0]), f32::from_bits(p1[1])))
-            } else {
-                (0u32, 0u32)
-            };
+            let (a1, a3) = if TWO { ($x1[$ks][0], $x1[$ks][1]) } else { (0u32, 0u32) };
             acc = mma_m16n8k16_bf16([$x0[$ks][0], a1, $x0[$ks][1], a3], [b0, b1], acc);
         }};}
 
-        // The FP32 input of pass `$pass` into L1 (2026-11-25, W-BOSS-SC-DENSE-VERIFY): `load_x!` reads it when the
-        // warp reaches that pass, from L1 in place of a wait for L2 at every stage. The first two passes before the
-        // loop, then the pass two ahead. Lane l takes lines l and l + 32 of the pass (4 stages x 8 input rows x 2
-        // lines of 128 bytes); rows past the inputs take none. A stage of a row is 256 aligned bytes inside that row
-        // of its input (half and the offset are whole stages).
+        // The FP32 input of pass `$pass` into L1 (rows 0..8, plus 8..16 when `TWO` is true):
+        // `load_x!` reads from L1 in place of waiting on L2 at every stage.
         macro_rules! prefetch_x {($pass:expr)=>{{
             let pass: usize = $pass;
             if pass < steps {
@@ -614,10 +711,13 @@ unsafe fn warp<const NARROW: bool, const TWO: bool>(
                 while j < 2 {
                     let line = lane + 32 * j;
                     let (u, r, h) = (line / 16, line % 16 / 2, line % 2);
+                    let kb = (pass * NARROW_UNROLL + u) * BK;
+                    let (src, off) = if kb < half { (input, kb) } else { (input2, kb - half) };
                     if r < inputs {
-                        let kb = (pass * NARROW_UNROLL + u) * BK;
-                        let (src, off) = if kb < half { (input, kb) } else { (input2, kb - half) };
                         asm!("prefetch.global.L1 [{a}];", a = in(reg64) src.add(r * half + off + h * 32) as u64);
+                    }
+                    if TWO && r + 8 < inputs {
+                        asm!("prefetch.global.L1 [{a}];", a = in(reg64) src.add((r + 8) * half + off + h * 32) as u64);
                     }
                     j += 1;
                 }
@@ -640,17 +740,18 @@ unsafe fn warp<const NARROW: bool, const TWO: bool>(
             asm!("bar.warp.sync 0xffffffff;");
             macro_rules! unit {($u:literal)=>{{
                 let chunk = step * NARROW_UNROLL + $u;
-                let k_base = chunk * BK;
                 let stage = w_smem + ((chunk % NS_NARROW) * NARROW_STAGE_BYTES) as u32 + b_row_off;
-                let xu = load_x!(chunk);
-                macro_rules! pair {($i:expr)=>{{
-                    [cvt_bf16x2(f32::from_bits(xu[$i][0]), f32::from_bits(xu[$i][1])), cvt_bf16x2(f32::from_bits(xu[$i + 1][0]), f32::from_bits(xu[$i + 1][1]))]
+                let xu0 = load_x!(in_valid0, g, chunk);
+                let xu1 = if TWO { load_x!(in_valid1, 8 + g, chunk) } else { [[0u32; 2]; 8] };
+                macro_rules! pair {($xu:expr, $i:expr)=>{{
+                    [cvt_bf16x2(f32::from_bits($xu[$i][0]), f32::from_bits($xu[$i][1])), cvt_bf16x2(f32::from_bits($xu[$i + 1][0]), f32::from_bits($xu[$i + 1][1]))]
                 }};}
-                let x0 = [pair!(0), pair!(2), pair!(4), pair!(6)];
-                kstep_n!(stage, k_base, x0, 0);
-                kstep_n!(stage, k_base, x0, 1);
-                kstep_n!(stage, k_base, x0, 2);
-                kstep_n!(stage, k_base, x0, 3);
+                let x0 = [pair!(xu0, 0), pair!(xu0, 2), pair!(xu0, 4), pair!(xu0, 6)];
+                let x1 = if TWO { [pair!(xu1, 0), pair!(xu1, 2), pair!(xu1, 4), pair!(xu1, 6)] } else { [[0u32; 2]; 4] };
+                kstep_n!(stage, x0, x1, 0);
+                kstep_n!(stage, x0, x1, 1);
+                kstep_n!(stage, x0, x1, 2);
+                kstep_n!(stage, x0, x1, 3);
             }};}
             unit!(0);
             unit!(1);
@@ -663,7 +764,7 @@ unsafe fn warp<const NARROW: bool, const TWO: bool>(
         return (acc, [0.0f32; 4]);
     }
 
-    // Wide: 4 warps (128 threads) owning 64 weight rows, sharing a FEW_STAGES-stage ring of XOR-swizzled BF16 X in SMEM
+    // Wide uncompressed: 4 warps (128 threads) owning 64 weight rows, sharing a FEW_STAGES-stage ring of XOR-swizzled BF16 X in SMEM
     // (30,720 B = 3 blocks/SM; each thread loads 1 x v4 per 8-token tile, overlapped with MMAs).
     let first_row = block_first + warp_id * 16;
     let r_base = lane >> 3;
@@ -677,38 +778,19 @@ unsafe fn warp<const NARROW: bool, const TWO: bool>(
     let tx_valid0 = tx_row < inputs;
     let tx_valid1 = TWO && (tx_row + 8 < inputs);
 
-    const PANEL_BYTES: u32 = (DATA_WORDS * 4) as u32;
-    const META_AT: u32 = 4 * PANEL_BYTES;
     macro_rules! issue_w {($chunk:expr,$w_stage:expr)=>{{
-        if compressed {
-            if first_row < rows {
-                let tile = tile!(first_row, $chunk * BK);
-                if lane < 24 {
-                    let mut k = 0;
-                    while k < 4 {
-                        let src = panels.add((tile + k) * DATA_WORDS + lane * 4);
-                        crate::ptx::copy16($w_stage + k as u32 * PANEL_BYTES + (lane * 16) as u32, src.cast());
-                        k += 1;
-                    }
-                }
-                if lane == 0 {
-                    crate::ptx::copy16($w_stage + META_AT, metadata.add(tile).cast());
-                }
+        let col = $chunk * BK + w_chunk * 8;
+        let mut i = 0usize;
+        while i < 4 {
+            let r = i * 4 + r_base;
+            let dst = $w_stage + swiz128(r, w_chunk);
+            let gr = first_row + r;
+            if gr < rows {
+                crate::ptx::copy16(dst, weights.add(gr * cols + col).cast());
+            } else {
+                st_shared_zero16(dst);
             }
-        } else {
-            let col = $chunk * BK + w_chunk * 8;
-            let mut i = 0usize;
-            while i < 4 {
-                let r = i * 4 + r_base;
-                let dst = $w_stage + swiz128(r, w_chunk);
-                let gr = first_row + r;
-                if gr < rows {
-                    crate::ptx::copy16(dst, weights.add(gr * cols + col).cast());
-                } else {
-                    st_shared_zero16(dst);
-                }
-                i += 1;
-            }
+            i += 1;
         }
     }};}
 
@@ -731,13 +813,7 @@ unsafe fn warp<const NARROW: bool, const TWO: bool>(
     let w_warp_off = (warp_id * 2_048) as u32;
     macro_rules! stage_at {($chunk:expr)=>{ smem + ((($chunk) % FEW_STAGES) * FEW_STAGE_BYTES) as u32 };}
     macro_rules! prefetch_w {($chunk:expr)=>{{
-        if compressed {
-            if lane < 12 && $chunk < chunks && first_row < rows {
-                let tile = tile!(first_row, $chunk * BK);
-                let address = panels.add(tile * DATA_WORDS + lane * 32);
-                asm!("prefetch.global.L2 [{a}];", a = in(reg64) address as u64);
-            }
-        } else if lane < 16 && $chunk < chunks && first_row + lane < rows {
+        if lane < 16 && $chunk < chunks && first_row + lane < rows {
             asm!("prefetch.global.L2 [{a}];", a = in(reg64) weights.add((first_row + lane) * cols + $chunk * BK) as u64);
         }
     }};}
@@ -779,26 +855,7 @@ unsafe fn warp<const NARROW: bool, const TWO: bool>(
         let cur_w = cur_stage + w_warp_off;
         let cur_x = cur_stage + FEW_INPUT_AT as u32;
         macro_rules! kstep_w {($xmask:expr)=>{{
-            let a = if compressed && first_row >= rows {
-                [0; 4]
-            } else if compressed {
-                let k = c * BK + $xmask as usize / 2;
-                let step = $xmask / 32;
-                let base = load_u32(cur_w + META_AT + step * 4);
-                let (r, col) = (first_row + g, k + 2 * s);
-                if base == RAW {
-                    [raw_pair!(r, col), raw_pair!(r + 8, col),
-                     raw_pair!(r, col + 8), raw_pair!(r + 8, col + 8)]
-                } else {
-                    let data = cur_w + step * PANEL_BYTES + (lane * 4) as u32;
-                    let mut a = decode_tile!(base, load_u32(data), load_u32(data + 128), load_u32(data + 256));
-                    if r >= rows { a[0] = 0; a[2] = 0; }
-                    if r + 8 >= rows { a[1] = 0; a[3] = 0; }
-                    a
-                }
-            } else {
-                ldmatrix_x4(cur_w + (off0 ^ $xmask))
-            };
+            let a = ldmatrix_x4(cur_w + (off0 ^ $xmask));
             let b0 = [load_u32(cur_x + (x_off0 ^ $xmask)), load_u32(cur_x + (x_off0 ^ ($xmask ^ 16u32)))];
             c0 = mma_m16n8k16_bf16(a, b0, c0);
             if TWO {

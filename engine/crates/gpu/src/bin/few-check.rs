@@ -766,9 +766,9 @@ mod check {
             if (recorded(Kind::PlainStagedFew) + recorded(Kind::PlainStagedOne)) - few_before != (few.cases + parts_extra) as u128 || recorded(Kind::PlainStaged) - row_before != row_launches as u128 {
                 return Err("a case did not record one launch of its entry".into());
             }
-            // The weights of the 2-to-8-row gate blend cases below, each raw and with its BF16 panels (registered while no
+            // The weights of the 2-to-16-row gate blend cases below, each raw and with its BF16 panels (registered while no
             // queue runs): the decode's forget and gain stacks have panels, so the joined launch reads them.
-            let blend_cases = [(384usize, 2usize), (608, 5), (384, 8), (2304, 3), (2304, 8)].into_iter().map(|(dim, inputs)| {
+            let blend_cases = [(384usize, 2usize), (608, 5), (384, 8), (2304, 3), (2304, 8), (384, 9), (608, 12), (2304, 16)].into_iter().map(|(dim, inputs)| {
                 let (rows, cols) = (2 * dim, 64);
                 let values = (0..rows*cols).map(|i| {
                     let v = input(i+5) * 0.125;
@@ -1177,6 +1177,123 @@ mod check {
                 }
                 println!("FEW CHECK GROUP PAIR cases=3 inputs=2,4,8 bit-exact and guards unchanged");
             }
+            // Strided M=2..=16 picked MoE (`Kind::PlainPackedRows` word 0 != 0): single-pass count=1..=16,
+            // NVFP4 tagged panels (one-shot & multi-slab X), 3-stage MXFP8 (native & custom table), and
+            // unpacked NVFP4 fallback, gated & ungated, bit-exact against unstrided `Kind::PlainPackedPicked`.
+            {
+                use spark_gpu_probe::packed_product::layout;
+                let upload = |bytes: &[u8]| -> Result<DeviceVector<'_>, String> {
+                    let mut vec = b.vector(bytes.len() / 4)?;
+                    b.write_vector_bytes(&mut vec, bytes)?;
+                    vec.into_resident_shared()
+                };
+                let mut strided_cases = 0usize;
+                for &(rows, cols, wide, tagged, custom_tbl, m_rows, repeat, gate) in &[
+                    (128usize, 256usize, false, true, false, 2usize, 8usize, true),
+                    (128, 1152, false, true, false, 8, 1, false),
+                    (128, 1152, false, true, false, 12, 1, false),
+                    (128, 2304, false, true, false, 16, 8, true),
+                    (70, 256, true, false, false, 2, 8, true),
+                    (128, 256, true, false, false, 12, 1, false),
+                    (64, 256, true, false, true, 4, 1, false),
+                    (70, 128, false, false, false, 10, 1, true),
+                ] {
+                    let shape = layout(rows, cols, wide);
+                    let experts = 3usize;
+                    let mut raw_bytes = vec![0u8; experts * shape.bytes];
+                    let mut panel_bytes = Vec::with_capacity(if tagged { experts * shape.bytes } else { 0 });
+                    for (expert, unit) in raw_bytes.chunks_exact_mut(shape.bytes).enumerate() {
+                        for (i, v) in unit[..shape.scales].iter_mut().enumerate() {
+                            *v = (i.wrapping_mul(37) + (i >> 3) + expert * 61) as u8;
+                        }
+                        for (i, v) in unit[shape.scales..shape.table].iter_mut().enumerate() {
+                            let mut s = if wide {
+                                (120 + (i + expert * 7) % 16) as u8
+                            } else {
+                                ((i.wrapping_mul(19) + expert * 47) & 0xff) as u8
+                            };
+                            if !wide && (s & 0x7f) == 0x7f { s ^= 1; }
+                            *v = s;
+                        }
+                        if wide {
+                            for (i, word) in unit[shape.table..].as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                                let val = if custom_tbl {
+                                    ((i as f32) - 128.0) / 64.0
+                                } else if (i & 0x7f) == 0x7f {
+                                    0.0f32
+                                } else {
+                                    let exp = (i >> 3) & 15;
+                                    let man = i & 7;
+                                    let mag = if exp == 0 {
+                                        (man as f32 / 8.0) * 2.0f32.powi(-6)
+                                    } else {
+                                        (1.0 + man as f32 / 8.0) * 2.0f32.powi(exp as i32 - 7)
+                                    };
+                                    if (i & 0x80) != 0 { -mag } else { mag }
+                                };
+                                word.copy_from_slice(&val.to_le_bytes());
+                            }
+                        } else {
+                            for (i, word) in unit[shape.table..].as_chunks_mut::<2>().0.iter_mut().enumerate() {
+                                let v = spark_gpu_probe::bf16::rounded(input(i + expert * 23 + 11));
+                                word.copy_from_slice(&((v.to_bits() >> 16) as u16).to_le_bytes());
+                            }
+                        }
+                        if tagged {
+                            panel_bytes.extend(spark_gpu_probe::decode_panels::pack_expert_tagged(unit, rows, cols));
+                        }
+                    }
+                    let stack = upload(if tagged { &panel_bytes } else { &raw_bytes })?;
+                    let picks_per_row = 8usize;
+                    let id_stride = 16usize;
+                    let picks = m_rows * picks_per_row;
+                    // Guarantee expert 0 hits `m_rows` times (testing count=2..=16 single-pass) while other slots vary.
+                    let mut flat_route = Vec::with_capacity(picks);
+                    let mut strided_route = vec![99.0f32; m_rows * id_stride];
+                    for r in 0..m_rows {
+                        for p in 0..picks_per_row {
+                            let id = if p == 0 { 0.0f32 } else { ((r + p) % experts) as f32 };
+                            flat_route.push(id);
+                            strided_route[r * id_stride + p] = id;
+                        }
+                    }
+                    let flat_ids = b.upload_vector(&flat_route)?.into_resident_shared()?;
+                    let strided_ids = b.upload_vector(&strided_route)?.into_resident_shared()?;
+                    let in_rows = picks / repeat;
+                    let x_host: Vec<f32> = (0..in_rows * cols).map(|k| input(k + rows + m_rows * 13)).collect();
+                    let x_strided = b.upload_vector(&x_host)?.into_resident_shared()?;
+                    let mut x_expanded_host = Vec::with_capacity(picks * cols);
+                    for j in 0..picks {
+                        let r = j / repeat;
+                        x_expanded_host.extend_from_slice(&x_host[r * cols..(r + 1) * cols]);
+                    }
+                    let x_expanded = b.upload_vector(&x_expanded_host)?.into_resident_shared()?;
+                    let caps = gate.then_some([4.0, 25.0, 0.25, 0.04]);
+                    let writes = if gate { picks * (rows / 2) } else { picks * rows };
+
+                    let want_buf = poisoned(b, picks * rows)?;
+                    let mut want_slice = want_buf.resident_range(GUARD..GUARD + picks * rows)?;
+                    b.project_packed_picked_step_into(rows, cols, wide, gate, &x_expanded, false, &stack, experts, &flat_ids, &mut want_slice, caps, false, None)?;
+                    let want = b.read_vector_values(&want_buf)?;
+
+                    let got_buf = poisoned(b, picks * rows)?;
+                    let mut got_slice = got_buf.resident_range(GUARD..GUARD + picks * rows)?;
+                    let before = recorded(Kind::PlainPackedRows);
+                    b.project_packed_picked_strided_into(rows, cols, wide, gate, &x_strided, repeat, &stack, experts, &strided_ids, picks, picks_per_row, id_stride, &mut got_slice, caps, false, None)?;
+                    if recorded(Kind::PlainPackedRows) != before + 1 {
+                        return Err(format!("strided picked MoE did not route to PlainPackedRows (rows={rows} cols={cols} wide={wide} m={m_rows})"));
+                    }
+                    let got = b.read_vector_values(&got_buf)?;
+                    if got[..GUARD].iter().chain(&got[GUARD + writes..]).any(|w| w.to_bits() != POISON) {
+                        return Err(format!("strided picked MoE changed a guard word (rows={rows} cols={cols} wide={wide} m={m_rows})"));
+                    }
+                    if let Some(at) = want[GUARD..GUARD + writes].iter().zip(&got[GUARD..GUARD + writes]).position(|(a, b)| a.to_bits() != b.to_bits()) {
+                        return Err(format!("strided picked MoE mismatch at word {at} (rows={rows} cols={cols} wide={wide} tagged={tagged} m={m_rows} gate={gate})"));
+                    }
+                    strided_cases += 1;
+                }
+                println!("FEW CHECK STRIDED PICKED MOE cases={strided_cases} M=2..16 NVFP4+MXFP8+unpacked gated+ungated bit-exact and guards unchanged");
+            }
             drop(queue);
             // 3-way fused 4-warp cooperative Vade-BF11-BP panel group (`Q+K+V`), single-row dual-input `staged_narrow`
             // (with PDL after `fast_norm_into`), and LUT-free SM121a register NVFP4 (`NVFP4_FACTOR_MAGIC`).
@@ -1349,7 +1466,7 @@ mod check {
                 drop(queue);
                 println!("FEW CHECK COOP-TRIPLE + NARROW-PAIR + REG-NVFP4 PASS");
             }
-            println!("FEW CHECK GATE BLEND cases=12 one row, and 2 to 8 rows raw and with panels, exact intermediate and blended words, guards unchanged");
+            println!("FEW CHECK GATE BLEND cases=18 one row, and 2 to 16 rows raw and with panels, exact intermediate and blended words, guards unchanged");
             println!("FEW CHECK PASS");
             Ok(())
         })

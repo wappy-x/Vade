@@ -78,7 +78,10 @@ resident_launch_plain_packed_picked 128    132           18496             0
 # shared bytes hold it to 3). Row = 134 plus 4.
 # 2026-11-25 (W-PROSE-CROWN-V4): grouped 3-way dual-input narrow launch (FEW_GROUP_PAIR): measured 140 registers,
 # 30,720 shared, 0 stack, 0 spill, still 3 blocks/SM (shared-bound). Row = 140 plus 4.
-resident_launch_plain_staged_few 128     144            30720             0
+# 2026-11-25 (M=2..=16 verify + FEW_PANEL_RING): unified P_DEPTH=12 direct panel ring (.L2::evict_first + .L2::256B,
+# part-staged X) + FEW_PANEL_RING + FEW_GATE_BLEND M=2..=16: measured 168 registers, 0 static shared (30,720 dynamic),
+# 0 stack, 0 spill, still 3 blocks/SM (shared-bound). Ceiling = measured + 4.
+resident_launch_plain_staged_few 128     172            30720             0
 # One-row product (2026-11-25, W-BOSS-EXACT-CROWN): the one-row forms of W-BOSS-PLAIN-38 in an entry of their own, with
 # only dynamic shared memory (0 static): the panel form reads the shared lossless BF16 panels in four-warp blocks (one
 # 64-row group a block) with twelve tiles of loads in flight a warp: measured 90 registers, 0 stack, no spill,
@@ -161,11 +164,11 @@ resident_launch_fast_router_pick  256     51            1152              0
 # GateBlend+RoundedNorm (scalar register-resident chunks, reuses 512 B shared); unrolled tanh/ln + PDL
 # launch_dependents (2026-11-25): 0 stack (was 48), 0 spill, 3 blocks/SM. Ceiling = measured + 4.
 resident_launch_fast_stream_ops   256     78            512               0
-# resident_launch_plain_packed_rows (kind 100): the grouped rows tile with each run read from its packed
-# unit; 256 threads, the two stages of the rows tile (36,864) + the 4-bit weight table (8,192) = 45,056 shared bytes.
-# Measured 2026-11-23 (CUDA 13.0 ptxas): 96 registers, 0 stack, no spill, 2 blocks a
-# multiprocessor. The row = the measured registers plus 4.
-resident_launch_plain_packed_rows 256  100            45056             0
+# resident_launch_plain_packed_rows (kind 100): dynamic shared memory (0 static). Mode B (word 0 == 0): grouped rows
+# tile (256 threads, 45,056 dynamic shared bytes, 2 blk/SM). Mode A (word 0 != 0): M=2..=16 strided picked MoE (128
+# threads, dynamic shared up to 25,344 B for 4 blk/SM, single-pass count=1..=16, 8 KB LUT + DEPTH=4 .L2::evict_first
+# panel ring, 3-stage MXFP8). Measured 128 registers, 0 stack, 0 spill. Ceiling = measured + 4.
+resident_launch_plain_packed_rows 256  132            0                 0
 # resident_launch_embed_rows (kind 102): one block a token row, a copy with no arithmetic. Measured
 # 2026-11-23: 22 registers, 0 shared, 0 stack, no spill. The row = the measured plus 4.
 resident_launch_embed_rows     256      26             0                 0

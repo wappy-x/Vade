@@ -138,8 +138,6 @@ impl<'a> Backend<'a> {
                 return Err("packed picks: compact dispatch table requires a disjoint aligned extent".into());
             }
         }
-        self.require_arm_kernels(&[crate::resident_launch::Kind::PlainPackedPicked.kernel()])?;
-        self.resident_completion()?;
         let rows_u32 = u32::try_from(rows).map_err(|_| "packed picks: the rows exceed the ABI")?;
         let experts_u32 = u32::try_from(experts).map_err(|_| "packed picks: the experts exceed the ABI")?;
         let input_words = if repeat == 0 { 0 } else { u32::try_from(cols).map_err(|_| "packed picks: the columns exceed the ABI")? };
@@ -153,14 +151,56 @@ impl<'a> Backend<'a> {
                 return Err("packed expert panels require a disjoint aligned single-row extent".into());
             }
         }
-        if !self.record_resident_packed_picked(
-            stack.device_address(), unit_words as u64 * 4, experts_u32, ids.device_address(),
-            picks, input.device_address(), output.device_address(), rows_u32,
-            packed_product::cols_word(cols, wide, pairs), input_words, caps,
-            if repeat == 0 { 1 } else { repeat }, ppr, stride, one_row,
-            panels.map_or(0, |p| p.device_address()),
-            compact.map_or(0, |c| c.device_address()),
-        )? {
+        // Multi-row strided MoE verify / multi-chat decode (`M = 2..=16`): route to `Kind::PlainPackedRows`
+        // (`plain_packed_rows.rs`, word 0 = non-zero `stack` address) for single-pass `1..=16` expert grouping,
+        // overlapped 8 KB SMEM LUT + continuous DEPTH=4 streaming panel ring, 3-stage MXFP8, and dynamic SMEM.
+        let use_few_rows = !one_row && panels.is_none() && ppr > 0;
+        let recorded = if use_few_rows {
+            use crate::resident_launch::{Command, Kind};
+            self.require_arm_kernels(&[Kind::PlainPackedRows.kernel()])?;
+            self.resident_completion()?;
+            let mut command = Command::new(Kind::PlainPackedRows);
+            let cols_word = packed_product::cols_word(cols, wide, pairs);
+            for (index, value) in [
+                stack.device_address(), input.device_address(), output.device_address(),
+                u64::from(rows_u32), u64::from(cols_word), picks as u64, u64::from(input_words),
+                ids.device_address(), u64::from(experts_u32), unit_words as u64 * 4,
+            ].into_iter().enumerate() { command.word(index, value); }
+            if let Some(values) = caps {
+                for (i, value) in values.into_iter().enumerate() { command.word(10 + i, u64::from(value.to_bits())); }
+            }
+            command.word(14, (if repeat == 0 { 1 } else { repeat }) as u64);
+            command.word(15, ppr as u64);
+            command.word(16, stride as u64);
+            let row_tiles = rows_u32.div_ceil(64);
+            // Launch 1 row tile per CTA (`blocks = row_tiles`, grid = (row_tiles, picks)): each unique expert's leader
+            // pick runs all contiguous 64-row bands in one wave (maximizing LPDDR5X sequential hits & L2 wtable/X reuse).
+            let blocks = row_tiles;
+            let shared_bytes: u32 = if wide {
+                // 3 stages * (64*64 codes + 64*4 scales + 16*64*2 BF16 X) + 64 B meta = 19,264 B (5 blk/SM).
+                19_264
+            } else {
+                // 8,192 B LUT + 128 B meta + bank-free X budget: floor 17,024 B guarantees >= 4 chunks/slab even at
+                // count = 16 (matching DEPTH = 4); cap 25,344 B keeps 4 blk/SM on 101,376 B SM121a.
+                let row_stride = (cols / 64) * 128 + 32;
+                let max_tokens = (picks / picks_per_row).clamp(1, 16);
+                let ideal = (max_tokens * row_stride + 8_320).clamp(17_024, 25_344);
+                (ideal.div_ceil(16) * 16) as u32
+            };
+            self.record_resident_block(Kind::PlainPackedRows, command, [blocks, picks as u32, 1, packed_product::PICKED_THREADS as u32, shared_bytes])?
+        } else {
+            self.require_arm_kernels(&[crate::resident_launch::Kind::PlainPackedPicked.kernel()])?;
+            self.resident_completion()?;
+            self.record_resident_packed_picked(
+                stack.device_address(), unit_words as u64 * 4, experts_u32, ids.device_address(),
+                picks, input.device_address(), output.device_address(), rows_u32,
+                packed_product::cols_word(cols, wide, pairs), input_words, caps,
+                if repeat == 0 { 1 } else { repeat }, ppr, stride, one_row,
+                panels.map_or(0, |p| p.device_address()),
+                compact.map_or(0, |c| c.device_address()),
+            )?
+        };
+        if !recorded {
             return Err("packed picks: the launch runs only as a recorded launch, and launches are not recorded now".into());
         }
         self.resident_completion()
@@ -229,7 +269,7 @@ impl<'a> Backend<'a> {
         let input_bytes = input_rows.map_or(0, |table| table.len() as u64 * 4);
         let head = [input.device_address(), output.device_address(), word(rows)?, u64::from(packed_product::cols_word(cols, wide, pairs)), word(inputs)?, word(stride)?];
         let (run_count, block_count) = (runs.len() as u64, blocks.len() as u64);
-        let recorded = self.record_resident_tabled(Kind::PlainPackedRows, [grid_blocks, 1, 1, staged::ROWS_THREADS as u32, 0], &bytes, |address| {
+        let recorded = self.record_resident_tabled(Kind::PlainPackedRows, [grid_blocks, 1, 1, staged::ROWS_THREADS as u32, 45_056], &bytes, |address| {
             let mut command = crate::resident_launch::Command::new(Kind::PlainPackedRows);
             let input_table = if input_rows.is_some() { address + tables_at } else { 0 };
             let output_table = if output_rows.is_some() { address + tables_at + input_bytes } else { 0 };

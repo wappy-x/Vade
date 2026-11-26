@@ -39,7 +39,7 @@ pub const FEW_SPLIT_OUT: u64 = 2;
 /// Maximum output buffers in a split `PLAIN_STAGED_FEW` launch.
 pub const FEW_SPLIT_MAX: usize = 8;
 /// The attached gate blend of a few-row forget-and-gain product (2026-11-25, W-BOSS-SC-DENSE-VERIFY): the recorder
-/// joins the product (`2 dim` rows of 64 columns, 2 to 8 input rows, no other flag) with the GateBlend of its rows
+/// joins the product (`2 dim` rows of 64 columns, 2 to 16 input rows, no other flag) with the GateBlend of its rows
 /// that reads it (`Backend::attach_gate_blend_rows`), as it joins the one-row pair. The kept rows, the message rows
 /// and the blended output (`inputs x dim` words each) in words `FEW_BLEND_WORD`, `+ 1` and `+ 2` (the split words,
 /// unused without the split flag); the launch then has `dim / 32` blocks (as many as the product's 64-row blocks).
@@ -57,10 +57,10 @@ pub const FEW_PANEL_RING: u64 = 16;
 /// Tiles in flight per warp for `FEW_PANEL_RING` (keeps `resident_launch_plain_staged_few` under 144 regs, 0 spill).
 pub const FEW_PANEL_RING_DEPTH: usize = 8;
 /// The shape the attached gate blend takes: `rows = 2 dim` weight rows of 64 columns, `dim` a whole number of 32-row
-/// blocks, 2 to 8 input rows (one MMA column a row; one row is the one-row entry's attached form).
+/// blocks, 2 to 16 input rows (1 or 2 MMA N-tiles; one row is the one-row entry's attached form).
 pub const fn few_gate_blend_admitted(rows: usize, cols: usize, inputs: usize) -> bool {
     let dim = rows / 2;
-    cols == STAGE && rows == 2 * dim && dim >= 32 && dim.is_multiple_of(32) && inputs >= 2 && inputs <= 8
+    cols == STAGE && rows == 2 * dim && dim >= 32 && dim.is_multiple_of(32) && inputs >= 2 && inputs <= FEW_MAX
         && few_shape_admitted(rows, cols, inputs)
 }
 const _: () = assert!(FEW_GATE_BLEND & (FEW_ROUND_OUT | FEW_SPLIT_OUT | FEW_GROUP_PAIR | FEW_PANEL_RING) == 0
