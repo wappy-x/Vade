@@ -173,6 +173,24 @@ const _: () = assert!(9 + MIX_KEPT_MAX <= MIX_LIST_NORMED_AT && 8 * (MIX_LIST_EP
 pub const fn mix_list_norm_admitted(dim: usize, threads: usize) -> bool {
     threads == MIX_BLEND_THREADS && dim >= 128 && dim % 128 == 0 && dim / 128 <= NORM_CHUNKS_MAX
 }
+/// Threads per block for `MIX_ONE`: with fused post-blend `RoundedNorm`, launch 1 warp per 128-element
+/// chunk (at least 8 warps = 256 threads so `kept <= 8` list dots run in parallel; 576 threads = 18 warps
+/// for `dim = 2304`, giving each warp exactly 1 chunk of 4 floats with zero load imbalance).
+#[inline(always)]
+pub const fn mix_one_threads(dim: usize, post_norm: bool) -> usize {
+    if post_norm && dim >= 128 && dim % 128 == 0 && dim <= MIX_ONE_DIM_MAX {
+        let chunks = dim / 128;
+        let warps = if chunks > 8 { chunks } else { 8 };
+        warps * 32
+    } else {
+        MIX_BLEND_THREADS
+    }
+}
+/// Admission for `MIX_ONE` with fused post-blend `RoundedNorm` (`dim <= MIX_ONE_DIM_MAX`, 1 warp/chunk).
+#[inline(always)]
+pub const fn mix_one_post_norm_admitted(dim: usize, threads: usize) -> bool {
+    dim >= 128 && dim % 128 == 0 && dim <= MIX_ONE_DIM_MAX && threads == mix_one_threads(dim, true)
+}
 pub const MIX_ONE_NORMED_AT: usize = 40;
 pub const MIX_ONE_EPSILON_AT: usize = 41;
 /// Fused post-blend `RoundedNorm` flag in word 8 of a `MIX_ONE` command (bit 4).
@@ -272,14 +290,12 @@ pub const fn stream_ops_parts(dim: usize) -> usize { if dim == 0 { 1 } else { di
 /// The grid of a stream op: `rows` rows of `stream_ops_parts(dim)` blocks each.
 #[inline(always)]
 pub const fn stream_ops_blocks(rows: usize, dim: usize) -> usize { rows * stream_ops_parts(dim) }
-/// Threads per block for `STREAM_OP_GATE_BLEND_NORM`: 9 warps (288 threads) when 9 divides `dim / 128`
-/// (e.g. `dim = 2304` -> 2 chunks/warp, 3 blk/SM = 27 warps/SM on SM121a), else `min(dim / 128, 8)` warps
-/// (`<= 256` threads, `<= 3` chunks/warp, 3 blk/SM).
+/// Threads per block for `STREAM_OP_GATE_BLEND_NORM`: 1 warp per 128-element norm chunk
+/// (`576` threads = `18` warps for `dim = 2304`, `640` threads = `20` warps for `dim = 2560`),
+/// giving each lane 4 channels with 1 barrier and zero multi-chunk register pressure.
 #[inline(always)]
 pub const fn gate_blend_norm_threads(dim: usize) -> usize {
-    let chunks = dim / 128;
-    let warps = if chunks <= 8 { chunks } else if chunks % 9 == 0 { 9 } else { 8 };
-    warps * 32
+    (dim / 128) * 32
 }
 #[inline(always)]
 pub const fn stream_ops_admitted(subop: u64, rows: usize, dim: usize, aux: usize, threads: usize) -> bool {
@@ -303,7 +319,7 @@ pub const fn stream_ops_admitted(subop: u64, rows: usize, dim: usize, aux: usize
                 && rows.saturating_mul(aux) <= ROUTE_FOLD_CONV_WEIGHTS_MAX
         }
         STREAM_OP_RING_CONV_ONE => {
-            threads == ROUTE_FOLD_CONV_THREADS
+            (threads == ROUTE_FOLD_CONV_THREADS || threads == 64)
                 && rows == 1
                 && aux >= 2 && aux <= ROUTE_FOLD_CONV_TAPS_MAX
         }
@@ -400,7 +416,7 @@ pub fn check_mix_rows_normed_form(
     }
     match (post_eps, post_out) {
         (Some(pe), Some(po)) => {
-            if !mix_list_norm_admitted(dim, MIX_BLEND_THREADS) || !(pe > 0.0 && pe.is_finite()) {
+            if !mix_one_post_norm_admitted(dim, mix_one_threads(dim, true)) || !(pe > 0.0 && pe.is_finite()) {
                 return Err("fast mix one: post-norm shape or epsilon outside envelope");
             }
             if !po.valid(post_bytes) || (post_half && po.address % 16 != 0)

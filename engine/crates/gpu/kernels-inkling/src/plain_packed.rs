@@ -28,7 +28,7 @@ use crate::ptx::{commit, copy4, copy16, load, load2, load4, load_u8, load_u16};
 use core::arch::nvptx::_syncthreads;
 use core::arch::{asm, nvptx};
 use crate::stream_pairs::gate_tanh;
-use crate::tc_ptx::{cvt_bf16x2, ld_global_nc_v4, load_u32, mma_m16n8k16_bf16, store_u32};
+use crate::tc_ptx::{cvt_bf16x2, ld_global_nc_v4, load_u32, mma_m16n8k16_bf16, shfl_xor_u32, store_u32};
 
 const WARP_ROWS: usize = 16;
 const PICKED_WARPS: usize = PICKED_THREADS / 32;
@@ -53,6 +53,76 @@ pub(crate) const PICKED_BLOCK_BYTES: usize = if PANEL_BLOCK_BYTES > PICKED_NARRO
     PICKED_WIDE_BYTES
 };
 const _: () = assert!(PICKED_BLOCK_BYTES == 18_496 && PANEL_NOLUT_X_BYTES == 18_432 && PICKED_BLOCK_BYTES % 16 == 0 && crate::packed_product::PANEL_INPUT_COLS * 2 <= picked_table_at(false));
+
+/// Exact 16-byte global read-only load with L2 256B prefetch and inline evict-first policy
+/// (ptxas folds inline `createpolicy` into a single hoisted `UMOV.64 URx, 0xd` with 0 `R2UR`).
+macro_rules! packed_ld_v4_evict {
+    ($p:expr) => {{
+        let (a, b, c, d): (u32, u32, u32, u32);
+        core::arch::asm!(
+            "{{ .reg .b64 pol; createpolicy.fractional.L2::evict_first.b64 pol, 1.0; \
+             ld.global.nc.L2::cache_hint.L2::256B.v4.u32 {{{a},{b},{c},{d}}}, [{p}], pol; }}",
+            a = out(reg32) a, b = out(reg32) b, c = out(reg32) c, d = out(reg32) d,
+            p = in(reg64) ($p),
+            options(readonly, nostack),
+        );
+        [a, b, c, d]
+    }};
+}
+
+/// Exact 8-byte global read-only load with L2 128B prefetch and inline evict-first policy.
+macro_rules! packed_ld_v2_evict {
+    ($p:expr) => {{
+        let (a, b): (u32, u32);
+        core::arch::asm!(
+            "{{ .reg .b64 pol; createpolicy.fractional.L2::evict_first.b64 pol, 1.0; \
+             ld.global.nc.L2::cache_hint.L2::128B.v2.u32 {{{a},{b}}}, [{p}], pol; }}",
+            a = out(reg32) a, b = out(reg32) b,
+            p = in(reg64) ($p),
+            options(readonly, nostack),
+        );
+        [a, b]
+    }};
+}
+
+/// Exact 4-byte global read-only load with L2 128B prefetch and inline evict-first policy.
+macro_rules! packed_ld_u32_evict {
+    ($p:expr) => {{
+        let v: u32;
+        core::arch::asm!(
+            "{{ .reg .b64 pol; createpolicy.fractional.L2::evict_first.b64 pol, 1.0; \
+             ld.global.nc.L2::cache_hint.L2::128B.u32 {v}, [{p}], pol; }}",
+            v = out(reg32) v,
+            p = in(reg64) ($p),
+            options(readonly, nostack),
+        );
+        v
+    }};
+}
+
+/// Bit-exact W4A16 register unpack of one 32-bit NVFP4 code word (four bytes = 8 E2M1 weights) scaled by
+/// two E4M3 block scale bytes (in the low 16 bits of `$scales`) and expert FP32 `$factor`.
+/// Every weight matches `f32_to_bf16((e2m1(code) * e4m3(scale)) * factor)` bit-for-bit, with zero LUT reads.
+macro_rules! nvfp4_word_exact_bf16x2 {
+    ($packed:expr, $scales:expr, $factor:expr) => {{
+        let (w0, w1, w2, w3): (u32, u32, u32, u32);
+        core::arch::asm!(
+            "{{ .reg .b8 b0, b1, b2, b3; .reg .b16 s16, h0, h1; .reg .b32 t1, t2, t3, sh, st, sb, ch, ph; .reg .f32 f0, f1; \
+             cvt.u16.u32 s16, {sc}; cvt.rn.f16x2.e4m3x2 sh, s16; \
+             prmt.b32 st, sh, sh, 0x1010; prmt.b32 sb, sh, sh, 0x3232; \
+             cvt.u8.u32 b0, {pk}; shr.u32 t1, {pk}, 8; cvt.u8.u32 b1, t1; \
+             shr.u32 t2, {pk}, 16; cvt.u8.u32 b2, t2; shr.u32 t3, {pk}, 24; cvt.u8.u32 b3, t3; \
+             cvt.rn.f16x2.e2m1x2 ch, b0; mul.rn.f16x2 ph, ch, st; mov.b32 {{h0, h1}}, ph; cvt.f32.f16 f0, h0; cvt.f32.f16 f1, h1; mul.rn.f32 f0, f0, {fac}; mul.rn.f32 f1, f1, {fac}; cvt.rn.bf16x2.f32 {w0}, f1, f0; \
+             cvt.rn.f16x2.e2m1x2 ch, b1; mul.rn.f16x2 ph, ch, sb; mov.b32 {{h0, h1}}, ph; cvt.f32.f16 f0, h0; cvt.f32.f16 f1, h1; mul.rn.f32 f0, f0, {fac}; mul.rn.f32 f1, f1, {fac}; cvt.rn.bf16x2.f32 {w1}, f1, f0; \
+             cvt.rn.f16x2.e2m1x2 ch, b2; mul.rn.f16x2 ph, ch, st; mov.b32 {{h0, h1}}, ph; cvt.f32.f16 f0, h0; cvt.f32.f16 f1, h1; mul.rn.f32 f0, f0, {fac}; mul.rn.f32 f1, f1, {fac}; cvt.rn.bf16x2.f32 {w2}, f1, f0; \
+             cvt.rn.f16x2.e2m1x2 ch, b3; mul.rn.f16x2 ph, ch, sb; mov.b32 {{h0, h1}}, ph; cvt.f32.f16 f0, h0; cvt.f32.f16 f1, h1; mul.rn.f32 f0, f0, {fac}; mul.rn.f32 f1, f1, {fac}; cvt.rn.bf16x2.f32 {w3}, f1, f0; }}",
+            w0 = out(reg32) w0, w1 = out(reg32) w1, w2 = out(reg32) w2, w3 = out(reg32) w3,
+            pk = in(reg32) ($packed), sc = in(reg32) ($scales), fac = in(reg32) ($factor),
+            options(pure, nomem, nostack),
+        );
+        [w0, w1, w2, w3]
+    }};
+}
 
 #[inline(always)]
 fn picked_input_offset(row: u32, column: u32) -> u32 {
@@ -119,7 +189,7 @@ unsafe fn wide(values: u32, power: f32, word: u32, e: u32, x: u32) -> f32 {
 /// Pick indices in original route order, up to eight in one word. The ordinal
 /// distinguishes the blocks of each participating pick in their joint grid.
 #[derive(Clone, Copy)]
-pub(crate) struct SharedPicks {pub(crate) indices:u64,pub(crate) count:usize,pub(crate) stride:usize,pub(crate) repeat:usize,pub(crate) ordinal:usize,pub(crate) one_row:bool,pub(crate) panels:*const u8}
+pub(crate) struct SharedPicks {pub(crate) indices:u64,pub(crate) count:usize,pub(crate) stride:usize,pub(crate) repeat:usize,pub(crate) ordinal:usize,pub(crate) one_row:bool,pub(crate) panels:*const u8,pub(crate) x_preloaded:bool}
 impl SharedPicks {
     #[inline(always)]
     fn index(self,slot:usize)->usize {((self.indices>>(8*slot))&255) as usize}
@@ -249,6 +319,40 @@ pub(crate) unsafe fn tile<const FORM:u8>(smem:u32,weights: *const u8, input: *co
         let block = nvptx::_block_idx_x() as u32 * count + ordinal;
         let step = nvptx::_grid_dim_x() as u32 * count * PICKED_ROWS as u32;
         if block * PICKED_ROWS as u32 >= rows { return; }
+        let is_down_pdl = caps.is_null() && repeat == 1 && stride != 0;
+        macro_rules! stage_x_meta {
+            ($meta_at:expr, $slab_start:expr, $slab_len:expr, $row_stride:expr) => {{
+                let ma: u32 = $meta_at;
+                let in_ptr = ((load_u32(smem + ma + 24) as u64)
+                    | ((load_u32(smem + ma + 28) as u64) << 32)) as *const f32;
+                let in_stride = load_u32(smem + ma + 32);
+                let in_repeat = load_u32(smem + ma + 36);
+                let idx_word = (load_u32(smem + ma + 16) as u64)
+                    | ((load_u32(smem + ma + 20) as u64) << 32);
+                let cnt = load_u32(smem + ma + 52) & 0xffff;
+                let pairs_in_slab = ($slab_len) * 16;
+                let mut g_idx = 0u32;
+                while g_idx < cnt {
+                    let pk = ((idx_word >> (8 * g_idx)) & 255) as u32;
+                    let xb = (pk / in_repeat) * in_stride + ($slab_start) * 64;
+                    let g_smem = smem + g_idx * ($row_stride);
+                    let gx = g_idx & 3;
+                    let mut pair = tid;
+                    while pair < pairs_in_slab {
+                        let c_i = pair >> 4;
+                        let ks = pair & 15;
+                        let xp = in_ptr.add((xb + c_i * 64 + (ks >> 2) * 16 + (ks & 3) * 2) as usize);
+                        let lo = crate::tc_ptx::ld_global_nc_v2_u32(xp.cast());
+                        let hi = crate::tc_ptx::ld_global_nc_v2_u32(xp.add(8).cast());
+                        let dst = g_smem + c_i * 128 + (((ks >> 2) ^ gx) << 5) + ((ks & 3) << 3);
+                        store_u32(dst, cvt_bf16x2(f32::from_bits(lo[0]), f32::from_bits(lo[1])));
+                        store_u32(dst + 4, cvt_bf16x2(f32::from_bits(hi[0]), f32::from_bits(hi[1])));
+                        pair += PICKED_THREADS as u32;
+                    }
+                    g_idx += 1;
+                }
+            }};
+        }
         let panel_ptr = if !wide_form && rows % 64 == 0 {
             if !group.panels.is_null() {
                 group.panels
@@ -270,45 +374,251 @@ pub(crate) unsafe fn tile<const FORM:u8>(smem:u32,weights: *const u8, input: *co
             let reg_nvfp4 = *t32.add(0xff * 8) == crate::packed_product::NVFP4_FACTOR_MAGIC_LO
                 && *t32.add(0xff * 8 + 1) == crate::packed_product::NVFP4_FACTOR_MAGIC_HI;
             let factor_bits = if reg_nvfp4 { *t32.add(0xff * 8 + 2) } else { 0u32 };
-            let meta_at = if reg_nvfp4 { PANEL_NOLUT_META_AT } else { PANEL_META_AT };
-            let x_budget = if reg_nvfp4 { PANEL_NOLUT_X_BYTES as u32 } else { PANEL_X_BYTES as u32 };
-            let table_addr = smem + PANEL_TABLE_AT as u32;
-            if !reg_nvfp4 {
-                for i in (tid..table_copies(false) as u32).step_by(PICKED_THREADS) {
-                    copy16(table_addr + i * 16, table.add((i * 16) as usize).cast());
+            let (g, s) = (lane >> 2, lane & 3);
+            let warp = tid / 32;
+            let g_slot = if g < count { g } else { 0 };
+            let gx_slot = g_slot & 3;
+            let chunks = cols / 64;
+            if reg_nvfp4 {
+                if tid == 0 {
+                    let put64 = |off: u32, v: u64| {
+                        store_u32(smem + PANEL_NOLUT_META_AT + off, v as u32);
+                        store_u32(smem + PANEL_NOLUT_META_AT + off + 4, (v >> 32) as u32);
+                    };
+                    put64(0, output as u64);
+                    put64(8, caps as u64);
+                    put64(16, group.indices);
+                    put64(24, input as u64);
+                    store_u32(smem + PANEL_NOLUT_META_AT + 32, stride);
+                    store_u32(smem + PANEL_NOLUT_META_AT + 36, repeat);
+                    store_u32(smem + PANEL_NOLUT_META_AT + 40, step);
+                    store_u32(smem + PANEL_NOLUT_META_AT + 44, factor_bits);
+                    store_u32(smem + PANEL_NOLUT_META_AT + 48, rows);
+                    store_u32(smem + PANEL_NOLUT_META_AT + 52, count | (u32::from(pairs) << 16));
+                    put64(56, panel_ptr as u64);
                 }
+                let max_slab = (PANEL_NOLUT_X_BYTES as u32 / count) / 128;
+                let one_shot_x = chunks <= max_slab;
+                let slab_chunks: u32 = if one_shot_x { chunks } else { max_slab };
+                let row_stride: u32 = slab_chunks * 128;
+                macro_rules! load_nl_meta64 {
+                    ($off:expr) => {{
+                        (load_u32(smem + PANEL_NOLUT_META_AT + $off) as u64)
+                            | ((load_u32(smem + PANEL_NOLUT_META_AT + $off + 4) as u64) << 32)
+                    }};
+                }
+                if is_down_pdl {
+                    if one_shot_x {
+                        // All 4 warps prefetch tile-0 codes into L2 while waiting for `GateUp` to write `active`.
+                        let stripe0 = (block * chunks) * 4 + warp;
+                        let c_p = panel_ptr.cast::<u32>().add((stripe0 * 128 + lane * 4) as usize);
+                        let last_c = chunks - 1;
+                        let mut pc = 0u32;
+                        while pc < 6 {
+                            let ch = if pc < last_c { pc } else { last_c };
+                            asm!("prefetch.global.L2 [{p}];", p = in(reg64) c_p.add((ch * 512) as usize), options(readonly, nostack));
+                            pc += 1;
+                        }
+                    }
+                    asm!("griddepcontrol.wait;", options(nostack));
+                }
+                if one_shot_x && (is_down_pdl || !group.x_preloaded) {
+                    let pairs_in_slab = chunks * 16;
+                    let mut g_idx = 0u32;
+                    while g_idx < count {
+                        let xb = (pick(g_idx) / repeat) * stride;
+                        let g_smem = smem + g_idx * row_stride;
+                        let gx = g_idx & 3;
+                        let mut pair = tid;
+                        while pair < pairs_in_slab {
+                            let c_i = pair >> 4;
+                            let ks = pair & 15;
+                            let xp = input.add((xb + c_i * 64 + (ks >> 2) * 16 + (ks & 3) * 2) as usize);
+                            let lo = crate::tc_ptx::ld_global_nc_v2_u32(xp.cast());
+                            let hi = crate::tc_ptx::ld_global_nc_v2_u32(xp.add(8).cast());
+                            let dst = g_smem + c_i * 128 + (((ks >> 2) ^ gx) << 5) + ((ks & 3) << 3);
+                            store_u32(dst, cvt_bf16x2(f32::from_bits(lo[0]), f32::from_bits(lo[1])));
+                            store_u32(dst + 4, cvt_bf16x2(f32::from_bits(hi[0]), f32::from_bits(hi[1])));
+                            pair += PICKED_THREADS as u32;
+                        }
+                        g_idx += 1;
+                    }
+                }
+                _syncthreads();
+                let factor = f32::from_bits(load_u32(smem + PANEL_NOLUT_META_AT + 44));
+                let x_base = smem + g_slot * row_stride + s * 8;
+                const DEPTH_REG: u32 = 6;
+                let mut first = block * PICKED_ROWS as u32;
+                while first < load_u32(smem + PANEL_NOLUT_META_AT + 48) {
+                    let stripe0 = (first / 64 * chunks) * 4 + warp;
+                    let mut acc = [0.0f32; 4];
+                    macro_rules! step_reg {
+                        ($x_addr:expr, $packed:expr, $scales:expr) => {{
+                            let weights = nvfp4_word_exact_bf16x2!($packed, $scales, factor);
+                            let values = load2($x_addr);
+                            acc = mma_m16n8k16_bf16(weights, values, acc);
+                        }};
+                    }
+                    macro_rules! consume_reg {
+                        ($slot:expr, $x:expr) => {{
+                            let (code_words, scale_words): ([u32; 4], [u32; 2]) = $slot;
+                            let x: u32 = $x;
+                            step_reg!(x + (gx_slot << 5), code_words[0], scale_words[0]);
+                            step_reg!(x + ((1 ^ gx_slot) << 5), code_words[1], scale_words[0] >> 16);
+                            step_reg!(x + ((2 ^ gx_slot) << 5), code_words[2], scale_words[1]);
+                            step_reg!(x + ((3 ^ gx_slot) << 5), code_words[3], scale_words[1] >> 16);
+                        }};
+                    }
+                    if one_shot_x {
+                        let p_base = load_nl_meta64!(56) as *const u8;
+                        let c_base = p_base.cast::<u32>().add((stripe0 * 128 + lane * 4) as usize);
+                        let s_base = p_base.add(parts.scales).cast::<u32>().add((stripe0 * 16 + g * 2) as usize);
+                        macro_rules! fetch_panel_nl {
+                            ($chunk:expr) => {{
+                                let ch = $chunk;
+                                (
+                                    packed_ld_v4_evict!(c_base.add((ch * 512) as usize)),
+                                    packed_ld_v2_evict!(s_base.add((ch * 64) as usize)),
+                                )
+                            }};
+                        }
+                        let last_c = chunks - 1;
+                        let mut ring = [([0u32; 4], [0u32; 2]); DEPTH_REG as usize];
+                        macro_rules! prime6 {
+                            ($($j:literal)*) => {$( ring[$j as usize] = fetch_panel_nl!(if $j < last_c { $j } else { last_c }); )*};
+                        }
+                        prime6!(0 1 2 3 4 5);
+                        let mut ci = 0u32;
+                        while ci + DEPTH_REG < chunks {
+                            let xb = x_base + ci * 128;
+                            macro_rules! stage6 {
+                                ($($j:literal)*) => {$(
+                                    consume_reg!(ring[$j as usize], xb + $j * 128);
+                                    let nxt = ci + $j + DEPTH_REG;
+                                    ring[$j as usize] = fetch_panel_nl!(if nxt < last_c { nxt } else { last_c });
+                                )*};
+                            }
+                            stage6!(0 1 2 3 4 5);
+                            ci += DEPTH_REG;
+                        }
+                        if first + load_u32(smem + PANEL_NOLUT_META_AT + 40) >= load_u32(smem + PANEL_NOLUT_META_AT + 48) {
+                            asm!("griddepcontrol.launch_dependents;", options(nostack));
+                        }
+                        let xb = x_base + ci * 128;
+                        macro_rules! tail6 {
+                            ($($j:literal)*) => {$( if ci + $j < chunks { consume_reg!(ring[$j as usize], xb + $j * 128); } )*};
+                        }
+                        tail6!(0 1 2 3 4 5);
+                    } else {
+                        let mut slab_start = 0u32;
+                        while slab_start < chunks {
+                            let slab_len = (chunks - slab_start).min(slab_chunks);
+                            _syncthreads();
+                            stage_x_meta!(PANEL_NOLUT_META_AT, slab_start, slab_len, row_stride);
+                            _syncthreads();
+                            let p_base = load_nl_meta64!(56) as *const u8;
+                            let c_base = p_base.cast::<u32>().add((stripe0 * 128 + lane * 4) as usize);
+                            let s_base = p_base.add(parts.scales).cast::<u32>().add((stripe0 * 16 + g * 2) as usize);
+                            let mut ci = 0u32;
+                            while ci < slab_len {
+                                let ch = slab_start + ci;
+                                let slot = (
+                                    packed_ld_v4_evict!(c_base.add((ch * 512) as usize)),
+                                    packed_ld_v2_evict!(s_base.add((ch * 64) as usize)),
+                                );
+                                consume_reg!(slot, x_base + ci * 128);
+                                ci += 1;
+                            }
+                            slab_start += slab_len;
+                        }
+                        if first + load_u32(smem + PANEL_NOLUT_META_AT + 40) >= load_u32(smem + PANEL_NOLUT_META_AT + 48) {
+                            asm!("griddepcontrol.launch_dependents;", options(nostack));
+                        }
+                    }
+                    let out_ptr = load_nl_meta64!(0) as *mut f32;
+                    let caps_ptr = load_nl_meta64!(8) as *const u64;
+                    let idx_word = load_nl_meta64!(16);
+                    let rows_m = load_u32(smem + PANEL_NOLUT_META_AT + 48);
+                    let cp = load_u32(smem + PANEL_NOLUT_META_AT + 52);
+                    let (cnt_m, pairs_m) = (cp & 0xffff, (cp >> 16) != 0);
+                    let top = first + warp * 16 + g;
+                    let mut col_i = 0u32;
+                    while col_i < 2 {
+                        let slot = 2 * s + col_i;
+                        if slot < cnt_m {
+                            let pk = ((idx_word >> (8 * slot)) & 255) as u32;
+                            let (v0, v1) = if col_i == 0 { (acc[0], acc[2]) } else { (acc[1], acc[3]) };
+                            if caps_ptr.is_null() {
+                                let row_offset = |row: u32| if pairs_m { row / 2 + (row & 1) * (rows_m / 2) } else { row };
+                                let out = out_ptr.add((pk * rows_m) as usize);
+                                *out.add(row_offset(top) as usize) = v0;
+                                *out.add(row_offset(top + 8) as usize) = v1;
+                            } else {
+                                use crate::fixed_math::{rn, sigmoid};
+                                let half = (g & 1) as usize;
+                                let cap = f32::from_bits(*caps_ptr.add(half) as u32);
+                                let inv = f32::from_bits(*caps_ptr.add(2 + half) as u32);
+                                let columns = (cnt_m + 1 - (slot & 1)) / 2;
+                                let mask = 0x1111_1111u32 * ((1u32 << columns) - 1);
+                                let out = out_ptr.add((pk * (rows_m / 2)) as usize);
+                                let write = |row: u32, value: f32| {
+                                    let value = rn(value);
+                                    let capped = gate_tanh(value * inv) * cap;
+                                    let other: u32;
+                                    asm!("shfl.sync.bfly.b32 {out},{v},4,31,{mask};",
+                                         out=out(reg32) other, v=in(reg32) capped.to_bits(), mask=in(reg32) mask);
+                                    if half == 0 {
+                                        *out.add((row / 2) as usize) = rn((capped * sigmoid(value)) * f32::from_bits(other));
+                                    }
+                                };
+                                write(top, v0);
+                                write(top + 8, v1);
+                            }
+                        }
+                        col_i += 1;
+                    }
+                    first += load_u32(smem + PANEL_NOLUT_META_AT + 40);
+                }
+                return;
+            }
+            // Synthetic-LUT fallback (`!reg_nvfp4`, test fixtures only).
+            let table_addr = smem + PANEL_TABLE_AT as u32;
+            for i in (tid..table_copies(false) as u32).step_by(PICKED_THREADS) {
+                copy16(table_addr + i * 16, table.add((i * 16) as usize).cast());
             }
             if tid == 0 {
                 let put64 = |off: u32, v: u64| {
-                    store_u32(smem + meta_at + off, v as u32);
-                    store_u32(smem + meta_at + off + 4, (v >> 32) as u32);
+                    store_u32(smem + PANEL_META_AT + off, v as u32);
+                    store_u32(smem + PANEL_META_AT + off + 4, (v >> 32) as u32);
                 };
                 put64(0, output as u64);
                 put64(8, caps as u64);
                 put64(16, group.indices);
                 put64(24, input as u64);
-                store_u32(smem + meta_at + 32, stride);
-                store_u32(smem + meta_at + 36, repeat);
-                store_u32(smem + meta_at + 40, step);
-                store_u32(smem + meta_at + 44, factor_bits);
+                store_u32(smem + PANEL_META_AT + 32, stride);
+                store_u32(smem + PANEL_META_AT + 36, repeat);
+                store_u32(smem + PANEL_META_AT + 40, step);
+                store_u32(smem + PANEL_META_AT + 48, rows);
+                store_u32(smem + PANEL_META_AT + 52, count | (u32::from(pairs) << 16));
             }
-            let chunks = cols / 64;
-            let max_slab = ((x_budget / count) - 32) / 128;
+            let max_slab = (PANEL_X_BYTES as u32 / count) / 128;
             let one_shot_x = chunks <= max_slab;
             let slab_chunks: u32 = if one_shot_x { chunks } else { max_slab };
-            let row_stride: u32 = slab_chunks * 128 + 32;
+            let row_stride: u32 = slab_chunks * 128;
             macro_rules! load_meta64 {
                 ($off:expr) => {{
-                    (load_u32(smem + meta_at + $off) as u64)
-                        | ((load_u32(smem + meta_at + $off + 4) as u64) << 32)
+                    (load_u32(smem + PANEL_META_AT + $off) as u64)
+                        | ((load_u32(smem + PANEL_META_AT + $off + 4) as u64) << 32)
                 }};
             }
-            if one_shot_x {
+            if is_down_pdl { asm!("griddepcontrol.wait;", options(nostack)); }
+            if one_shot_x && (is_down_pdl || !group.x_preloaded) {
                 let pairs_in_slab = chunks * 16;
                 let mut g_idx = 0u32;
                 while g_idx < count {
                     let xb = (pick(g_idx) / repeat) * stride;
                     let g_smem = smem + g_idx * row_stride;
+                    let gx = g_idx & 3;
                     let mut pair = tid;
                     while pair < pairs_in_slab {
                         let c_i = pair >> 4;
@@ -316,7 +626,7 @@ pub(crate) unsafe fn tile<const FORM:u8>(smem:u32,weights: *const u8, input: *co
                         let xp = input.add((xb + c_i * 64 + (ks >> 2) * 16 + (ks & 3) * 2) as usize);
                         let lo = crate::tc_ptx::ld_global_nc_v2_u32(xp.cast());
                         let hi = crate::tc_ptx::ld_global_nc_v2_u32(xp.add(8).cast());
-                        let dst = g_smem + c_i * 128 + ks * 8;
+                        let dst = g_smem + c_i * 128 + (((ks >> 2) ^ gx) << 5) + ((ks & 3) << 3);
                         store_u32(dst, cvt_bf16x2(f32::from_bits(lo[0]), f32::from_bits(lo[1])));
                         store_u32(dst + 4, cvt_bf16x2(f32::from_bits(hi[0]), f32::from_bits(hi[1])));
                         pair += PICKED_THREADS as u32;
@@ -324,317 +634,79 @@ pub(crate) unsafe fn tile<const FORM:u8>(smem:u32,weights: *const u8, input: *co
                     g_idx += 1;
                 }
             }
-            if !reg_nvfp4 {
-                commit();
-                crate::ptx::wait();
-            }
+            commit();
+            crate::ptx::wait();
             _syncthreads();
-
-            let (g, s) = (lane >> 2, lane & 3);
-            let warp = tid / 32;
-            let g_slot = if g < count { g } else { 0 };
-            let x_base = smem + g_slot * row_stride + s * 8;
             let codes_at = panel_ptr.cast::<u32>();
             let scales_at = panel_ptr.add(parts.scales).cast::<u32>();
-            let l2_evict: u64;
-            asm!("createpolicy.fractional.L2::evict_first.b64 {p}, 1.0;", p = out(reg64) l2_evict, options(pure, nomem, nostack));
+            let x_base = smem + g_slot * row_stride + s * 8;
             let mut first = block * PICKED_ROWS as u32;
-            while first < rows {
-                let stripes = first / 64 * chunks;
-                macro_rules! fetch_panel {
-                    ($chunk:expr) => {{
-                        let stripe = (stripes + $chunk) * 4 + warp;
-                        let c_addr = codes_at.add((stripe * 128 + lane * 4) as usize);
-                        let s_addr = scales_at.add((stripe * 16 + g * 2) as usize);
-                        let (a, b, c, d, s0, s1): (u32, u32, u32, u32, u32, u32);
-                        asm!("ld.global.nc.L2::cache_hint.L2::256B.v4.u32 {{{a},{b},{c},{d}}},[{addr}],{h};",
-                             a=out(reg32) a, b=out(reg32) b, c=out(reg32) c, d=out(reg32) d,
-                             addr=in(reg64) c_addr, h=in(reg64) l2_evict, options(readonly, nostack));
-                        asm!("ld.global.nc.L2::cache_hint.L2::128B.v2.u32 {{{s0},{s1}}},[{addr}],{h};",
-                             s0=out(reg32) s0, s1=out(reg32) s1,
-                             addr=in(reg64) s_addr, h=in(reg64) l2_evict, options(readonly, nostack));
-                        ([a, b, c, d], [s0, s1])
+            while first < load_u32(smem + PANEL_META_AT + 48) {
+                let stripe0 = (first / 64 * chunks) * 4 + warp;
+                let c_base = codes_at.add((stripe0 * 128 + lane * 4) as usize);
+                let s_base = scales_at.add((stripe0 * 16 + g * 2) as usize);
+                let mut acc = [0.0f32; 4];
+                macro_rules! step_smem {
+                    ($x_addr:expr, $packed:expr, $scales:expr) => {{
+                        let packed = $packed;
+                        let scale_bits = $scales;
+                        let top = table_addr + 32 * (scale_bits & 255);
+                        let bottom = table_addr + 32 * ((scale_bits >> 8) & 255);
+                        let decode = |line: u32, byte: u32| load_u16(line + 2 * (byte & 15)) | (load_u16(line + 2 * ((byte >> 4) & 15)) << 16);
+                        let weights = [decode(top, packed), decode(bottom, packed >> 8), decode(top, packed >> 16), decode(bottom, packed >> 24)];
+                        let values = load2($x_addr);
+                        acc = mma_m16n8k16_bf16(weights, values, acc);
                     }};
                 }
-                let mut acc = [0.0f32; 4];
-                if reg_nvfp4 {
-                    // Bit-exact SM121a register NVFP4 decode (`cvt.rn.f16x2.{e4m3x2,e2m1x2}` + exact FP16 mul +
-                    // FP32 `* factor` + `cvt.rn.bf16x2.f32`), zero 8 KB SMEM LUT, DEPTH=6 chunks in flight.
-                    let factor = f32::from_bits(load_u32(smem + meta_at + 44));
-                    const DEPTH_REG: u32 = 6;
-                    macro_rules! step_reg {
-                        ($x_addr:expr, $packed:expr, $scales:expr) => {{
-                            let packed: u32 = $packed;
-                            let scale_bits: u32 = $scales;
-                            let (r0, r1, r2, r3): (u32, u32, u32, u32);
-                            asm!(
-                                "{{",
-                                ".reg .b16 %hs0, %hs1, %ht, %hb, %h0, %h1;",
-                                ".reg .b8  %b0, %b1, %b2, %b3;",
-                                ".reg .b32 %sc, %st, %sb, %p0, %p1, %p2, %p3;",
-                                ".reg .f32 %f0, %f1;",
-                                "mov.b32 {{%hs0, %hs1}}, {s2};",
-                                "cvt.rn.f16x2.e4m3x2 %sc, %hs0;",
-                                "mov.b32 {{%ht, %hb}}, %sc;",
-                                "mov.b32 %st, {{%ht, %ht}};",
-                                "mov.b32 %sb, {{%hb, %hb}};",
-                                "mov.b32 {{%b0, %b1, %b2, %b3}}, {w};",
-                                "cvt.rn.f16x2.e2m1x2 %p0, %b0;",
-                                "cvt.rn.f16x2.e2m1x2 %p1, %b1;",
-                                "cvt.rn.f16x2.e2m1x2 %p2, %b2;",
-                                "cvt.rn.f16x2.e2m1x2 %p3, %b3;",
-                                "mul.rn.f16x2 %p0, %p0, %st;",
-                                "mul.rn.f16x2 %p1, %p1, %sb;",
-                                "mul.rn.f16x2 %p2, %p2, %st;",
-                                "mul.rn.f16x2 %p3, %p3, %sb;",
-                                "mov.b32 {{%h0, %h1}}, %p0;",
-                                "cvt.f32.f16 %f0, %h0; cvt.f32.f16 %f1, %h1;",
-                                "mul.rn.f32 %f0, %f0, {fac}; mul.rn.f32 %f1, %f1, {fac};",
-                                "cvt.rn.bf16x2.f32 {r0}, %f1, %f0;",
-                                "mov.b32 {{%h0, %h1}}, %p1;",
-                                "cvt.f32.f16 %f0, %h0; cvt.f32.f16 %f1, %h1;",
-                                "mul.rn.f32 %f0, %f0, {fac}; mul.rn.f32 %f1, %f1, {fac};",
-                                "cvt.rn.bf16x2.f32 {r1}, %f1, %f0;",
-                                "mov.b32 {{%h0, %h1}}, %p2;",
-                                "cvt.f32.f16 %f0, %h0; cvt.f32.f16 %f1, %h1;",
-                                "mul.rn.f32 %f0, %f0, {fac}; mul.rn.f32 %f1, %f1, {fac};",
-                                "cvt.rn.bf16x2.f32 {r2}, %f1, %f0;",
-                                "mov.b32 {{%h0, %h1}}, %p3;",
-                                "cvt.f32.f16 %f0, %h0; cvt.f32.f16 %f1, %h1;",
-                                "mul.rn.f32 %f0, %f0, {fac}; mul.rn.f32 %f1, %f1, {fac};",
-                                "cvt.rn.bf16x2.f32 {r3}, %f1, %f0;",
-                                "}}",
-                                w = in(reg32) packed,
-                                s2 = in(reg32) scale_bits,
-                                fac = in(reg32) factor,
-                                r0 = out(reg32) r0,
-                                r1 = out(reg32) r1,
-                                r2 = out(reg32) r2,
-                                r3 = out(reg32) r3,
-                                options(pure, nomem, nostack)
-                            );
-                            let values = load2($x_addr);
-                            acc = mma_m16n8k16_bf16([r0, r1, r2, r3], values, acc);
-                        }};
-                    }
-                    macro_rules! consume_reg {
-                        ($slot:expr, $x:expr) => {{
-                            let (code_words, scale_words): ([u32; 4], [u32; 2]) = $slot;
-                            let x: u32 = $x;
-                            step_reg!(x, code_words[0], scale_words[0]);
-                            step_reg!(x + 32, code_words[1], scale_words[0] >> 16);
-                            step_reg!(x + 64, code_words[2], scale_words[1]);
-                            step_reg!(x + 96, code_words[3], scale_words[1] >> 16);
-                        }};
-                    }
-                    if one_shot_x {
-                        let last_c = chunks - 1;
-                        let mut ring = [([0u32; 4], [0u32; 2]); DEPTH_REG as usize];
-                        macro_rules! prime6 {
-                            ($($j:literal)*) => {$( ring[$j as usize] = fetch_panel!(if $j < last_c { $j } else { last_c }); )*};
-                        }
-                        prime6!(0 1 2 3 4 5);
-                        let mut ci = 0u32;
-                        while ci + DEPTH_REG <= chunks {
-                            let xb = x_base + ci * 128;
-                            macro_rules! stage6 {
-                                ($($j:literal)*) => {$(
-                                    consume_reg!(ring[$j as usize], xb + $j * 128);
-                                    let nxt = ci + $j + DEPTH_REG;
-                                    ring[$j as usize] = fetch_panel!(if nxt < last_c { nxt } else { last_c });
-                                )*};
-                            }
-                            stage6!(0 1 2 3 4 5);
-                            ci += DEPTH_REG;
-                        }
-                        let xb = x_base + ci * 128;
-                        macro_rules! tail6 {
-                            ($($j:literal)*) => {$( if ci + $j < chunks { consume_reg!(ring[$j as usize], xb + $j * 128); } )*};
-                        }
-                        tail6!(0 1 2 3 4);
-                    } else {
-                        let mut slab_start = 0u32;
-                        while slab_start < chunks {
-                            let slab_len = (chunks - slab_start).min(slab_chunks);
-                            _syncthreads();
-                            let in_ptr = load_meta64!(24) as *const f32;
-                            let in_stride = load_u32(smem + meta_at + 32);
-                            let in_repeat = load_u32(smem + meta_at + 36);
-                            let idx_word = load_meta64!(16);
-                            let pairs_in_slab = slab_len * 16;
-                            let mut g_idx = 0u32;
-                            while g_idx < count {
-                                let pk = ((idx_word >> (8 * g_idx)) & 255) as u32;
-                                let xb = (pk / in_repeat) * in_stride + slab_start * 64;
-                                let g_smem = smem + g_idx * row_stride;
-                                let mut pair = tid;
-                                while pair < pairs_in_slab {
-                                    let c_i = pair >> 4;
-                                    let ks = pair & 15;
-                                    let xp = in_ptr.add((xb + c_i * 64 + (ks >> 2) * 16 + (ks & 3) * 2) as usize);
-                                    let lo = crate::tc_ptx::ld_global_nc_v2_u32(xp.cast());
-                                    let hi = crate::tc_ptx::ld_global_nc_v2_u32(xp.add(8).cast());
-                                    let dst = g_smem + c_i * 128 + ks * 8;
-                                    store_u32(dst, cvt_bf16x2(f32::from_bits(lo[0]), f32::from_bits(lo[1])));
-                                    store_u32(dst + 4, cvt_bf16x2(f32::from_bits(hi[0]), f32::from_bits(hi[1])));
-                                    pair += PICKED_THREADS as u32;
-                                }
-                                g_idx += 1;
-                            }
-                            _syncthreads();
-                            let slab_last = slab_start + slab_len - 1;
-                            let mut ring = [([0u32; 4], [0u32; 2]); DEPTH_REG as usize];
-                            macro_rules! prime6s {
-                                ($($j:literal)*) => {$(
-                                    let p = slab_start + $j;
-                                    ring[$j as usize] = fetch_panel!(if p < slab_last { p } else { slab_last });
-                                )*};
-                            }
-                            prime6s!(0 1 2 3 4 5);
-                            let mut ci = 0u32;
-                            while ci + DEPTH_REG <= slab_len {
-                                let xb = x_base + ci * 128;
-                                macro_rules! stage6s {
-                                    ($($j:literal)*) => {$(
-                                        consume_reg!(ring[$j as usize], xb + $j * 128);
-                                        let nxt = slab_start + ci + $j + DEPTH_REG;
-                                        ring[$j as usize] = fetch_panel!(if nxt < slab_last { nxt } else { slab_last });
-                                    )*};
-                                }
-                                stage6s!(0 1 2 3 4 5);
-                                ci += DEPTH_REG;
-                            }
-                            let xb = x_base + ci * 128;
-                            macro_rules! tail6s {
-                                ($($j:literal)*) => {$( if ci + $j < slab_len { consume_reg!(ring[$j as usize], xb + $j * 128); } )*};
-                            }
-                            tail6s!(0 1 2 3 4);
-                            slab_start += slab_len;
-                        }
+                macro_rules! consume_smem {
+                    ($ch:expr, $x:expr) => {{
+                        let ch = $ch;
+                        let code_words = packed_ld_v4_evict!(c_base.add((ch * 512) as usize));
+                        let scale_words = packed_ld_v2_evict!(s_base.add((ch * 64) as usize));
+                        let x: u32 = $x;
+                        step_smem!(x + (gx_slot << 5), code_words[0], scale_words[0]);
+                        step_smem!(x + ((1 ^ gx_slot) << 5), code_words[1], scale_words[0] >> 16);
+                        step_smem!(x + ((2 ^ gx_slot) << 5), code_words[2], scale_words[1]);
+                        step_smem!(x + ((3 ^ gx_slot) << 5), code_words[3], scale_words[1] >> 16);
+                    }};
+                }
+                if one_shot_x {
+                    let mut ci = 0u32;
+                    while ci < chunks {
+                        consume_smem!(ci, x_base + ci * 128);
+                        ci += 1;
                     }
                 } else {
-                    const DEPTH: u32 = 4;
-                    macro_rules! step_smem {
-                        ($x_addr:expr, $packed:expr, $scales:expr) => {{
-                            let packed = $packed;
-                            let scale_bits = $scales;
-                            let top = table_addr + 32 * (scale_bits & 255);
-                            let bottom = table_addr + 32 * ((scale_bits >> 8) & 255);
-                            let decode = |line: u32, byte: u32| load_u16(line + 2 * (byte & 15)) | (load_u16(line + 2 * ((byte >> 4) & 15)) << 16);
-                            let weights = [decode(top, packed), decode(bottom, packed >> 8), decode(top, packed >> 16), decode(bottom, packed >> 24)];
-                            let values = load2($x_addr);
-                            acc = mma_m16n8k16_bf16(weights, values, acc);
-                        }};
-                    }
-                    macro_rules! consume_smem {
-                        ($slot:expr, $x:expr) => {{
-                            let (code_words, scale_words): ([u32; 4], [u32; 2]) = $slot;
-                            let x: u32 = $x;
-                            step_smem!(x, code_words[0], scale_words[0]);
-                            step_smem!(x + 32, code_words[1], scale_words[0] >> 16);
-                            step_smem!(x + 64, code_words[2], scale_words[1]);
-                            step_smem!(x + 96, code_words[3], scale_words[1] >> 16);
-                        }};
-                    }
-                    if one_shot_x {
-                        let last_c = chunks - 1;
-                        let mut ring = [([0u32; 4], [0u32; 2]); DEPTH as usize];
-                        macro_rules! prime4 {
-                            ($($j:literal)*) => {$( ring[$j as usize] = fetch_panel!(if $j < last_c { $j } else { last_c }); )*};
-                        }
-                        prime4!(0 1 2 3);
+                    let mut slab_start = 0u32;
+                    while slab_start < chunks {
+                        let slab_len = (chunks - slab_start).min(slab_chunks);
+                        _syncthreads();
+                        stage_x_meta!(PANEL_META_AT, slab_start, slab_len, row_stride);
+                        _syncthreads();
                         let mut ci = 0u32;
-                        while ci + DEPTH <= chunks {
-                            let xb = x_base + ci * 128;
-                            macro_rules! stage4 {
-                                ($($j:literal)*) => {$(
-                                    consume_smem!(ring[$j as usize], xb + $j * 128);
-                                    let nxt = ci + $j + DEPTH;
-                                    ring[$j as usize] = fetch_panel!(if nxt < last_c { nxt } else { last_c });
-                                )*};
-                            }
-                            stage4!(0 1 2 3);
-                            ci += DEPTH;
+                        while ci < slab_len {
+                            consume_smem!(slab_start + ci, x_base + ci * 128);
+                            ci += 1;
                         }
-                        let xb = x_base + ci * 128;
-                        macro_rules! tail4 {
-                            ($($j:literal)*) => {$( if ci + $j < chunks { consume_smem!(ring[$j as usize], xb + $j * 128); } )*};
-                        }
-                        tail4!(0 1 2);
-                    } else {
-                        let mut slab_start = 0u32;
-                        while slab_start < chunks {
-                            let slab_len = (chunks - slab_start).min(slab_chunks);
-                            _syncthreads();
-                            let in_ptr = load_meta64!(24) as *const f32;
-                            let in_stride = load_u32(smem + meta_at + 32);
-                            let in_repeat = load_u32(smem + meta_at + 36);
-                            let idx_word = load_meta64!(16);
-                            let pairs_in_slab = slab_len * 16;
-                            let mut g_idx = 0u32;
-                            while g_idx < count {
-                                let pk = ((idx_word >> (8 * g_idx)) & 255) as u32;
-                                let xb = (pk / in_repeat) * in_stride + slab_start * 64;
-                                let g_smem = smem + g_idx * row_stride;
-                                let mut pair = tid;
-                                while pair < pairs_in_slab {
-                                    let c_i = pair >> 4;
-                                    let ks = pair & 15;
-                                    let xp = in_ptr.add((xb + c_i * 64 + (ks >> 2) * 16 + (ks & 3) * 2) as usize);
-                                    let lo = crate::tc_ptx::ld_global_nc_v2_u32(xp.cast());
-                                    let hi = crate::tc_ptx::ld_global_nc_v2_u32(xp.add(8).cast());
-                                    let dst = g_smem + c_i * 128 + ks * 8;
-                                    store_u32(dst, cvt_bf16x2(f32::from_bits(lo[0]), f32::from_bits(lo[1])));
-                                    store_u32(dst + 4, cvt_bf16x2(f32::from_bits(hi[0]), f32::from_bits(hi[1])));
-                                    pair += PICKED_THREADS as u32;
-                                }
-                                g_idx += 1;
-                            }
-                            _syncthreads();
-                            let slab_last = slab_start + slab_len - 1;
-                            let mut ring = [([0u32; 4], [0u32; 2]); DEPTH as usize];
-                            macro_rules! prime4s {
-                                ($($j:literal)*) => {$(
-                                    let p = slab_start + $j;
-                                    ring[$j as usize] = fetch_panel!(if p < slab_last { p } else { slab_last });
-                                )*};
-                            }
-                            prime4s!(0 1 2 3);
-                            let mut ci = 0u32;
-                            while ci + DEPTH <= slab_len {
-                                let xb = x_base + ci * 128;
-                                macro_rules! stage4s {
-                                    ($($j:literal)*) => {$(
-                                        consume_smem!(ring[$j as usize], xb + $j * 128);
-                                        let nxt = slab_start + ci + $j + DEPTH;
-                                        ring[$j as usize] = fetch_panel!(if nxt < slab_last { nxt } else { slab_last });
-                                    )*};
-                                }
-                                stage4s!(0 1 2 3);
-                                ci += DEPTH;
-                            }
-                            let xb = x_base + ci * 128;
-                            macro_rules! tail4s {
-                                ($($j:literal)*) => {$( if ci + $j < slab_len { consume_smem!(ring[$j as usize], xb + $j * 128); } )*};
-                            }
-                            tail4s!(0 1 2);
-                            slab_start += slab_len;
-                        }
+                        slab_start += slab_len;
                     }
                 }
                 let out_ptr = load_meta64!(0) as *mut f32;
                 let caps_ptr = load_meta64!(8) as *const u64;
                 let idx_word = load_meta64!(16);
+                let rows_m = load_u32(smem + PANEL_META_AT + 48);
+                let cp = load_u32(smem + PANEL_META_AT + 52);
+                let (cnt_m, pairs_m) = (cp & 0xffff, (cp >> 16) != 0);
                 let top = first + warp * 16 + g;
                 let mut col_i = 0u32;
                 while col_i < 2 {
                     let slot = 2 * s + col_i;
-                    if slot < count {
+                    if slot < cnt_m {
                         let pk = ((idx_word >> (8 * slot)) & 255) as u32;
                         let (v0, v1) = if col_i == 0 { (acc[0], acc[2]) } else { (acc[1], acc[3]) };
                         if caps_ptr.is_null() {
-                            let row_offset = |row: u32| if pairs { row / 2 + (row & 1) * (rows / 2) } else { row };
-                            let out = out_ptr.add((pk * rows) as usize);
+                            let row_offset = |row: u32| if pairs_m { row / 2 + (row & 1) * (rows_m / 2) } else { row };
+                            let out = out_ptr.add((pk * rows_m) as usize);
                             *out.add(row_offset(top) as usize) = v0;
                             *out.add(row_offset(top + 8) as usize) = v1;
                         } else {
@@ -642,9 +714,9 @@ pub(crate) unsafe fn tile<const FORM:u8>(smem:u32,weights: *const u8, input: *co
                             let half = (g & 1) as usize;
                             let cap = f32::from_bits(*caps_ptr.add(half) as u32);
                             let inv = f32::from_bits(*caps_ptr.add(2 + half) as u32);
-                            let columns = (count + 1 - (slot & 1)) / 2;
+                            let columns = (cnt_m + 1 - (slot & 1)) / 2;
                             let mask = 0x1111_1111u32 * ((1u32 << columns) - 1);
-                            let out = out_ptr.add((pk * (rows / 2)) as usize);
+                            let out = out_ptr.add((pk * (rows_m / 2)) as usize);
                             let write = |row: u32, value: f32| {
                                 let value = rn(value);
                                 let capped = gate_tanh(value * inv) * cap;
@@ -661,13 +733,10 @@ pub(crate) unsafe fn tile<const FORM:u8>(smem:u32,weights: *const u8, input: *co
                     }
                     col_i += 1;
                 }
-                first += load_u32(smem + meta_at + 40);
+                first += load_u32(smem + PANEL_META_AT + 40);
             }
+            asm!("griddepcontrol.launch_dependents;", options(nostack));
             return;
-        }
-        let table_addr = smem + picked_table_at(wide_form) as u32;
-        for i in (tid..table_copies(wide_form) as u32).step_by(PICKED_THREADS) {
-            copy16(table_addr + i * 16, table.add((i * 16) as usize).cast());
         }
         // A supplied table can define other values. Compare all 256 words
         // before replacing any table reads with the native E4M3 conversion.
@@ -684,6 +753,285 @@ pub(crate) unsafe fn tile<const FORM:u8>(smem:u32,weights: *const u8, input: *co
                  ok=in(reg32) u32::from(ok), result=out(reg32) result);
             result != 0
         } else { false };
+        if wide_form && native && rows % 64 == 0 {
+            let chunks = cols / 64;
+            let scale_stages = chunks >> 1;
+            let (g, s) = (lane >> 2, lane & 3);
+            let warp = tid >> 5;
+            let g_slot = if g < count { g } else { 0 };
+            if tid == 0 {
+                let put64 = |off: u32, v: u64| {
+                    store_u32(smem + PANEL_NOLUT_META_AT + off, v as u32);
+                    store_u32(smem + PANEL_NOLUT_META_AT + off + 4, (v >> 32) as u32);
+                };
+                put64(0, output as u64);
+                put64(8, caps as u64);
+                put64(16, group.indices);
+                put64(24, input as u64);
+                store_u32(smem + PANEL_NOLUT_META_AT + 32, stride);
+                store_u32(smem + PANEL_NOLUT_META_AT + 36, repeat);
+                store_u32(smem + PANEL_NOLUT_META_AT + 40, step);
+                store_u32(smem + PANEL_NOLUT_META_AT + 48, rows);
+                store_u32(smem + PANEL_NOLUT_META_AT + 52, count | (u32::from(pairs) << 16));
+            }
+            let max_slab = (PANEL_NOLUT_X_BYTES as u32 / count) / 128;
+            let one_shot_x = chunks <= max_slab;
+            let slab_chunks: u32 = if one_shot_x { chunks } else { max_slab & !1 };
+            let row_stride: u32 = slab_chunks * 128;
+            macro_rules! load_mx_meta64 {
+                ($off:expr) => {{
+                    (load_u32(smem + PANEL_NOLUT_META_AT + $off) as u64)
+                        | ((load_u32(smem + PANEL_NOLUT_META_AT + $off + 4) as u64) << 32)
+                }};
+            }
+            if is_down_pdl {
+                if one_shot_x {
+                    let row_block = (block << 1) + (warp >> 1);
+                    let r0_i = ((warp & 1) << 4) + g;
+                    let c0_p = codes.cast::<u32>().add((row_block * chunks * 512 + r0_i * 16 + s * 4) as usize);
+                    let mut pc = 0u32;
+                    while pc < 4 && pc < chunks {
+                        asm!("prefetch.global.L2 [{p}];", p = in(reg64) c0_p.add((pc * 512) as usize), options(readonly, nostack));
+                        asm!("prefetch.global.L2 [{p}];", p = in(reg64) c0_p.add((pc * 512 + 128) as usize), options(readonly, nostack));
+                        pc += 1;
+                    }
+                }
+                asm!("griddepcontrol.wait;", options(nostack));
+            }
+            if one_shot_x && (is_down_pdl || !group.x_preloaded) {
+                let pairs_in_slab = chunks * 16;
+                let mut g_idx = 0u32;
+                while g_idx < count {
+                    let xb = (pick(g_idx) / repeat) * stride;
+                    let g_smem = smem + g_idx * row_stride;
+                    let gx = g_idx & 3;
+                    let mut pair = tid;
+                    while pair < pairs_in_slab {
+                        let c_i = pair >> 4;
+                        let ks = pair & 15;
+                        let xp = input.add((xb + c_i * 64 + (ks >> 2) * 16 + (ks & 3) * 2) as usize);
+                        let lo = crate::tc_ptx::ld_global_nc_v2_u32(xp.cast());
+                        let hi = crate::tc_ptx::ld_global_nc_v2_u32(xp.add(8).cast());
+                        let dst = g_smem + c_i * 128 + (((ks >> 2) ^ gx) << 5) + ((ks & 3) << 3);
+                        store_u32(dst, cvt_bf16x2(f32::from_bits(lo[0]), f32::from_bits(lo[1])));
+                        store_u32(dst + 4, cvt_bf16x2(f32::from_bits(hi[0]), f32::from_bits(hi[1])));
+                        pair += PICKED_THREADS as u32;
+                    }
+                    g_idx += 1;
+                }
+            }
+            _syncthreads();
+
+            let gx_slot = g_slot & 3;
+            let x_base = smem + g_slot * row_stride + s * 8;
+            let codes_u32 = codes.cast::<u32>();
+            let scales_u32 = scales.cast::<u32>();
+            let r0_in32 = ((warp & 1) << 4) + g;
+            let prmt_sel: u32 = if (s & 1) == 0 { 0x5410 } else { 0x7632 };
+            const MX_DEPTH: u32 = 2;
+            const _: () = assert!(MX_DEPTH == 2);
+
+            let mut first = block * PICKED_ROWS as u32;
+            while first < load_u32(smem + PANEL_NOLUT_META_AT + 48) {
+                let row_block = (first >> 5) + (warp >> 1);
+                let c0_base = codes_u32.add((row_block * chunks * 512 + r0_in32 * 16 + s * 4) as usize);
+                let s0_base = scales_u32.add((row_block * scale_stages * 32 + r0_in32) as usize);
+                // Fetch 64-col codes (`r1 = r0 + 8` is fixed +128 u32 = +512 B); scale words (`+8` u32) loaded ONCE per pair.
+                macro_rules! fetch_mx_codes {
+                    ($chunk:expr) => {{
+                        let ch_off = ($chunk * 512) as usize;
+                        (
+                            packed_ld_v4_evict!(c0_base.add(ch_off)),
+                            packed_ld_v4_evict!(c0_base.add(ch_off + 128)),
+                        )
+                    }};
+                }
+                macro_rules! fetch_mx_scales {
+                    ($pair_idx:expr) => {{
+                        let s_off = (($pair_idx) * 32) as usize;
+                        (
+                            packed_ld_u32_evict!(s0_base.add(s_off)),
+                            packed_ld_u32_evict!(s0_base.add(s_off + 8)),
+                        )
+                    }};
+                }
+                macro_rules! xpose4x4_u16 {
+                    ($a:expr, $b:expr) => {{
+                        let a: u32 = $a;
+                        let b: u32 = $b;
+                        let pa = shfl_xor_u32(a, 1);
+                        let pb = shfl_xor_u32(b, 1);
+                        let (lo_a, hi_a) = if (s & 1) == 0 { (a, pa) } else { (pa, a) };
+                        let (lo_b, hi_b) = if (s & 1) == 0 { (b, pb) } else { (pb, b) };
+                        let (t0, t1): (u32, u32);
+                        asm!("prmt.b32 {t0}, {la}, {ha}, {sel}; prmt.b32 {t1}, {lb}, {hb}, {sel};",
+                            t0 = out(reg32) t0, t1 = out(reg32) t1,
+                            la = in(reg32) lo_a, ha = in(reg32) hi_a,
+                            lb = in(reg32) lo_b, hb = in(reg32) hi_b,
+                            sel = in(reg32) prmt_sel, options(pure, nomem, nostack));
+                        let u = if (s & 2) == 0 { t1 } else { t0 };
+                        let pu = shfl_xor_u32(u, 2);
+                        if (s & 2) == 0 { (t0, pu) } else { (pu, t1) }
+                    }};
+                }
+                macro_rules! unpack_mx_u16 {
+                    ($bits:expr, $mult:expr) => {{
+                        let result: u32;
+                        asm!(
+                            "{{ .reg .pred p0, p1; .reg .b32 lo, hi, cl, h; .reg .b16 pair, a, b; .reg .f32 f0, f1; \
+                             and.b32 lo, {raw}, 127; setp.eq.u32 p0, lo, 127; \
+                             and.b32 lo, {raw}, 255; selp.b32 lo, 0, lo, p0; \
+                             and.b32 hi, {raw}, 0x7f00; setp.eq.u32 p1, hi, 0x7f00; \
+                             and.b32 hi, {raw}, 0xff00; selp.b32 hi, 0, hi, p1; \
+                             or.b32 cl, lo, hi; cvt.u16.u32 pair, cl; \
+                             cvt.rn.f16x2.e4m3x2 h, pair; mov.b32 {{a, b}}, h; \
+                             cvt.f32.f16 f0, a; cvt.f32.f16 f1, b; \
+                             mul.rn.f32 f0, f0, {m}; mul.rn.f32 f1, f1, {m}; \
+                             cvt.rn.bf16x2.f32 {res}, f1, f0; }}",
+                            res = out(reg32) result, raw = in(reg32) ($bits), m = in(reg32) $mult,
+                            options(pure, nomem, nostack),
+                        );
+                        result
+                    }};
+                }
+                let mut acc = [0.0f32; 4];
+                macro_rules! consume_mx {
+                    ($codes:expr, $sc_pair:expr, $x:expr) => {{
+                        let (c0, c1): ([u32; 4], [u32; 4]) = $codes;
+                        let sc_pair: u32 = $sc_pair;
+                        let x: u32 = $x;
+                        let (r0_lo01, r0_lo23) = xpose4x4_u16!(c0[0], c0[1]);
+                        let (r0_hi01, r0_hi23) = xpose4x4_u16!(c0[2], c0[3]);
+                        let (r1_lo01, r1_lo23) = xpose4x4_u16!(c1[0], c1[1]);
+                        let (r1_hi01, r1_hi23) = xpose4x4_u16!(c1[2], c1[3]);
+                        let m0_a = power(sc_pair & 255);
+                        let m1_a = power((sc_pair >> 16) & 255);
+                        let a0 = unpack_mx_u16!(r0_lo01 & 0xffff, m0_a);
+                        let a2 = unpack_mx_u16!(r0_hi01 & 0xffff, m0_a);
+                        let a1 = unpack_mx_u16!(r1_lo01 & 0xffff, m1_a);
+                        let a3 = unpack_mx_u16!(r1_hi01 & 0xffff, m1_a);
+                        acc = mma_m16n8k16_bf16([a0, a1, a2, a3], load2(x + (gx_slot << 5)), acc);
+                        let a0 = unpack_mx_u16!(r0_lo01 >> 16, m0_a);
+                        let a2 = unpack_mx_u16!(r0_hi01 >> 16, m0_a);
+                        let a1 = unpack_mx_u16!(r1_lo01 >> 16, m1_a);
+                        let a3 = unpack_mx_u16!(r1_hi01 >> 16, m1_a);
+                        acc = mma_m16n8k16_bf16([a0, a1, a2, a3], load2(x + ((1 ^ gx_slot) << 5)), acc);
+                        let m0_b = power((sc_pair >> 8) & 255);
+                        let m1_b = power((sc_pair >> 24) & 255);
+                        let a0 = unpack_mx_u16!(r0_lo23 & 0xffff, m0_b);
+                        let a2 = unpack_mx_u16!(r0_hi23 & 0xffff, m0_b);
+                        let a1 = unpack_mx_u16!(r1_lo23 & 0xffff, m1_b);
+                        let a3 = unpack_mx_u16!(r1_hi23 & 0xffff, m1_b);
+                        acc = mma_m16n8k16_bf16([a0, a1, a2, a3], load2(x + ((2 ^ gx_slot) << 5)), acc);
+                        let a0 = unpack_mx_u16!(r0_lo23 >> 16, m0_b);
+                        let a2 = unpack_mx_u16!(r0_hi23 >> 16, m0_b);
+                        let a1 = unpack_mx_u16!(r1_lo23 >> 16, m1_b);
+                        let a3 = unpack_mx_u16!(r1_hi23 >> 16, m1_b);
+                        acc = mma_m16n8k16_bf16([a0, a1, a2, a3], load2(x + ((3 ^ gx_slot) << 5)), acc);
+                    }};
+                }
+                if one_shot_x {
+                    // `cols % 128 == 0` guarantees `chunks >= 2` and even; each pair shares one scale word.
+                    let mut r0 = fetch_mx_codes!(0);
+                    let mut sc_cur = fetch_mx_scales!(0);
+                    let mut r1 = fetch_mx_codes!(1);
+                    let mut ci = 0u32;
+                    while ci + MX_DEPTH < chunks {
+                        let xb = x_base + ci * 128;
+                        let sc_lo = (sc_cur.0 & 0xffff) | ((sc_cur.1 & 0xffff) << 16);
+                        let sc_hi = (sc_cur.0 >> 16) | (sc_cur.1 & 0xffff_0000);
+                        consume_mx!(r0, sc_lo, xb);
+                        r0 = fetch_mx_codes!(ci + 2);
+                        sc_cur = fetch_mx_scales!((ci + 2) >> 1);
+                        consume_mx!(r1, sc_hi, xb + 128);
+                        r1 = fetch_mx_codes!(ci + 3);
+                        ci += MX_DEPTH;
+                    }
+                    if first + load_u32(smem + PANEL_NOLUT_META_AT + 40) >= load_u32(smem + PANEL_NOLUT_META_AT + 48) {
+                        asm!("griddepcontrol.launch_dependents;", options(nostack));
+                    }
+                    let xb = x_base + ci * 128;
+                    let sc_lo = (sc_cur.0 & 0xffff) | ((sc_cur.1 & 0xffff) << 16);
+                    let sc_hi = (sc_cur.0 >> 16) | (sc_cur.1 & 0xffff_0000);
+                    consume_mx!(r0, sc_lo, xb);
+                    consume_mx!(r1, sc_hi, xb + 128);
+                } else {
+                    let mut slab_start = 0u32;
+                    while slab_start < chunks {
+                        let slab_len = (chunks - slab_start).min(slab_chunks);
+                        _syncthreads();
+                        stage_x_meta!(PANEL_NOLUT_META_AT, slab_start, slab_len, row_stride);
+                        _syncthreads();
+                        let mut ci = 0u32;
+                        while ci + 1 < slab_len {
+                            let ch = slab_start + ci;
+                            let sc_pair = fetch_mx_scales!(ch >> 1);
+                            let sc_lo = (sc_pair.0 & 0xffff) | ((sc_pair.1 & 0xffff) << 16);
+                            let sc_hi = (sc_pair.0 >> 16) | (sc_pair.1 & 0xffff_0000);
+                            let c_even = fetch_mx_codes!(ch);
+                            let c_odd = fetch_mx_codes!(ch + 1);
+                            consume_mx!(c_even, sc_lo, x_base + ci * 128);
+                            consume_mx!(c_odd, sc_hi, x_base + (ci + 1) * 128);
+                            ci += 2;
+                        }
+                        slab_start += slab_len;
+                    }
+                    if first + load_u32(smem + PANEL_NOLUT_META_AT + 40) >= load_u32(smem + PANEL_NOLUT_META_AT + 48) {
+                        asm!("griddepcontrol.launch_dependents;", options(nostack));
+                    }
+                }
+                let out_ptr = load_mx_meta64!(0) as *mut f32;
+                let caps_ptr = load_mx_meta64!(8) as *const u64;
+                let idx_word = load_mx_meta64!(16);
+                let rows_m = load_u32(smem + PANEL_NOLUT_META_AT + 48);
+                let cp = load_u32(smem + PANEL_NOLUT_META_AT + 52);
+                let (cnt_m, pairs_m) = (cp & 0xffff, (cp >> 16) != 0);
+                let top = first + warp * 16 + g;
+                let mut col_i = 0u32;
+                while col_i < 2 {
+                    let slot = 2 * s + col_i;
+                    if slot < cnt_m {
+                        let pk = ((idx_word >> (8 * slot)) & 255) as u32;
+                        let (v0, v1) = if col_i == 0 { (acc[0], acc[2]) } else { (acc[1], acc[3]) };
+                        if caps_ptr.is_null() {
+                            let row_offset = |row: u32| if pairs_m { row / 2 + (row & 1) * (rows_m / 2) } else { row };
+                            let out = out_ptr.add((pk * rows_m) as usize);
+                            *out.add(row_offset(top) as usize) = v0;
+                            *out.add(row_offset(top + 8) as usize) = v1;
+                        } else {
+                            use crate::fixed_math::{rn, sigmoid};
+                            let half = (g & 1) as usize;
+                            let cap = f32::from_bits(*caps_ptr.add(half) as u32);
+                            let inv = f32::from_bits(*caps_ptr.add(2 + half) as u32);
+                            let columns = (cnt_m + 1 - (slot & 1)) / 2;
+                            let mask = 0x1111_1111u32 * ((1u32 << columns) - 1);
+                            let out = out_ptr.add((pk * (rows_m / 2)) as usize);
+                            let write = |row: u32, value: f32| {
+                                let value = rn(value);
+                                let capped = gate_tanh(value * inv) * cap;
+                                let other: u32;
+                                asm!("shfl.sync.bfly.b32 {out},{v},4,31,{mask};",
+                                     out=out(reg32) other, v=in(reg32) capped.to_bits(), mask=in(reg32) mask);
+                                if half == 0 {
+                                    *out.add((row / 2) as usize) = rn((capped * sigmoid(value)) * f32::from_bits(other));
+                                }
+                            };
+                            write(top, v0);
+                            write(top + 8, v1);
+                        }
+                    }
+                    col_i += 1;
+                }
+                first += load_u32(smem + PANEL_NOLUT_META_AT + 40);
+            }
+            return;
+        }
+        if is_down_pdl { asm!("griddepcontrol.wait;", options(nostack)); }
+        _syncthreads();
+        let table_addr = smem + picked_table_at(wide_form) as u32;
+        for i in (tid..table_copies(wide_form) as u32).step_by(PICKED_THREADS) {
+            copy16(table_addr + i * 16, table.add((i * 16) as usize).cast());
+        }
         let code_bytes = code_stage(wide_form) as u32;
         let scale_at = picked_scale_at(wide_form) as u32;
         let input_at = picked_input_at(wide_form) as u32;
@@ -847,6 +1195,7 @@ pub(crate) unsafe fn tile<const FORM:u8>(smem:u32,weights: *const u8, input: *co
             }
             first += step;
         }
+        asm!("griddepcontrol.launch_dependents;", options(nostack));
         return;
     }
     // Warp 0 runs the direct chains. The other threads make products.

@@ -150,6 +150,8 @@ pub(crate) unsafe fn replay_router_pick(table: *const crate::inkling_launch::Com
             core::arch::nvptx::trap();
         }
         if ((logits as usize) | (bias as usize) | (output as usize)) & 3 != 0 { core::arch::nvptx::trap(); }
+        // Allow dependent `PlainPackedPicked` (`GateUp`) to launch on idle SMs and pre-stage `X` before `wait`.
+        core::arch::asm!("griddepcontrol.launch_dependents;", options(nostack));
 
         let smem = crate::ptx::shared::<ROUTER_COMPACT_SMEM_BYTES>();
         let tid = core::arch::nvptx::_thread_idx_x() as usize;
@@ -163,15 +165,23 @@ pub(crate) unsafe fn replay_router_pick(table: *const crate::inkling_launch::Com
             let l_ptr = logits.add(row * experts);
             let o_ptr = output.add(row * 2 * picks);
 
-            // Each lane holds up to 4 experts (`lane + 32 * k` for k in 0..4) in registers (0 stack), computing sigmoid ONCE.
-            let s0 = if lane < experts { sigmoid(*l_ptr.add(lane)) } else { 0.0f32 };
-            let s1 = if lane + 32 < experts { sigmoid(*l_ptr.add(lane + 32)) } else { 0.0f32 };
-            let s2 = if lane + 64 < experts { sigmoid(*l_ptr.add(lane + 64)) } else { 0.0f32 };
-            let s3 = if lane + 96 < experts { sigmoid(*l_ptr.add(lane + 96)) } else { 0.0f32 };
-            let c0 = if lane < experts { s0 + *bias.add(lane) } else { f32::NEG_INFINITY };
-            let c1 = if lane + 32 < experts { s1 + *bias.add(lane + 32) } else { f32::NEG_INFINITY };
-            let c2 = if lane + 64 < experts { s2 + *bias.add(lane + 64) } else { f32::NEG_INFINITY };
-            let c3 = if lane + 96 < experts { s3 + *bias.add(lane + 96) } else { f32::NEG_INFINITY };
+            // Hoist all 4 logit + 4 bias global loads before `sigmoid` so DRAM/L2 loads overlap in flight.
+            let l0 = if lane < experts { *l_ptr.add(lane) } else { 0.0f32 };
+            let l1 = if lane + 32 < experts { *l_ptr.add(lane + 32) } else { 0.0f32 };
+            let l2 = if lane + 64 < experts { *l_ptr.add(lane + 64) } else { 0.0f32 };
+            let l3 = if lane + 96 < experts { *l_ptr.add(lane + 96) } else { 0.0f32 };
+            let b0 = if lane < experts { *bias.add(lane) } else { 0.0f32 };
+            let b1 = if lane + 32 < experts { *bias.add(lane + 32) } else { 0.0f32 };
+            let b2 = if lane + 64 < experts { *bias.add(lane + 64) } else { 0.0f32 };
+            let b3 = if lane + 96 < experts { *bias.add(lane + 96) } else { 0.0f32 };
+            let s0 = if lane < experts { sigmoid(l0) } else { 0.0f32 };
+            let s1 = if lane + 32 < experts { sigmoid(l1) } else { 0.0f32 };
+            let s2 = if lane + 64 < experts { sigmoid(l2) } else { 0.0f32 };
+            let s3 = if lane + 96 < experts { sigmoid(l3) } else { 0.0f32 };
+            let c0 = if lane < experts { s0 + b0 } else { f32::NEG_INFINITY };
+            let c1 = if lane + 32 < experts { s1 + b1 } else { f32::NEG_INFINITY };
+            let c2 = if lane + 64 < experts { s2 + b2 } else { f32::NEG_INFINITY };
+            let c3 = if lane + 96 < experts { s3 + b3 } else { f32::NEG_INFINITY };
             let mut alive_mask = u32::from(lane < experts)
                 | (u32::from(lane + 32 < experts) << 1)
                 | (u32::from(lane + 64 < experts) << 2)
@@ -352,9 +362,6 @@ pub(crate) unsafe fn replay_stream_ops(table: *const crate::inkling_launch::Comm
     unsafe {
         let c = &*table.add(index as usize);
         if c.kind != crate::inkling_launch::FAST_STREAM_OPS { core::arch::nvptx::trap(); }
-        // Allow a dependent decode panel product (`resident_launch::dependent_launch`) to overlap its panel prefetches
-        // before its `griddepcontrol.wait`. This launch is never itself dependent, so all prior work has ended.
-        core::arch::asm!("griddepcontrol.launch_dependents;", options(nostack));
         let w = c.payload.as_ptr().cast::<u64>();
         let subop = *w;
         let rows = *w.add(6) as usize;
@@ -367,11 +374,11 @@ pub(crate) unsafe fn replay_stream_ops(table: *const crate::inkling_launch::Comm
         let smem = crate::ptx::shared::<FOLD_SMEM_BYTES>();
         if subop == STREAM_OP_GATE_BLEND_NORM {
             // Fused `GateBlend` + optional weighted `RoundedNorm` for 1..=3 gates (`grid = (rows, count, 1)`).
-            // Launches `warps = threads / 32` (`<= 9` warps = `<= 288` threads -> 3 blocks/SM on SM121a), with
-            // each warp owning `<= 3` 128-element chunks (`<= 12` floats/lane in scalar registers, zero stack frame).
+            // Launches 1 warp per 128-element norm chunk (`threads = (dim / 128) * 32`, e.g. 576 for `dim = 2304`),
+            // so each lane owns 4 channels with 1 barrier, preloaded static weights, and zero stack frame.
             // SAFETY: host checked via `fast_ops::check_gate_blend_norm` that all `count` gate tuples have valid
-            // extents, word alignment, and mutually disjoint outputs. `smem` (512 B) holds `chunks + 1 <= 33` words;
-            // all `threads` participate in every `_syncthreads` and full 32-lane warps in every `shfl_xor`.
+            // extents, word alignment, and mutually disjoint outputs. `smem` (512 B) holds `chunks <= 20` words;
+            // all `threads` participate in `_syncthreads` and full 32-lane warps in every `shfl_xor`.
             let count = aux;
             let row = core::arch::nvptx::_block_idx_x() as usize;
             let gate_i = core::arch::nvptx::_block_idx_y() as usize;
@@ -395,77 +402,63 @@ pub(crate) unsafe fn replay_stream_ops(table: *const crate::inkling_launch::Comm
             }
             let tid = core::arch::nvptx::_thread_idx_x() as usize;
             let (warp, lane) = (tid >> 5, tid & 31);
-            let warps = threads >> 5;
             let chunks = dim / NORM_CHUNK;
             let f_ptr = gates_p.add(row * 2 * dim);
             let g_ptr = f_ptr.add(dim);
             let k_ptr = kept_p.add(row * dim);
             let m_ptr = msg_p.add(row * dim);
             let o_ptr = out_p.add(row * dim);
-            macro_rules! word {($p:expr)=>{{let v: f32; core::arch::asm!("ld.global.nc.f32 {v}, [{p}];", v = out(reg32) v, p = in(reg64) $p, options(readonly, nostack)); v}}}
-            macro_rules! blend_col {($c:expr) => {{
-                let f = word!(f_ptr.add($c));
-                let g = word!(g_ptr.add($c));
-                let k = word!(k_ptr.add($c));
-                let m = word!(m_ptr.add($c));
-                (1.0f32 - tanh(f)) * k + tanh(g) * m
-            }};}
-            let (ch0, ch1, ch2) = (warp, warp + warps, warp + 2 * warps);
-            let (has0, has1, has2) = (ch0 < chunks, ch1 < chunks, ch2 < chunks);
-            let (b0, b1, b2) = (ch0 * NORM_CHUNK + lane, ch1 * NORM_CHUNK + lane, ch2 * NORM_CHUNK + lane);
-            macro_rules! run_chunk {($has:ident, $ch:ident, $b:ident) => {{
-                if $has {
-                    let v0 = blend_col!($b);
-                    let v1 = blend_col!($b + LANES);
-                    let v2 = blend_col!($b + 2 * LANES);
-                    let v3 = blend_col!($b + 3 * LANES);
-                    let mut sq = 0.0f32;
-                    sq += v0 * v0; sq += v1 * v1; sq += v2 * v2; sq += v3 * v3;
-                    sq += shfl_xor_f32(sq, 16);
-                    sq += shfl_xor_f32(sq, 8);
-                    sq += shfl_xor_f32(sq, 4);
-                    sq += shfl_xor_f32(sq, 2);
-                    sq += shfl_xor_f32(sq, 1);
-                    if lane == 0 { store_u32(smem + ($ch * 4) as u32, sq.to_bits()); }
-                    (v0, v1, v2, v3)
-                } else {
-                    (0.0f32, 0.0f32, 0.0f32, 0.0f32)
-                }
-            }};}
-            let (v00, v01, v02, v03) = run_chunk!(has0, ch0, b0);
-            let (v10, v11, v12, v13) = run_chunk!(has1, ch1, b1);
-            let (v20, v21, v22, v23) = run_chunk!(has2, ch2, b2);
+            let col0 = warp * NORM_CHUNK + lane;
+            let col1 = col0 + LANES;
+            let col2 = col0 + 2 * LANES;
+            let col3 = col0 + 3 * LANES;
+            // Preload static norm weights BEFORE `wait` and hoist all 16 operand loads before `tanh` math.
+            macro_rules! ld_nc_f32 {($p:expr)=>{{let v: f32; core::arch::asm!("ld.global.nc.f32 {v}, [{p}];", v = out(reg32) v, p = in(reg64) $p, options(readonly, nostack)); v}}}
+            let (w0, w1, w2, w3) = if wt_p.is_null() {
+                (0.0f32, 0.0f32, 0.0f32, 0.0f32)
+            } else {
+                (ld_nc_f32!(wt_p.add(col0)), ld_nc_f32!(wt_p.add(col1)), ld_nc_f32!(wt_p.add(col2)), ld_nc_f32!(wt_p.add(col3)))
+            };
+            core::arch::asm!("griddepcontrol.wait;", options(nostack));
+            core::arch::asm!("griddepcontrol.launch_dependents;", options(nostack));
+            let (f0, f1, f2, f3) = (*f_ptr.add(col0), *f_ptr.add(col1), *f_ptr.add(col2), *f_ptr.add(col3));
+            let (g0, g1, g2, g3) = (*g_ptr.add(col0), *g_ptr.add(col1), *g_ptr.add(col2), *g_ptr.add(col3));
+            let (k0, k1, k2, k3) = (*k_ptr.add(col0), *k_ptr.add(col1), *k_ptr.add(col2), *k_ptr.add(col3));
+            let (m0, m1, m2, m3) = (*m_ptr.add(col0), *m_ptr.add(col1), *m_ptr.add(col2), *m_ptr.add(col3));
+            let v0 = (1.0f32 - tanh(f0)) * k0 + tanh(g0) * m0;
+            let v1 = (1.0f32 - tanh(f1)) * k1 + tanh(g1) * m1;
+            let v2 = (1.0f32 - tanh(f2)) * k2 + tanh(g2) * m2;
+            let v3 = (1.0f32 - tanh(f3)) * k3 + tanh(g3) * m3;
+            let mut sq = 0.0f32;
+            sq += v0 * v0;
+            sq += v1 * v1;
+            sq += v2 * v2;
+            sq += v3 * v3;
+            sq += shfl_xor_f32(sq, 16);
+            sq += shfl_xor_f32(sq, 8);
+            sq += shfl_xor_f32(sq, 4);
+            sq += shfl_xor_f32(sq, 2);
+            sq += shfl_xor_f32(sq, 1);
+            if lane == 0 { store_u32(smem + (warp * 4) as u32, sq.to_bits()); }
             core::arch::nvptx::_syncthreads();
-            if warp == 0 {
-                let mut total = if lane < chunks { f32::from_bits(load_u32(smem + (lane * 4) as u32)) } else { 0.0f32 };
-                total += shfl_xor_f32(total, 16);
-                total += shfl_xor_f32(total, 8);
-                total += shfl_xor_f32(total, 4);
-                total += shfl_xor_f32(total, 2);
-                total += shfl_xor_f32(total, 1);
-                if lane == 0 { store_u32(smem + (NORM_CHUNKS_MAX * 4) as u32, (1.0f32 / root(total / dim as f32 + bound)).to_bits()); }
+            let mut total = if lane < chunks { f32::from_bits(load_u32(smem + (lane * 4) as u32)) } else { 0.0f32 };
+            total += shfl_xor_f32(total, 16);
+            total += shfl_xor_f32(total, 8);
+            total += shfl_xor_f32(total, 4);
+            total += shfl_xor_f32(total, 2);
+            total += shfl_xor_f32(total, 1);
+            let scale = 1.0f32 / root(total / dim as f32 + bound);
+            if wt_p.is_null() {
+                *o_ptr.add(col0) = rn(v0 * scale);
+                *o_ptr.add(col1) = rn(v1 * scale);
+                *o_ptr.add(col2) = rn(v2 * scale);
+                *o_ptr.add(col3) = rn(v3 * scale);
+            } else {
+                *o_ptr.add(col0) = rn((v0 * scale) * w0);
+                *o_ptr.add(col1) = rn((v1 * scale) * w1);
+                *o_ptr.add(col2) = rn((v2 * scale) * w2);
+                *o_ptr.add(col3) = rn((v3 * scale) * w3);
             }
-            core::arch::nvptx::_syncthreads();
-            let scale = f32::from_bits(load_u32(smem + (NORM_CHUNKS_MAX * 4) as u32));
-            macro_rules! store_chunk {($has:ident, $b:ident, $a:ident, $bb:ident, $c:ident, $d:ident) => {{
-                if $has {
-                    if wt_p.is_null() {
-                        *o_ptr.add($b) = rn($a * scale);
-                        *o_ptr.add($b + LANES) = rn($bb * scale);
-                        *o_ptr.add($b + 2 * LANES) = rn($c * scale);
-                        *o_ptr.add($b + 3 * LANES) = rn($d * scale);
-                    } else {
-                        let (w0, w1, w2, w3) = (word!(wt_p.add($b)), word!(wt_p.add($b + LANES)), word!(wt_p.add($b + 2 * LANES)), word!(wt_p.add($b + 3 * LANES)));
-                        *o_ptr.add($b) = rn(($a * scale) * w0);
-                        *o_ptr.add($b + LANES) = rn(($bb * scale) * w1);
-                        *o_ptr.add($b + 2 * LANES) = rn(($c * scale) * w2);
-                        *o_ptr.add($b + 3 * LANES) = rn(($d * scale) * w3);
-                    }
-                }
-            }};}
-            store_chunk!(has0, b0, v00, v01, v02, v03);
-            store_chunk!(has1, b1, v10, v11, v12, v13);
-            store_chunk!(has2, b2, v20, v21, v22, v23);
             return;
         }
         let in0 = *w.add(1) as *const f32;
@@ -474,8 +467,8 @@ pub(crate) unsafe fn replay_stream_ops(table: *const crate::inkling_launch::Comm
         let weight = *w.add(4) as *const f32;
         let output = *w.add(5) as *mut f32;
         if subop == STREAM_OP_RING_CONV_ONE {
-            // M=1 fused ring-write (+ optional RouteFold) + 1-head ShortConv + addend + round on a full-SM
-            // 72x32 grid with zero stack frame, vectorized taps, and zero RAW reload of the written ring row.
+            // M=1 fused ring-write (+ optional RouteFold) + 1-head ShortConv + addend + round on a single-wave
+            // 36x64 (or 72x32) grid with zero stack frame, vectorized taps, pre-wait PDL staging, and zero RAW reload.
             // SAFETY: host verified via `block_check::operands` + `resident_conv_ring::{ring, fold}` that
             // every buffer has checked extents, word alignment, and non-overlap. Each channel `ch` has one writer.
             let taps = aux;
@@ -506,6 +499,9 @@ pub(crate) unsafe fn replay_stream_ops(table: *const crate::inkling_launch::Comm
             if written_slot >= taps || written_slot * row_bytes != off_bytes {
                 core::arch::nvptx::trap();
             }
+            // Pre-`wait` (overlaps preceding `PlainPackedPicked Down` tail via PDL):
+            // router weights, fixed conv taps, step slot, residual addend, and prior-token ring rows
+            // are all ready before `Down` writes `downs_p` (or `O_proj` writes `source`).
             let tid = core::arch::nvptx::_thread_idx_x() as usize;
             if picks > 0 {
                 if tid < picks {
@@ -514,24 +510,9 @@ pub(crate) unsafe fn replay_stream_ops(table: *const crate::inkling_launch::Comm
                 core::arch::nvptx::_syncthreads();
             }
             let ch = (core::arch::nvptx::_block_idx_x() as usize) * threads + tid;
-            if ch < dim {
-                let cur = if picks == 0 {
-                    f32::from_bits(ld_global_nc_u32(source.add(ch).cast()))
-                } else {
-                    let d_base = downs_p.add(ch).cast::<u32>();
-                    let mut fsum = 0.0f32;
-                    let mut p = 0usize;
-                    while p < picks {
-                        let wt = f32::from_bits(load_u32(smem + (p * 4) as u32));
-                        let d = f32::from_bits(ld_global_nc_u32(d_base.add(p * dim)));
-                        fsum += rn(d) * wt;
-                        p += 1;
-                    }
-                    let v = rn(fsum);
-                    *source.add(ch) = v;
-                    v
-                };
-                *ring_row.add(ch) = cur;
+            let has_add = (conv_form & CONV_ADDEND) != 0;
+            let round_sum = (conv_form & CONV_ROUND_SUM) != 0;
+            let (t0, t1, t2, t3, mut r0, mut r1, mut r2, mut r3, step_f, addend) = if ch < dim {
                 let (t0, t1, t2, t3) = if taps == 4 && (weight as usize) & 15 == 0 {
                     let v = ld_global_nc_v4(weight.add(ch * 4));
                     (v[0], v[1], v[2], v[3])
@@ -543,18 +524,57 @@ pub(crate) unsafe fn replay_stream_ops(table: *const crate::inkling_launch::Comm
                         if 3 < taps { *weight.add(ch * taps + 3) } else { 0.0f32 },
                     )
                 };
-                let r0 = if written_slot == 0 { cur } else { *ring_mut.add(ch) };
-                let r1 = if written_slot == 1 { cur } else if 1 < taps { *ring_mut.add(dim + ch) } else { 0.0f32 };
-                let r2 = if written_slot == 2 { cur } else if 2 < taps { *ring_mut.add(2 * dim + ch) } else { 0.0f32 };
-                let r3 = if written_slot == 3 { cur } else if 3 < taps { *ring_mut.add(3 * dim + ch) } else { 0.0f32 };
+                let r0 = if written_slot == 0 { 0.0f32 } else { *ring_mut.add(ch) };
+                let r1 = if written_slot == 1 { 0.0f32 } else if 1 < taps { *ring_mut.add(dim + ch) } else { 0.0f32 };
+                let r2 = if written_slot == 2 { 0.0f32 } else if 2 < taps { *ring_mut.add(2 * dim + ch) } else { 0.0f32 };
+                let r3 = if written_slot == 3 { 0.0f32 } else if 3 < taps { *ring_mut.add(3 * dim + ch) } else { 0.0f32 };
                 let step_f = f32::from_bits(ld_global_nc_u32(step_ptr.cast()));
+                let addend = if has_add { f32::from_bits(ld_global_nc_u32(add_ptr.add(ch).cast())) } else { 0.0f32 };
+                (t0, t1, t2, t3, r0, r1, r2, r3, step_f, addend)
+            } else {
+                (0.0f32, 0.0f32, 0.0f32, 0.0f32, 0.0f32, 0.0f32, 0.0f32, 0.0f32, 0.0f32, 0.0f32)
+            };
+            // Wait for `Down` / `O_proj` to finish writing `downs_p` / `source`, then launch dependent `FastMixBlend`.
+            core::arch::asm!("griddepcontrol.wait;", options(nostack));
+            core::arch::asm!("griddepcontrol.launch_dependents;", options(nostack));
+            if ch < dim {
+                let cur = if picks == 0 {
+                    f32::from_bits(ld_global_nc_u32(source.add(ch).cast()))
+                } else {
+                    let d_base = downs_p.add(ch).cast::<u32>();
+                    let mut fsum = 0.0f32;
+                    let mut p = 0usize;
+                    while p + 4 <= picks {
+                        let d0 = f32::from_bits(ld_global_nc_u32(d_base.add(p * dim)));
+                        let d1 = f32::from_bits(ld_global_nc_u32(d_base.add((p + 1) * dim)));
+                        let d2 = f32::from_bits(ld_global_nc_u32(d_base.add((p + 2) * dim)));
+                        let d3 = f32::from_bits(ld_global_nc_u32(d_base.add((p + 3) * dim)));
+                        let w0 = f32::from_bits(load_u32(smem + (p * 4) as u32));
+                        let w1 = f32::from_bits(load_u32(smem + ((p + 1) * 4) as u32));
+                        let w2 = f32::from_bits(load_u32(smem + ((p + 2) * 4) as u32));
+                        let w3 = f32::from_bits(load_u32(smem + ((p + 3) * 4) as u32));
+                        fsum += rn(d0) * w0;
+                        fsum += rn(d1) * w1;
+                        fsum += rn(d2) * w2;
+                        fsum += rn(d3) * w3;
+                        p += 4;
+                    }
+                    while p < picks {
+                        let wt = f32::from_bits(load_u32(smem + (p * 4) as u32));
+                        let d = f32::from_bits(ld_global_nc_u32(d_base.add(p * dim)));
+                        fsum += rn(d) * wt;
+                        p += 1;
+                    }
+                    let v = rn(fsum);
+                    *source.add(ch) = v;
+                    v
+                };
+                *ring_row.add(ch) = cur;
+                match written_slot { 0 => r0 = cur, 1 => r1 = cur, 2 => r2 = cur, _ => r3 = cur }
                 let slot = step_f as usize;
                 if slot >= taps || slot as f32 != step_f {
                     *output.add(ch) = f32::NAN;
                 } else {
-                    let has_add = (conv_form & CONV_ADDEND) != 0;
-                    let round_sum = (conv_form & CONV_ROUND_SUM) != 0;
-                    let addend = if has_add { f32::from_bits(ld_global_nc_u32(add_ptr.add(ch).cast())) } else { 0.0f32 };
                     let mut csum = 0.0f32;
                     let mut lag = taps;
                     while lag > 0 {
@@ -599,6 +619,9 @@ pub(crate) unsafe fn replay_stream_ops(table: *const crate::inkling_launch::Comm
             {
                 core::arch::nvptx::trap();
             }
+            // Pre-`wait` (overlaps preceding `PlainPackedPicked Down` tail via PDL):
+            // `in0` (router weights), `weight` (fixed conv taps), `ring` (prior slots), and `in2` (residual)
+            // are all ready before `Down` writes `in1` (`downs`).
             let tid = core::arch::nvptx::_thread_idx_x() as usize;
             let total_w = end * picks;
             let mut wi = start * picks + tid;
@@ -610,8 +633,7 @@ pub(crate) unsafe fn replay_stream_ops(table: *const crate::inkling_launch::Comm
             }
             core::arch::nvptx::_syncthreads();
             let ch = (core::arch::nvptx::_block_idx_x() as usize) * threads + tid;
-            if ch < dim {
-                // Hoist fixed taps into scalar registers ONCE across all rows (coalesced 16B load when taps==4).
+            let (t0, t1, t2, t3, mut r0, mut r1, mut r2, mut r3, res0) = if ch < dim {
                 let (t0, t1, t2, t3) = if taps == 4 && (weight as usize) & 15 == 0 {
                     let v = ld_global_nc_v4(weight.add(ch * 4));
                     (v[0], v[1], v[2], v[3])
@@ -623,13 +645,22 @@ pub(crate) unsafe fn replay_stream_ops(table: *const crate::inkling_launch::Comm
                         if 3 < taps { *weight.add(ch * taps + 3) } else { 0.0f32 },
                     )
                 };
-                let mut r0 = *ring.add(ch);
-                let mut r1 = if 1 < taps { *ring.add(dim + ch) } else { 0.0f32 };
-                let mut r2 = if 2 < taps { *ring.add(2 * dim + ch) } else { 0.0f32 };
-                let mut r3 = if 3 < taps { *ring.add(3 * dim + ch) } else { 0.0f32 };
+                let r0 = *ring.add(ch);
+                let r1 = if 1 < taps { *ring.add(dim + ch) } else { 0.0f32 };
+                let r2 = if 2 < taps { *ring.add(2 * dim + ch) } else { 0.0f32 };
+                let r3 = if 3 < taps { *ring.add(3 * dim + ch) } else { 0.0f32 };
+                let res0 = if !separate && rows == 1 { f32::from_bits(ld_global_nc_u32(in2.add(ch).cast())) } else { 0.0f32 };
+                (t0, t1, t2, t3, r0, r1, r2, r3, res0)
+            } else {
+                (0.0f32, 0.0f32, 0.0f32, 0.0f32, 0.0f32, 0.0f32, 0.0f32, 0.0f32, 0.0f32)
+            };
+            // Wait for `Down` to finish writing `in1` (`downs`), then immediately launch dependent `FastMixBlend`.
+            core::arch::asm!("griddepcontrol.wait;", options(nostack));
+            core::arch::asm!("griddepcontrol.launch_dependents;", options(nostack));
+            if ch < dim {
                 let mut row = start;
                 while row < end {
-                    let res = f32::from_bits(ld_global_nc_u32(in2.add(row * dim + ch).cast()));
+                    let res = if !separate && rows == 1 { res0 } else { f32::from_bits(ld_global_nc_u32(in2.add(row * dim + ch).cast())) };
                     let mut fsum = 0.0f32;
                     let w_base = (row * picks * 4) as u32;
                     if half {
@@ -643,6 +674,21 @@ pub(crate) unsafe fn replay_stream_ops(table: *const crate::inkling_launch::Comm
                     } else {
                         let d_base = in1.add(row * picks * dim + ch).cast::<u32>();
                         let mut p = 0usize;
+                        while p + 4 <= picks {
+                            let d0 = f32::from_bits(ld_global_nc_u32(d_base.add(p * dim)));
+                            let d1 = f32::from_bits(ld_global_nc_u32(d_base.add((p + 1) * dim)));
+                            let d2 = f32::from_bits(ld_global_nc_u32(d_base.add((p + 2) * dim)));
+                            let d3 = f32::from_bits(ld_global_nc_u32(d_base.add((p + 3) * dim)));
+                            let w0 = f32::from_bits(load_u32(smem + w_base + (p * 4) as u32));
+                            let w1 = f32::from_bits(load_u32(smem + w_base + ((p + 1) * 4) as u32));
+                            let w2 = f32::from_bits(load_u32(smem + w_base + ((p + 2) * 4) as u32));
+                            let w3 = f32::from_bits(load_u32(smem + w_base + ((p + 3) * 4) as u32));
+                            fsum += rn(d0) * w0;
+                            fsum += rn(d1) * w1;
+                            fsum += rn(d2) * w2;
+                            fsum += rn(d3) * w3;
+                            p += 4;
+                        }
                         while p < picks {
                             let wt = f32::from_bits(load_u32(smem + w_base + (p * 4) as u32));
                             let d = f32::from_bits(ld_global_nc_u32(d_base.add(p * dim)));
@@ -701,6 +747,8 @@ pub(crate) unsafe fn replay_stream_ops(table: *const crate::inkling_launch::Comm
             {
                 core::arch::nvptx::trap();
             }
+            core::arch::asm!("griddepcontrol.wait;", options(nostack));
+            core::arch::asm!("griddepcontrol.launch_dependents;", options(nostack));
             let ch = (core::arch::nvptx::_block_idx_x() as usize) * threads + (core::arch::nvptx::_thread_idx_x() as usize);
             if ch >= dim { return; }
             let tile = core::arch::nvptx::_block_idx_y() as usize;
@@ -807,6 +855,8 @@ pub(crate) unsafe fn replay_stream_ops(table: *const crate::inkling_launch::Comm
             {
                 core::arch::nvptx::trap();
             }
+            core::arch::asm!("griddepcontrol.wait;", options(nostack));
+            core::arch::asm!("griddepcontrol.launch_dependents;", options(nostack));
             let ch = (core::arch::nvptx::_block_idx_x() as usize) * threads + (core::arch::nvptx::_thread_idx_x() as usize);
             if ch >= width { return; }
             let tile = core::arch::nvptx::_block_idx_y() as usize;
@@ -863,6 +913,8 @@ pub(crate) unsafe fn replay_stream_ops(table: *const crate::inkling_launch::Comm
         if ((in0 as usize) | (in1 as usize) | (in2 as usize) | (weight as usize) | (output as usize)) & 3 != 0 {
             core::arch::nvptx::trap();
         }
+        core::arch::asm!("griddepcontrol.wait;", options(nostack));
+        core::arch::asm!("griddepcontrol.launch_dependents;", options(nostack));
         let tid = core::arch::nvptx::_thread_idx_x() as usize;
         let (first, step) = (part * threads + tid, parts * threads);
 
@@ -919,6 +971,29 @@ pub(crate) unsafe fn replay_stream_ops(table: *const crate::inkling_launch::Comm
             let o_ptr = output.add(row * width);
             let add_ptr = if has_add { in2.add(row * width) } else { core::ptr::null() };
             let tok_ptr = if has_token { in1.add(row * heads * taps) } else { core::ptr::null() };
+            if taps == 4 && rows == 1 && !ring.is_null() && !has_token && every.is_null() && (weight as usize) & 15 == 0 {
+                // Vectorized single-row `taps == 4` ring path: 1 `LDG.E.128` for all 4 fixed taps.
+                let r1_ptr = ring.add(((first_slot + 3) & 3) * width);
+                let r2_ptr = ring.add(((first_slot + 2) & 3) * width);
+                let r3_ptr = ring.add(((first_slot + 1) & 3) * width);
+                let mut ch = first;
+                while ch < width {
+                    let ft = ld_global_nc_v4(weight.add(ch * 4));
+                    let x3 = *r3_ptr.add(ch);
+                    let x2 = *r2_ptr.add(ch);
+                    let x1 = *r1_ptr.add(ch);
+                    let cur = rn(*in0.add(ch));
+                    let mut sum = 0.0f32;
+                    sum += ft[3] * rn(x3);
+                    sum += ft[2] * rn(x2);
+                    sum += ft[1] * rn(x1);
+                    sum += ft[0] * cur;
+                    let y = rn((sum + cur) * bound);
+                    *o_ptr.add(ch) = if !has_add { y } else if !round_sum { *add_ptr.add(ch) + y } else { rn(*add_ptr.add(ch) + y) };
+                    ch += step;
+                }
+                return;
+            }
             let mut ch = first;
             while ch < width {
                 let head = if heads == 1 { 0 } else { ch / head_dim };

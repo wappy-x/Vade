@@ -1784,7 +1784,7 @@ too. From a controller, the same service starts with
 `vade up --sparks 1 --diagnostic-unqualified-text`.
 
 On current `main`, Inkling 2 Mini keeps 20.69 GB of resident weights on GPU,
-admits up to 38 concurrent chats with `--mtp 7` (44 plain) at a 32,768-token
+admits 37–38 concurrent chats with `--mtp 7` (44 plain) at a 32,768-token
 context, accepts configured contexts up to 1,048,576 tokens, and keeps the
 prompt cache on by default (`--cache-bytes 0` turns it off).
 

@@ -91,7 +91,7 @@ vade pull thinkingmachines/Inkling-2-Mini@b85c3cfa615fc413cc9af3379f491b963f3b58
 VADE_MODELS=~/models/thinkingmachines/Inkling-2-Mini vade up
 ```
 
-On current `main`, Inkling keeps 20.69 GB of resident weights, admits up to 38 concurrent chats with `--mtp 7` (44 plain) at 32K context, accepts configured contexts up to 1,048,576 tokens, and keeps the prompt cache on by default (`--cache-bytes 0` turns it off). `vade up` defaults to plain decode (`--mtp 0`) and accepts explicit `--mtp 0..=7` up to the checkpoint's declared draft depth.
+On current `main`, Inkling keeps 20.69 GB of resident weights, admits 37–38 concurrent chats with `--mtp 7` (44 plain) at 32K context, accepts configured contexts up to 1,048,576 tokens, and keeps the prompt cache on by default (`--cache-bytes 0` turns it off). `vade up` defaults to plain decode (`--mtp 0`) and accepts explicit `--mtp 0..=7` up to the checkpoint's declared draft depth.
 
 **GLM 5.3 Flash on two Sparks.** Pull it on both Sparks, set the controller config to that folder and revision, then start it from the controller:
 
@@ -179,28 +179,28 @@ All 16,800 compared token IDs matched, and every compared drafted answer matched
 
 ### Inkling 2 Mini · 1 Spark
 
-Live `main` (GPU kernel code of the measured build `a82cfaf49a`) is much faster than `rc.26`. The table below shows released `rc.25` and `rc.26` alongside fresh full RigMark cards from 2026-11-25 on `a82cfaf49a` (one Spark, 32,768-token context, 5 decode runs per workload, 8,192-token prefill, 8-chat concurrency).
+Live `main` (GPU kernel code of the measured build `3e8c3a8cc2`) is much faster than `rc.26`. The table below shows released `rc.25` and `rc.26` alongside fresh full RigMark cards from 2026-11-25 on `3e8c3a8cc2` (one Spark, 32,768-token context, 5 decode runs per workload, 8,192-token prefill, 8-chat concurrency).
 
 <div align="center">
 
-| Load | rc.25 / rc.26 | Live `main` (`a82cfaf49a`) |
+| Load | rc.25 / rc.26 | Live `main` (`3e8c3a8cc2`) |
 | :--- | :---: | :---: |
-| First token, cold 8,192-token prompt (drafted / plain card) | 96.7 s / 50.6 s | 2.01 s / 1.99 s |
-| First token, cold 32,768-token prompt (`ctx 65536`, 3 runs) | unmeasured | 8.80 s |
+| First token, cold 8,192-token prompt (drafted / plain card) | 96.7 s / 50.6 s | 1.98 s / 1.98 s |
+| First token, cold 32,768-token prompt (`ctx 65536`, 3 runs) | unmeasured | 8.94 s (peak 8.81 s) |
 | First token, cached 8,192-token replay (drafted / plain card) | unmeasured | 0.007 s / 0.007 s |
-| One chat, plain decode (prose / code / structured) | unmeasured | 41.5 / 40.7 / 41.7 tok/s |
-| One chat, adaptive drafting (`--mtp 7`, prose / code / structured) | unavailable | 49.4 / 87.2 / 132.5 tok/s |
-| Eight chats at once (total, `C8`, drafted / plain card) | unmeasured | 169.8 / 159.8 tok/s |
-| Sixteen / thirty-two chats at once (`C16` / `C32`, effort-0 code, plain / drafted) | unmeasured | 223.1 / 223.2 · 305.8 / 304.2 tok/s |
-| Resident weights on GPU (32K admission) | 67.85 GB | 20.69 GB (up to 38 chats `--mtp 7`, 44 plain) |
+| One chat, plain decode (prose / code / structured) | unmeasured | 42.8 / 41.9 / 43.0 tok/s |
+| One chat, adaptive drafting (`--mtp 7`, prose / code / structured) | unavailable | 50.0 / 87.1 / 133.2 tok/s |
+| Eight chats at once (total, `C8`, drafted / plain card) | unmeasured | 172.9 / 161.0 tok/s |
+| Sixteen / thirty-two chats at once (`C16` / `C32`, effort-0 code, plain / drafted) | unmeasured | 223.6 / 225.5 · 304.3 / 303.2 tok/s |
+| Resident weights on GPU (32K admission) | 67.85 GB | 20.69 GB (37–38 chats `--mtp 7`, 44 plain) |
 
 </div>
 
 How to read the live `main` column:
 
-- **Launch and numbers.** All speeds came from launching `flash-serve --diagnostic-unqualified-text --mtp 7` (drafted card) or `--mtp 0` (plain card) directly on one Spark (greedy, reasoning `effort 0`). Adaptive drafting on `a82cfaf49a` reached medians of 49.43 / 87.20 / 132.47 tok/s on prose / code / structured (5 runs each, peaks 50.30 / 90.86 / 135.93; up from 49.22 / 86.99 / 130.54 on `78bb835132`, 47.05 / 82.57 / 128.99 on `c975fa3203`, and 46.71 / 79.79 / 110.91 on `e38ae8201a`). Plain decode reached 41.46 / 40.66 / 41.70 tok/s (up from 37.31 / 36.71 / 37.48 on `c975fa3203`), eight chats reached 169.79 tok/s (peak 173.29) on the drafted card and 159.82 tok/s plain (C8 TTFT 0.919 s / 0.888 s), matched 256-token effort-0 code multi-chat scaling at 32K context under `--mtp 7` reached 61.9 / 82.3 tok/s (`C2`, `1.33x`), 102.3 / 126.7 tok/s (`C4`, `1.24x`), 159.8 / 170.0 tok/s (`C8`), 223.1 / 223.2 tok/s (`C16`, peak 230.1 / 227.2), and 305.8 / 304.2 tok/s (`C32`, plain / auto, peak 308.6 / 306.0, `186/186` exact plain-vs-auto across `47,616` tokens), cold 8,192-token first token was 2.010 s (4,076.5 tok/s read) on the drafted card and 1.994 s (4,109.3 tok/s read) on the plain card, cold 32,768-token first token reached 8.797 s (3,724.8 tok/s read, peak 8.791 s, 3 runs at 65,536 context, down from 11.646 s on `c0d4ef05cf`), and cached 8,192-token replay returned in 0.007 s drafted / 0.007 s plain (8,192 of 8,192 tokens restored). Through `vade up`, Inkling defaults to plain decode (`--mtp 0`) with prompt caching on and accepts explicit `--mtp 0..=7`.
-- **Token IDs.** `a82cfaf49a` stays bit-exact with the owner-approved self-exact Inkling baseline `e38ae8201a` across every compared decode, prefill, concurrency, and multi-width stream.
-- **Checks and source.** All 15 RigMark single-chat output checks passed on both cards (prose 5/5, code 5/5, structured 5/5). Cross-card plain vs drafted replies (and both cards against `78bb835132` and `e38ae8201a`) matched identically on 15/15 decode streams (36,452 completion tokens, 0 mismatches) and 30/30 prefill plus C8 streams (6,192 tokens, 0 mismatches); served multi-width exactness matched `e38ae8201a` on 160/160 streams (5,120 token IDs) plus 31/31 C1–C16 drafted cohorts (992 token IDs), 186/186 C2–C32 plain-vs-auto streams (`124/124` against `6d174bcf61`) and 6/6 cold/warm 8K and 32K prefill streams matched `78bb835132` (`c0d4ef05cf`), and 8/8 `compute-sanitizer` (`memcheck` + `synccheck`) runs reported 0 errors. These are private lab receipts (see `https://vade.lol/results/`, not committed under `bench/receipts/`). See [Results](docs/results.md#inkling-2-mini-one-spark-rc26) for every cell and for unmerged private-branch receipts.
+- **Launch and numbers.** All speeds came from launching `flash-serve --diagnostic-unqualified-text --mtp 7` (drafted card) or `--mtp 0` (plain card) directly on one Spark (greedy, reasoning `effort 0`). Adaptive drafting on `3e8c3a8cc2` reached medians of 50.02 / 87.14 / 133.21 tok/s on prose / code / structured (5 runs each, peaks 50.58 / 89.70 / 136.26; up from 49.43 / 87.20 / 132.47 on `a82cfaf49a`, 49.22 / 86.99 / 130.54 on `78bb835132`, 47.05 / 82.57 / 128.99 on `c975fa3203`, and 46.71 / 79.79 / 110.91 on `e38ae8201a`). Plain decode reached 42.79 / 41.94 / 43.03 tok/s (up from 41.46 / 40.66 / 41.70 on `a82cfaf49a` and 37.31 / 36.71 / 37.48 on `c975fa3203`), eight chats reached 172.90 tok/s (peak 173.68) on the drafted card and 161.00 tok/s plain (C8 TTFT 0.935 s / 0.879 s), matched 256-token effort-0 code multi-chat scaling at 32K context under `--mtp 7` reached 62.5 / 81.1 tok/s (`C2`, `1.30x`, peak 99.2), 103.3 / 122.0 tok/s (`C4`, `1.18x`, peak 130.8), 160.7 / 172.0 tok/s (`C8`), 223.6 / 225.5 tok/s (`C16`, peak 230.0 / 228.8), and 304.3 / 303.2 tok/s (`C32`, plain / auto, peak 306.5 / 303.3, `186/186` exact plain-vs-auto across `47,616` tokens), cold 8,192-token first token was 1.980 s (4,137.1 tok/s read) on the drafted card and 1.980 s (4,137.5 tok/s read) on the plain card, cold 32,768-token first token reached 8.936 s (3,667.0 tok/s read, peak 8.813 s / 3,718.0 tok/s, 3 runs at 65,536 context, down from 11.646 s on `c0d4ef05cf`), and cached 8,192-token replay returned in 0.007 s drafted / 0.007 s plain (8,192 of 8,192 tokens restored). Through `vade up`, Inkling defaults to plain decode (`--mtp 0`) with prompt caching on and accepts explicit `--mtp 0..=7`.
+- **Token IDs.** `3e8c3a8cc2` stays bit-exact with the owner-approved self-exact Inkling baseline `e38ae8201a` across every compared decode, prefill, concurrency, and multi-width stream.
+- **Checks and source.** All 15 RigMark single-chat output checks passed on both cards (prose 5/5, code 5/5, structured 5/5). Cross-card plain vs drafted replies (and both cards against `a82cfaf49a` and `e38ae8201a`) matched identically on 15/15 decode streams (36,452 completion tokens, 0 mismatches) and 30/30 prefill plus C8 streams (6,192 tokens, 0 mismatches); served multi-width exactness matched `e38ae8201a` on 160/160 streams (5,120 token IDs, solo median 43.562 tok/s) plus 31/31 C1–C16 drafted cohorts (992 token IDs), 186/186 C2–C32 plain-vs-auto streams (`186/186` against `a82cfaf49a`) and 6/6 cold/warm 8K and 32K prefill streams matched `78bb835132` (`c0d4ef05cf`), and 8/8 `compute-sanitizer` (`memcheck` + `synccheck`) runs reported 0 errors. These are private lab receipts (see `https://vade.lol/results/`, not committed under `bench/receipts/`). See [Results](docs/results.md#inkling-2-mini-one-spark-rc26) for every cell and for unmerged private-branch receipts.
 
 ## Exactness
 
@@ -222,7 +222,7 @@ Every change to engine arithmetic, scheduling, caching or transport must pass a 
 - The opt-in `fast` and `sampled` draft modes on FP8.
 - Seeds with drafting on, on FP8, or on four Sparks.
 - Other NVIDIA driver versions.
-- GLM 5.3 Flash and Inkling 2 Mini. Neither is qualified yet. On GLM, all 16,800 compared drafted token IDs matched plain decoding ([rc.24](CHANGELOG.md#v020-rc24---2026-11-21)). On Inkling (`a82cfaf49a`), plain and drafted replies (and both cards against `78bb835132` and baseline `e38ae8201a`) matched identically on 15/15 decode streams (36,452 completion tokens) and 30/30 prefill plus C8 streams (6,192 tokens), served multi-width exactness matched `e38ae8201a` on 160/160 streams plus 31/31 C1–C16 drafted cohorts, and 6/6 cold/warm 8K/32K prefill plus 186/186 C2–C32 streams matched exactly.
+- GLM 5.3 Flash and Inkling 2 Mini. Neither is qualified yet. On GLM, all 16,800 compared drafted token IDs matched plain decoding ([rc.24](CHANGELOG.md#v020-rc24---2026-11-21)). On Inkling (`3e8c3a8cc2`), plain and drafted replies (and both cards against `a82cfaf49a` and baseline `e38ae8201a`) matched identically on 15/15 decode streams (36,452 completion tokens) and 30/30 prefill plus C8 streams (6,192 tokens), served multi-width exactness matched `e38ae8201a` on 160/160 streams plus 31/31 C1–C16 drafted cohorts, and 6/6 cold/warm 8K/32K prefill plus 186/186 C2–C32 streams matched exactly.
 
 <a id="defaults-by-route"></a>
 

@@ -118,6 +118,10 @@ fn dependent_launch(before:&Grid,g:&Grid)->bool {
             && ((g.kind==Kind::PlainStagedOne && ((g.shared>=4608 && g.shared!=crate::few_product::ONE_BLOCK_BYTES as u32) || g.threads==32))
                 || g.kind==Kind::PlainStagedNarrow))
         || (before.kind==Kind::FastRowDots && before.threads==32 && g.kind==Kind::FlashWindowSplit16)
+        || (before.kind==Kind::FastRouterPick && g.kind==Kind::PlainPackedPicked)
+        || (before.kind==Kind::PlainPackedPicked && g.kind==Kind::PlainPackedPicked)
+        || (before.kind==Kind::PlainPackedPicked && g.kind==Kind::FastStreamOps)
+        || (before.kind==Kind::FastStreamOps && g.kind==Kind::FastMixBlend && g.threads>=576)
     )
 }
 /// True when two pieces launch the same kernels in the same order with the same block sizes on the same lanes: only launch
@@ -441,7 +445,12 @@ impl<'a> Backend<'a> {
                     && conv_ring::fold(&mut command,Kind::FastStreamOps,&r.calls[at-1].command) {
                     r.calls.pop();r.heavy=r.heavy.saturating_sub(1);
                 }
-                if let Some((fast_cmd,fast_grid))=conv_ring::to_fast_stream(&command) {
+                if let Some((fast_cmd,mut fast_grid))=conv_ring::to_fast_stream(&command) {
+                    let dim=u64::from_ne_bytes(fast_cmd.payload[56..64].try_into().unwrap()) as usize;
+                    if dim>=128 {
+                        fast_grid[0]=dim.div_ceil(64) as u32;
+                        fast_grid[3]=64;
+                    }
                     kind=Kind::FastStreamOps;command=fast_cmd;grid=fast_grid;
                 }
             }
@@ -540,6 +549,15 @@ impl<'a> Backend<'a> {
                     previous.grid=Grid {kind:Kind::Pointwise,blocks:bucketed,rows:1,planes:1,threads:128,shared:0,lane:merged};previous.copy_bytes=previous.copy_bytes.saturating_add(copy_bytes);
                     return Ok(());
                 }
+            }
+        }
+        if kind==Kind::FastMixBlend {
+            let flags=u64::from_ne_bytes(command.payload[64..72].try_into().unwrap());
+            if (flags & (crate::fast_ops::MIX_ONE | crate::fast_ops::MIX_ONE_POST_NORM))
+                == (crate::fast_ops::MIX_ONE | crate::fast_ops::MIX_ONE_POST_NORM)
+            {
+                let dim=u64::from_ne_bytes(command.payload[48..56].try_into().unwrap()) as usize;
+                grid[3]=crate::fast_ops::mix_one_threads(dim,true) as u32;
             }
         }
         r.calls.push(Call {grid:Grid {kind,blocks:grid[0],rows:grid[1],planes:grid[2],threads:grid[3],shared:grid[4],lane},command,copy_bytes});
@@ -841,14 +859,14 @@ impl<'a> Backend<'a> {
         command.word(crate::packed_product::PICKED_ONE_ROW_WORD+1,panels);
         command.word(crate::packed_product::PICKED_ONE_ROW_WORD+2,compact);
         let wave=crate::packed_product::spread(rows as usize,picks,self.multiprocessor_count());
-        let wide=(cols & crate::packed_product::WIDE)!=0;
         let row_tiles=rows.div_ceil(64);
-        // NVFP4 in-place MMA-lane panels: exact 3 blk/SM at M=1 (18*8=144, 2 tiles/blk, zero wave-2 tail);
+        // NVFP4 in-place MMA-lane panels and MXFP8 zero-barrier register-pipelined tiles (`rows % 64 == 0`):
+        // exact 3 blk/SM at M=1 (18*8=144, 2 tiles/blk, zero wave-2 tail);
         // with opt-in LPT compaction at M=2..8, launch `row_tiles` (36) so every live CTA
         // executes 1 tile (zero 3:1 tail imbalance) while idle CTAs early-exit before tile entry.
         let blocks=if compact!=0 && picks>8 {
             row_tiles
-        } else if panels!=0 || (!wide && rows.is_multiple_of(64)) {
+        } else if panels!=0 || rows.is_multiple_of(64) {
             let sm=self.multiprocessor_count();
             if picks<=8 {
                 row_tiles.min((3*sm).div_ceil(picks).max(1) as u32)

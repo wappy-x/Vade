@@ -976,6 +976,38 @@ unsafe fn run_packed_picked(table: *const Command, index: u64) {
             words.add(10)
         };
         let smem=ptx::shared::<{plain_packed::PICKED_BLOCK_BYTES}>();
+        let one_row = *words.add(packed_product::PICKED_ONE_ROW_WORD) != 0;
+        // Edge 3A (`FastRouterPick -> GateUp`): when not `Down` (`caps.is_null() && repeat == 1 && input_words != 0`),
+        // `ids`/`compact` may still be written by `FastRouterPick`. For single-row `GateUp` (`input_words == 0`,
+        // `cols <= 5120`), `X` is already ready before `FastRouterPick` and fits inside `PANEL_X_BYTES` (`10,240 B`),
+        // so pre-stage `X` into `smem` BEFORE `griddepcontrol.wait`.
+        let mut preloaded_x = false;
+        let is_down_pdl = caps.is_null() && repeat == 1 && input_words != 0;
+        if !is_down_pdl {
+            let cols = (word & packed_product::COLS) as usize;
+            if one_row && input_words == 0 && !caps.is_null()
+                && rows % 64 == 0 && cols > 0 && cols % 64 == 0 && cols <= 5120
+                && (input as usize) & 15 == 0
+                && core::arch::nvptx::_block_dim_x() as usize == packed_product::PICKED_THREADS
+            {
+                let tid = core::arch::nvptx::_thread_idx_x() as u32;
+                let pairs_in_slab = (cols / 64) as u32 * 16;
+                let mut pair = tid;
+                while pair < pairs_in_slab {
+                    let c_i = pair >> 4;
+                    let ks = pair & 15;
+                    let xp = input.add((c_i * 64 + (ks >> 2) * 16 + (ks & 3) * 2) as usize);
+                    let lo = tc_ptx::ld_global_nc_v2_u32(xp.cast());
+                    let hi = tc_ptx::ld_global_nc_v2_u32(xp.add(8).cast());
+                    let dst = smem + c_i * 128 + ((ks >> 2) << 5) + ((ks & 3) << 3);
+                    tc_ptx::store_u32(dst, tc_ptx::cvt_bf16x2(f32::from_bits(lo[0]), f32::from_bits(lo[1])));
+                    tc_ptx::store_u32(dst + 4, tc_ptx::cvt_bf16x2(f32::from_bits(hi[0]), f32::from_bits(hi[1])));
+                    pair += packed_product::PICKED_THREADS as u32;
+                }
+                preloaded_x = true;
+            }
+            core::arch::asm!("griddepcontrol.wait;", options(nostack));
+        }
         // SAFETY: word PICKED_ONE_ROW_WORD + 2 is zero (standard route scan) or a host-checked
         // 16-byte aligned compacted dispatch table of `picks` 16-byte entries built by `fast_router_pick`.
         let compact = *words.add(packed_product::PICKED_ONE_ROW_WORD + 2) as *const u32;
@@ -1039,8 +1071,8 @@ unsafe fn run_packed_picked(table: *const Command, index: u64) {
         // length as the raw stack. Its expert stride and index use the validated unit.
         let panels = *words.add(packed_product::PICKED_ONE_ROW_WORD + 1) as *const u8;
         let panels = if panels.is_null() { panels } else { panels.add(id_u32 as usize*unit_bytes) };
-        let one_row = *words.add(packed_product::PICKED_ONE_ROW_WORD) != 0;
-        let group=plain_packed::SharedPicks {indices,count,stride:input_words,repeat,ordinal,one_row,panels};
+        if preloaded_x && count > 1 { core::arch::nvptx::_syncthreads(); }
+        let group=plain_packed::SharedPicks {indices,count,stride:input_words,repeat,ordinal,one_row,panels,x_preloaded: preloaded_x && count == 1};
         if word&packed_product::WIDE==0 {
             plain_packed::tile::<0>(smem,unit,input,output,rows,word,caps,Some(group));
         } else {

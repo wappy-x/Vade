@@ -64,6 +64,8 @@ resident_launch_plain_packed_group 160    81             37376             0
 # 2026-11-25 (W-BOSS-SINGLECHAT-PLAIN-VERIFY): unified DEPTH=4 in-place NVFP4 MMA panel path for all M=1..=8
 # (bank-conflict-free +32B padded X, 10,240 B X area for one-shot M=2 GateUp & M=4 Down, load-balanced M=2/4/8 grids):
 # 18,496 shared bytes (5 blk/SM on SM121a), zero stack and spills.
+# 2026-11-25 (bit-exact W4A16/W8A16 MoE + PDL): zero-pad XOR-swizzled X (`18,432 B`), zero trailing loads,
+# branchless register-pipelined MXFP8 (`MX_DEPTH=2`), and 4-edge MoE/Mix PDL; measured 130 regs, 0 stack, 0 spill, ceiling unchanged.
 resident_launch_plain_packed_picked 128    132           18496             0
 # Staged few-row product: one warp for narrow matrices and four warps for wide matrices.
 # The row uses the wide block size and the maximum shared memory of either form.
@@ -142,6 +144,7 @@ resident_launch_prefill_packed_tc    256  128           42016             0
 # The list mix with the gate norm (`fast_ops::MIX_LIST_NORM`, W-BOSS-EXACT-PREFILL-25S, prefill messages) adds 33 shared
 # words (the norm chunk sums and the scale): 12,980 bytes. Merged image (W-BOSS-CROWN-V3, 2026-11-25): measured 64
 # registers, 12,980 shared, 0 stack, 0 spill, 4 blocks a multiprocessor. Row = 64 plus 4.
+# 2026-11-25 (576t register-softmax MIX_ONE + PDL): 576t 2-barrier register-softmax MIX_ONE + burst L2 prefetch + PDL; measured 56 regs, 10,820 shared, ceiling unchanged.
 resident_launch_fast_mix_blend    256     68            12980             0
 # fast_row_dots: list-form RowDots plus paired multi-row KV finish (KV_FINISH_TAG, 1 warp per (side, row, head),
 # head_dim=128, register BF16 packing); measured 74 registers, 0 shared, 0 stack, 0 spill, 6 blocks/SM (measured + 4).
@@ -163,6 +166,7 @@ resident_launch_fast_router_pick  256     51            1152              0
 # RouteFold+AfterExperts ShortConv (hoisted scalar taps, 512 B shared weights), and fused 1..=3
 # GateBlend+RoundedNorm (scalar register-resident chunks, reuses 512 B shared); unrolled tanh/ln + PDL
 # launch_dependents (2026-11-25): 0 stack (was 48), 0 spill, 3 blocks/SM. Ceiling = measured + 4.
+# 2026-11-25 (576t GateBlendNorm + 36x64 RING_CONV_ONE + PDL): 576t 1-barrier GateBlendNorm, single-wave 36x64 RING_CONV_ONE with pre-wait PDL + unrolled-by-4 fold, vectorized ShortConvWin; measured 78 regs, ceiling unchanged.
 resident_launch_fast_stream_ops   256     78            512               0
 # resident_launch_plain_packed_rows (kind 100): dynamic shared memory (0 static). Mode B (word 0 == 0): grouped rows
 # tile (256 threads, 45,056 dynamic shared bytes, 2 blk/SM). Mode A (word 0 != 0): M=2..=16 strided picked MoE (128
