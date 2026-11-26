@@ -185,3 +185,68 @@ fn a_chat_with_many_rows_works_in_a_wide_ring_and_the_state_keeps_the_window_rin
     }
     assert_eq!(super::moves(5,12,4,6),[(1,5,1),(2,0,2),(0,2,4)]);
 }
+#[test]
+fn a_cohort_is_cut_into_the_fewest_direct_parts_of_even_size() {
+    assert_eq!((direct_parts(1),direct_parts(2),direct_parts(16)),(vec![(0,1)],vec![(0,2)],vec![(0,16)]));
+    assert_eq!((direct_parts(17),direct_parts(20),direct_parts(32),direct_parts(33)),(vec![(0,9),(9,8)],vec![(0,10),(10,10)],vec![(0,16),(16,16)],vec![(0,11),(11,11),(22,11)]));
+    let most=spark_gpu_probe::fast_ops::DIRECT_CHATS_MAX;
+    for rows in 2..=300 {
+        let parts=direct_parts(rows);let mut next=0;
+        for &(start,n) in &parts {assert!(start==next && (2..=most).contains(&n),"{rows} chats");next+=n;}
+        let sizes=parts.iter().map(|part|part.1);
+        assert!(next==rows && parts.len()==rows.div_ceil(most) && sizes.clone().max().unwrap()-sizes.min().unwrap()<=1,"{rows} chats");
+    }
+}
+/// A decode cohort above the limit of one direct launch (`DIRECT_CHATS_MAX`) runs the direct convolution in parts.
+/// The words of the output and the ring of each chat after the step are those of one launch a row.
+#[test]
+fn a_cohort_above_the_direct_limit_runs_the_direct_convolution_in_parts() {
+    use crate::loop_decoder::attention::hand::{Hand,Mode};
+    use spark_gpu_probe::block_ops::{Op,Shape};
+    for fixture in [Fixture::small(),Fixture::wide()] {
+        let l=layouts_for(&fixture.description,24,1).unwrap();let layout=&l[0];
+        // The forms of the convolution in a decode step: the taps that the token makes (the key), the fixed taps
+        // alone (a boundary), the addend (after attention) and the addend with a rounded sum (after the experts).
+        for (which,cols) in [(Ring::Key,1u32),(Ring::Value,0),(Ring::AfterAttention,2),(Ring::AfterExperts,6)] {
+            let (channels,taps)=layout.ring_size(which);let heads=if cols&1!=0 && channels.is_multiple_of(2) {2} else {1};
+            let shape=Shape {op:Op::ShortConv,heads:heads as u32,dim:(channels/heads) as u32,taps:taps as u32,rows:0,cols,epsilon:0.0,bound:0.5};
+            let fixed=made(&format!("direct taps {which:?}"),channels*taps,24,-3,0);
+            for rows in [2usize,3,16,17,20,33] {
+                // Each chat has a position of its own, so the rows of a part have different ring slots.
+                let step=list(&(0..rows).map(|chat|Span {first:(chat as u64*5+3)%11,count:1}).collect::<Vec<_>>());
+                let inputs=made(&format!("direct inputs {which:?} {rows}"),rows*channels,24,-3,1);
+                let token=(cols&1!=0).then(||made(&format!("direct token {which:?} {rows}"),rows*heads*taps,24,-3,0));
+                let addend=(cols&2!=0).then(||made(&format!("direct addend {which:?} {rows}"),rows*channels,24,-3,1));
+                // The output, the pending ring of each chat, and the ring of each chat (a step changes no ring).
+                let run=|hand:&Hand|{
+                    let mut states=(0..rows).map(|chat|{
+                        let mut state=clean(hand,std::slice::from_ref(layout)).unwrap();
+                        state.visits[0].rings[which as usize]=made(&format!("direct ring {which:?} {chat}"),taps*channels,24,-3,1);state
+                    }).collect::<Vec<_>>();
+                    let before=states.iter().map(|state|bits(&state.visits[0].rings[which as usize])).collect::<Vec<_>>();
+                    let output={
+                        let mut visits=states.iter_mut().map(|state|&mut state.visits[0]).collect::<Vec<_>>();
+                        convolve(hand,layout,which,&step,&mut visits,shape,&inputs,token.as_ref(),addend.as_ref(),&fixed).unwrap()
+                    };
+                    assert_eq!(states.iter().map(|state|bits(&state.visits[0].rings[which as usize])).collect::<Vec<_>>(),before);
+                    (bits(&output),states.iter().map(|state|bits(state.visits[0].next[which as usize].as_ref().unwrap())).collect::<Vec<_>>())
+                };
+                // One launch a row: the hand arm, and the arm of the host.
+                let rowwise=Hand::new(Mode::All);let want=run(&rowwise);
+                assert_eq!((rowwise.count(Op::ShortConv),rowwise.direct.borrow().clone()),(rows,None));
+                assert_eq!(run(&Hand::new(Mode::Refused)),want,"{which:?} {rows} chats: the host arm");
+                // The direct form: parts of at most 16 chats, in row order, and no launch a row.
+                let direct=Hand::new(Mode::All);*direct.direct.borrow_mut()=Some(Vec::new());
+                assert_eq!(run(&direct),want,"{which:?} {rows} chats: the direct parts");
+                let sizes=direct_parts(rows).iter().map(|part|part.1).collect::<Vec<_>>();
+                assert_eq!((direct.launches(),direct.direct.borrow().clone()),(0,Some(sizes.clone())));
+                // A refused part: the whole step runs one launch a row, with the same words and the same rings.
+                for refused in 1..=sizes.len() {
+                    let part=Hand::new(Mode::All);*part.direct.borrow_mut()=Some(Vec::new());part.direct_refused.set(refused);
+                    assert_eq!(run(&part),want,"{which:?} {rows} chats: part {refused} refused");
+                    assert_eq!((part.count(Op::ShortConv),part.direct.borrow().clone()),(rows,Some(sizes[..refused].to_vec())));
+                }
+            }
+        }
+    }
+}

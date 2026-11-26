@@ -152,9 +152,14 @@ pub enum Mode {
 /// The rounded norm of this family is arm `RoundedNorm`, and no part of the driver may call `Compute::norm`: its
 /// host form rounds twice and its device form rounds its input. `norms` counts such calls, and a test holds it at 0.
 /// `fail_at`: the launch with this number (counted from 1) fails, for the tests of a step that stops half way.
-pub struct Hand {pub mode:Mode,pub launches:RefCell<BTreeMap<u32,usize>>,pub by_hand:RefCell<BTreeMap<u32,usize>>,pub norms:Cell<usize>,pub fail_at:Cell<usize>}
+///
+/// `direct`: with a list, the backend takes the direct convolution of a decode cohort (`Compute::short_conv_direct`)
+/// from its hand form and writes the rows of each call into the list; with none it refuses the call, as the host
+/// does. `direct_refused`: the direct call with this number (counted from 1) is refused.
+pub struct Hand {pub mode:Mode,pub launches:RefCell<BTreeMap<u32,usize>>,pub by_hand:RefCell<BTreeMap<u32,usize>>,pub norms:Cell<usize>,pub fail_at:Cell<usize>,
+    pub direct:RefCell<Option<Vec<usize>>>,pub direct_refused:Cell<usize>}
 impl Hand {
-    pub fn new(mode:Mode)->Self {Self {mode,launches:RefCell::default(),by_hand:RefCell::default(),norms:Cell::new(0),fail_at:Cell::new(0)}}
+    pub fn new(mode:Mode)->Self {Self {mode,launches:RefCell::default(),by_hand:RefCell::default(),norms:Cell::new(0),fail_at:Cell::new(0),direct:RefCell::new(None),direct_refused:Cell::new(0)}}
     pub fn count(&self,op:Op)->usize {self.launches.borrow().get(&(op as u32)).copied().unwrap_or(0)}
     pub fn launches(&self)->usize {self.launches.borrow().values().sum()}
 }
@@ -191,6 +196,28 @@ impl Compute for Hand {
             },
             None=>match host {Some(why)=>Err(why),None=>Host.operation(s,x,w)},
         }
+    }
+    /// The direct convolution of a decode cohort, from its written contract (`bounded_decoder::ShortConvDirect`): row
+    /// `r` reads the ring of its chat with the row's own slot taken by its input, the hand form of arm `ShortConv`
+    /// gives its words, and `every` holds that ring of each row. As the device form, one call takes 2 to
+    /// `DIRECT_CHATS_MAX` rows; any other count is refused.
+    fn short_conv_direct(&self,p:&crate::bounded_decoder::ShortConvDirect<'_,Vec<f32>>)->Result<Option<(Vec<f32>,Vec<f32>)>> {
+        let Some(call)=self.direct.borrow_mut().as_mut().map(|rows|{rows.push(p.rows);rows.len()}) else {return Ok(None)};
+        let (s,rows)=(p.shape,p.rows);let (heads,taps,width)=(s.heads as usize,s.taps as usize,(s.heads*s.dim) as usize);
+        if !(2..=spark_gpu_probe::fast_ops::DIRECT_CHATS_MAX).contains(&rows) || call==self.direct_refused.get() {return Ok(None);}
+        if p.inputs.len()!=rows*width || p.chat_rings.len()!=rows || p.chat_rings.iter().any(|&(ring,own)|ring.len()!=taps*width || own>=taps)
+            || p.token.is_some_and(|token|token.len()!=rows*heads*taps) || p.addend.is_some_and(|addend|addend.len()!=rows*width) {
+            return Err("hand direct convolution: an operand differs from the rows of the call".into());
+        }
+        let (mut output,mut every)=(Vec::with_capacity(rows*width),Vec::with_capacity(rows*taps*width));
+        for (row,&(ring,own)) in p.chat_rings.iter().enumerate() {
+            let mut ring=ring.clone();ring[own*width..(own+1)*width].copy_from_slice(&p.inputs[row*width..(row+1)*width]);
+            let token=p.token.map_or(&[][..],|token|&token[row*heads*taps..(row+1)*heads*taps]);
+            let addend=p.addend.map_or(&[][..],|addend|&addend[row*width..(row+1)*width]);
+            output.extend(arm(s,[&ring,token,addend,&[own as f32]],p.fixed)?.ok_or("hand direct convolution: the shape is no ShortConv arm")?);
+            every.extend(ring);
+        }
+        Ok(Some((output,every)))
     }
     fn norm(&self,name:&str,s:NormShape,x:&Vec<f32>,w:&[f32])->Result<Vec<f32>> {self.norms.set(self.norms.get()+1);Host.norm(name,s,x,w)}
     fn begin(&self,key:(usize,usize),p:&crate::layer_operands::ResidualBlockOperands,x:&Vec<f32>)->Result<(Self::Pass,Vec<f32>)> {Host.begin(key,p,x)}

@@ -1495,3 +1495,4 @@ fn clock_elapsed(start: &Instant) -> Duration { start.elapsed() }
 use model_tests::{clock_now, clock_elapsed};
 
 #[cfg(test)] mod prompt_workspace_tests;
+#[cfg(test)] mod late_join_tests;

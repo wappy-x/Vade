@@ -19,7 +19,7 @@
 //! `state::commit`. The planes are written: only slots of the positions of this step, which no row of a
 //! position before the step can see.
 use super::{position_factor,rounded_norm,score_scale};
-use super::super::{experts::conv_scale,mix::{Inputs,Run,Weight,Weights,need,number,shape},rows::{Rows,gather,rows_operation,shared},state::{self,Layout,Ring,VisitState,size,many::{convolve,convolve_kv,key_steps,key_steps_both,room,write_rows}}};
+use super::super::{experts::conv_scale,mix::{Inputs,Run,Weight,Weights,need,number,shape},rows::{Rows,gather,rows_operation,shared},state::{self,Layout,Ring,VisitState,size,many::{convolve,convolve_kv,direct_parts,key_steps,key_steps_both,room,write_rows}}};
 use crate::{Result,bounded_decoder::{Compute,KvFinishPair,WindowOne,WindowSplit}};
 use engine_model::plan::description::{ConvTaps,Visit};
 use spark_gpu_probe::{block_stream::{CONV_ADDEND,CONV_TOKEN_TAPS},causal_ops::Op};
@@ -179,26 +179,41 @@ pub fn half_rows<C:Compute,W:Weights<C>>(run:&Run<'_,C,W>,visit:&Visit,layout:&L
             let k_scale = conv_scale(if key_made.is_some() { 2 * k_taps as u64 + 1 } else { k_taps as u64 + 1 });
             let v_scale = conv_scale(if value_made.is_some() { 2 * v_taps as u64 + 1 } else { v_taps as u64 + 1 });
             let ring_words = k_taps * k_ch;
-            if separate && !step.keeps() && rows <= spark_gpu_probe::fast_ops::DIRECT_CHATS_MAX
-                && k_taps <= spark_gpu_probe::fast_ops::DIRECT_TAPS_MAX
-            {
+            // In launches of at most `DIRECT_CHATS_MAX` chats (`direct_parts`). A row reads its own rings and writes its
+            // own plane row, so its words do not depend on the other rows of its launch.
+            if separate && !step.keeps() && k_taps <= spark_gpu_probe::fast_ops::DIRECT_TAPS_MAX {
                 let plane_slots = spans.iter().map(|s| layout.slot(s.first)).collect::<Result<Vec<_>>>()?;
-                let req = crate::bounded_decoder::KvFinishDirect {
-                    rows, kv_heads, taps: k_taps, plane_rows: layout.rows,
-                    key_bound: a.query_key_clip as f32, val_eps: epsilon as f32, key_scale: k_scale, val_scale: v_scale,
-                    key_in: &key_product, key_fixed: k_fixed, key_made: key_made.as_ref(),
-                    val_in: &value_product, val_fixed: v_fixed, val_made: value_made.as_ref(),
-                };
-                let mut targets: Vec<_> = states.iter_mut().zip(spans).zip(&plane_slots)
-                    .map(|((st, sp), &ps)| (&st.rings[Ring::Key as usize], &st.rings[Ring::Value as usize], (sp.first % k_taps as u64) as usize, &mut st.keys, &mut st.values, ps))
-                    .collect();
-                if let Some([ke, ve]) = c.kv_finish_direct(&req, &mut targets)? {
+                let parts = direct_parts(rows);
+                let mut made = Vec::with_capacity(parts.len());
+                for &(start, n) in &parts {
+                    // One part takes the products as they are. More parts take views of their rows.
+                    let part = |x: &C::Value, words: usize| (n < rows).then(|| c.range(x, start * words, n * words)).transpose();
+                    let (k_in, v_in) = (part(&key_product, k_ch)?, part(&value_product, v_ch)?);
+                    let k_made = key_made.as_ref().map(|m| part(m, kv_heads * k_taps)).transpose()?.flatten();
+                    let v_made = value_made.as_ref().map(|m| part(m, kv_heads * v_taps)).transpose()?.flatten();
+                    let req = crate::bounded_decoder::KvFinishDirect {
+                        rows: n, kv_heads, taps: k_taps, plane_rows: layout.rows,
+                        key_bound: a.query_key_clip as f32, val_eps: epsilon as f32, key_scale: k_scale, val_scale: v_scale,
+                        key_in: k_in.as_ref().unwrap_or(&key_product), key_fixed: k_fixed, key_made: k_made.as_ref().or(key_made.as_ref()),
+                        val_in: v_in.as_ref().unwrap_or(&value_product), val_fixed: v_fixed, val_made: v_made.as_ref().or(value_made.as_ref()),
+                    };
+                    let mut targets: Vec<_> = states[start..start + n].iter_mut().zip(&spans[start..start + n]).zip(&plane_slots[start..start + n])
+                        .map(|((st, sp), &ps)| (&st.rings[Ring::Key as usize], &st.rings[Ring::Value as usize], (sp.first % k_taps as u64) as usize, &mut st.keys, &mut st.values, ps))
+                        .collect();
+                    let Some([ke, ve]) = c.kv_finish_direct(&req, &mut targets)? else { break };
                     drop(targets);
-                    need(c.words(&ke) == rows * ring_words && c.words(&ve) == rows * ring_words,
+                    need(c.words(&ke) == n * ring_words && c.words(&ve) == n * ring_words,
                         "the direct key-value finish differs from the layout")?;
-                    for (row, state) in states.iter_mut().enumerate() {
-                        state.next[Ring::Key as usize] = Some(c.range(&ke, row * ring_words, ring_words)?);
-                        state.next[Ring::Value as usize] = Some(c.range(&ve, row * ring_words, ring_words)?);
+                    made.push((ke, ve));
+                }
+                // A refused part leaves the whole step to the forms below. They write the plane rows of every chat
+                // again, with the same words, before any row reads them; no pending ring is set before every part ran.
+                if made.len() == parts.len() {
+                    for (&(start, n), (ke, ve)) in parts.iter().zip(&made) {
+                        for (row, state) in states[start..start + n].iter_mut().enumerate() {
+                            state.next[Ring::Key as usize] = Some(c.range(ke, row * ring_words, ring_words)?);
+                            state.next[Ring::Value as usize] = Some(c.range(ve, row * ring_words, ring_words)?);
+                        }
                     }
                     direct_kv = true;
                 }

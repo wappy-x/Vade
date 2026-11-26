@@ -1,7 +1,26 @@
 //! Keep the first decode of a bounded prompt group together.
+
+/// True when the prompts that arrive beside live decode join one shared prompt pass.
+///
+/// The serial prompt turn exists to cut a late prompt into slices of `Config::prefill_chunk`
+/// rows, with a decode step between the slices. When that slice is at least the largest prompt
+/// of a shared pass (`shared_limit` rows), the serial turn cuts nothing: it reads the whole
+/// prompt in one pass, one late chat a turn. A pass has a cost that does not grow with its
+/// rows, so each late chat then pays that cost alone.
+/// MEASURED 2026-11-26 (one Spark, looped text service, lab run w3j diag-auto): a pass of one
+/// 137-row prompt took 156 ms, and a pass of ten took 460 ms. 31 late chats took 31 passes
+/// (4.85 s). On such an engine the late prompts that wait at one time are read in one shared
+/// pass. The tokens of a chat do not depend on the other chats of its pass.
+pub(super) fn late_join(prefill_chunk: usize, shared_limit: usize) -> bool {
+    shared_limit != 0 && prefill_chunk >= shared_limit
+}
+
 #[derive(Default)]
-pub(super) struct Cohorts { groups: Vec<Vec<u64>>, serial: Vec<u64> }
+pub(super) struct Cohorts { groups: Vec<Vec<u64>>, serial: Vec<u64>, join: bool }
 impl Cohorts {
+    /// `join`: prompts that arrive beside live decode are read together (`late_join`), so no
+    /// arrival is latched to the serial turns.
+    pub fn new(join: bool) -> Self { Self { join, ..Self::default() } }
     /// New arrivals cannot extend a group that already started its prompt.
     pub fn begin(&mut self, ids: impl Iterator<Item = u64>) {
         let new: Vec<_> = ids.filter(|id| !self.holds(*id) && !self.serial(*id)).collect();
@@ -15,7 +34,7 @@ impl Cohorts {
         self.serial.retain(|id| live.iter().any(|(active, ready)| id == active && !ready));
         // Latch the old sliced path at arrival, even if the older decoder ends
         // before this prompt does. Completed peers held by a fresh group do not decode.
-        if self.decoding(live.iter().copied()) {
+        if !self.join && self.decoding(live.iter().copied()) {
             for &(id, ready) in &live {
                 if !ready && !self.holds(id) && !self.serial(id) { self.serial.push(id); }
             }
@@ -77,7 +96,17 @@ pub(super) fn whole_fits(
 
 #[cfg(test)]
 mod tests {
-    use super::{Cohorts, WholeJob, row_cap, whole_fits};
+    use super::{Cohorts, WholeJob, late_join, row_cap, whole_fits};
+
+    #[test]
+    fn late_prompts_join_a_shared_pass_only_when_the_serial_slice_cuts_nothing() {
+        // The slice is the shared limit or more: a serial turn would read the prompt whole.
+        assert!(late_join(4096, 4096) && late_join(4096, 256));
+        // A smaller slice cuts the prompt between decode steps: the serial turns stay.
+        assert!(!late_join(64, 256) && !late_join(4, 256) && !late_join(4095, 4096));
+        // No shared pass exists.
+        assert!(!late_join(4096, 0));
+    }
 
     #[test]
     fn whole_read_requires_all_live_slots_and_all_rows() {
@@ -158,5 +187,22 @@ mod tests {
         c.refresh([].into_iter()); c.begin([4, 5].into_iter());
         c.refresh([(4, true), (5, false)].into_iter());
         assert!(!c.decoding([(4, true), (5, false)].into_iter())); assert!(!c.serial(5));
+    }
+    #[test]
+    fn late_prompts_that_share_a_pass_are_not_latched_and_join_decode_together() {
+        let mut c = Cohorts::new(true);
+        // Chat 1 decodes. Chats 2 and 3 arrive: no serial latch, so one shared pass takes both.
+        c.refresh([(1, true), (2, false), (3, false)].into_iter());
+        assert!(!c.serial(2) && !c.serial(3) && c.serial_ids().is_empty());
+        c.begin([2, 3].into_iter());
+        assert!(c.holds(2) && c.holds(3) && !c.holds(1));
+        // Chat 2 ends its prompt first: it waits for chat 3, and chat 1 decodes on.
+        c.refresh([(1, true), (2, true), (3, false)].into_iter());
+        assert!(c.holds(2) && c.decoding([(1, true), (2, true), (3, false)].into_iter()));
+        // Both prompts are read: the group ends, and the next arrival is not latched either.
+        c.refresh([(1, true), (2, true), (3, true), (4, false)].into_iter());
+        assert!(!c.holds(2) && !c.holds(3) && !c.serial(4));
+        // A lone late prompt forms no group: nothing holds it.
+        c.begin([4].into_iter()); assert!(!c.holds(4));
     }
 }

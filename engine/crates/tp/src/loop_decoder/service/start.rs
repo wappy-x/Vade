@@ -118,6 +118,15 @@ pub fn text(root:&Path,description:&LoopTextDescription)->Result<Text> {
         ||"service and tokenizer EOS sets differ".to_owned())?;
     Ok(Text {tokenizer,identity,eos})
 }
+/// The most freed device storage that the service keeps for reuse: the storage of one step, and of the chats of
+/// one full cohort (at most 32 chats, and not more than the chat pool). `chat` is all that one chat holds
+/// (`Service::chat_bytes`). It is more than the state words of the chat. With a smaller bound the pool keeps
+/// fewer chats than a cohort has, and each other chat pays a device allocation when it opens.
+/// MEASURED 2026-11-26 (one Spark, 32 K context, 37 chats admitted, lab runs w3j x-cand2 and x-spare2): with the
+/// state words of 32 chats as the bound (39.9 GB), each round of 32 chats opened 13 to 15 chats slowly, about 50 ms
+/// each (0.70 to 0.81 s a round). With this bound (68.2 GB) a repeat round opened 0 to 4 chats slowly, and the rate
+/// of 32 chats that start together went from 403.7 to 430.2 tokens per second.
+fn spares(step:usize,chat:usize,chats:usize,pool:usize)->usize {step.saturating_add(chat.saturating_mul(chats.min(32)).min(pool))}
 /// Serve chats on `listener` (the caller binds `Settings::bind`) until `stop` is set or `requests` requests are answered.
 /// `backend` is the word of the ready line and of the health record for the arithmetic that runs: `host` or `device`.
 /// The ready line is the last line before the port answers.
@@ -143,9 +152,7 @@ pub fn serve_with_draft<C:Compute,W:Weights<C>>(compute:&C,weights:&W,descriptio
     }
     let mut service=Service::new(compute,weights,description,settings.context,eos,seats)?.with_prompt_keep(!settings.options.no_prompt_keep);
     service.model=model;service.depth=settings.options.depth;
-    // Keep spares for one step plus pooled session state so repeat cohorts reuse arenas without cuMemAlloc stalls.
-    let spares=service.step_bytes().max(service.state_bytes().saturating_mul(service.chats().min(32)).min(service.pool()));
-    compute.step_spares(spares);
+    compute.step_spares(spares(service.step_bytes(),service.chat_bytes(),service.chats(),service.pool()));
     let mut limits=limits(settings.context,settings.output)?;
     limits.next_mtp_depth=Some(service.depth);limits.api_key=auth;limits.metadata=Some(spark_serve::metadata::Metadata::loop_text(&identity,backend));limits.identity=Some(identity);
     limits.validate()?;

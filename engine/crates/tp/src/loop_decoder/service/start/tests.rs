@@ -49,6 +49,18 @@ fn the_places_are_read_and_a_start_that_cannot_be_served_is_refused() {
 }
 /// The service has no transport: a place with a neighbor link is refused, at any size of the layout.
 #[test]
+fn the_spare_bound_holds_one_step_and_the_chats_of_a_full_cohort() {
+    const GB:usize=1<<30;
+    // 37 chats of 2 GB in a 74 GB chat pool, 7 GB a step: one step and 32 chats.
+    assert_eq!(spares(7*GB,2*GB,37,74*GB),71*GB);
+    // Fewer chats than a full cohort: one step and all of them.
+    assert_eq!(spares(7*GB,2*GB,8,16*GB),23*GB);
+    // The chats never count for more than the chat pool, and no chat leaves the step.
+    assert_eq!(spares(7*GB,2*GB,32,40*GB),47*GB);
+    assert_eq!(spares(7*GB,2*GB,0,74*GB),7*GB);
+    assert_eq!(spares(usize::MAX,2*GB,32,74*GB),usize::MAX);
+}
+#[test]
 fn a_place_with_a_neighbor_is_refused() {
     assert!(alone(0,1).is_ok());
     for (place,size,links) in [(0,2,1),(1,2,1),(0,4,1),(1,4,2),(3,4,1),(2,8,2)] {

@@ -47,6 +47,16 @@ pub fn gather(spans:&[ChatRows],taps:usize)->Result<Gather> {
     }
     Ok(out)
 }
+/// The parts of a decode cohort of `rows` chats (one row a chat) for the launches that read each chat's own ring or
+/// plane (`Compute::short_conv_direct`, `Compute::kv_finish_direct`): `(first row, rows)`, in row order. One launch
+/// takes at most `DIRECT_CHATS_MAX` chats and at least 2. So the cohort is cut into the fewest parts, of sizes that
+/// differ by at most one: no part of a cohort of 2 or more chats has fewer than 2 rows (17 chats are 9 and 8).
+pub fn direct_parts(rows:usize)->Vec<(usize,usize)> {
+    let parts=rows.div_ceil(spark_gpu_probe::fast_ops::DIRECT_CHATS_MAX).max(1);
+    let (each,more)=(rows/parts,rows%parts);
+    let mut start=0;
+    (0..parts).map(|part|{let n=each+usize::from(part<more);start+=n;(start-n,n)}).collect()
+}
 /// One gather launch: output row `i` is row `table[i]` of `source`. A row has `width` words.
 fn permute<C:Compute>(compute:&C,source:&C::Value,source_rows:usize,table:&[usize],width:usize)->Result<C::Value> {
     let number=|n:usize|u32::try_from(n).map_err(|_|"loop decoder state: a gather exceeds the launch format".to_owned());
@@ -217,22 +227,38 @@ pub fn convolve<C:Compute>(
             }
         }
     }
-    // Multi-chat decode (`!step.keeps()`, 1 row per chat, up to 16 chats): read each chat's ring directly without `row_rings`.
-    if !step.keeps() && step.chats().len() > 1 && step.chats().len() == rows && rows <= spark_gpu_probe::fast_ops::DIRECT_CHATS_MAX
+    // Multi-chat decode (`!step.keeps()`, 1 row per chat): read each chat's ring directly without `row_rings`, in
+    // launches of at most `DIRECT_CHATS_MAX` chats (`direct_parts`). A row reads its own ring and its own input, so
+    // its words do not depend on the other rows of its launch: the parts of a large cohort give the words of one launch.
+    if !step.keeps() && step.chats().len() > 1 && step.chats().len() == rows
         && (2..=spark_gpu_probe::fast_ops::DIRECT_TAPS_MAX).contains(&taps) && compute.words(inputs) == rows * channels
         && states.iter().all(|s| compute.words(&s.rings[which as usize]) == taps * channels)
     {
         let chat_rings: Vec<_> = states.iter().zip(step.chats())
             .map(|(st, sp)| (&st.rings[which as usize], (sp.first % taps as u64) as usize)).collect();
-        let req = crate::bounded_decoder::ShortConvDirect { shape, rows, inputs, token, addend, fixed, chat_rings: &chat_rings };
-        if let Some((output, every)) = compute.short_conv_direct(&req)? {
-            let ring_words = taps * channels;
-            need(compute.words(&output) == rows * channels && compute.words(&every) == rows * ring_words,
+        let (ring_words, heads, parts) = (taps * channels, shape.heads as usize, direct_parts(rows));
+        let mut made = Vec::with_capacity(parts.len());
+        for &(start, n) in &parts {
+            // One part takes the operands as they are. More parts take views of their rows.
+            let part = |x: &C::Value, words: usize| (n < rows).then(|| compute.range(x, start * words, n * words)).transpose();
+            let (inputs_part, token_part, addend_part) = (part(inputs, channels)?, token.map(|t| part(t, heads * taps)).transpose()?.flatten(), addend.map(|a| part(a, channels)).transpose()?.flatten());
+            let req = crate::bounded_decoder::ShortConvDirect { shape, rows: n, inputs: inputs_part.as_ref().unwrap_or(inputs),
+                token: token_part.as_ref().or(token), addend: addend_part.as_ref().or(addend), fixed, chat_rings: &chat_rings[start..start + n] };
+            let Some((output, every)) = compute.short_conv_direct(&req)? else { break };
+            need(compute.words(&output) == n * channels && compute.words(&every) == n * ring_words,
                 "the direct convolution differs from the rows of the step")?;
-            for (row, state) in states.iter_mut().enumerate() {
-                state.next[which as usize] = Some(compute.range(&every, row * ring_words, ring_words)?);
+            made.push((output, every));
+        }
+        // A refused part leaves the whole step to the rings below: no pending ring is set before every part ran.
+        if made.len() == parts.len() {
+            drop(chat_rings);
+            for (&(start, n), (_, every)) in parts.iter().zip(&made) {
+                for (row, state) in states[start..start + n].iter_mut().enumerate() {
+                    state.next[which as usize] = Some(compute.range(every, row * ring_words, ring_words)?);
+                }
             }
-            return Ok(output);
+            if made.len() == 1 { return Ok(made.remove(0).0); }
+            return compute.join(&made.iter().map(|(output, _)| output).collect::<Vec<_>>());
         }
     }
     let (rings,steps,window)=conv_rings(compute,layout,which,step,states,inputs)?;

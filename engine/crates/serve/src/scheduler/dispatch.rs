@@ -87,7 +87,7 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
     let mut next_id = 0u64;
     let admission_clock = clock_now();
     let mut tick = 0u64;
-    let mut prefill_budget = PrefillBudget::new(); let mut prompt_cohorts = super::prompt_cohort::Cohorts::default();
+    let mut prefill_budget = PrefillBudget::new(); let mut prompt_cohorts = super::prompt_cohort::Cohorts::new(engine.shared_prefill_batch() && !engine.shared_batch() && super::prompt_cohort::late_join(config.prefill_chunk, shared_prefill_limit));
     let mut swap: Option<Swap> = None;
     let mut accepted = 0usize;
     let mut preparing = 0usize;
