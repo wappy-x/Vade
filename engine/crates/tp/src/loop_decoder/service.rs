@@ -479,6 +479,31 @@ impl<C:Compute,W:Weights<C>> Drop for Chat<'_,'_,C,W> {
     }
 }
 impl<'a,C:Compute,W:Weights<C>> Service<'a,C,W> {
+    /// The state of a new chat: the sizes and the words of `Driver::clean`, with no fill of a straight plane.
+    ///
+    /// A straight plane (a layer that sees every token) has one row a token of the context, so it is nearly all of the
+    /// bytes of a chat. It is made as the restore of no row (`Compute::state_restore`): room that is written before any
+    /// read. That holds by the rules of `state`: the token at position `p` writes row `p` before its attention reads
+    /// the plane, and the attention arms read the live keys only, rows `0..=p`. So no arm reads a row that the chat did
+    /// not write. A restored chat stands on the same rule (`state::copy_prefix`): its planes hold the kept rows and an
+    /// unwritten rest. The host form of `state_restore` fills with zeros, so a host run holds the words of `clean`.
+    /// The rings and the planes of a window layer are zeros, as in `clean`: a convolution reads the zero inputs of the
+    /// tokens before the start, and a window ring wraps.
+    ///
+    /// MEASURED 2026-11-26 (one Spark, context 36,864): `clean` filled 1,380,843,520 bytes a chat. A chat opened in
+    /// 8.2 ms on a warm pool and opens in about 2 ms with no fill. The scheduler opens the chats of a burst one after
+    /// another, and a burst whose first prompt pass starts before its last chat is open reads the rest one chat at a
+    /// time. That still happens when chats need new device memory: such a chat still takes 48 to 58 ms to open.
+    fn fresh(&self)->Result<State<C::Value>> {
+        let c=self.compute;let none=c.zeros(0)?;
+        let visits=self.driver.layouts().iter().map(|l| {
+            let (plane,kv,after)=(l.rows*l.row_words,l.kv_taps*l.kv_channels,l.taps*l.channels);
+            let room=||if l.ring {c.zeros(plane)} else {c.state_restore(&none,plane)};
+            Ok(state::VisitState {keys:room()?,values:room()?,rings:[c.zeros(kv)?,c.zeros(kv)?,c.zeros(after)?,c.zeros(after)?],
+                next:std::array::from_fn(|_|None),planes:None,every:std::array::from_fn(|_|None),written:None})
+        }).collect::<Result<Vec<_>>>()?;
+        Ok(State {position:0,visits})
+    }
     fn open(&self,state:impl FnOnce()->Result<State<C::Value>>)->Result<Chat<'_,'a,C,W>> {
         if let Some(error)=self.compute.fatal_error() {return Err(error);}
         need(self.live.get()<self.chats,"no free chat: every chat of this service is in use")?;
@@ -493,7 +518,7 @@ impl<'a,C:Compute,W:Weights<C>> Service<'a,C,W> {
 }
 impl<'a,C:Compute,W:Weights<C>> spark_serve::Engine for Service<'a,C,W> {
     type Session<'s>=Chat<'s,'a,C,W> where Self:'s;
-    fn session(&self)->Result<Self::Session<'_>> {self.open(||self.driver.clean())}
+    fn session(&self)->Result<Self::Session<'_>> {self.open(||self.fresh())}
     /// A request that asks for drafting is refused before a chat opens, with the reason in the answer.
     fn validate_request(&self,_prompt:&[u32],request:&Request)->Result<()> {
         if request.mtp_depth.is_some_and(|depth|depth>self.depth) || request.draft.is_some_and(|mode|!matches!(mode,DraftMode::Auto|DraftMode::Plain) && !(self.depth>0 && mode==DraftMode::Strict)) {return Err(DRAFT_REFUSAL.into());}
@@ -548,5 +573,27 @@ impl<'a,C:Compute,W:Weights<C>> spark_serve::Engine for Service<'a,C,W> {
     fn lone_chat_rows(&self)->usize {if self.depth>0 {16.min(self.driver.limits().step_rows)} else {1}}
     fn step_batch<'s>(&'s self,rows:&mut [BatchRows<'_,Self::Session<'s>>])->std::result::Result<Vec<Predictions>,BatchError> {
         self.batch(rows,super::experts::Phase::Decode).map_err(|message|BatchError {request:None,message})
+    }
+}
+#[cfg(test)]
+mod fresh_tests {
+    use super::*;
+    use crate::{bounded_decoder::Host,loop_decoder::fixture::Fixture};
+    /// A new chat holds the state of `Driver::clean`, visit by visit: the same sizes and, on the host, the same words
+    /// (the host form of a plane that is not filled is zeros). Both made-up models have a straight plane and a ring.
+    #[test]
+    fn a_new_chat_holds_the_state_of_a_clean_driver() {
+        for fixture in [Fixture::small(),Fixture::wide()] {
+            let seats=Seats {limits:tests::LIMITS,chat:1<<20,room:64<<20,most:1};
+            let service=Service::new(&Host,&fixture,&fixture.description,48,vec![1],seats).unwrap();
+            let layouts=service.driver.layouts();
+            assert!(layouts.iter().any(|l|l.ring) && layouts.iter().any(|l|!l.ring));
+            let (new,clean)=(service.fresh().unwrap(),service.driver.clean().unwrap());
+            assert_eq!((new.position,new.visits.len()),(clean.position,clean.visits.len()));
+            for (a,b) in new.visits.iter().zip(&clean.visits) {
+                assert_eq!((&a.keys,&a.values,&a.rings),(&b.keys,&b.values,&b.rings));
+                assert!(a.next.iter().chain(&a.every).all(Option::is_none) && a.planes.is_none() && a.written.is_none());
+            }
+        }
     }
 }
