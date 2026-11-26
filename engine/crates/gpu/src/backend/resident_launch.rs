@@ -100,7 +100,28 @@ impl Recorder<'_> {
     fn fed(&mut self) {self.fed=0;self.tail=false;}
     /// A real stream wait has ended: nothing is queued on the device, so no retained executable has a replay in flight.
     pub(super) fn drained(&mut self) {self.fed();self.drained_at=self.clock;}
+    /// The storage charge of the retained executables before the one used longest ago is retired.
+    fn retained_limit(&self)->usize {
+        #[cfg(test)]
+        if let Some(limit)=self.retained_budget {return limit;}
+        RETAINED_BYTES
+    }
+    /// The same-kernel executables a new key needs before the one used longest ago becomes its donor (`same_kernels`):
+    /// `SAME_KERNELS` while a new executable of `nodes` launches fits the retained limit, one when it does not.
+    fn donor_floor(&self,nodes:usize)->usize {
+        let retained=self.pieces.values().map(|piece|piece.graph.storage_bytes).sum::<usize>();
+        let storage=crate::GraphAllowance::flash(nodes).map_or(usize::MAX,|allowance|allowance.maximum_bytes());
+        donor_floor(retained,storage,self.retained_limit())
+    }
 }
+/// The retained limit: 32 executables of the largest Flash charge (`DecodeGraph::MAX_RESERVATION_BYTES`).
+const RETAINED_BYTES:usize=32*DecodeGraph::MAX_RESERVATION_BYTES;
+/// When a new executable would not fit the retained limit, the one used longest ago of the same kernels is updated in place
+/// (`Backend::end_segment`) instead: no executable is retired, nothing new is retained, and there is no stream drain and no
+/// instantiation. A retired executable whose key comes back is captured again with both, the cost seen in served drafting
+/// (2026-11-26, one Spark, a code chat of 4,459 tokens: 339 captures, 293 of keys captured before and retired since; 324 had
+/// an executable of the same kernels to update). Below the limit `SAME_KERNELS` holds, so short cycles of keys stay hits.
+fn donor_floor(retained:usize,storage:usize,limit:usize)->usize {if retained.saturating_add(storage)<=limit {SAME_KERNELS} else {1}}
 /// Retained executables of one kernel sequence before one of them is reused for a new grid set. Below it a new key gets
 /// its own executable, so keys that come back in a short cycle (the four phases of a pooled step, the four row counts past
 /// the selection budget) stay hits. At it, a grid set that is new on every step (an extent that follows the context) takes
@@ -616,7 +637,7 @@ impl<'a> Backend<'a> {
             let hit=r.pieces.contains_key(&key) || {
                 let (mut same,mut oldest)=(0usize,None::<u64>);
                 for (_old,piece) in r.pieces.iter().filter(|(old,_)|same_kernels(old,&key)) {same+=1;if oldest.is_none_or(|used|piece.used<used) {oldest=Some(piece.used);}}
-                oldest.is_some_and(|used|same>=SAME_KERNELS && used<=r.drained_at)
+                oldest.is_some_and(|used|used<=r.drained_at && same>=r.donor_floor(key.len()))
             } || (r.fed==0 && !r.tail && r.calls.len()<=32);
             if hit {r.ramp[0]+=1;r.early=true;drop(r);return self.flush_resident_launches();}
             r.ramp[1]+=1;r.missed=true;}
@@ -1014,10 +1035,7 @@ impl<'a> Backend<'a> {
                 loop {
                     let r=self.recorder.borrow();
                     let retained=r.pieces.values().map(|piece|piece.graph.storage_bytes).sum::<usize>();
-                    #[cfg(not(test))]
-                    let fits=retained.saturating_add(storage)<=32*DecodeGraph::MAX_RESERVATION_BYTES;
-                    #[cfg(test)]
-                    let fits=retained.saturating_add(storage)<=r.retained_budget.unwrap_or(32*DecodeGraph::MAX_RESERVATION_BYTES);
+                    let fits=retained.saturating_add(storage)<=r.retained_limit();
                     let evict=!fits && !r.pieces.is_empty();drop(r);if !evict {break;}
                     // Retire the executable used longest ago, after its replays have ended.
                     if !retired {self.synchronize()?;retired=true;}let mut r=self.recorder.borrow_mut();
@@ -1033,12 +1051,13 @@ impl<'a> Backend<'a> {
             // the same kernels are retained, the one used longest ago is the donor, if its replays have ended (used at or
             // before the last real stream wait): it is updated in place below, after this piece's table upload. A launch
             // whose extent follows the context (a row count, a zero fill) then costs an update of one executable, not the
-            // capture of a new one with its stream wait, and the retained set does not grow by a piece a step. With no
-            // donor, a new executable is captured now.
+            // capture of a new one with its stream wait, and the retained set does not grow by a piece a step. When a new
+            // executable would not fit the retained limit, one such executable is enough (`donor_floor`). With no donor, a
+            // new executable is captured now.
             let donor=if self.recorder.borrow().pieces.contains_key(&key) {None} else {
                 let r=self.recorder.borrow();let (mut same,mut oldest)=(0usize,None::<(&Vec<Grid>,u64)>);
                 for (old,piece) in r.pieces.iter().filter(|(old,_)|same_kernels(old,&key)) {same+=1;if oldest.is_none_or(|(_,used)|piece.used<used) {oldest=Some((old,piece.used));}}
-                oldest.filter(|&(_,used)|same>=SAME_KERNELS && used<=r.drained_at).map(|(old,_)|old.clone())
+                oldest.filter(|&(_,used)|used<=r.drained_at && same>=r.donor_floor(count)).map(|(old,_)|old.clone())
             };
             if donor.is_none() && !self.recorder.borrow().pieces.contains_key(&key) {capture()?;}
             let replay=||->Result<(),String> {
@@ -1166,12 +1185,15 @@ fn resident_piece_eviction_preserves_output() -> Result<(), String> {
                 }
             }
             let evictions = backend.resident_copy_counts().piece_evictions;
+            // A full set updates an idle executable of the same kernels in place (`donor_floor`); it retires one only
+            // for a key with no such donor. Either way the set stays within the budget, checked above at every case.
+            let updates = backend.recorder.borrow().updates;
             match retained_budget {
                 None if evictions != 0 => Err("default-budget control evicted pieces".into()),
                 None => Ok(()),
-                Some(_) if evictions < 32 => Err(format!("expected repeated evictions, got {evictions}")),
+                Some(_) if evictions + updates < 32 => Err(format!("expected repeated retirements or updates under the budget, got {evictions} and {updates}")),
                 Some(_) => {
-                    println!("RESIDENT EVICTION PASS evictions={evictions} budget_bytes={budget} compared_bytes={}", compared_words * std::mem::size_of::<u32>());
+                    println!("RESIDENT EVICTION PASS evictions={evictions} updates={updates} budget_bytes={budget} compared_bytes={}", compared_words * std::mem::size_of::<u32>());
                     Ok(())
                 }
             }
@@ -1208,6 +1230,19 @@ fn resident_piece_eviction_preserves_output() -> Result<(), String> {
         let mut other=piece;other[1].threads=160;assert!(!same_kernels(&piece,&other));
         let mut other=piece;other[1].shared=30720;assert!(!same_kernels(&piece,&other));
         assert!(!same_kernels(&piece,&piece[..3]) && same_kernels(&piece,&piece));
+    }
+    /// Below the retained limit a new key needs `SAME_KERNELS` executables of its kernels before one is its donor; when a new
+    /// executable would pass the limit, one is enough, so a full set updates in place and never retires an executable for it.
+    #[test] fn a_full_retained_set_takes_any_same_kernel_donor() {
+        use super::{donor_floor,RETAINED_BYTES,SAME_KERNELS,DecodeGraph};
+        assert_eq!(RETAINED_BYTES,32*DecodeGraph::MAX_RESERVATION_BYTES);
+        let piece=crate::GraphAllowance::flash(170).unwrap().maximum_bytes();
+        assert_eq!(donor_floor(0,piece,RETAINED_BYTES),SAME_KERNELS);
+        assert_eq!(donor_floor(RETAINED_BYTES-piece,piece,RETAINED_BYTES),SAME_KERNELS);
+        assert_eq!(donor_floor(RETAINED_BYTES-piece+1,piece,RETAINED_BYTES),1);
+        assert_eq!(donor_floor(RETAINED_BYTES,1,RETAINED_BYTES),1);
+        // A piece above the Flash node limit has no allowance: it can never fit, so any donor serves.
+        assert_eq!(donor_floor(0,usize::MAX,RETAINED_BYTES),1);
     }
     /// The parts of one flush after a wait, as `part_limit` alone cuts them (the weight batch that `leaves_alone` sends
     /// out by itself is not modelled here). `tail`: the wait was a selection read.

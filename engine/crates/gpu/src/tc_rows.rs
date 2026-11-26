@@ -193,12 +193,21 @@ pub const fn tc_tiny_wanted(rows: usize, inputs: usize) -> bool {
 
 /// True when Mode 0 dense uses the 4-warp cooperative-W `BN=16, BK=64` `evict_first` path (`m_tiles=1`):
 /// - `17..=32` with `rows <= 2560` (`O_proj`, `K/V`, `K+KTap`: 4x warps/SM, 2-stage X = 12,288 B)
+/// - `9..=16` with `1280 < rows <= 2560` (`O_proj`, the panel shapes): the 1-warp tile ran one warp a 16-row band
+///   (144 warps on 48 SMs, 134 us at C16 decode, 73 us here); the four warps of a band split its weight chunks and
+///   each output keeps its one ascending-k MMA chain (same words). `K/V` and `K+KTap` (`rows <= 1280`, raw weights)
+///   stay on the 1-warp tile there (29 us against 31 us at C16 decode).
 /// - `33..=128` with `rows <= 16_384 && cols > 64` (C32 `M=125` prefill on `QKV`, `O_proj`, `K/V`: 1-stage X = 20,480 B)
 #[inline(always)]
 pub const fn tc_coop_w_wanted(rows: usize, cols: usize, inputs: usize) -> bool {
     (inputs > 16 && inputs <= TC_SMALL_BM && rows <= TC_TINY_ROWS_MAX)
+        || (inputs > TC_COOP_SMALL_MIN && inputs <= 16 && rows > TC_PANEL_ROWS_MIN && rows <= TC_TINY_ROWS_MAX)
         || (inputs > TC_SMALL_BM && inputs <= 128 && rows <= 16_384 && cols > TC_STAGE)
 }
+/// Inputs at or below this keep the 1-warp tile (`tc_tiny_wanted`) for every `rows <= 2560`.
+pub const TC_COOP_SMALL_MIN: usize = 8;
+/// Dense matrices of at most this many rows (`K/V` 1024, `K+KTap` 1056) read raw weights, not `bf16_panels`.
+pub const TC_PANEL_ROWS_MIN: usize = 1280;
 
 /// True when medium-M (`129..=256`, `128 < rows <= 2560`, `cols > 64`) uses the 2-warp `32x32` tiled path to saturate 48 SMs.
 #[inline(always)]
@@ -824,8 +833,12 @@ mod tests {
         assert_eq!(tc_dense_blocks(2304, 1024), 36 * 16);
         assert_eq!(tc_dense_spec(2304, 3072, 32, false), (128, 144, TC_COOP_M32_SMEM));
         assert_eq!(tc_dense_spec(1024, 2304, 32, false), (128, 64, TC_COOP_M32_SMEM));
-        assert_eq!(tc_dense_spec(2304, 3072, 16, false), (TC_TINY_THREADS, 144, TC_W1_M16_SMEM));
-        assert_eq!(tc_dense_spec(1024, 2304, 16, false), (TC_TINY_THREADS, 64, TC_W1_M16_SMEM));
+        assert_eq!(tc_dense_spec(2304, 3072, 16, false), (128, 144, TC_COOP_M32_SMEM));
+        assert_eq!(tc_dense_spec(1024, 2304, 9, false), (TC_TINY_THREADS, 64, TC_W1_M16_SMEM));
+        assert_eq!(tc_dense_spec(1056, 2304, 16, false), (TC_TINY_THREADS, 66, TC_W1_M16_SMEM));
+        assert_eq!(tc_dense_spec(2304, 3072, 9, false), (128, 144, TC_COOP_M32_SMEM));
+        assert_eq!(tc_dense_spec(2304, 3072, 8, false), (TC_TINY_THREADS, 144, TC_W1_M16_SMEM));
+        assert_eq!(tc_dense_spec(1024, 2304, 8, false), (TC_TINY_THREADS, 64, TC_W1_M16_SMEM));
         assert_eq!(tc_dense_spec(6656, 2304, 32, false), (64, 208, TC_W2_SMEM));
         assert_eq!(tc_dense_spec(6656, 2304, 16, false), (64, 208, TC_W2_M16_SMEM));
         assert_eq!(tc_dense_spec(200_058, 2304, 32, false), (128, 3126, TC_W4_SMEM));
@@ -843,7 +856,8 @@ mod tests {
         assert_eq!(tc_dense_spec(2304, 3072, 125, false), (128, 144, TC_COOP_M128_SMEM));
         assert_eq!(tc_dense_spec(8600, 2304, 125, false), (128, 538, TC_COOP_M128_SMEM));
         assert_eq!(tc_dense_spec(1024, 2304, 180, false), (64, 6 * 32, TC_MED_W2_SMEM));
-        assert_eq!(tc_dense_panel_smem(2304, 3072, 16, 8), 4 * 16 * 128 + 8 * 128);
+        assert_eq!(tc_dense_panel_smem(2304, 3072, 8, 8), 4 * 16 * 128 + 8 * 128);
+        assert_eq!(tc_dense_panel_smem(2304, 3072, 16, 8), 8_192 + 16_384 + 8 * 128);
         assert_eq!(tc_dense_panel_smem(6656, 2304, 16, 4), 4 * 16 * 128 + 2 * 4 * 128);
         assert_eq!(tc_dense_panel_smem(6656, 2304, 32, 4), 3 * 32 * 128 + 2 * 4 * 128);
         assert_eq!(tc_dense_panel_smem(200_058, 2304, 32, 1), 3 * 32 * 128 + 4 * 128);

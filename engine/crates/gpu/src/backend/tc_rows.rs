@@ -91,7 +91,7 @@ impl<'a> Backend<'a> {
     fn tc_panels_for(&self, weight: &DeviceVector<'_>, rows: usize, cols: usize, inputs: usize) -> Option<(u64, u64, usize)> {
         // Small-row projections (`rows <= 1280`, e.g. K/V 1024 and K+KTap 1056) are L2-resident and faster on raw
         // `LDG.128`; larger matrices (`O_proj` 2304, `QKV` 6552/8600, `LM Head` 200k) stream Vade-BF11-BP panels.
-        if rows <= 1280 || inputs > tc_rows::TC_SMALL_BM { return None; }
+        if rows <= tc_rows::TC_PANEL_ROWS_MIN || inputs > tc_rows::TC_SMALL_BM { return None; }
         let chunks = cols / crate::bf16_panels::CHUNK_COLS;
         let (base, first_band, slices) = self.panel_at(weight, cols)?;
         if base == 0 || (base & 15) != 0 || !matches!(slices, 1 | 4 | 8) || !chunks.is_multiple_of(slices) {

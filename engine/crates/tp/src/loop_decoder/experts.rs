@@ -25,9 +25,10 @@ use spark_gpu_probe::causal_ops::{Op,Shape};
 /// Form word of arm `ShortConv`: an addend is given, and the sum with the addend is rounded to BF16.
 const CONV_ADDEND:u32=1<<1;
 const CONV_ROUND:u32=1<<2;
-/// Larger decode batches (`> 8` rows, past the single-pass `ROUTER_PICK_COMPACT_ROWS_MAX` / `PICKS_MAX` envelope)
-/// group expert products by unique expert via `PLAIN_PACKED_TC_ROWS` in one bit-exact tensor-core pass.
-const DEVICE_ROWS:usize=8;
+/// Decode steps of at most this many rows keep the row form of the expert products. Wider decode batches
+/// (`> 16` rows) group expert products by unique expert in one bit-exact tensor-core pass. At 8, a C1 verify step of
+/// `9..=16` rows took the grouped `prefill_packed_tc` path during decode, which is slower than the row path there.
+const DEVICE_ROWS:usize=16;
 /// The arithmetic form of the expert products. Decode always uses the row form, at every cohort width. Prefill
 /// always uses the grouped tensor-core form where the device supports it, including a short final prompt slice.
 /// A token therefore never changes arithmetic because unrelated chats joined or left its scheduler cohort.
