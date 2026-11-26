@@ -15,8 +15,10 @@
 //!      `3` A stages (`24,576 B`, `wait_group 1`) + `2` unpacked B stages (`16,384 B`) + `1 KB` `(V1*2^112, V3_half*2^112)`
 //!      LUT + `32 B` `META`. Cooperative 1x unpack via zero-IMAD 8-inst `shl+prmt 0xbb99` LUT unpack interleaved
 //!      inside `k_sub_0` HMMAs, `.L2::256B` codes + `.L2::128B` scales preserving `PREFILL_M_GROUP = 8` L2 reuse.
-//!    - `mode == 1`: shipped tiled MXFP8. `3`-stage `cp.async.cg` (`38,400 B <= 40,960 B`, `wait_group 1`),
-//!      zero SMEM LUT, 5-inst exact `cvt.rn.f16x2.e4m3x2` register unpack.
+//!    - `mode == 1`: shipped tiled MXFP8, coalesced. The A ring of `mode == 2` + `2` raw B stages of `64` columns
+//!      (`128 x 64 B`: the 4 row blocks of 32 rows copied whole, so a warp's `cp.async.cg` reads 512 contiguous
+//!      bytes, 4 full lines, in place of 16 half lines of the 32-column form) + the 4-byte scale copies in the
+//!      LUT bytes (`2 x 512 B`). 5-inst exact `cvt.rn.f16x2.e4m3x2` register unpack, zero SMEM LUT.
 //!    - `mode == 0`: shipped tiled NVFP4. `3`-stage `cp.async.cg` + `1 KB` `shl+prmt` LUT exact unpack.
 //!    - Exact `FAST_CAPPED_GATE` LUT gating (`coefficients`), and bank-free dead-SMEM coalesced `st.global.v4.b32`
 //!      BF16 epilogues (`128 B/row` for `GateUp`, `256 B/row` `evict_first` for `Down`).
@@ -42,13 +44,16 @@ use crate::tc_rows::TC_BM;
 const TILE16: u32 = 16 * 64;
 /// Unified `42,016 B` static SMEM layout (`2 blk/SM` on SM121a `101,376 B` SMEM):
 /// - `mode == 2`: `3` A stages (`24,576 B`) + `2` unpacked B stages (`16,384 B`) + `1 KB` LUT + `32 B` META.
-/// - `mode == 0/1`: `3` stages of `12,800 B` (`8,192 B` A + `4,096 B` packed B + `512 B` scales) = `38,400 B <= 40,960 B`.
+/// - `mode == 1`: `3` A stages (`24,576 B`) + `2` raw MXFP8 B stages (`128 x 64 B`) + `2 x 512 B` scale copies + `32 B` META.
+/// - `mode == 0`: `3` stages of `12,800 B` (`8,192 B` A + `4,096 B` packed B + `512 B` scales) = `38,400 B <= 40,960 B`.
 const A_BYTES: usize = PREFILL_PAIR_M * 32 * 2; // 8,192 B (`128 x 32` BF16)
 const A_STAGES: usize = 3;
 const B_AT: usize = A_STAGES * A_BYTES; // 24,576 B
 const B_BYTES: usize = PREFILL_BN * 32 * 2; // 8,192 B (`128 x 32` BF16 unpacked)
 const B_STAGES: usize = 2;
-const STAGE32: usize = A_BYTES + PREFILL_BN * (32 + 4); // 12,800 B (mode 0/1)
+const STAGE32: usize = A_BYTES + PREFILL_BN * (32 + 4); // 12,800 B (mode 0)
+/// Bytes of one MXFP8 scale copy stage (`mode == 1`): 4 bytes (two 64-column stages) of each of the 128 rows.
+const MX_SCALE_BYTES: usize = PREFILL_BN * 4;
 const LUT_AT: usize = B_AT + B_STAGES * B_BYTES; // 40,960 B (16B aligned)
 const LUT_BYTES: usize = 256 * 4; // 1,024 B (`(V1*2^112, V3_half*2^112)` per scale)
 const META_AT: usize = LUT_AT + LUT_BYTES; // 41,984 B (16B aligned)
@@ -57,7 +62,7 @@ const BLOCK_BYTES: usize = META_AT + META_BYTES; // 42,016 B
 
 const _: () = assert!(PREFILL_PAIR_M == 128 && PREFILL_BN == 128 && PREFILL_THREADS == 256);
 const _: () = assert!(B_AT == 24_576 && LUT_AT == 40_960 && META_AT == 41_984 && BLOCK_BYTES == 42_016);
-const _: () = assert!(3 * STAGE32 <= LUT_AT);
+const _: () = assert!(3 * STAGE32 <= LUT_AT && 2 * MX_SCALE_BYTES == LUT_BYTES && B_BYTES == PREFILL_BN * 64);
 /// Dead SMEM `0..40,960` reused by BF16 GateUp (`128 x 72 u16 = 18,432 B`) and Down (`128 x 68 u32 = 34,816 B`).
 const _: () = assert!(PREFILL_PAIR_M * 72 * 2 <= LUT_AT && PREFILL_PAIR_M * 68 * 4 <= LUT_AT);
 
@@ -459,25 +464,132 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
             }};
         }
 
-        if mode == 2 {
-            // In-place MMA-lane NVFP4 panel path (`pack_expert_tagged`):
-            // - 3-stage `cp.async` A (`24,576 B`, `wait_group 1`) + 2-stage unpacked B (`16,384 B`) + 1 KB `shl+prmt` LUT!
-            // - `.L2::256B` codes + `.L2::128B` scales WITHOUT `evict_first` so `PREFILL_M_GROUP = 8` shares weights in L2!
-            // - Interleaved unpack inside `k_sub_0` HMMAs (fills SM121a HMMA shadow slots + launches `fetch_b64` early!).
+        // The A ring of `mode == 2` and `mode == 1`: 3 stages of 32 columns (`24,576 B`, `wait_group 1`).
+        if mode != 0 {
             for st in 0..A_STAGES as u32 {
                 let s = smem + st * A_BYTES as u32;
                 if a_src0 == u32::MAX { st_shared_zero16(s + a_dst0); }
                 if a_src1 == u32::MAX { st_shared_zero16(s + a_dst0 + 4096); }
             }
-            macro_rules! issue_a {
-                ($st:expr, $c_idx:expr) => {{
-                    let s = smem + ($st as u32) * A_BYTES as u32;
-                    let at = ($c_idx as u32) * 16;
-                    if a_src0 != u32::MAX { crate::ptx::copy16(s + a_dst0, input.add((a_src0 + at) as usize)); }
-                    if a_src1 != u32::MAX { crate::ptx::copy16(s + a_dst0 + 4096, input.add((a_src1 + at) as usize)); }
+        }
+        macro_rules! issue_a {
+            ($st:expr, $c_idx:expr) => {{
+                let s = smem + ($st as u32) * A_BYTES as u32;
+                let at = ($c_idx as u32) * 16;
+                if a_src0 != u32::MAX { crate::ptx::copy16(s + a_dst0, input.add((a_src0 + at) as usize)); }
+                if a_src1 != u32::MAX { crate::ptx::copy16(s + a_dst0 + 4096, input.add((a_src1 + at) as usize)); }
+            }};
+        }
+
+        if mode == 1 {
+            // Coalesced MXFP8: B stage `s` (64 columns) holds the 4 row blocks of the tile copied whole (`row * 64 B`,
+            // the four 16-byte parts of a row XOR-swizzled by `(row >> 1) & 3`, bank-free for the 8 rows a read). This
+            // thread copies parts `tid` and `tid + 256` (512 contiguous bytes a warp); warp 0 copies the 4-byte scale
+            // copies of the stage pair (`s / 2`, 128 contiguous bytes a row block). Groups: `{A(2s+2), B(s+1)}` at
+            // half 0 of stage `s`, `{A(2s+3)}` at half 1, so `wait_group 1` before half `h` of stage `s` has
+            // `A(2s+h)` and `B(s)` landed. B buffer `(s+1) & 1` was last read in stage `s-1`, before the barrier.
+            let stages = (k / 64) as u32;
+            let (g, t) = (lane >> 2, lane & 3);
+            let tile_row = tile_n * PREFILL_BN;
+            // Part `tid` (row block `tid >> 7`, rows 0..63 of the tile) and part `tid + 256` (row block + 2, 64 rows
+            // and `k * 64` code bytes further, the same swizzle 4,096 B further in the stage).
+            let b_src0 = (code_copy(tile_row + (tid >> 7) * 32, 0, 0, k, true) + (tid & 127) * 16) as u32;
+            let b_dst0 = ((tid >> 2) * 64 + (((tid & 3) ^ ((tid >> 3) & 3)) * 16)) as u32;
+            let b_ok0 = tile_row + (tid >> 7) * 32 < rows;
+            let b_ok1 = tile_row + (tid >> 7) * 32 + 64 < rows;
+            let sc_src = if tid < 32 && tile_row + (tid >> 3) * 32 < rows {
+                (parts.scales + scale_copy(tile_row + (tid >> 3) * 32, 0, k, true) + (tid & 7) * 16) as u32
+            } else {
+                u32::MAX
+            };
+            for bs in 0..2u32 {
+                let bb = smem + B_AT as u32 + bs * B_BYTES as u32;
+                if !b_ok0 { st_shared_zero16(bb + b_dst0); }
+                if !b_ok1 { st_shared_zero16(bb + b_dst0 + 4096); }
+                if tid < 32 && sc_src == u32::MAX {
+                    st_shared_zero16(smem + (LUT_AT + tid * 16) as u32 + bs * MX_SCALE_BYTES as u32);
+                }
+            }
+            macro_rules! issue_b {
+                ($s:expr) => {{
+                    let s_idx: u32 = $s;
+                    let bb = smem + B_AT as u32 + (s_idx & 1) * B_BYTES as u32 + b_dst0;
+                    let src = unit.add((b_src0 + s_idx * 2048) as usize);
+                    if b_ok0 { crate::ptx::copy16(bb, src.cast()); }
+                    if b_ok1 { crate::ptx::copy16(bb + 4096, src.add(k * 64).cast()); }
+                    if sc_src != u32::MAX {
+                        crate::ptx::copy16(
+                            smem + (LUT_AT + tid * 16) as u32 + (s_idx & 1) * MX_SCALE_BYTES as u32,
+                            unit.add((sc_src + (s_idx >> 1) * 128) as usize).cast(),
+                        );
+                    }
                 }};
             }
 
+            issue_a!(0, 0);
+            issue_b!(0);
+            crate::ptx::commit();
+            issue_a!(1, 1);
+            crate::ptx::commit();
+            let b_r0 = warp_n * 32 + g;
+            let mut a_cur = 0u32;
+            let mut s = 0u32;
+            macro_rules! mx_half {
+                ($h:expr) => {{
+                    let h: u32 = $h;
+                    cp_async_wait_one();
+                    core::arch::nvptx::_syncthreads();
+                    let a_wr = if a_cur == 0 { 2 } else { a_cur - 1 };
+                    if s + 1 < stages {
+                        issue_a!(a_wr, 2 * s + 2 + h);
+                        if h == 0 { issue_b!(s + 1); }
+                    }
+                    crate::ptx::commit();
+                    if subs > 0 {
+                        let a_stage = smem + a_cur * A_BYTES as u32;
+                        let st_b = smem + B_AT as u32 + (s & 1) * B_BYTES as u32;
+                        let sc_b = smem + LUT_AT as u32 + (s & 1) * MX_SCALE_BYTES as u32;
+                        let sc_shift = ((s & 1) * 2 + h) * 8;
+                        macro_rules! load_mx_row {
+                            ($row:expr, $k_sub:expr) => {{
+                                let row: usize = $row;
+                                let sc = (load_u32(sc_b + (row * 4) as u32) >> sc_shift) & 255;
+                                let (p1, p2, two) = if sc <= 142 {
+                                    (((sc + 112) << 7) * 0x0001_0001, 0, false)
+                                } else {
+                                    (0x7780_7780, (sc << 7) * 0x0001_0001, true)
+                                };
+                                let part = (h as usize * 2 + $k_sub) ^ ((row >> 1) & 3);
+                                let row_off = st_b + (row * 64 + part * 16) as u32;
+                                let c0 = crate::ptx::load_u16(row_off + (t * 2) as u32) as u16;
+                                let c1 = crate::ptx::load_u16(row_off + (8 + t * 2) as u32) as u16;
+                                [unpack_mx_pair!(c0, p1, p2, two), unpack_mx_pair!(c1, p1, p2, two)]
+                            }};
+                        }
+                        for k_sub in 0..2usize {
+                            let a_at = a_stage + if k_sub == 0 { a_off } else { a_off ^ 32 };
+                            let r0 = load_mx_row!(b_r0, k_sub);
+                            let r1 = load_mx_row!(b_r0 + 8, k_sub);
+                            let r2 = load_mx_row!(b_r0 + 16, k_sub);
+                            let r3 = load_mx_row!(b_r0 + 24, k_sub);
+                            let bp0 = [r0[0], r0[1], r1[0], r1[1]];
+                            let bp1 = [r2[0], r2[1], r3[0], r3[1]];
+                            k_sub_mma!(a_at, bp0, bp1);
+                        }
+                    }
+                    a_cur = if a_cur == 2 { 0 } else { a_cur + 1 };
+                }};
+            }
+            while s < stages {
+                mx_half!(0);
+                mx_half!(1);
+                s += 1;
+            }
+        } else if mode == 2 {
+            // In-place MMA-lane NVFP4 panel path (`pack_expert_tagged`):
+            // - 3-stage `cp.async` A (`24,576 B`, `wait_group 1`) + 2-stage unpacked B (`16,384 B`) + 1 KB `shl+prmt` LUT!
+            // - `.L2::256B` codes + `.L2::128B` scales WITHOUT `evict_first` so `PREFILL_M_GROUP = 8` shares weights in L2!
+            // - Interleaved unpack inside `k_sub_0` HMMAs (fills SM121a HMMA shadow slots + launches `fetch_b64` early!).
             let stages = (k / 64) as u32;
             let (b_code0, b_scale0) = if tile_n * PREFILL_BN + warp * 16 < rows {
                 let chunk0 = ((tile_n * 2 + (warp >> 2)) * (k >> 6)) * 4 + (warp & 3);
@@ -614,43 +726,30 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
                 s += 1;
             }
         } else {
-            // Shipped tiled layout (`mode == 1` MXFP8, `mode == 0` NVFP4):
+            // Shipped tiled NVFP4 layout (`mode == 0`):
             // 3 stages of `K = 32` (`12,800 B` each -> `38,400 B <= 40,960 B`, `wait_group 1`, 1 barrier per 32 cols),
-            // `cp.async.cg` on codes (L1-bypass hardware async!), `half_m` split, pipelined `LDSM`, 5-inst MXFP8 / 8-inst NVFP4 unpack.
+            // `cp.async.cg` on codes (L1-bypass hardware async!), `half_m` split, pipelined `LDSM`, 8-inst NVFP4 unpack.
             let steps = (k / 32) as u32;
             let (g, t) = (lane >> 2, lane & 3);
             let b_row = tid >> 1;
             let b_half = tid & 1;
             let global_b_row = tile_n * PREFILL_BN + b_row;
             let b_valid = global_b_row < rows;
-            let (b_code_off, b_scale_off): (u32, u32) = if b_valid {
-                let code_off = code_copy(global_b_row, 0, 0, k, wide);
-                let scale_off = parts.scales + scale_copy(global_b_row, 0, k, wide);
-                if wide {
-                    ((code_off + b_half * 16) as u32, if b_half == 0 { scale_off as u32 } else { u32::MAX })
-                } else {
-                    (
-                        if b_half == 0 { code_off as u32 } else { u32::MAX },
-                        if b_half == 0 { scale_off as u32 } else { u32::MAX },
-                    )
-                }
+            let (b_code_off, b_scale_off): (u32, u32) = if b_valid && b_half == 0 {
+                (code_copy(global_b_row, 0, 0, k, false) as u32, (parts.scales + scale_copy(global_b_row, 0, k, false)) as u32)
             } else {
                 (u32::MAX, u32::MAX)
             };
-            let b_dst_off = if wide {
-                (A_BYTES + b_row * 32 + (b_half ^ ((b_row >> 2) & 1)) * 16) as u32
-            } else {
-                (A_BYTES + b_row * 16) as u32
-            };
+            let b_dst_off = (A_BYTES + b_row * 16) as u32;
             let b_sc_dst_off = (A_BYTES + PREFILL_BN * 32 + b_row * 4) as u32;
 
             for st in 0..3u32 {
                 let st_base = smem + st * STAGE32 as u32;
                 if a_src0 == u32::MAX { st_shared_zero16(st_base + a_dst0); }
                 if a_src1 == u32::MAX { st_shared_zero16(st_base + a_dst0 + 4096); }
-                if !b_valid {
-                    if wide || b_half == 0 { st_shared_zero16(st_base + b_dst_off); }
-                    if b_half == 0 { store_u32(st_base + b_sc_dst_off, 0); }
+                if !b_valid && b_half == 0 {
+                    st_shared_zero16(st_base + b_dst_off);
+                    store_u32(st_base + b_sc_dst_off, 0);
                 }
             }
 
@@ -662,11 +761,7 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
                     if a_src0 != u32::MAX { crate::ptx::copy16(st_base + a_dst0, input.add((a_src0 + a_w) as usize)); }
                     if a_src1 != u32::MAX { crate::ptx::copy16(st_base + a_dst0 + 4096, input.add((a_src1 + a_w) as usize)); }
                     if b_code_off != u32::MAX {
-                        let b_co = if wide {
-                            (step_u >> 1) * 2048 + (step_u & 1) * 32
-                        } else {
-                            (step_u >> 1) * 1024 + (step_u & 1) * 16
-                        };
+                        let b_co = (step_u >> 1) * 1024 + (step_u & 1) * 16;
                         core::arch::asm!(
                             "cp.async.cg.shared.global [{d}], [{p}], 16;",
                             d = in(reg32) (st_base + b_dst_off),
@@ -675,7 +770,7 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
                         );
                     }
                     if b_scale_off != u32::MAX {
-                        let b_so = if wide { (step_u >> 2) * 128 } else { (step_u >> 1) * 128 };
+                        let b_so = (step_u >> 1) * 128;
                         core::arch::asm!(
                             "cp.async.ca.shared.global [{d}], [{p}], 4;",
                             d = in(reg32) (st_base + b_sc_dst_off),
@@ -701,62 +796,33 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
                 if subs > 0 {
                     let st_base = smem + cur * STAGE32 as u32;
                     let sc_base = st_base + (A_BYTES + PREFILL_BN * 32) as u32;
-                    if wide {
-                        let sc_shift = (step & 3) * 8;
-                        macro_rules! load_mx_row {
-                            ($row:expr, $k_sub:expr) => {{
-                                let row: usize = $row;
-                                let sc = (load_u32(sc_base + (row * 4) as u32) >> sc_shift) & 255;
-                                let (p1, p2, two) = if sc <= 142 {
-                                    (((sc + 112) << 7) * 0x0001_0001, 0, false)
-                                } else {
-                                    (0x7780_7780, (sc << 7) * 0x0001_0001, true)
-                                };
-                                let row_off = st_base + (A_BYTES + row * 32 + ($k_sub ^ ((row >> 2) & 1)) * 16) as u32;
-                                let c0 = crate::ptx::load_u16(row_off + (t * 2) as u32) as u16;
-                                let c1 = crate::ptx::load_u16(row_off + (8 + t * 2) as u32) as u16;
-                                [unpack_mx_pair!(c0, p1, p2, two), unpack_mx_pair!(c1, p1, p2, two)]
-                            }};
-                        }
-                        for k_sub in 0..2usize {
-                            let a_at = st_base + if k_sub == 0 { a_off } else { a_off ^ 32 };
-                            let r0 = load_mx_row!(b_r0, k_sub);
-                            let r1 = load_mx_row!(b_r0 + 8, k_sub);
-                            let r2 = load_mx_row!(b_r0 + 16, k_sub);
-                            let r3 = load_mx_row!(b_r0 + 24, k_sub);
-                            let bp0 = [r0[0], r0[1], r1[0], r1[1]];
-                            let bp1 = [r2[0], r2[1], r3[0], r3[1]];
-                            k_sub_mma!(a_at, bp0, bp1);
-                        }
-                    } else {
-                        let half_shift = (step & 1) * 16;
-                        macro_rules! load_nv_row {
-                            ($row:expr, $k_sub:expr) => {{
-                                let row: usize = $row;
-                                let sc = (load_u32(sc_base + (row * 4) as u32) >> (half_shift + ($k_sub * 8) as u32)) & 255;
-                                let s_raw = load_u32(smem + LUT_AT as u32 + sc * 4);
-                                let (v1, v3): (u32, u32);
-                                core::arch::asm!(
-                                    "prmt.b32 {v1}, {s}, {s}, 0x1010; prmt.b32 {v3}, {s}, {s}, 0x3232;",
-                                    v1 = out(reg32) v1, v3 = out(reg32) v3, s = in(reg32) s_raw,
-                                    options(pure, nomem, nostack),
-                                );
-                                let row_off = st_base + (A_BYTES + row * 16 + $k_sub * 8) as u32;
-                                let w_lo = load_u32(row_off) >> (t * 8);
-                                let w_hi = load_u32(row_off + 4) >> (t * 8);
-                                [unpack_nv_byte!(w_lo, v1, v3), unpack_nv_byte!(w_hi, v1, v3)]
-                            }};
-                        }
-                        for k_sub in 0..2usize {
-                            let a_at = st_base + if k_sub == 0 { a_off } else { a_off ^ 32 };
-                            let r0 = load_nv_row!(b_r0, k_sub);
-                            let r1 = load_nv_row!(b_r0 + 8, k_sub);
-                            let r2 = load_nv_row!(b_r0 + 16, k_sub);
-                            let r3 = load_nv_row!(b_r0 + 24, k_sub);
-                            let bp0 = [r0[0], r0[1], r1[0], r1[1]];
-                            let bp1 = [r2[0], r2[1], r3[0], r3[1]];
-                            k_sub_mma!(a_at, bp0, bp1);
-                        }
+                    let half_shift = (step & 1) * 16;
+                    macro_rules! load_nv_row {
+                        ($row:expr, $k_sub:expr) => {{
+                            let row: usize = $row;
+                            let sc = (load_u32(sc_base + (row * 4) as u32) >> (half_shift + ($k_sub * 8) as u32)) & 255;
+                            let s_raw = load_u32(smem + LUT_AT as u32 + sc * 4);
+                            let (v1, v3): (u32, u32);
+                            core::arch::asm!(
+                                "prmt.b32 {v1}, {s}, {s}, 0x1010; prmt.b32 {v3}, {s}, {s}, 0x3232;",
+                                v1 = out(reg32) v1, v3 = out(reg32) v3, s = in(reg32) s_raw,
+                                options(pure, nomem, nostack),
+                            );
+                            let row_off = st_base + (A_BYTES + row * 16 + $k_sub * 8) as u32;
+                            let w_lo = load_u32(row_off) >> (t * 8);
+                            let w_hi = load_u32(row_off + 4) >> (t * 8);
+                            [unpack_nv_byte!(w_lo, v1, v3), unpack_nv_byte!(w_hi, v1, v3)]
+                        }};
+                    }
+                    for k_sub in 0..2usize {
+                        let a_at = st_base + if k_sub == 0 { a_off } else { a_off ^ 32 };
+                        let r0 = load_nv_row!(b_r0, k_sub);
+                        let r1 = load_nv_row!(b_r0 + 8, k_sub);
+                        let r2 = load_nv_row!(b_r0 + 16, k_sub);
+                        let r3 = load_nv_row!(b_r0 + 24, k_sub);
+                        let bp0 = [r0[0], r0[1], r1[0], r1[1]];
+                        let bp1 = [r2[0], r2[1], r3[0], r3[1]];
+                        k_sub_mma!(a_at, bp0, bp1);
                     }
                 }
                 cur = if cur == 2 { 0 } else { cur + 1 };
