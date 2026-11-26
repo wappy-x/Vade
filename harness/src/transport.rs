@@ -266,6 +266,8 @@ pub(crate) struct DeadlineStream<'a> {
     start: Instant,
     progress: Instant,
     idle_timeout: Duration,
+    read_timeout: Option<Duration>,
+    write_timeout: Option<Duration>,
     cancel: Option<&'a AtomicBool>,
     deadline: Option<Instant>,
     downstream: Option<Arc<Mutex<Downstream>>>,
@@ -273,6 +275,9 @@ pub(crate) struct DeadlineStream<'a> {
     #[cfg(test)]
     on_read_wait: Option<Box<dyn FnOnce() + Send>>,
 }
+
+const DOWNSTREAM_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const COALESCE_WRITE_BYTES: usize = 64 * 1024;
 
 impl<'a> DeadlineStream<'a> {
     #[cfg(test)]
@@ -287,11 +292,14 @@ impl<'a> DeadlineStream<'a> {
         socket_option(stream.set_read_timeout(Some(POLL_TIMEOUT)))?;
         socket_option(stream.set_write_timeout(Some(POLL_TIMEOUT)))?;
         socket_option(stream.set_nodelay(true))?;
+        let now = Instant::now();
         Ok(Self {
             stream,
-            start: Instant::now(),
-            progress: Instant::now(),
+            start: now,
+            progress: now,
             idle_timeout: IDLE_TIMEOUT,
+            read_timeout: Some(POLL_TIMEOUT),
+            write_timeout: Some(POLL_TIMEOUT),
             cancel,
             deadline: None,
             downstream: None,
@@ -302,15 +310,19 @@ impl<'a> DeadlineStream<'a> {
     }
 
     pub(crate) fn check(&self) -> io::Result<()> {
+        self.check_at(Instant::now(), true)
+    }
+
+    fn check_at(&self, now: Instant, force_poll: bool) -> io::Result<()> {
         if self.cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
             return Err(io::Error::new(
                 io::ErrorKind::ConnectionAborted,
                 "request canceled",
             ));
         }
-        if self.start.elapsed() >= LIFETIME
-            || self.progress.elapsed() >= self.idle_timeout
-            || self.deadline.is_some_and(|at| Instant::now() >= at)
+        if now.saturating_duration_since(self.start) >= LIFETIME
+            || now.saturating_duration_since(self.progress) >= self.idle_timeout
+            || self.deadline.is_some_and(|at| now >= at)
         {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
@@ -318,7 +330,10 @@ impl<'a> DeadlineStream<'a> {
             ));
         }
         if let Some(downstream) = &self.downstream
-            && let Err(error) = downstream.lock().unwrap_or_else(|e| e.into_inner()).check()
+            && let Err(error) = downstream
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .check(now, force_poll)
         {
             // The client of this upstream request is gone. The engine keeps a
             // queued stream whose socket only closed, but it drops any request
@@ -328,7 +343,10 @@ impl<'a> DeadlineStream<'a> {
             return Err(error);
         }
         if let Some(input) = &self.buffered_input {
-            input.lock().unwrap_or_else(|e| e.into_inner()).check()?;
+            input
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .check(now, force_poll)?;
         }
         Ok(())
     }
@@ -336,13 +354,15 @@ impl<'a> DeadlineStream<'a> {
         self.idle_timeout = gateway_response_idle(method, path);
     }
     pub(crate) fn watch_downstream(&mut self) -> io::Result<()> {
+        let now = Instant::now();
         self.buffered_input = Some(Arc::new(Mutex::new(Downstream {
             socket: self.stream.try_clone()?,
             deadline: self.request_deadline(),
+            last_poll: now,
             buffered: VecDeque::new(),
             failure: None,
         })));
-        self.check()
+        self.check_at(now, true)
     }
     pub(crate) fn watch_peer(&mut self, peer: &Self) {
         self.downstream = peer.buffered_input.clone();
@@ -370,8 +390,20 @@ impl<'a> DeadlineStream<'a> {
     pub(crate) fn set_idle_timeout(&mut self, timeout: Duration) {
         self.idle_timeout = timeout;
     }
-    fn poll_timeout(&self) -> Duration {
-        let now = Instant::now();
+    pub(crate) fn write_all_coalesced(&mut self, head: &[u8], body: &[u8]) -> io::Result<()> {
+        if body.is_empty() {
+            return self.write_all(head);
+        }
+        if head.len().saturating_add(body.len()) <= COALESCE_WRITE_BYTES {
+            let mut combined = Vec::with_capacity(head.len() + body.len());
+            combined.extend_from_slice(head);
+            combined.extend_from_slice(body);
+            return self.write_all(&combined);
+        }
+        self.write_all(head)?;
+        self.write_all(body)
+    }
+    fn poll_timeout_at(&self, now: Instant) -> Duration {
         let mut remaining = (self.start + LIFETIME)
             .saturating_duration_since(now)
             .min((self.progress + self.idle_timeout).saturating_duration_since(now));
@@ -385,6 +417,22 @@ impl<'a> DeadlineStream<'a> {
         };
         interval.min(remaining).max(Duration::from_millis(1))
     }
+    fn apply_read_timeout(&mut self, now: Instant) -> io::Result<()> {
+        let timeout = self.poll_timeout_at(now);
+        if self.read_timeout != Some(timeout) {
+            socket_option(self.stream.set_read_timeout(Some(timeout)))?;
+            self.read_timeout = Some(timeout);
+        }
+        Ok(())
+    }
+    fn apply_write_timeout(&mut self, now: Instant) -> io::Result<()> {
+        let timeout = self.poll_timeout_at(now);
+        if self.write_timeout != Some(timeout) {
+            socket_option(self.stream.set_write_timeout(Some(timeout)))?;
+            self.write_timeout = Some(timeout);
+        }
+        Ok(())
+    }
 }
 
 // After a complete request, downstream EOF or a socket error cancels upstream;
@@ -396,15 +444,20 @@ impl<'a> DeadlineStream<'a> {
 struct Downstream {
     socket: TcpStream,
     deadline: Instant,
+    last_poll: Instant,
     buffered: VecDeque<u8>,
     failure: Option<io::ErrorKind>,
 }
 
 impl Downstream {
-    fn check(&mut self) -> io::Result<()> {
+    fn check(&mut self, now: Instant, force: bool) -> io::Result<()> {
         if let Some(kind) = self.failure {
             return Err(io::Error::new(kind, "downstream unavailable"));
         }
+        if !force && now.saturating_duration_since(self.last_poll) < DOWNSTREAM_POLL_INTERVAL {
+            return Ok(());
+        }
+        self.last_poll = now;
         let result = self.poll();
         if let Err(error) = &result {
             self.failure = Some(error.kind());
@@ -489,8 +542,10 @@ impl Read for DeadlineStream<'_> {
         if buffer.is_empty() {
             return Ok(0);
         }
+        let mut force_poll = false;
         loop {
-            self.check()?;
+            let now = Instant::now();
+            self.check_at(now, force_poll)?;
             if let Some(input) = &self.buffered_input {
                 let n = input
                     .lock()
@@ -498,12 +553,12 @@ impl Read for DeadlineStream<'_> {
                     .read_buffered(buffer);
                 if let Some(n) = n {
                     if n > 0 {
-                        self.progress = Instant::now();
+                        self.progress = now;
                     }
                     return Ok(n);
                 }
             }
-            socket_option(self.stream.set_read_timeout(Some(self.poll_timeout())))?;
+            self.apply_read_timeout(now)?;
             match self.stream.read(buffer) {
                 Ok(n) => {
                     if n > 0 {
@@ -523,6 +578,7 @@ impl Read for DeadlineStream<'_> {
                     if e.kind() != io::ErrorKind::Interrupted {
                         if let Some(on_wait) = self.on_read_wait.take() { on_wait(); }
                     }
+                    force_poll = true;
                     continue;
                 }
                 Err(e) => return Err(e),
@@ -533,13 +589,15 @@ impl Read for DeadlineStream<'_> {
 
 impl Write for DeadlineStream<'_> {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        let mut force_poll = false;
         loop {
-            self.check()?;
-            socket_option(self.stream.set_write_timeout(Some(self.poll_timeout())))?;
+            let now = Instant::now();
+            self.check_at(now, force_poll)?;
+            self.apply_write_timeout(now)?;
             match self.stream.write(buffer) {
                 Ok(n) => {
                     if n > 0 {
-                        self.progress = Instant::now();
+                        self.progress = now;
                     }
                     return Ok(n);
                 }
@@ -551,6 +609,7 @@ impl Write for DeadlineStream<'_> {
                             | io::ErrorKind::Interrupted
                     ) =>
                 {
+                    force_poll = true;
                     continue;
                 }
                 Err(e) => return Err(e),
@@ -558,7 +617,7 @@ impl Write for DeadlineStream<'_> {
         }
     }
     fn flush(&mut self) -> io::Result<()> {
-        self.check()?;
+        self.check_at(Instant::now(), false)?;
         self.stream.flush()
     }
 }
@@ -981,27 +1040,28 @@ impl Response<'_> {
 }
 
 pub(crate) fn hop_header(name: &str, head: &Head) -> bool {
-    matches!(
-        name,
-        "connection"
-            | "keep-alive"
-            | "proxy-authenticate"
-            | "proxy-authorization"
-            | "te"
-            | "trailer"
-            | "transfer-encoding"
-            | "upgrade"
-            | "host"
-            | "content-length"
-    ) || head
-        .fields
-        .iter()
-        .filter(|(key, _)| key == "connection")
-        .any(|(_, value)| {
-            value
-                .split(',')
-                .any(|token| token.trim().eq_ignore_ascii_case(name))
-        })
+    const HOP: &[&str] = &[
+        "connection",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+        "host",
+        "content-length",
+    ];
+    HOP.iter().any(|h| h.eq_ignore_ascii_case(name))
+        || head
+            .fields
+            .iter()
+            .filter(|(key, _)| key == "connection")
+            .any(|(_, value)| {
+                value
+                    .split(',')
+                    .any(|token| token.trim().eq_ignore_ascii_case(name))
+            })
 }
 
 #[cfg(test)]

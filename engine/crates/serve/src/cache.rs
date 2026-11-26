@@ -166,11 +166,10 @@ impl CacheLimits {
     pub(crate) fn checkpoint_bytes(&self) -> usize { self.retained_bytes / 2 }
     fn validate(&self) -> Result<(), String> {
         // Zero retained bytes disables snapshots; insertions still enforce it.
+        // Retained memory (`retained_bytes`) bounds live cache entries rather than an arbitrary entry cap.
         if self.entries == 0
-            || self.entries > 128
             || self.tokens_per_entry == 0
             || self.tokens_per_entry > crate::Limits::MAX_CONTEXT_TOKENS
-            || (self.retained_bytes != 0 && self.tokens_per_entry > 262144)
             || self.logits_per_entry == 0
             || self.logits_per_entry > 1_048_576
             || self.idle_ttl.is_zero()

@@ -360,6 +360,20 @@ fn codex_home_asks_for_no_thinking_only_where_the_model_can_turn_it_off() {
         assert!(config.contains(if none { "model_auto_compact_token_limit = 24576\nmodel_reasoning_effort = \"none\"\nweb_search = \"disabled\"\n" }
             else { "model_auto_compact_token_limit = 24576\nweb_search = \"disabled\"\n" }), "{config}");
     }
+    // 512K context server defaults Codex auto-compact to 307200 (300K) in both home and print modes.
+    let inkling_home = parent.join("inkling-512k");
+    let output = invoke(&["setup", "codex", "--endpoint", "http://127.0.0.1:18080", "--model", "inkling-2-mini", "--target", "direct", "--dedicated-home",
+        "--context-window", "524288", "--max-output-tokens", "16384", "--write", inkling_home.to_str().unwrap()]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let config = fs::read_to_string(inkling_home.join("config.toml")).unwrap();
+    assert!(config.contains("model_context_window = 524288\nmodel_auto_compact_token_limit = 307200\n"), "{config}");
+    let models = fs::read_to_string(inkling_home.join("models.json")).unwrap();
+    assert!(models.contains("\"context_window\":524288") && models.contains("\"auto_compact_token_limit\":307200"), "{models}");
+    let printed = invoke(&["setup", "codex", "--endpoint", "http://127.0.0.1:18080", "--model", "inkling-2-mini", "--target", "direct",
+        "--context-window", "524288", "--max-output-tokens", "16384"]);
+    assert!(printed.status.success(), "{}", stderr(&printed));
+    let text = stdout(&printed);
+    assert!(text.contains("model_context_window = 524288\nmodel_auto_compact_token_limit = 307200\n"), "{text}");
 }
 
 #[test]

@@ -6,8 +6,9 @@
 //! `models/inkling2_loop/modeling_inkling2_loop.py`; this file follows them and holds its own code).
 //! - The key plane and the value plane. One row a token: key heads times head size BF16 values, packed two a
 //!   word as `Op::PackBf16` writes them. A row holds the FINISHED key or value: after the convolution, and after
-//!   the clip (key) or the norm (value). A window layer has a ring of `window` rows. A layer that sees every
-//!   token has a straight plane of `capacity` rows.
+//!   the clip (key) or the norm (value). A window layer has a ring of `window` rows, and of a few spare rows more
+//!   in a driver that takes whole check passes (`spare_rows`). A layer that sees every token has a straight plane
+//!   of `capacity` rows.
 //! - Four convolution rings of `taps` rows each: for the key, the value, the stream after attention and the stream
 //!   after the experts. A row holds one INPUT of its convolution (the vector before the convolution), as 32-bit words.
 //!
@@ -25,14 +26,15 @@
 //! attention arms). `step_words` is the one place that makes such words.
 //!
 //! A step of many rows (`many`): a chat can take several positions in one step. The ring of a window layer in the
-//! state keeps `window` rows whatever the step row limit, so a token step reads only its window. A chat with more
-//! than one row in a step works in a wider ring of its own, `window + step row limit - 1` rows (`Layout::wide`):
-//! the rows it needs from the state go in first (`many::widen`), a row of the step still sees `window` keys at most,
-//! and no row of the step writes over a key that an earlier row of the step still reads. The window ring after the
-//! step (`many::narrow`) waits as pending until the whole step is done (`commit`), so the state keeps every key a
-//! step that fails needs to run again. The order of a sum over keys is by distance, so the ring size changes no
-//! word. A convolution ring is not written in such a step: each row gets its ring by one gather, and the ring after
-//! the step is kept as pending until the whole step is done (`commit`).
+//! state keeps `window` rows, and with a step row limit of a whole check pass or more it keeps the spare rows of one
+//! check pass too (`spare_rows`); a token step still reads only its window. A chat with more rows in a step than the
+//! state ring takes (`many::room`) works in a wider ring of its own, `window + step row limit - 1` rows
+//! (`Layout::wide`): the rows it needs from the state go in first (`many::widen`), a row of the step still sees
+//! `window` keys at most, and no row of the step writes over a key that an earlier row of the step still reads. The
+//! window ring after the step (`many::narrow`) waits as pending until the whole step is done (`commit`), so the
+//! state keeps every key a step that fails needs to run again. The order of a sum over keys is by distance, so the
+//! ring size changes no word. A convolution ring is not written in such a step: each row gets its ring by one
+//! gather, and the ring after the step is kept as pending until the whole step is done (`commit`).
 use crate::{Result,bounded_decoder::Compute};
 use engine_model::plan::description::LoopTextDescription;
 use super::rows::Limits;
@@ -43,6 +45,22 @@ pub use many::{accept,commit,conv_rings,discard,row_rings};
 
 /// A 32-bit float holds every whole number up to this one. A larger count or slot cannot be a step word.
 pub const STEP_WORD_LIMIT:usize=1<<24;
+/// The most rows of one chat in a check pass of drafted tokens that go straight into a window ring: the newest token
+/// and the proposed ones, the rows of one attention launch.
+pub const CHECK_ROWS:usize=spark_gpu_probe::flash_window::FW_ONE_ROWS_MAX;
+/// The spare rows of a window ring in the state, above its window, for a step row limit of `step_rows`: enough for
+/// one whole check pass (`CHECK_ROWS - 1`) where the limit takes one, else none.
+///
+/// Why spare rows: the row of position `p` lies in slot `p mod rows`, where the row of position `p - rows` was. With
+/// `rows = window + spare`, a step of up to `spare + 1` rows of a chat from position `first` writes only over
+/// positions up to `first - window`. No row from position `first` on reads those (it sees `window` keys at most).
+/// So the rows go into the ring before the chat keeps them: the rows that the chat does not keep are written again
+/// by the next step before any row reads them, as in a straight plane, and many chats share one attention launch.
+/// The order of a sum over keys is by position and by distance, never by slot, so the ring size changes no word.
+///
+/// Why none under `CHECK_ROWS`: a driver with a small limit keeps the ring of the token path (its window), and its
+/// check passes keep their rows apart (`VisitState::written`).
+pub const fn spare_rows(step_rows:usize)->usize {if step_rows>=CHECK_ROWS {CHECK_ROWS-1} else {0}}
 fn need(ok:bool,why:&str)->Result<()> {if ok {Ok(())} else {Err(format!("loop decoder state: {why}"))}}
 pub(super) fn size(n:u64)->Result<usize> {usize::try_from(n).map_err(|_|"loop decoder state: a size exceeds this host".to_owned())}
 
@@ -54,8 +72,8 @@ impl Ring {pub const ALL:[Self;4]=[Self::Key,Self::Value,Self::AfterAttention,Se
 /// The sizes of the state of one visit. Every number comes from the description of the visit's layer.
 #[derive(Debug,Clone,Copy,PartialEq,Eq)]
 pub struct Layout {
-    /// Rows of the key plane and of the value plane in the state. A window layer: its window (`wide` gives the ring of
-    /// a chat with many rows in a step). Else the admitted context.
+    /// Rows of the key plane and of the value plane in the state. A window layer: its window and the spare rows of a
+    /// check pass (`spare_rows`; `wide` gives the ring of a chat with more rows in a step). Else the admitted context.
     pub rows:usize,
     /// The most keys that one token sees: the window of a window layer, else `rows`.
     pub window:usize,
@@ -84,7 +102,8 @@ impl Layout {
         need(capacity>0 && capacity as u64<=d.max_positions,"the capacity is zero or above the model's longest chat")?;
         need(kv_channels>0 && kv_channels.is_multiple_of(2),"a packed row needs an even count of values")?;
         need(step_rows>0 && step_rows<=STEP_WORD_LIMIT && key_bytes>0,"a limit of a step is zero or too large")?;
-        let (ring,rows,window)=match a.window {Some(window)=>{let window=size(window)?;window.checked_add(step_rows-1).ok_or("loop decoder state: a ring size overflows")?;(true,window,window)},None=>(false,capacity,capacity)};
+        // The spare rows are at most `step_rows - 1`, so the checked sum bounds the ring of the state too.
+        let (ring,rows,window)=match a.window {Some(window)=>{let window=size(window)?;window.checked_add(step_rows-1).ok_or("loop decoder state: a ring size overflows")?;(true,window+spare_rows(step_rows),window)},None=>(false,capacity,capacity)};
         let layout=Self {rows,window,step_rows,key_bytes,ring,row_words:kv_channels/2,kv_channels,kv_taps:size(a.key_value_conv.kernel)?,channels:size(d.hidden)?,taps:size(d.conv.kernel)?};
         let wide=layout.wide().rows;
         need(rows>0 && layout.kv_taps>0 && layout.taps>0 && layout.channels>0,"a state size is zero")?;
@@ -112,6 +131,28 @@ impl Layout {
     pub fn view_rows(&self,position:u64)->Result<usize> {
         if self.ring {return Ok(self.rows);}
         Ok(self.live(position)?.checked_next_multiple_of(BUCKET_ROWS as usize).map_or(self.rows,|rows|rows.min(self.rows)))
+    }
+    /// `view_rows` bounded by the plane's currently mapped rows `plane_rows`. On paged GPU planes (`1,024` rows/page,
+    /// multiple of `BUCKET_ROWS = 256`), `view_rows(position) <= plane_rows` always holds; on tiny host fixtures with
+    /// `< 256` rows/page, this keeps the view inside the mapped prefix.
+    pub fn view_rows_in(&self,position:u64,plane_rows:usize)->Result<usize> {
+        if self.ring {
+            need(plane_rows==self.rows,"a ring plane differs from its window")?;
+            return Ok(self.rows);
+        }
+        let live=self.live(position)?;
+        need(live<=plane_rows && plane_rows<=self.rows,"a straight plane has fewer mapped rows than live tokens")?;
+        Ok(self.view_rows(position)?.min(plane_rows))
+    }
+    /// Rows of a straight KV plane mapped for `tokens` tokens at `page_bytes` allocation granularity (0 = full plane).
+    pub fn plane_rows_for(&self,tokens:usize,page_bytes:usize)->usize {
+        if self.ring {return self.rows;}
+        let row_bytes=self.row_words.saturating_mul(4);
+        if page_bytes==0 || row_bytes==0 || self.rows.saturating_mul(row_bytes)<page_bytes {
+            return self.rows;
+        }
+        let page_rows=page_bytes.div_ceil(row_bytes).max(1);
+        tokens.max(1).div_ceil(page_rows).saturating_mul(page_rows).min(self.rows)
     }
     /// Channels and rows of one convolution ring.
     pub fn ring_size(&self,ring:Ring)->(usize,usize) {
@@ -153,49 +194,85 @@ pub fn clean<C:Compute>(compute:&C,layouts:&[Layout])->Result<State<C::Value>> {
         next:std::array::from_fn(|_|None),planes:None,every:std::array::from_fn(|_|None),written:None})).collect::<Result<Vec<_>>>()?;
     Ok(State {position:0,visits})
 }
+/// Mapped rows of `plane`: fixed `layout.rows` for a ring, or `1..=layout.rows` whole rows for a growing straight plane.
+pub fn plane_rows<C:Compute>(compute:&C,layout:&Layout,plane:&C::Value)->Result<usize> {
+    let words=compute.words(plane);
+    if layout.ring {
+        need(words==layout.rows*layout.row_words,"a ring plane differs from the layout")?;
+        return Ok(layout.rows);
+    }
+    need(words>0 && words.is_multiple_of(layout.row_words),"a straight plane differs from the row width")?;
+    let rows=words/layout.row_words;
+    need(rows<=layout.rows,"a straight plane exceeds the layout capacity")?;
+    Ok(rows)
+}
+/// Ensure every straight KV plane of `state` is mapped for at least `needed_tokens` tokens (capped at `layout.rows`).
+/// Call outside `compute.work` so CUDA VMM page maps never execute inside an unsubmitted resident launch queue.
+pub fn ensure_capacity<C:Compute>(compute:&C,layouts:&[Layout],state:&mut State<C::Value>,needed_tokens:usize)->Result<()> {
+    need(state.visits.len()==layouts.len(),"the state differs from the visits of the description")?;
+    let page_bytes=compute.plane_page_bytes();
+    for (visit,layout) in state.visits.iter_mut().zip(layouts) {
+        if layout.ring {continue;}
+        let want_words=layout.plane_rows_for(needed_tokens,page_bytes)*layout.row_words;
+        let max_words=layout.rows*layout.row_words;
+        if compute.words(&visit.keys)<want_words {compute.plane_grow(&mut visit.keys,want_words,max_words)?;}
+        if compute.words(&visit.values)<want_words {compute.plane_grow(&mut visit.values,want_words,max_words)?;}
+    }
+    Ok(())
+}
 /// Live global KV occupies only the committed rows. Wrapped windows must keep their original slot layout.
 fn prefix_plane_words(layout:&Layout,position:u64)->usize {
     layout.row_words*if layout.ring {layout.rows} else {(position as usize).min(layout.rows)}
 }
-pub(super) fn prefix_bytes<V>(layouts:&[Layout],position:u64)->usize {
-    // Device copies use the resident vector pool, which rounds each buffer to a 4 KiB page.
+/// Private (non-straight-plane) bytes retained by one snapshot: window rings, convolution rings, and metadata.
+pub(super) fn retained_private_bytes<V>(layouts:&[Layout])->usize {
     let bytes=|words:usize|(words*4).next_multiple_of(4096);
     layouts.iter().map(|l| {
-        2*(bytes(prefix_plane_words(l,position))+bytes(l.kv_taps*l.kv_channels)+bytes(l.taps*l.channels))
+        let rings=2*(bytes(l.kv_taps*l.kv_channels)+bytes(l.taps*l.channels));
+        let window=if l.ring {2*bytes(l.rows*l.row_words)} else {0};
+        window+rings+std::mem::size_of::<VisitState<V>>()
+    }).sum()
+}
+pub(super) fn prefix_bytes<V>(layouts:&[Layout],position:u64,page_bytes:usize)->usize {
+    let bytes=|words:usize|(words*4).next_multiple_of(4096);
+    layouts.iter().map(|l| {
+        let plane=if l.ring {
+            bytes(l.rows*l.row_words)
+        } else {
+            let rows=l.plane_rows_for(position as usize,page_bytes);
+            bytes(rows*l.row_words)
+        };
+        2*(plane+bytes(l.kv_taps*l.kv_channels)+bytes(l.taps*l.channels))
             +std::mem::size_of::<VisitState<V>>()
     }).sum()
 }
-/// Copy a committed state at its exact position. A kept state has compact global planes; a live
-/// fork restores full writable capacity. No mutable plane or ring aliases the source after this.
-pub(super) fn copy_prefix<C:Compute>(compute:&C,layouts:&[Layout],state:&State<C::Value>,restore:bool)->Result<State<C::Value>> {
+/// Copy a committed state at its exact position inside an active unrecorded `compute.work` scope.
+/// Straight planes use zero-copy CoW page aliasing (`plane_fork`) up to complete pages and copy only the
+/// partial tail; `restore` maps writable capacity for `target_tokens`.
+pub(super) fn copy_prefix_unrecorded<C:Compute>(compute:&C,layouts:&[Layout],state:&State<C::Value>,restore:bool,target_tokens:usize)->Result<State<C::Value>> {
     need(state.position>0 && state.visits.len()==layouts.len(),"invalid prefix state")?;
-    compute.work(|| {
-        // Bulk state snapshot/restore uses direct DtoD DMA copies rather than recording one-off graph pieces.
-        let paused=compute.rows_unrecorded(true)?;
-        let copied=(|| {
-            let visits=state.visits.iter().zip(layouts).map(|(visit,layout)| {
-                need(visit.planes.is_none() && visit.next.iter().all(Option::is_none) && visit.every.iter().all(Option::is_none) && visit.written.is_none(),"cannot copy an unfinished step")?;
-                let copy=|source:&C::Value| compute.rows_append(None,0,source,1);
-                let plane=|source:&C::Value| {
-                    let words=prefix_plane_words(layout,state.position);
-                    let live=compute.range(source,0,words)?;
-                    let full=layout.rows*layout.row_words;
-                    if restore && words<full {
-                        compute.state_restore(&live,full)
-                    } else {
-                        copy(&live)
-                    }
-                };
-                let [k,v,attention,experts]=&visit.rings;
-                Ok(VisitState {keys:plane(&visit.keys)?,values:plane(&visit.values)?,
-                    rings:[copy(k)?,copy(v)?,copy(attention)?,copy(experts)?],
-                    next:std::array::from_fn(|_|None),planes:None,every:std::array::from_fn(|_|None),written:None})
-            }).collect::<Result<Vec<_>>>()?;
-            Ok(State {position:state.position,visits})
-        })();
-        let resumed=compute.rows_unrecorded(paused);
-        copied.and_then(|state|resumed.map(|_|state))
-    })
+    let page_bytes=compute.plane_page_bytes();
+    let visits=state.visits.iter().zip(layouts).map(|(visit,layout)| {
+        need(visit.planes.is_none() && visit.next.iter().all(Option::is_none) && visit.every.iter().all(Option::is_none) && visit.written.is_none(),"cannot copy an unfinished step")?;
+        let copy=|source:&C::Value| compute.rows_append(None,0,source,1);
+        let plane=|source:&C::Value| {
+            if layout.ring {
+                let words=prefix_plane_words(layout,state.position);
+                let live=compute.range(source,0,words)?;
+                return copy(&live);
+            }
+            let committed=prefix_plane_words(layout,state.position);
+            let max_words=layout.rows*layout.row_words;
+            let want_tokens=if restore {target_tokens.max(state.position as usize)} else {state.position as usize};
+            let needed=layout.plane_rows_for(want_tokens,page_bytes)*layout.row_words;
+            compute.plane_fork(source,committed,needed,max_words)
+        };
+        let [k,v,attention,experts]=&visit.rings;
+        Ok(VisitState {keys:plane(&visit.keys)?,values:plane(&visit.values)?,
+            rings:[copy(k)?,copy(v)?,copy(attention)?,copy(experts)?],
+            next:std::array::from_fn(|_|None),planes:None,every:std::array::from_fn(|_|None),written:None})
+    }).collect::<Result<Vec<_>>>()?;
+    Ok(State {position:state.position,visits})
 }
 /// Numbers for an arm, one 32-bit word each: a live count, a slot.
 pub fn step_words<C:Compute>(compute:&C,numbers:&[usize])->Result<C::Value> {
@@ -211,8 +288,10 @@ pub fn pack<C:Compute>(compute:&C,values:&C::Value)->Result<C::Value> {
 /// Put the finished key or value of the token at `position` into its row of `plane`. `finished` holds the BF16
 /// values of one row, not packed. No other row changes.
 pub fn write_row<C:Compute>(compute:&C,layout:&Layout,plane:&mut C::Value,position:u64,finished:&C::Value)->Result<()> {
-    need(compute.words(finished)==layout.kv_channels && compute.words(plane)==layout.rows*layout.row_words,"a key or value row differs from the layout")?;
-    let packed=pack(compute,finished)?;compute.state_fill(plane,layout.slot(position)?*layout.row_words,&packed)
+    let cap=plane_rows(compute,layout,plane)?;
+    let slot=layout.slot(position)?;
+    need(compute.words(finished)==layout.kv_channels && slot<cap,"a key or value row differs from the layout")?;
+    let packed=pack(compute,finished)?;compute.state_fill(plane,slot*layout.row_words,&packed)
 }
 /// Put the input of one convolution for the token at `position` into its ring row. No other row changes.
 /// It gives the step word of arm `ShortConv`: the ring row of the current token.
@@ -224,7 +303,8 @@ pub fn write_ring<C:Compute>(compute:&C,layout:&Layout,which:Ring,rings:&mut [C:
 /// The first `rows` rows of a plane, for the attention arms: `rows` is `Layout::view_rows` of the token.
 /// The two step words of those arms are the live count and the row of the token (`Layout::live`, `Layout::slot`).
 pub fn view<C:Compute>(compute:&C,layout:&Layout,plane:&C::Value,rows:usize)->Result<C::Value> {
-    need(compute.words(plane)==layout.rows*layout.row_words && rows>0 && rows<=layout.rows,"a plane or its view differs from the layout")?;
+    let cap=plane_rows(compute,layout,plane)?;
+    need(rows>0 && rows<=cap,"a plane or its view differs from the layout")?;
     compute.range(plane,0,rows*layout.row_words)
 }
 #[cfg(test)]
@@ -255,6 +335,17 @@ mod tests {
         let wide=wider[0].wide();assert_eq!((wide.rows,wide.slot(9).unwrap(),wide.view_rows(9).unwrap(),wide.live(9).unwrap()),(8,1,8,4));
         assert_eq!(Layout {step_rows:1,key_bytes:1<<30,..wider[0]},l[0]);assert_eq!(l[0].wide(),l[0]);
         assert_eq!(Layout {step_rows:1,key_bytes:1<<30,..wider[1]},l[1]);assert_eq!(layouts_for(d,16,Limits::ONE).unwrap(),l);
+        // A step row limit of one whole check pass or more: the state ring keeps the spare rows of one check pass.
+        // A token still sees the window, its slot goes round the larger ring, and a plane does not change.
+        assert_eq!((spare_rows(1),spare_rows(CHECK_ROWS-1),spare_rows(CHECK_ROWS),spare_rows(4096)),(0,0,CHECK_ROWS-1,CHECK_ROWS-1));
+        for limit in [CHECK_ROWS,CHECK_ROWS+5] {
+            let spare=layouts_for(d,16,Limits {step_rows:limit,key_bytes:64}).unwrap();let ring=4+CHECK_ROWS-1;
+            assert_eq!((spare[0].rows,spare[0].window,spare[0].wide().rows,spare[0].view_rows(40).unwrap()),(ring,4,4+limit-1,ring));
+            assert_eq!((spare[0].live(2).unwrap(),spare[0].live(40).unwrap(),spare[0].slot(40).unwrap(),spare[0].slot(ring as u64).unwrap()),(3,4,40%ring,0));
+            assert_eq!(Layout {rows:4,..spare[0]},Layout {step_rows:limit,key_bytes:64,..l[0]});assert_eq!(Layout {step_rows:1,key_bytes:1<<30,..spare[1]},l[1]);
+            assert_eq!(spare[0].words(),2*ring*8+2*4*16+2*4*32);
+        }
+        assert_eq!(layouts_for(d,16,Limits {step_rows:CHECK_ROWS-1,key_bytes:64}).unwrap()[0].rows,4);
         assert!(layouts_for(d,16,Limits {step_rows:0,key_bytes:64}).is_err() && layouts_for(d,16,Limits {step_rows:2,key_bytes:0}).is_err());
         // The two visits of one layer have the same layout and their own state.
         assert_eq!((l[2],l[3]),(l[4],l[5]));assert_eq!(l[0].words(),2*4*8+2*4*16+2*4*32);

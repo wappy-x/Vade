@@ -34,12 +34,12 @@ fn a_loop_checkpoint_starts_on_one_spark() {
     let manifest = f.app.manifest().unwrap();
     let direct = Session::new(&f.app.config, &fp4_options(&["--sparks", "1", "--diagnostic-unqualified-text"]), &manifest, "a".repeat(64)).unwrap();
     assert_eq!((direct.group_len(), direct.topology(), direct.two_sparks()), (1, "path", false));
-    assert_eq!((direct.mtp, direct.mtp_explicit, direct.context), (0, true, 32768));
+    assert_eq!((direct.mtp, direct.mtp_explicit, direct.context, direct.output), (0, true, 524_288, 16384));
     let args = direct.engine_args(0);
     assert_eq!(&args[..4], &[String::from("0"), String::from("1"), String::from("127.0.0.1:0"), String::from("127.0.0.1:0")]);
     assert!(args.iter().any(|arg| arg == "--diagnostic-unqualified-text") && depth(&args, "0"));
     assert!(!args.iter().any(|arg| arg == "--fp4-local" || arg == "--decode-fuse"));
-    assert!(!direct.ranks[0].machine.model_path.contains("inkling"));
+    assert!(!std::path::Path::new(&direct.ranks[0].machine.model_path).file_name().unwrap().to_string_lossy().contains("inkling"));
     f.app.up(&fp4_options(&["--sparks", "1", "--diagnostic-unqualified-text"])).unwrap();
     let saved = Session::load(&f.app.config.state_dir).unwrap().unwrap();
     let saved_args = saved.engine_args(0);
@@ -120,13 +120,13 @@ fn a_named_draft_depth_is_refused_when_the_plan_has_no_draft() {
 #[test]
 fn a_loop_checkpoint_with_declared_draft_accepts_named_mtp_up_to_its_plan_max() {
     let draft_cfg = crate::text_service::LOOP_DRAFT_CONFIG;
-    // Bare start stays at depth 0 (`--mtp 0`).
+    // Bare start defaults to the checkpoint's max drafting depth (`--mtp 7`) and 512K context / 16K output.
     let mut bare = with_config(1, "checkpoint", Some(draft_cfg));
     bare.app.up(&fp4_options(&["--sparks", "1", "--diagnostic-unqualified-text"])).unwrap();
     let saved = Session::load(&bare.app.config.state_dir).unwrap().unwrap();
-    assert_eq!((saved.group_len(), saved.mtp, saved.mtp_explicit), (1, 0, true));
-    assert!(depth(&saved.engine_args(0), "0"));
-    // Explicit --mtp 1..=7 passes through to flash-serve.
+    assert_eq!((saved.group_len(), saved.mtp, saved.mtp_explicit, saved.context, saved.output), (1, 7, true, 524_288, 16384));
+    assert!(depth(&saved.engine_args(0), "7"));
+    // Explicit --mtp 0..=7 passes through to flash-serve.
     for depth_arg in ["0", "1", "3", "7"] {
         let mut f = with_config(1, "checkpoint", Some(draft_cfg));
         f.app.up(&fp4_options(&["--sparks", "1", "--diagnostic-unqualified-text", "--mtp", depth_arg])).unwrap();
@@ -144,11 +144,11 @@ fn a_loop_checkpoint_with_declared_draft_accepts_named_mtp_up_to_its_plan_max() 
     let mut two = with_config(2, "checkpoint", Some(draft_cfg));
     let err = two.app.up(&fp4_options(&["--sparks", "2", "--diagnostic-unqualified-text", "--mtp", "7"])).unwrap_err();
     assert!(err.contains("no transport between Sparks") && !started(&two) && !two.recorded(), "{err}");
-    // Remote Spark reporting text_draft_max=7 enables --mtp 7 over SSH.
-    let remote_draft = "text_sparks=1\ntext_draft_default=0\ntext_draft_max=7\n";
+    // Remote Spark reporting text_draft_default=7, text_draft_max=7 enables --mtp 7 over SSH (and defaults to 7).
+    let remote_draft = "text_sparks=1\ntext_draft_default=7\ntext_draft_max=7\n";
     let mut one_f = Fixture::fp4(1, false);
     let mut one = take(&mut one_f, remote_draft, true);
-    one.up(&fp4_options(&["--sparks", "1", "--diagnostic-unqualified-text", "--mtp", "7"])).unwrap();
+    one.up(&fp4_options(&["--sparks", "1", "--diagnostic-unqualified-text"])).unwrap();
     let saved = Session::load(&one.config.state_dir).unwrap().unwrap();
     assert_eq!((saved.group_len(), saved.mtp, saved.mtp_explicit), (1, 7, true));
     assert!(depth(&saved.engine_args(0), "7"));
@@ -402,7 +402,7 @@ fn admitted_chats_reads_the_loop_ready_line() {
     assert_eq!(crate::state::admitted_chats("LOOP TEXT ADMISSION\nLOOP TEXT LOAD\n"), None);
     assert_eq!(crate::state::admitted_chats(&line.replace(" max_chats=1", "")), None);
     assert_eq!(crate::state::admitted_chats(&line.replace("max_chats=1", "max_chats=0")), None);
-    assert_eq!(crate::state::admitted_chats(&line.replace("max_chats=1", "max_chats=33")), None);
+    assert_eq!(crate::state::admitted_chats(&line.replace("max_chats=1", "max_chats=89")), Some(89));
     let flash = "flashnext ready world=1 model=m context=32768 concurrency=rows active=8 connections=16";
     assert_eq!(crate::state::admitted_chats(&format!("{line}\n{flash}\n")), Some(8));
     assert_eq!(crate::state::admitted_chats(&format!("{flash}\n{line}\n")), Some(1));

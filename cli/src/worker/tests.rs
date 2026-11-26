@@ -288,7 +288,7 @@ fn text_service_op_reads_the_checkpoint_plan() {
     fs::create_dir(&loop_draft_dir).unwrap();
     fs::write(loop_draft_dir.join("config.json"), crate::text_service::LOOP_DRAFT_CONFIG).unwrap();
     let reply = handle(&fields(&[("op", "text-service"), ("model_path", loop_draft_dir.to_str().unwrap())])).unwrap();
-    assert_eq!((reply["text_sparks"].as_str(), reply["text_draft_default"].as_str(), reply["text_draft_max"].as_str()), ("1", "0", "7"));
+    assert_eq!((reply["text_sparks"].as_str(), reply["text_draft_default"].as_str(), reply["text_draft_max"].as_str()), ("1", "7", "7"));
     let other = root.join("notes");
     fs::create_dir(&other).unwrap();
     fs::write(other.join("config.json"), r#"{"model_type":"other","architectures":["Inkling2LoopForConditionalGeneration"]}"#).unwrap();

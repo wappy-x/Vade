@@ -54,6 +54,8 @@ Options:
   --yes                 Agent: no prompts (same as --approval auto); blocked commands
                         stay blocked. Alias: --dangerously-skip-prompts
   --context-tokens N    Agent: override server context budget; default from capabilities
+  --auto-compact-tokens N
+                        Agent: auto-compact threshold in tokens (default 307200 at >=400K, else 80%)
   --no-compact          Agent: no automatic compaction; /compact still works
   --prewarm-compaction  Agent: opt in to a one-token cache warm after compaction; reply discarded
   --reply-tokens N      Agent: estimated prose budget; 0 disables local budgeting
@@ -80,6 +82,8 @@ Options:
   --plain               Line input; no raw terminal/color
   --bind ADDRESS        Gateway bind, default 127.0.0.1:8787
   --children            Agent only: enable bounded children (read-only by default)
+  --max-subagents N     Agent: max concurrent subagents (default 8)
+  --subagent-context N  Agent: token budget and context cap per subagent (default 131072)
   --child-edit NAME=PATH
                         Host scope for exact file edits (repeat for each leased file)
   --child-shell NAME    Host scope for shell; exclusive workspace writes, approvals apply
@@ -201,6 +205,8 @@ Usage: vade-harness agent --endpoint URL --model NAME --workspace PATH [OPTIONS]
   --yes                 No prompts (same as --approval auto); blocked commands stay
                         blocked. Alias: --dangerously-skip-prompts
   --context-tokens N    Override server context budget (fallback 131072)
+  --auto-compact-tokens N
+                        Auto-compact threshold in tokens (default 307200 at >=400K, else 80%)
   --agent-time-limit-seconds N
                         Active work per request (default 1200; 0 disables)
   --config PATH         Native JSON config; time limit and auto_continue settings
@@ -227,6 +233,8 @@ Usage: vade-harness agent --endpoint URL --model NAME --workspace PATH [OPTIONS]
   --shell-exclude NAME  Block another directory name (repeat up to 8)
   --shell-toolchain DIR Owner-selected Rust distribution; bin/lib read-only
   --children            Enable bounded children; default scopes are read-only
+  --max-subagents N     Max concurrent subagents (default 8)
+  --subagent-context N  Token budget and context cap per subagent (default 131072)
   --child-edit NAME=PATH
                         Grant an exact child file scope (repeatable)
   --child-shell NAME    Grant an exclusive child shell scope (repeatable)

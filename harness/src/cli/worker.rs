@@ -222,7 +222,13 @@ impl App {
             };
         // One status line when a file changed since the last turn. Agent mode
         // shows it when the changed text joins the turn, which covers resume.
-        if let Some(line) = self.instructions.refresh().filter(|_| self.config.mode != Mode::Agent) {
+        // Direct mode freezes its system prefix after turn 1 so mid-session
+        // edits to instruction files do not bust the engine's KV prefix cache.
+        if self.config.mode == Mode::Direct && self.direct_instructions.is_some() {
+            if self.instructions.changed() {
+                self.notice("Project instructions changed; keeping current prefix for cache stability (use /new to reload).")?;
+            }
+        } else if let Some(line) = self.instructions.refresh().filter(|_| self.config.mode != Mode::Agent) {
             self.notice(&line)?;
         }
         let retrying = std::mem::take(&mut self.answers.retrying);
@@ -301,6 +307,7 @@ impl App {
                 max_run_time: self.config.max_run_time,
                 max_context_tokens: self.config.context_budget(&self.context),
                 output_reserve_tokens: self.config.output_reserve(model.context()),
+                auto_compact_tokens: self.config.auto_compact_tokens,
                 ..Limits::default()
             };
             if !self.internal_prompt(&user) {
@@ -329,8 +336,11 @@ impl App {
         let messages = if matches!(mode, Mode::Codex | Mode::Hermes | Mode::Agent) {
             Vec::new()
         } else {
+            let section = self
+                .direct_instructions
+                .get_or_insert_with(|| self.instructions.section().to_owned());
             let system = vade_harness::memory::with_memory(&format!("{SYSTEM_PROMPT}\n{}", vade_harness::session::model_identity(self.config.model.as_deref().unwrap_or("unspecified"))), &self.memory);
-            prompt::build_messages(&prompt::with_instructions(&system, self.instructions.section()), self.session.history(), &user)
+            prompt::build_messages(&prompt::with_instructions(&system, section), self.session.history(), &user)
         };
         let endpoint = self.config.endpoint.clone().unwrap_or_default();
         let model = self.config.model.clone().unwrap_or_default();
@@ -411,6 +421,8 @@ impl App {
                 },
                 generation,
                 self.config.child_grants.clone(),
+                self.config.max_subagents,
+                self.config.subagent_context,
                 Arc::clone(&cancel),
             ) {
                 Ok(scheduler) => Some(scheduler),
@@ -446,6 +458,7 @@ impl App {
             .as_ref()
             .map(|(command, _)| command.clone());
         let auto_compact = self.config.auto_compact;
+        let auto_compact_tokens = self.config.auto_compact_tokens;
         let auto_continue = self.config.auto_continue;
         let compaction_trigger = Arc::clone(&self.auto_compaction);
         let context_tokens = self.config.context_budget(&self.context);
@@ -574,6 +587,7 @@ impl App {
                             },
                             max_context_tokens: context_tokens,
                             output_reserve_tokens,
+                            auto_compact_tokens,
                             ..Limits::default()
                         },
                         scheduler,
@@ -598,6 +612,7 @@ impl App {
                                 },
                                 max_context_tokens: context_tokens,
                                 output_reserve_tokens,
+                                auto_compact_tokens,
                                 ..Limits::default()
                             },
                             &worker_cancel,

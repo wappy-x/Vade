@@ -103,8 +103,9 @@ pub struct Seats {pub limits:Limits,pub chat:usize,pub room:usize,pub most:usize
 pub struct Service<'a,C:Compute,W:Weights<C>> {
     model:Option<&'a dyn mtp::Model<C,W>>,depth:usize,
     driver:Driver<'a,C,W>,compute:&'a C,rows:usize,context:usize,eos:Vec<u32>,
-    /// Bytes that one chat reserves, the bytes of the values of one step, what the chats can use, and the chats.
-    chat_bytes:usize,step:usize,pool:usize,chats:usize,
+    /// Fixed per-chat bytes (ledger chat less straight planes), extra shared-step ring bytes, minimum paged chat
+    /// reservation, step workspace bytes, session pool bytes, and max concurrent active chats.
+    fixed_base:usize,extra_rings:usize,chat_bytes:usize,step:usize,pool:usize,chats:usize,
     keep:bool,
     /// Chats that are open now, and the number of the next chat.
     live:Cell<usize>,next:Cell<u64>,
@@ -126,17 +127,9 @@ impl<'a,C:Compute,W:Weights<C>> Service<'a,C,W> {
     /// `context` is the longest chat in tokens. `eos` is the stop set: the caller gives the EOS list of the checkpoint.
     /// `seats` gives the limits of a step and the bytes (`Admitted::seats`).
     ///
-    /// The chats of the service are counted here, with the driver's own numbers:
-    /// - The values of the largest step come off the room once (`Driver::device_words` for a step of the row limit
-    ///   over all chats of the service, where one row a chat runs the end and gives its logits back: the words of
-    ///   its values and the rest of the last page of each device buffer). A prompt piece runs the end on its last
-    ///   row only, and a new token is one row a chat, so a step of this service has at most one end row a chat;
-    ///   `batch` cuts a step that would have more (`ends`).
-    /// - A chat reserves its bytes of the ledger and, for each other chat of the service, one more set of
-    ///   convolution rings: the rings of a chat are views of one block of its last step, and a chat that waits
-    ///   keeps that block alive.
-    /// - The count is the most chats that fit so, at most `seats.most` and at most the step row limit (a step of
-    ///   new tokens has one row a chat). No chat fits: the start is refused with the numbers.
+    /// Straight KV planes grow in pages (`Compute::plane_page_bytes`), so `new` requires at least one full-context
+    /// chat to fit beside one step, then admits every chat slot up to `seats.most` (the launch-row ABI limit) that
+    /// fits in `seats.room` at each chat's minimum paged footprint; the scheduler enforces exact live paged bytes.
     pub fn new(compute:&'a C,weights:&'a W,description:&'a LoopTextDescription,context:usize,eos:Vec<u32>,seats:Seats)->Result<Self> {
         need(context>0 && context as u64<=description.max_positions,"the context is zero or above the model's longest chat")?;
         let rows=size(description.head_rows)?;
@@ -148,9 +141,14 @@ impl<'a,C:Compute,W:Weights<C>> Service<'a,C,W> {
         let driver=Driver::with_limits(compute,weights,description,context as u64,seats.limits)?;
         need(driver.state_words().checked_mul(4).is_some_and(|bytes|bytes<=seats.chat),"the state of one chat is larger than the bytes that the ledger reserves for a chat")?;
         let rings=driver.layouts().iter().map(|layout|2*(layout.kv_taps*layout.kv_channels+layout.taps*layout.channels)).sum::<usize>().saturating_mul(4);
+        let page_bytes=compute.plane_page_bytes();
+        let full_planes:usize=driver.layouts().iter().filter(|l|!l.ring).map(|l|2*l.rows*l.row_words*4).sum();
+        let min_planes:usize=driver.layouts().iter().filter(|l|!l.ring).map(|l|2*l.plane_rows_for(1,page_bytes)*l.row_words*4).sum();
+        let fixed_base=seats.chat.saturating_sub(full_planes);
         // `settle` detaches any waiting chat immediately after a cohort step, so a live chat holds at most one
         // extra ring set across its active step (linear in chats).
-        let hold=|chats:usize|if chats>1 {seats.chat.saturating_add(rings)} else {seats.chat};
+        let min_hold=|chats:usize|fixed_base.saturating_add(min_planes).saturating_add(if chats>1 {rings} else {0});
+        let full_hold=|chats:usize|seats.chat.saturating_add(if chats>1 {rings} else {0});
         // `seats.chat` already reserves widened window-ring slack from the ledger (`chat_slack`). Avoid charging the
         // same per-chat window-plane scratch twice in `driver.device_words` for chats beyond the first.
         let chat_slack=seats.chat.saturating_sub(driver.state_words().saturating_mul(4));
@@ -162,11 +160,15 @@ impl<'a,C:Compute,W:Weights<C>> Service<'a,C,W> {
         let window_credit=window_step_per_chat.min(chat_slack);
         let step=|chats:usize|driver.device_words(limit,chats,chats,chats).saturating_mul(4)
             .saturating_sub(chats.saturating_sub(1).saturating_mul(window_credit));
-        let fits=|chats:usize|chats.saturating_mul(hold(chats)).saturating_add(step(chats))<=seats.room;
+        let fits=|chats:usize| {
+            let s=step(chats);
+            s.saturating_add(full_hold(chats))<=seats.room
+                && s.saturating_add(chats.saturating_mul(min_hold(chats)))<=seats.room
+        };
         let chats=(1..=seats.most).take_while(|&chats|fits(chats)).last().unwrap_or(0);
         if chats==0 {return Err(format!("text service memory refusal: CONTEXT={context}; room={}; step_values={}; session_pool={}; full_session={}; no chat fits beside the values of one step of {limit} rows: reduce CONTEXT",seats.room,step(1),seats.room.saturating_sub(step(1)),seats.chat));}
-        let (step,chat_bytes)=(step(chats),hold(chats));
-        Ok(Self {model:None,depth:0,driver,compute,rows,context,eos,chat_bytes,step,pool:seats.room-step,chats,keep:true,live:Cell::new(0),next:Cell::new(0),slots:RefCell::new(Vec::new()),detached:Cell::new(0),token_steps:Cell::new(0),
+        let (step,chat_bytes,extra_rings)=(step(chats),min_hold(chats),if chats>1 {rings} else {0});
+        Ok(Self {model:None,depth:0,driver,compute,rows,context,eos,fixed_base,extra_rings,chat_bytes,step,pool:seats.room-step,chats,keep:true,live:Cell::new(0),next:Cell::new(0),slots:RefCell::new(Vec::new()),detached:Cell::new(0),token_steps:Cell::new(0),
             cohort:RefCell::new(mtp_batch::CohortPricing::default()),
             #[cfg(test)] batch_steps:Cell::new(0)})
     }
@@ -207,8 +209,31 @@ impl<'a,C:Compute,W:Weights<C>> Service<'a,C,W> {
     pub fn limits(&self)->Limits {self.driver.limits()}
     /// Bytes of the state that the driver allocates for one chat.
     pub fn state_bytes(&self)->usize {self.driver.state_words()*4}
-    /// Bytes that one chat reserves: its bytes of the ledger and the rings that it can keep alive for the other chats.
+    /// Minimum bytes that one paged chat reserves (fixed rings + 1 straight-plane page + extra ring set).
     pub fn chat_bytes(&self)->usize {self.chat_bytes}
+    /// Non-straight-plane bytes of one chat (window rings, conv rings, slack, and optional bounded local draft buffers):
+    /// stored in the vector pool rather than the VMM KV page reserve.
+    pub fn fixed_chat_bytes(&self)->usize {
+        let local_draft=if self.depth>0 {
+            self.model.map_or(0,|m| {
+                let cfg=m.config();
+                let row_bytes=cfg.kv_width().saturating_mul(4);
+                (0..cfg.num_layers).filter(|&i|cfg.is_local(i)).map(|_|2*super::draft::local_kv_cap(cfg,self.context).saturating_mul(row_bytes)).sum()
+            })
+        } else {0};
+        self.fixed_base.saturating_add(self.extra_rings).saturating_add(local_draft)
+    }
+    fn plane_bytes_for(&self,tokens:usize)->usize {
+        let page_bytes=self.compute.plane_page_bytes();
+        self.driver.layouts().iter().filter(|l|!l.ring).map(|l|2*l.plane_rows_for(tokens,page_bytes)*l.row_words*4).sum()
+    }
+    fn plain_reservation_bytes(&self,tokens:usize)->Option<usize> {
+        (tokens>0 && tokens<=self.context).then(||self.fixed_base.saturating_add(self.plane_bytes_for(tokens)).saturating_add(self.extra_rings))
+    }
+    fn draft_reservation_bytes(&self,tokens:usize)->usize {
+        if self.depth==0 {return 0;}
+        self.model.map_or(0,|m|super::draft::draft_kv_bytes(m.config(),tokens,self.context,self.compute.plane_page_bytes()))
+    }
     /// The driver's bound of the bytes of the values of one step. They are taken off the room once.
     pub fn step_bytes(&self)->usize {self.step}
     /// What the chats can use: the room less the values of one step.
@@ -218,8 +243,8 @@ impl<'a,C:Compute,W:Weights<C>> Service<'a,C,W> {
     pub fn schedule(&self)->(CacheLimits,Config) {
         let pool=self.pool;
         let rows=self.verify_row_cap();
-        (CacheLimits {entries:if self.keep {crate::row_split::KEPT_PROMPTS} else {1},retained_bytes:if self.keep {pool} else {0},
-            tokens_per_entry:self.context.min(262_144),logits_per_entry:self.rows,idle_ttl:Duration::from_secs(300)},
+        (CacheLimits {entries:if self.keep {self.chats.max(crate::row_split::KEPT_PROMPTS)} else {1},retained_bytes:if self.keep {pool} else {0},
+            tokens_per_entry:self.context,logits_per_entry:self.rows,idle_ttl:Duration::from_secs(300)},
         Config {active:self.chats,connections:self.chats.max(32),prefill_chunk:self.driver.limits().step_rows,foreground_rows:rows,background_rows:rows,active_bytes:pool,session_budget_bytes:pool,
             draft:if self.depth>0 {DraftMode::Strict} else {DraftMode::Plain},mtp_depth:self.depth,draft_global_bank:false,prefix_cache:self.keep,
             sharing:spark_serve::scheduler::Sharing {private_counts:self.keep,..Default::default()}})
@@ -235,6 +260,12 @@ impl<'a,C:Compute,W:Weights<C>> Service<'a,C,W> {
     /// A step that fails moves no position (`Driver::step_rows_seen`).
     /// `alone`: the chats are one chat whose rings are its own (no other chat shares them).
     fn run(&self,chats:&mut [ChatStep<'_,C::Value>],alone:bool,phase:super::experts::Phase)->Result<(Vec<u32>,Vec<f32>)> {
+        // Grow straight KV planes BEFORE entering `compute.work` so CUDA VMM page maps never execute
+        // while resident launches are queued.
+        for chat in chats.iter_mut() {
+            let needed=(chat.state.position as usize).saturating_add(chat.tokens.len());
+            self.driver.ensure_capacity(chat.state,needed)?;
+        }
         self.compute.work(|| {
             // One new decode token of one chat whose rings are its own (the scheduler asks a decode row for `All`):
             // the token pass of the driver (`Driver::step`), which
@@ -301,6 +332,7 @@ impl<'a,C:Compute,W:Weights<C>> Service<'a,C,W> {
             }
         }
         let mut answers:Vec<(Vec<u32>,Vec<Vec<f32>>)>=rows.iter().map(|_|Default::default()).collect();
+        for batch in rows.iter_mut() {batch.session.restored_draft=None;}
         let called=rows.iter().map(|batch|batch.session.active_slot()).collect::<Result<Vec<_>>>()?;
         let mut slots=self.slots.borrow_mut();
         for pieces in steps.iter().filter(|pieces|!pieces.is_empty()) {
@@ -350,17 +382,17 @@ pub fn limits(context:usize,output:usize)->Result<spark_serve::Limits> {crate::r
 /// Its state is in the slot `slot` of the service.
 pub struct Chat<'s,'a,C:Compute,W:Weights<C>> {
     service:&'s Service<'a,C,W>,state:ChatState<C::Value>,id:u64,steps:u64,stepped:Duration,
-    draft:Option<mtp::Context<C::Value>>,draft_retired:bool,
+    draft:Option<mtp::Context<C::Value>>,restored_draft:Option<super::draft::DraftChat<C::Value>>,draft_retired:bool,
 }
-enum ChatState<V> {Active(usize),Kept(State<V>)}
+enum ChatState<V> {Active(usize),Kept(State<V>,Option<super::draft::DraftChat<V>>)}
 impl<C:Compute,W:Weights<C>> Chat<'_,'_,C,W> {
     fn active_slot(&self)->Result<usize> {
-        match self.state {ChatState::Active(slot)=>Ok(slot),ChatState::Kept(_)=>Err("loop text service: a kept prompt must be restored before use".into())}
+        match self.state {ChatState::Active(slot)=>Ok(slot),ChatState::Kept(..)=>Err("loop text service: a kept prompt must be restored before use".into())}
     }
     fn position(&self)->u64 {
         match &self.state {
             ChatState::Active(slot)=>self.service.slots.borrow()[*slot].as_ref().map_or(0,|slot|slot.state.position+slot.pending_accept.map_or(0,|(_,k)|k as u64)),
-            ChatState::Kept(state)=>state.position,
+            ChatState::Kept(state,_)=>state.position,
         }
     }
     /// The next tokens of this chat alone, in steps of at most the step row limit. `last` asks for the logits
@@ -376,6 +408,7 @@ impl<C:Compute,W:Weights<C>> Chat<'_,'_,C,W> {
             }
             return Ok(answer);
         }
+        self.restored_draft=None;
         let active=self.active_slot()?;
         let mut slots=service.slots.borrow_mut();
         for (place,piece) in tokens.chunks(limit).enumerate() {
@@ -394,16 +427,45 @@ impl<C:Compute,W:Weights<C>> Chat<'_,'_,C,W> {
     }
 }
 impl<C:Compute,W:Weights<C>> spark_serve::Session for Chat<'_,'_,C,W> {
+    fn reserve_model_draft(&mut self,tokens:usize) {
+        if let ChatState::Active(slot)=self.state {
+            let mut slots=self.service.slots.borrow_mut();
+            if let Some(slot)=slots.get_mut(slot).and_then(Option::as_mut) {
+                let _=self.service.driver.ensure_capacity(&mut slot.state,tokens);
+            }
+        }
+        if let (Some(ctx),Some(model))=(self.draft.as_mut(),self.service.model) {
+            let _=ctx.chat.ensure_global_capacity(self.service.compute,model.config(),tokens);
+        }
+    }
+    fn admission_tokens(&mut self,tokens:usize) {
+        if let ChatState::Active(slot)=self.state {
+            let mut slots=self.service.slots.borrow_mut();
+            if let Some(slot)=slots.get_mut(slot).and_then(Option::as_mut) {
+                let _=self.service.driver.ensure_capacity(&mut slot.state,tokens);
+            }
+        }
+    }
     fn configure_request(&mut self,request:&Request)->Result<()> {
         let depth=self.service.draft_depth(request);
-        if let Some(model)=self.service.model && depth>0 && self.position()==0 {
-            let mut chat=model.chat();chat.limit_to(self.service.context);
-            self.draft=Some(mtp::Context::new(chat,depth));
-            self.draft_retired=false;
+        let restored=self.restored_draft.take();
+        if let Some(model)=self.service.model && depth>0 {
+            let pos=self.position() as usize;
+            let chat=if pos==0 {
+                let mut chat=model.chat();chat.limit_to(self.service.context);
+                Some(chat)
+            } else {
+                restored.filter(|chat|chat.len()==pos).map(|mut chat|{chat.limit_to(self.service.context);chat})
+            };
+            if let Some(chat)=chat {
+                self.draft=Some(mtp::Context::new(chat,depth));
+                self.draft_retired=false;
+            }
         }
         Ok(())
     }
     fn disable_model_draft(&mut self) {
+        self.restored_draft=None;
         self.draft_retired|=self.draft.take().is_some();
         if let ChatState::Active(active)=self.state {
             let mut slots=self.service.slots.borrow_mut();
@@ -425,7 +487,56 @@ impl<C:Compute,W:Weights<C>> spark_serve::Session for Chat<'_,'_,C,W> {
     fn prefill_advance(&mut self,tokens:&[u32])->Result<()> {self.read(tokens,false,super::experts::Phase::Prefill).map(|_|())}
     /// The prompt piece is the step row limit: a piece is one step.
     fn prefill_chunk_size(&self,_:usize)->usize {self.service.driver.limits().step_rows}
-    fn can_fork(&self)->bool {self.service.keep && self.draft.is_none() && self.position()>0}
+    fn settle_prefix(&mut self)->Result<()> {
+        let ChatState::Active(active)=self.state else {return Ok(());};
+        let service=self.service;
+        let need_accept=service.slots.borrow()[active].as_ref().is_some_and(|slot|slot.pending_accept.is_some());
+        let need_draft=self.draft.as_ref().is_some_and(|d|d.pending.is_empty() && (d.lagged>0 || d.deferred_rows>0));
+        if !need_accept && !need_draft {return Ok(());}
+        if let (Some(ctx),Some(model))=(self.draft.as_mut(),service.model) && need_draft {
+            ctx.chat.ensure_global_capacity(service.compute,model.config(),ctx.read_to())?;
+        }
+        service.compute.work(|| {
+            let paused=service.compute.rows_unrecorded(true)?;
+            let run=(||->Result<()> {
+                if need_accept {
+                    let mut slots=service.slots.borrow_mut();
+                    if let Some(slot)=slots.get_mut(active).and_then(Option::as_mut) {
+                        service.flush_accept(slot)?;
+                    }
+                }
+                if let (Some(ctx),Some(model))=(self.draft.as_mut(),service.model)
+                    && ctx.pending.is_empty() && (ctx.lagged>0 || ctx.deferred_rows>0)
+                {
+                    ctx.catch_up(service.compute,model)?;
+                }
+                Ok(())
+            })();
+            let resumed=service.compute.rows_unrecorded(paused);
+            run?;resumed?;
+            Ok(())
+        })
+    }
+    fn can_fork(&self)->bool {
+        if !self.service.keep {return false;}
+        match &self.state {
+            ChatState::Active(slot)=>{
+                let slots=self.service.slots.borrow();
+                let Some(slot)=slots.get(*slot).and_then(Option::as_ref) else {return false;};
+                let pos=slot.state.position;
+                if pos==0 || slot.pending_accept.is_some() {return false;}
+                match &self.draft {
+                    None=>true,
+                    Some(d)=>self.service.model.is_some()
+                        && d.pending.is_empty() && d.lagged==0 && d.deferred_rows==0
+                        && d.chat.len() as u64==pos,
+                }
+            }
+            ChatState::Kept(state,draft)=>{
+                state.position>0 && draft.as_ref().is_none_or(|d|d.len() as u64==state.position)
+            }
+        }
+    }
     fn can_fork_prefix(&self,position:usize)->bool {self.can_fork() && self.position()==position as u64}
     fn preserves_prefix_boundaries(&self)->bool {true}
     fn checkpoint_reusable_tokens(&self,tokens:usize)->usize {
@@ -438,34 +549,141 @@ impl<C:Compute,W:Weights<C>> spark_serve::Session for Chat<'_,'_,C,W> {
         self.service.keep && position.is_multiple_of(chunk) && (position/chunk).is_power_of_two()
     }
     fn retained_bytes(&self)->Option<usize> {
-        self.can_fork().then(||state::prefix_bytes::<C::Value>(self.service.driver.layouts(),self.position()))
+        if !self.can_fork() {return None;}
+        let pos=self.position();
+        let page_bytes=self.service.compute.plane_page_bytes();
+        let target=state::prefix_bytes::<C::Value>(self.service.driver.layouts(),pos,page_bytes);
+        let has_draft=match &self.state {
+            ChatState::Active(_)=>self.draft.is_some() || self.restored_draft.as_ref().is_some_and(|d|d.len() as u64==pos),
+            ChatState::Kept(_,draft)=>draft.is_some(),
+        };
+        let draft=if has_draft {
+            self.service.model.map_or(0,|m|super::draft::DraftChat::<C::Value>::prefix_bytes(m.config(),pos as usize,self.service.context,page_bytes))
+        } else {0};
+        Some(target.saturating_add(draft))
     }
-    fn retention_is_immutable(&self)->bool {matches!(self.state,ChatState::Kept(_))}
+    fn retained_private_bytes(&self)->usize {
+        if !self.can_fork() {return 0;}
+        let pos=self.position();
+        let target=state::retained_private_bytes::<C::Value>(self.service.driver.layouts());
+        let has_draft=match &self.state {
+            ChatState::Active(_)=>self.draft.is_some() || self.restored_draft.as_ref().is_some_and(|d|d.len() as u64==pos),
+            ChatState::Kept(_,draft)=>draft.is_some(),
+        };
+        let draft=if has_draft {
+            self.service.model.map_or(0,|m|super::draft::DraftChat::<C::Value>::retained_private_bytes(m.config(),pos as usize))
+        } else {0};
+        target.saturating_add(draft)
+    }
+    fn retained_allocations(&self)->Option<Vec<(usize,usize)>> {
+        if !self.can_fork() {return None;}
+        let service=self.service;
+        let layouts=service.driver.layouts();
+        let collect=|state:&State<C::Value>,draft:Option<&super::draft::DraftChat<C::Value>>| -> Option<Vec<(usize,usize)>> {
+            let mut out=Vec::new();
+            let mut seen=std::collections::BTreeSet::new();
+            for (visit,layout) in state.visits.iter().zip(layouts) {
+                if layout.ring {continue;}
+                let mut plane_allocs=Vec::new();
+                if !service.compute.state_allocations(&visit.keys,&mut plane_allocs)
+                    || !service.compute.state_allocations(&visit.values,&mut plane_allocs)
+                {
+                    return None;
+                }
+                for (id,bytes) in plane_allocs {
+                    if id!=0 && bytes!=0 && seen.insert(id) {out.push((id,bytes));}
+                }
+            }
+            if let (Some(d),Some(m))=(draft,service.model) {
+                let mut draft_allocs=Vec::new();
+                if !d.collect_allocations(service.compute,m.config(),None,&mut draft_allocs) {return None;}
+                for (id,bytes) in draft_allocs {
+                    if id!=0 && bytes!=0 && seen.insert(id) {out.push((id,bytes));}
+                }
+            }
+            Some(out)
+        };
+        match &self.state {
+            ChatState::Kept(state,draft)=>collect(state,draft.as_ref()),
+            ChatState::Active(slot)=>{
+                let slots=service.slots.borrow();
+                let state=&slots[*slot].as_ref()?.state;
+                let draft=self.draft.as_ref().map(|d|&d.chat)
+                    .or_else(||self.restored_draft.as_ref().filter(|d|d.len() as u64==state.position));
+                collect(state,draft)
+            }
+        }
+    }
+    fn prefix_allocations(&self,tokens:usize)->Option<Vec<(usize,usize)>> {
+        if !self.can_fork() {return None;}
+        let service=self.service;
+        let layouts=service.driver.layouts();
+        let collect=|state:&State<C::Value>,draft:Option<&super::draft::DraftChat<C::Value>>| -> Option<Vec<(usize,usize)>> {
+            let mut out=Vec::new();
+            let mut seen=std::collections::BTreeSet::new();
+            for (visit,layout) in state.visits.iter().zip(layouts) {
+                if layout.ring {continue;}
+                let committed=tokens.min(layout.rows)*layout.row_words;
+                let mut plane_allocs=Vec::new();
+                if !service.compute.plane_prefix_allocations(&visit.keys,committed,&mut plane_allocs)
+                    || !service.compute.plane_prefix_allocations(&visit.values,committed,&mut plane_allocs)
+                {
+                    return None;
+                }
+                for (id,bytes) in plane_allocs {
+                    if id!=0 && bytes!=0 && seen.insert(id) {out.push((id,bytes));}
+                }
+            }
+            if let (Some(d),Some(m))=(draft,service.model) {
+                let mut draft_allocs=Vec::new();
+                if !d.collect_allocations(service.compute,m.config(),Some(tokens),&mut draft_allocs) {return None;}
+                for (id,bytes) in draft_allocs {
+                    if id!=0 && bytes!=0 && seen.insert(id) {out.push((id,bytes));}
+                }
+            }
+            Some(out)
+        };
+        match &self.state {
+            ChatState::Kept(state,draft)=>collect(state,draft.as_ref()),
+            ChatState::Active(slot)=>{
+                let slots=service.slots.borrow();
+                let state=&slots[*slot].as_ref()?.state;
+                let draft=self.draft.as_ref().map(|d|&d.chat)
+                    .or_else(||self.restored_draft.as_ref().filter(|d|d.len() as u64==state.position));
+                collect(state,draft)
+            }
+        }
+    }
+    fn retention_is_immutable(&self)->bool {matches!(self.state,ChatState::Kept(..))}
     fn fork(&self)->Result<Self> {
         need(self.can_fork(),"a chat has no committed prefix to fork")?;
         let service=self.service;
-        let layouts=service.driver.layouts();
         match &self.state {
             ChatState::Active(slot)=>{
                 let slots=service.slots.borrow();
                 let state=&slots[*slot].as_ref().ok_or("loop text service: the chat is not open")?.state;
-                let kept=state::copy_prefix(service.compute,layouts,state,false)?;
-                Ok(Self {service,state:ChatState::Kept(kept),id:self.id,steps:0,stepped:Duration::ZERO,draft:None,draft_retired:false})
+                let draft_src=self.draft.as_ref().map(|d|&d.chat)
+                    .or_else(||self.restored_draft.as_ref().filter(|d|d.len() as u64==state.position));
+                let (kept,kept_draft)=service.copy_snapshot(state,draft_src,false,state.position as usize)?;
+                Ok(Self {service,state:ChatState::Kept(kept,kept_draft),id:self.id,steps:0,stepped:Duration::ZERO,draft:None,restored_draft:None,draft_retired:false})
             }
-            ChatState::Kept(state)=>service.open(||state::copy_prefix(service.compute,layouts,state,true)),
+            ChatState::Kept(state,draft)=>service.open_with(||service.copy_snapshot(state,draft.as_ref(),true,state.position as usize)),
         }
     }
     fn fork_prefix(&self,position:usize)->Result<Self> {
         need(self.can_fork_prefix(position),"only the committed prefix position can be forked")?;
         match &self.state {
             ChatState::Active(slot)=>{
+                need(self.service.live.get()<self.service.chats,"no free chat: every chat of this service is in use")?;
                 let slots=self.service.slots.borrow();
                 let state=&slots[*slot].as_ref().ok_or("loop text service: the chat is not open")?.state;
-                let copy=state::copy_prefix(self.service.compute,self.service.driver.layouts(),state,true)?;
+                let draft_src=self.draft.as_ref().map(|d|&d.chat)
+                    .or_else(||self.restored_draft.as_ref().filter(|d|d.len() as u64==state.position));
+                let pair=self.service.copy_snapshot(state,draft_src,true,position)?;
                 drop(slots);
-                self.service.open(||Ok(copy))
+                self.service.open_with(||Ok(pair))
             }
-            ChatState::Kept(_)=>self.fork(),
+            ChatState::Kept(..)=>self.fork(),
         }
     }
 }
@@ -474,51 +692,71 @@ impl<C:Compute,W:Weights<C>> Drop for Chat<'_,'_,C,W> {
         let ChatState::Active(slot)=self.state else {return;};
         let seconds=self.stepped.as_secs_f64();
         let position=self.service.slots.borrow_mut().get_mut(slot).and_then(Option::take).map_or(0,|slot|slot.state.position+slot.pending_accept.map_or(0,|(_,k)|k as u64));
+        let draft_bytes=if self.draft.is_some() {self.service.draft_reservation_bytes((position as usize).max(1))} else {0};
+        let live_bytes=self.service.plane_bytes_for((position as usize).max(1)).saturating_add(draft_bytes);
+        self.service.compute.kv_conversation_ended(live_bytes);
         eprintln!("SERVED CHAT END session={} tokens={} position={position} step_seconds={seconds:.6} tokens_per_second={:.3}",self.id,self.steps,if seconds>0.0 {self.steps as f64/seconds} else {0.0});
         self.service.live.set(self.service.live.get().saturating_sub(1));
     }
 }
 impl<'a,C:Compute,W:Weights<C>> Service<'a,C,W> {
-    /// The state of a new chat: the sizes and the words of `Driver::clean`, with no fill of a straight plane.
-    ///
-    /// A straight plane (a layer that sees every token) has one row a token of the context, so it is nearly all of the
-    /// bytes of a chat. It is made as the restore of no row (`Compute::state_restore`): room that is written before any
-    /// read. That holds by the rules of `state`: the token at position `p` writes row `p` before its attention reads
-    /// the plane, and the attention arms read the live keys only, rows `0..=p`. So no arm reads a row that the chat did
-    /// not write. A restored chat stands on the same rule (`state::copy_prefix`): its planes hold the kept rows and an
-    /// unwritten rest. The host form of `state_restore` fills with zeros, so a host run holds the words of `clean`.
-    /// The rings and the planes of a window layer are zeros, as in `clean`: a convolution reads the zero inputs of the
-    /// tokens before the start, and a window ring wraps.
-    ///
-    /// MEASURED 2026-11-26 (one Spark, context 36,864): `clean` filled 1,380,843,520 bytes a chat. A chat opened in
-    /// 8.2 ms on a warm pool and opens in about 2 ms with no fill. The scheduler opens the chats of a burst one after
-    /// another, and a burst whose first prompt pass starts before its last chat is open reads the rest one chat at a
-    /// time. That still happens when chats need new device memory: such a chat still takes 48 to 58 ms to open.
-    fn fresh(&self)->Result<State<C::Value>> {
-        let c=self.compute;let none=c.zeros(0)?;
+    /// The state of a new chat sized initially for `initial_tokens` tokens: fixed window rings and conv rings are
+    /// zero-initialized, while straight KV planes start at `plane_rows_for(initial_tokens)` and grow on demand via
+    /// CUDA VMM pages (`Compute::plane_alloc` / `Compute::plane_grow`).
+    fn fresh(&self)->Result<State<C::Value>> {self.fresh_for(1)}
+    fn fresh_for(&self,initial_tokens:usize)->Result<State<C::Value>> {
+        let c=self.compute;
+        let page_bytes=c.plane_page_bytes();
         let visits=self.driver.layouts().iter().map(|l| {
-            let (plane,kv,after)=(l.rows*l.row_words,l.kv_taps*l.kv_channels,l.taps*l.channels);
-            let room=||if l.ring {c.zeros(plane)} else {c.state_restore(&none,plane)};
+            let (max_words,kv,after)=(l.rows*l.row_words,l.kv_taps*l.kv_channels,l.taps*l.channels);
+            let init_words=l.plane_rows_for(initial_tokens,page_bytes)*l.row_words;
+            let room=||if l.ring {c.zeros(max_words)} else {c.plane_alloc(max_words,init_words)};
             Ok(state::VisitState {keys:room()?,values:room()?,rings:[c.zeros(kv)?,c.zeros(kv)?,c.zeros(after)?,c.zeros(after)?],
                 next:std::array::from_fn(|_|None),planes:None,every:std::array::from_fn(|_|None),written:None})
         }).collect::<Result<Vec<_>>>()?;
         Ok(State {position:0,visits})
     }
+    fn copy_snapshot(&self,state:&State<C::Value>,draft:Option<&super::draft::DraftChat<C::Value>>,restore:bool,target_tokens:usize)->Result<(State<C::Value>,Option<super::draft::DraftChat<C::Value>>)> {
+        let layouts=self.driver.layouts();
+        let draft_cfg=match draft {
+            Some(_)=>Some(self.model.ok_or("loop text service: draft model missing for snapshot")?.config()),
+            None=>None,
+        };
+        self.compute.work(|| {
+            // Bulk state snapshot/restore uses direct DtoD DMA copies / CoW VMM aliases outside graph recording.
+            let paused=self.compute.rows_unrecorded(true)?;
+            let copied=(|| {
+                let target=state::copy_prefix_unrecorded(self.compute,layouts,state,restore,target_tokens)?;
+                let draft=match (draft,draft_cfg) {
+                    (Some(chat),Some(cfg))=>Some(chat.copy_prefix(self.compute,cfg,restore)?),
+                    _=>None,
+                };
+                Ok((target,draft))
+            })();
+            let resumed=self.compute.rows_unrecorded(paused);
+            copied.and_then(|pair|resumed.map(|_|pair))
+        })
+    }
     fn open(&self,state:impl FnOnce()->Result<State<C::Value>>)->Result<Chat<'_,'a,C,W>> {
+        self.open_with(||state().map(|s|(s,None)))
+    }
+    fn open_with(&self,build:impl FnOnce()->Result<(State<C::Value>,Option<super::draft::DraftChat<C::Value>>)>)->Result<Chat<'_,'a,C,W>> {
         if let Some(error)=self.compute.fatal_error() {return Err(error);}
         need(self.live.get()<self.chats,"no free chat: every chat of this service is in use")?;
-        let started=Instant::now();let state=state()?;
+        let started=Instant::now();let (state,restored_draft)=build()?;
         let id=self.next.get();self.next.set(id.checked_add(1).ok_or("loop text service: chat numbers are used up")?);self.live.set(self.live.get()+1);
         eprintln!("SERVED CHAT session={id} live={} setup_seconds={:.9}",self.live.get(),started.elapsed().as_secs_f64());
         let mut slots=self.slots.borrow_mut();
         let slot=match slots.iter().position(Option::is_none) {Some(free)=>free,None=>{slots.push(None);slots.len()-1}};
         slots[slot]=Some(Slot {state,shared:false,pending_accept:None});
-        Ok(Chat {service:self,state:ChatState::Active(slot),id,steps:0,stepped:Duration::ZERO,draft:None,draft_retired:false})
+        Ok(Chat {service:self,state:ChatState::Active(slot),id,steps:0,stepped:Duration::ZERO,draft:None,restored_draft,draft_retired:false})
     }
 }
 impl<'a,C:Compute,W:Weights<C>> spark_serve::Engine for Service<'a,C,W> {
     type Session<'s>=Chat<'s,'a,C,W> where Self:'s;
     fn session(&self)->Result<Self::Session<'_>> {self.open(||self.fresh())}
+    fn session_for_admission(&self,_request:&Request,tokens:usize)->Result<Self::Session<'_>> {self.open(||self.fresh_for(tokens))}
+    fn active_cohort(&self,chats:usize) {self.compute.kv_reserve_cohort(chats);}
     /// A request that asks for drafting is refused before a chat opens, with the reason in the answer.
     fn validate_request(&self,_prompt:&[u32],request:&Request)->Result<()> {
         if request.mtp_depth.is_some_and(|depth|depth>self.depth) || request.draft.is_some_and(|mode|!matches!(mode,DraftMode::Auto|DraftMode::Plain) && !(self.depth>0 && mode==DraftMode::Strict)) {return Err(DRAFT_REFUSAL.into());}
@@ -539,17 +777,20 @@ impl<'a,C:Compute,W:Weights<C>> spark_serve::Engine for Service<'a,C,W> {
     fn propose_batch<'s>(&'s self,rows:&mut [DraftRows<'_,Self::Session<'s>>])->std::result::Result<Vec<spark_engine::draft::ModelProposal>,BatchError> {
         self.propose_batch_impl(rows)
     }
-    fn prefer_shared_prefill(&self,request:&Request)->bool {self.draft_depth(request)>0}
+    fn prefer_shared_prefill(&self,_request:&Request)->bool {false}
     fn permits_prefix_cache(&self,request:&Request)->bool {self.draft_depth(request)==0 || !matches!(request.draft,Some(DraftMode::Strict))}
     fn greedy_draft_only(&self)->bool {self.depth>0}
     fn memory_bytes(&self)->Option<(usize,usize,usize)> {self.compute.memory_bytes()}
     fn context_limit(&self)->usize {self.context}
     fn vocab_size(&self)->usize {self.rows}
     fn eos_token_ids(&self)->&[u32] {&self.eos}
-    /// The whole state of a chat is allocated when the chat starts, at any prompt length.
+    /// Straight KV planes grow in pages with live token count; the scheduler extends reservations dynamically.
     fn session_reservation_bytes(&self)->Option<usize> {Some(self.chat_bytes)}
-    fn request_reservation_bytes(&self,tokens:usize)->Option<usize> {(tokens>0 && tokens<=self.context).then_some(self.chat_bytes)}
-    fn reserve_full_output(&self)->bool {true}
+    fn request_reservation_bytes(&self,tokens:usize)->Option<usize> {
+        self.plain_reservation_bytes(tokens).map(|bytes|bytes.saturating_add(self.draft_reservation_bytes(tokens)))
+    }
+    fn request_reservation_bytes_plain(&self,tokens:usize)->Option<usize> {self.plain_reservation_bytes(tokens)}
+    fn reserve_full_output(&self)->bool {false}
     /// Every chat is the same work for this service: no slot is kept free for one kind of request.
     fn reserve_foreground_slot(&self)->bool {false}
     /// With two or more chats a tick gives enough rows for either multi-chat verify (`verify_row_cap`) or plain cohort decode (`self.chats`).
@@ -579,8 +820,8 @@ impl<'a,C:Compute,W:Weights<C>> spark_serve::Engine for Service<'a,C,W> {
 mod fresh_tests {
     use super::*;
     use crate::{bounded_decoder::Host,loop_decoder::fixture::Fixture};
-    /// A new chat holds the state of `Driver::clean`, visit by visit: the same sizes and, on the host, the same words
-    /// (the host form of a plane that is not filled is zeros). Both made-up models have a straight plane and a ring.
+    /// A new paged chat keeps `Driver::clean` rings and window planes, starts straight planes at one page
+    /// (`plane_rows_for(1)`), and grows cleanly to full capacity while preserving every word.
     #[test]
     fn a_new_chat_holds_the_state_of_a_clean_driver() {
         for fixture in [Fixture::small(),Fixture::wide()] {
@@ -588,11 +829,24 @@ mod fresh_tests {
             let service=Service::new(&Host,&fixture,&fixture.description,48,vec![1],seats).unwrap();
             let layouts=service.driver.layouts();
             assert!(layouts.iter().any(|l|l.ring) && layouts.iter().any(|l|!l.ring));
-            let (new,clean)=(service.fresh().unwrap(),service.driver.clean().unwrap());
+            let (mut new,clean)=(service.fresh().unwrap(),service.driver.clean().unwrap());
             assert_eq!((new.position,new.visits.len()),(clean.position,clean.visits.len()));
+            let page_bytes=Host.plane_page_bytes();
+            for ((a,b),l) in new.visits.iter().zip(&clean.visits).zip(layouts) {
+                assert_eq!(&a.rings,&b.rings);
+                let want_words=l.plane_rows_for(1,page_bytes)*l.row_words;
+                assert_eq!((a.keys.len(),a.values.len()),(want_words,want_words));
+                if l.ring {
+                    assert_eq!((&a.keys,&a.values),(&b.keys,&b.values));
+                } else {
+                    assert!(want_words<b.keys.len(),"paged straight plane starts smaller than full context");
+                    assert!(a.keys.iter().chain(&a.values).all(|v|v.to_bits()==0));
+                }
+                assert!(a.next.iter().chain(&a.every).all(Option::is_none) && a.planes.is_none() && a.written.is_none());
+            }
+            service.driver.ensure_capacity(&mut new,48).unwrap();
             for (a,b) in new.visits.iter().zip(&clean.visits) {
                 assert_eq!((&a.keys,&a.values,&a.rings),(&b.keys,&b.values,&b.rings));
-                assert!(a.next.iter().chain(&a.every).all(Option::is_none) && a.planes.is_none() && a.written.is_none());
             }
         }
     }

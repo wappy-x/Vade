@@ -54,6 +54,8 @@ pub(crate) struct Config {
     pub(crate) verbose: bool,
     pub(crate) children: bool,
     pub(crate) child_grants: BTreeMap<String, child_agents::Scope>,
+    pub(crate) max_subagents: Option<usize>,
+    pub(crate) subagent_context: Option<usize>,
     pub(crate) bind: String,
     pub(crate) upstreams: Vec<String>,
     pub(crate) access: vade_harness::gateway::Access,
@@ -66,6 +68,7 @@ pub(crate) struct Config {
     pub(crate) resume: Option<String>,
     pub(crate) name: Option<String>,
     pub(crate) context_tokens: usize,
+    pub(crate) auto_compact_tokens: Option<usize>,
     pub(crate) max_run_time: Option<Duration>,
     pub(crate) auto_compact: bool,
     pub(crate) auto_continue: bool,
@@ -212,6 +215,8 @@ impl Config {
             verbose: false,
             children: false,
             child_grants: BTreeMap::new(),
+            max_subagents: None,
+            subagent_context: None,
             bind: "127.0.0.1:8787".into(),
             upstreams: Vec::new(),
             access: vade_harness::gateway::Access::default(),
@@ -224,6 +229,7 @@ impl Config {
             resume: None,
             name: None,
             context_tokens: context::DEFAULT_CONTEXT_TOKENS,
+            auto_compact_tokens: None,
             max_run_time: vade_harness::agent::Limits::default().max_run_time,
             auto_compact: true,
             auto_continue: true,
@@ -379,6 +385,9 @@ impl Config {
                 | "--resume"
                 | "--name"
                 | "--context-tokens"
+                | "--auto-compact-tokens"
+                | "--max-subagents"
+                | "--subagent-context"
                 | "--agent-time-limit-seconds"
                 | "--config"
                 | "--rules-scope"
@@ -496,10 +505,40 @@ impl Config {
                         "--context-tokens" => {
                             config.context_tokens =
                                 value.parse().map_err(|_| "invalid context token budget")?;
-                            if !(8192..=2_000_000).contains(&config.context_tokens) {
-                                return Err("context token budget must be 8192–2000000");
+                            if config.context_tokens < 8192 {
+                                return Err("context token budget must be at least 8192");
                             }
                             used.push("--context-tokens");
+                        }
+                        "--auto-compact-tokens" => {
+                            let tokens: usize = value
+                                .parse()
+                                .map_err(|_| "invalid auto-compact token threshold")?;
+                            if tokens < 1024 {
+                                return Err("auto-compact token threshold must be at least 1024");
+                            }
+                            config.auto_compact_tokens = Some(tokens);
+                            used.push("--auto-compact-tokens");
+                        }
+                        "--max-subagents" => {
+                            let count: usize = value
+                                .parse()
+                                .map_err(|_| "invalid max subagents count")?;
+                            if count == 0 {
+                                return Err("max subagents must be at least 1");
+                            }
+                            config.max_subagents = Some(count);
+                            used.push("--max-subagents");
+                        }
+                        "--subagent-context" => {
+                            let tokens: usize = value
+                                .parse()
+                                .map_err(|_| "invalid subagent context token budget")?;
+                            if tokens < 1024 {
+                                return Err("subagent context must be at least 1024");
+                            }
+                            config.subagent_context = Some(tokens);
+                            used.push("--subagent-context");
                         }
                         "--child-edit" => {
                             let (name, path) = value
@@ -644,6 +683,9 @@ impl Config {
                 || used.contains(&"--resume")
                 || used.contains(&"--name")
                 || used.contains(&"--context-tokens")
+                || used.contains(&"--auto-compact-tokens")
+                || used.contains(&"--max-subagents")
+                || used.contains(&"--subagent-context")
                 || used.contains(&"--agent-time-limit-seconds")
                 || used.contains(&"--config")
                 || used.contains(&"--rules-scope")
@@ -653,7 +695,7 @@ impl Config {
                 || used.contains(&"--no-check"))
         {
             return Err(
-                "--approval, --yes, --resume, --name, --context-tokens, --agent-time-limit-seconds, --config, --rules-scope, --shell-exclude, --shell-toolchain, --check and --no-check require agent mode",
+                "--approval, --yes, --resume, --name, --context-tokens, --auto-compact-tokens, --max-subagents, --subagent-context, --agent-time-limit-seconds, --config, --rules-scope, --shell-exclude, --shell-toolchain, --check and --no-check require agent mode",
             );
         }
         if used.contains(&"--vade-home") && used.contains(&"--state-in-project") {
@@ -740,6 +782,9 @@ impl Config {
         }
         if !config.auto_compact && config.mode != Mode::Agent {
             return Err("--no-compact and --no-auto-compact require agent mode");
+        }
+        if !config.auto_compact && config.auto_compact_tokens.is_some() {
+            return Err("choose --no-compact or --auto-compact-tokens, not both");
         }
         if config.prewarm_compaction && config.mode != Mode::Agent {
             return Err("--prewarm-compaction requires agent mode");

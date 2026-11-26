@@ -533,7 +533,7 @@ impl Limits {
     pub fn tokenizer_limits(&self) -> engine_tokenizer::Limits {
         engine_tokenizer::Limits {
             max_input_bytes: self.body_bytes.max(self.output_bytes.div_ceil(4)),
-            max_tokens: engine_tokenizer::Limits::default().max_tokens,
+            max_tokens: engine_tokenizer::Limits::default().max_tokens.max(self.context_tokens),
         }
     }
     /// Largest reply for a nonempty prompt on the loaded engine. Each rendered
@@ -546,15 +546,15 @@ impl Limits {
         if self.header_bytes == 0
             || self.header_bytes > 64 * 1024
             || self.body_bytes == 0
-            || self.body_bytes > 4 * 1024 * 1024
+            || self.body_bytes > Self::MAX_BODY_BYTES
             || self.input_tokens == 0
             || self.input_tokens > Self::MAX_CONTEXT_TOKENS
             || self.output_tokens == 0
-            || self.output_tokens > 262144
+            || self.output_tokens > Self::MAX_CONTEXT_TOKENS
             || self.context_tokens == 0
             || self.context_tokens > Self::MAX_CONTEXT_TOKENS
             || self.output_bytes < 1024
-            || self.output_bytes > 16 * 1024 * 1024
+            || self.output_bytes > Self::MAX_CONTEXT_TOKENS * 256
             || [
                 self.read_timeout,
                 self.write_timeout,
@@ -574,6 +574,8 @@ impl Limits {
 impl Limits {
     /// Service ceiling. The engine can admit a smaller context for the loaded model.
     pub const MAX_CONTEXT_TOKENS: usize = 1_048_576;
+    /// Largest request body accepted at `MAX_CONTEXT_TOKENS` (16 bytes per token).
+    pub const MAX_BODY_BYTES: usize = Self::MAX_CONTEXT_TOKENS * 16;
 }
 
 #[cfg(test)]
@@ -591,13 +593,14 @@ mod long_context_tests {
     #[test]
     fn bounds_each_service_limit_independently() {
         let max = Limits::MAX_CONTEXT_TOKENS;
+        let max_body = Limits::MAX_BODY_BYTES;
         for (input_tokens, context_tokens, body_bytes, output_tokens) in [
-            (max, max, 4 << 20, 262_144), (max + 1, max, 4 << 20, 1),
-            (max, max + 1, 4 << 20, 1), (max, max, (4 << 20) + 1, 1),
-            (max, max, 4 << 20, 262_145), (0, max, 1024, 1), (max, 0, 1024, 1),
+            (max, max, max_body, max), (max + 1, max, max_body, 1),
+            (max, max + 1, max_body, 1), (max, max, max_body + 1, 1),
+            (max, max, max_body, max + 1), (0, max, 1024, 1), (max, 0, 1024, 1),
         ] {
             let limits = Limits { input_tokens, context_tokens, body_bytes, output_tokens, ..Limits::default() };
-            assert_eq!(limits.validate().is_ok(), (input_tokens, context_tokens, body_bytes, output_tokens) == (max, max, 4 << 20, 262_144));
+            assert_eq!(limits.validate().is_ok(), (input_tokens, context_tokens, body_bytes, output_tokens) == (max, max, max_body, max));
         }
     }
 }

@@ -528,3 +528,24 @@ fn compaction_keeps_the_anchor_bytes_and_the_builder_counts_them() {
     // Other options share nothing.
     assert_eq!(builder.shared_messages("{\"model\":\"other\"}", c.messages().iter().map(|m| m.serialized_json())), 0);
 }
+
+#[test]
+fn large_context_auto_compacts_at_300k_and_honors_explicit_threshold() {
+    assert_eq!(auto_compact_threshold(524_288, None), 307_200);
+    assert_eq!(auto_compact_threshold(1_048_576, None), 307_200);
+    assert_eq!(auto_compact_threshold(400_000, None), 307_200);
+    assert_eq!(auto_compact_threshold(399_999, None), 399_999 * 4 / 5);
+    assert_eq!(auto_compact_threshold(131_072, None), 131_072 * 4 / 5);
+    assert_eq!(auto_compact_threshold(524_288, Some(200_000)), 200_000);
+    assert_eq!(auto_compact_threshold(524_288, Some(450_000)), 450_000);
+    assert_eq!(auto_compact_threshold(131_072, Some(64_000)), 64_000);
+
+    let c = conversation();
+    let mut usage = Usage::for_conversation(&c);
+    usage.exact = Some((290_000, 16_384, 524_288, true));
+    assert!(!usage.near_limit(524_288, 16_384), "290K + 8K reserve < 307.2K");
+    usage.exact = Some((300_000, 16_384, 524_288, true));
+    assert!(usage.near_limit(524_288, 16_384), "300K + 8K reserve >= 307.2K");
+    assert!(!usage.near_limit_at(524_288, 16_384, Some(400_000)));
+    assert!(usage.near_limit_at(524_288, 16_384, Some(250_000)));
+}

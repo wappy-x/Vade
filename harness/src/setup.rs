@@ -25,9 +25,9 @@ Usage: vade-harness setup <claude|codex|hermes|opencode|pi|aider|continue|open-w
                        instructions and launch.sh; refuses existing directories
                        (claude, codex, hermes, opencode and pi)
   --context-window N   Verified total context tokens (home mode: required;
-                       also accepted by continue)
+                       also accepted by codex and continue)
   --max-output-tokens N Verified output reservation (home mode: required;
-                       also accepted by continue)
+                       also accepted by codex and continue)
   --client-bin PATH    Client executable for launch.sh (home mode only)
   -h, --help           Show this help
 
@@ -244,8 +244,8 @@ impl Config {
                     let count = value
                         .parse::<u64>()
                         .ok()
-                        .filter(|n| (1..=1_048_576).contains(n))
-                        .ok_or("setup token limits must be integers in 1..1048576")?;
+                        .filter(|n| *n >= 1)
+                        .ok_or("setup token limits must be positive integers")?;
                     if flag == "--context-window" {
                         context_window = Some(count);
                     } else {
@@ -285,7 +285,10 @@ impl Config {
                     "dedicated home requires verified --context-window and --max-output-tokens",
                 );
             }
-        } else if client_bin.is_some() || (client != Client::Continue && (context_window.is_some() || max_output_tokens.is_some())) {
+        } else if client_bin.is_some()
+            || (!matches!(client, Client::Continue | Client::Codex)
+                && (context_window.is_some() || max_output_tokens.is_some()))
+        {
             return Err("client executable and token limits require --dedicated-home");
         }
         if context_window
@@ -316,9 +319,20 @@ impl Config {
                 .iter()
                 .map(|(key, value)| format!("export {key}={}\n", shell_quote(value)))
                 .collect(),
-            Client::Codex => format!(
-                "model = {model}\nmodel_provider = \"vade\"\n\n[model_providers.vade]\nname = \"Vade\"\nbase_url = {base}\nwire_api = \"responses\"\nrequires_openai_auth = false\nsupports_websockets = false\n"
-            ),
+            Client::Codex => {
+                let limits = if !self.dedicated_home
+                    && let Some(context) = self.context_window
+                {
+                    let output = self.max_output_tokens.unwrap_or(0);
+                    let compact = codex_auto_compact_limit(context, output);
+                    format!("model_context_window = {context}\nmodel_auto_compact_token_limit = {compact}\n")
+                } else {
+                    String::new()
+                };
+                format!(
+                    "model = {model}\nmodel_provider = \"vade\"\n{limits}\n[model_providers.vade]\nname = \"Vade\"\nbase_url = {base}\nwire_api = \"responses\"\nrequires_openai_auth = false\nsupports_websockets = false\n"
+                )
+            }
             Client::Hermes => format!(
                 "model:\n  default: {model}\n  provider: custom\n  base_url: {base}\n  api_key: \"no-key-required\"\n"
             ),
@@ -404,6 +418,18 @@ fn claude_environment(endpoint: &str, model: &str) -> Vec<(&'static str, String)
         // with the one before it and the engine reads the whole prompt again.
         ("CLAUDE_CODE_ATTRIBUTION_HEADER", "0".into())]);
     environment
+}
+
+/// Auto-compact token threshold for Codex setups: 307,200 (300K) on >=400K
+/// contexts (such as Inkling 512K/1M with Paged KV), and `context - output`
+/// on smaller contexts.
+pub(super) fn codex_auto_compact_limit(context: u64, output: u64) -> u64 {
+    let room = context.saturating_sub(output);
+    if context >= crate::context::LARGE_CONTEXT_COMPACT_WINDOW as u64 {
+        (crate::context::LARGE_CONTEXT_AUTO_COMPACT_TOKENS as u64).min(room)
+    } else {
+        room
+    }
 }
 
 fn quoted(value: &str) -> String {

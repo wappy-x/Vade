@@ -272,7 +272,9 @@ impl NativeModel {
             else if message.role() == "user" && !matches!(text.trim(), "Continue" | "Continue.") { break; }
             if recoveries == 2 { break; }
         }
-        let required = recoveries == 2 && !self.contract.options.disable_tools
+        let required = recoveries == 2
+            && !self.contract.forced_tool_choice_unsupported
+            && !self.contract.options.disable_tools
             && request.options.get("tool_choice").is_none()
             && request.options.get("tools").and_then(json::Value::as_array).is_some_and(|tools| !tools.is_empty());
         if self.contract.tool_recovery != required {
@@ -449,23 +451,50 @@ impl Model for NativeModel {
         let automatic = self
             .contract
             .automatic_output(request.serialized_options())?;
-        let options = self.contract.decorate(request.serialized_options())?;
-        let mut builder = crate::prompt::AppendOnlyRequest::default();
-        let body = builder
-            .prepare(
-                &options,
-                request.messages.iter().map(|m| m.serialized_json()),
-            )?
-            .to_vec();
-        let (body, _) = super::cancel::prepare(&self.endpoint, &body,
-            self.server_cancellation && self.contract.context.capabilities.is_some())?;
-        let result = self.contract.admit_adjusted(
+        let prepare_body = |contract: &crate::contract::Contract| -> io::Result<Vec<u8>> {
+            let options = contract.decorate(request.serialized_options())?;
+            let mut builder = crate::prompt::AppendOnlyRequest::default();
+            let body = builder
+                .prepare(
+                    &options,
+                    request.messages.iter().map(|m| m.serialized_json()),
+                )?
+                .to_vec();
+            let (body, _) = super::cancel::prepare(
+                &self.endpoint,
+                &body,
+                self.server_cancellation && contract.context.capabilities.is_some(),
+            )?;
+            Ok(body)
+        };
+        let mut body = prepare_body(&self.contract)?;
+        let mut result = self.contract.admit_adjusted(
             &self.endpoint,
             &body,
             &self.pool,
             Some(cancel),
             automatic,
         );
+        // Some chat templates (such as Inkling and GLM) reject forced
+        // `tool_choice: "required"` with HTTP 400. If admission rejected a
+        // recovery-injected forced policy, drop forced tool_choice for this
+        // session and retry admission once with the model's normal auto policy.
+        if result.is_err()
+            && self.contract.tool_recovery
+            && !self.contract.forced_tool_choice_unsupported
+            && self.contract.context.last_http_status == Some(400)
+        {
+            self.contract.forced_tool_choice_unsupported = true;
+            self.contract.tool_recovery = false;
+            body = prepare_body(&self.contract)?;
+            result = self.contract.admit_adjusted(
+                &self.endpoint,
+                &body,
+                &self.pool,
+                Some(cancel),
+                automatic,
+            );
+        }
         // Refused admission still supplies an exact count for compaction. All
         // malformed/HTTP/cancellation errors remain errors; no heuristic downgrade.
         let input = self.contract.context.input.clone();

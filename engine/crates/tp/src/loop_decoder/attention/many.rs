@@ -19,7 +19,7 @@
 //! `state::commit`. The planes are written: only slots of the positions of this step, which no row of a
 //! position before the step can see.
 use super::{position_factor,rounded_norm,score_scale};
-use super::super::{experts::conv_scale,mix::{Inputs,Run,Weight,Weights,need,number,shape},rows::{Rows,gather,rows_operation,shared},state::{self,Layout,Ring,VisitState,size,many::{convolve,convolve_kv,direct_parts,key_steps,key_steps_both,room,write_rows}}};
+use super::super::{experts::conv_scale,mix::{Inputs,Run,Weight,Weights,need,number,shape},rows::{Rows,gather,rows_operation,shared},state::{self,Layout,Ring,VisitState,size,many::{convolve,convolve_kv,direct_parts,held_apart,key_steps,key_steps_both,room,write_rows}}};
 use crate::{Result,bounded_decoder::{Compute,KvFinishPair,WindowOne,WindowSplit}};
 use engine_model::plan::description::{ConvTaps,Visit};
 use spark_gpu_probe::{block_stream::{CONV_ADDEND,CONV_TOKEN_TAPS},causal_ops::Op};
@@ -291,9 +291,11 @@ pub fn half_rows<C:Compute,W:Weights<C>>(run:&Run<'_,C,W>,visit:&Visit,layout:&L
         }
     }
     // The wide planes of each chat with more than one row in the step of a window layer whose ring is wider for a step.
-    // Before the first wrap every new row occupies a never-committed slot. A retry
-    // overwrites those slots before reading them, including after a partial accept.
-    let wraps:Vec<bool>=spans.iter().map(|span|step.keeps() && layout.ring && (spans.len()==1 || span.first+span.count as u64>layout.rows as u64)).collect();
+    // A check pass of many chats writes the new rows of a chat into its ring where the ring takes them (`held_apart`):
+    // before the first wrap they take slots that were never written, and past it the spare rows of the ring
+    // (`state::spare_rows`) keep them off every key that a row from the chat's position on reads. A retry writes those
+    // slots again before it reads them, also after the chat kept only some of the rows.
+    let wraps:Vec<bool>=spans.iter().map(|&span|held_apart(layout,step,span)).collect();
     let any_wraps=wraps.iter().any(|&w|w);
     let mut scratch=spans.iter().zip(states.iter()).zip(&fits).map(|((span,state),fit)|if !step.keeps() && span.count>1 && fit.wide().rows>layout.rows && span.first+span.count as u64>layout.rows as u64 {
         Ok(Some([state::many::widen(c,fit,&state.keys,span.first)?,state::many::widen(c,fit,&state.values,span.first)?]))} else {Ok(None)}).collect::<Result<Vec<_>>>()?;
@@ -306,7 +308,12 @@ pub fn half_rows<C:Compute,W:Weights<C>>(run:&Run<'_,C,W>,visit:&Visit,layout:&L
         for (((span, state), scratch), fit) in spans.iter().zip(states.iter_mut()).zip(scratch.iter_mut()).zip(fits.iter()) {
             let plane_layout = if scratch.is_some() { fit.wide() } else { *layout };
             let first = plane_layout.slot(span.first)?;
-            let write = |clip, param| spark_gpu_probe::fast_ops::KvWrite { first, plane_rows: plane_layout.rows, clip, param };
+            let plane_rows = if scratch.is_some() || plane_layout.ring {
+                plane_layout.rows
+            } else {
+                state::plane_rows(c, &plane_layout, &state.keys)?
+            };
+            let write = |clip, param| spark_gpu_probe::fast_ops::KvWrite { first, plane_rows, clip, param };
             let (k_slice, v_slice) = if spans.len() == 1 {
                 (None, None)
             } else {
@@ -346,10 +353,12 @@ pub fn half_rows<C:Compute,W:Weights<C>>(run:&Run<'_,C,W>,visit:&Visit,layout:&L
         let words=layout.row_words;let mut offset=0;
         for ((((span,state),scratch),fit),&wrap) in spans.iter().zip(states.iter_mut()).zip(scratch.iter_mut()).zip(&fits).zip(&wraps) {
             let (keys,values)=(c.range(&keys,offset*words,span.count*words)?,c.range(&values,offset*words,span.count*words)?);
-            // Keep wrapped-ring verify writes out of `state.keys`/`state.values` until `accept()` commits the kept prefix.
-            // Straight planes and unwrapped rings (`first + count <= layout.rows`) write directly into unused future slots
-            // (`>= span.first`), leaving every committed slot `0..span.first` untouched on partial accept or discard and
-            // letting multi-chat verify share the batched `window_split` path with zero `accept()` KV copies.
+            // Keep the verify writes of a chat that is held apart out of `state.keys`/`state.values` until `accept()`
+            // commits the kept prefix. Straight planes and rings that take the rows (`count <= room`) write directly:
+            // into unused future slots (`>= span.first`) before the first wrap, and past it over rows that are out of
+            // the window of every position from `span.first` on. Every key that the chat still sees stays untouched on
+            // partial accept or discard, and multi-chat verify shares the batched `window_split` path with zero
+            // `accept()` KV copies.
             if wrap {state.written=Some([keys,values]);}
             else if let Some([wide_keys,wide_values])=scratch {
                 let wide=fit.wide();write_rows(c,&wide,wide_keys,*span,&keys)?;write_rows(c,&wide,wide_values,*span,&values)?;
@@ -391,7 +400,12 @@ pub fn half_rows<C:Compute,W:Weights<C>>(run:&Run<'_,C,W>,visit:&Visit,layout:&L
                 steps_v.extend([live, layout.slot(pos)?]);
                 row_pos_live.push((pos, live));
                 let state = &states[chat];
-                planes.push((state::view(c, layout, &state.keys, view)?, state::view(c, layout, &state.values, view)?));
+                let chat_view = if layout.ring {
+                    view
+                } else {
+                    layout.view_rows_in(pos, state::plane_rows(c, layout, &state.keys)?)?
+                };
+                planes.push((state::view(c, layout, &state.keys, chat_view)?, state::view(c, layout, &state.values, chat_view)?));
             }
             let both = state::step_words(c, &steps_v)?;
             let (q_part, m_part, s_part, g_part, pos_part) = if n == rows {
@@ -431,7 +445,7 @@ pub fn half_rows<C:Compute,W:Weights<C>>(run:&Run<'_,C,W>,visit:&Visit,layout:&L
         for (((span, state), scratch), fit) in spans.iter().zip(states.iter()).zip(&scratch).zip(&fits) {
             let wide = fit.wide();
             let (chat_layout, planes) = match scratch { Some([k, v]) => (&wide, [k, v]), None => (layout, [&state.keys, &state.values]) };
-            let chat_view = chat_layout.view_rows(span.first + span.count as u64 - 1)?;
+            let chat_view = chat_layout.view_rows_in(span.first + span.count as u64 - 1, state::plane_rows(c, chat_layout, planes[0])?)?;
             let (kv, vv) = (state::view(c, chat_layout, planes[0], chat_view)?, state::view(c, chat_layout, planes[1], chat_view)?);
             let mut done = 0usize;
             while done < span.count {
@@ -462,7 +476,8 @@ pub fn half_rows<C:Compute,W:Weights<C>>(run:&Run<'_,C,W>,visit:&Visit,layout:&L
     }
     // A verify pass (provisional rows) keeps its own chronological views below.
     if cohort_done {
-    } else if !prefill && !any_wraps && (2..=16).contains(&rows) && rows==spans.len() && words<=key_bytes/4 {
+    } else if !prefill && !any_wraps && (2..=16).contains(&rows) && rows==spans.len() && words<=key_bytes/4
+        && states.iter().all(|s|c.words(&s.keys)>=view*layout.row_words && c.words(&s.values)>=view*layout.row_words) {
         let mut steps=Vec::with_capacity(2*rows);let mut counts=Vec::with_capacity(rows);
         for span in spans {let n=layout.live(span.first)?;steps.extend([n,layout.slot(span.first)?]);counts.push(n);}
         let both=state::step_words(c,&steps)?;
@@ -497,7 +512,11 @@ pub fn half_rows<C:Compute,W:Weights<C>>(run:&Run<'_,C,W>,visit:&Visit,layout:&L
         // Fast GQA-packed Split-KV path for decode/verify (`!prefill`): runs BEFORE any provisional sliding-window
         // ring copy (`state.written`), reading committed keys from `planes` and provisional rows directly from `delta`!
         if !prefill {
-            let split_view = if layout.ring { layout.rows } else { layout.view_rows(span.first + span.count as u64 - 1)? };
+            let split_view = if layout.ring {
+                layout.rows
+            } else {
+                layout.view_rows_in(span.first + span.count as u64 - 1, state::plane_rows(c, layout, planes[0])?)?
+            };
             let (base_k, base_v) = (state::view(c, layout, planes[0], split_view)?, state::view(c, layout, planes[1], split_view)?);
             let mut split_done = 0usize;
             let mut split_parts = Vec::new();
@@ -565,7 +584,7 @@ pub fn half_rows<C:Compute,W:Weights<C>>(run:&Run<'_,C,W>,visit:&Visit,layout:&L
             let rd = (prefix > 0).then_some((k, v, prefix, start_slot));
             (rd, prefix as u64, prefix + span.count)
         } else {
-            (None, span.first, layout.view_rows(span.first + span.count as u64 - 1)?)
+            (None, span.first, layout.view_rows_in(span.first + span.count as u64 - 1, state::plane_rows(c, layout, planes[0])?)?)
         };
         let mut materialized: Option<(C::Value, C::Value)> = None;
         let mut views = |planes: [&C::Value; 2]| -> Result<(C::Value, C::Value)> {

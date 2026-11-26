@@ -35,12 +35,18 @@ impl<'b, 'd> Device<'b, 'd> {
         let width = s.heads as usize * s.dim as usize;
         let taps = s.taps as usize;
         let reads = [Some(conv.input), Some(conv.ring), conv.made];
+        let write_start = if conv.write.first + conv.rows <= conv.write.plane_rows {
+            conv.write.first * (width / 2)
+        } else {
+            0
+        };
+        let need_words = conv.write.plane_rows * (width / 2);
         if !self.loop_prefill.get() || !self.backend.resident_launches_active()
             || s.dim as usize != fast_ops::CONV_KV_DIM
             || !fast_ops::stream_ops_admitted(fast_ops::STREAM_OP_SHORT_CONV_WIN, conv.rows, width, taps, fast_ops::STREAM_OPS_THREADS)
             || !(conv.write.param.is_finite() && conv.write.param > 0.0)
             || reads.iter().flatten().any(|v| v.vector.is_segmented() || v.vector.len() != v.words)
-            || plane.vector.is_segmented() || !plane.vector.writable_from(0)
+            || plane.words < need_words || plane.vector.len() < need_words || !plane.vector.writable_from(write_start)
         {
             return Ok(false);
         }
@@ -685,14 +691,17 @@ impl<'b, 'd> Device<'b, 'd> {
             return Ok(None);
         }
         let width = p.kv_heads * fast_ops::KV_FINISH_HEAD_DIM;
-        let plane_words = p.plane_rows * (width / 2);
+        let row_words = width / 2;
         for (kr, vr, rs, kp, vp, ps) in targets.iter() {
+            let min_words = (*ps + 1) * row_words;
+            let write_word = *ps * row_words;
             if *rs >= p.taps || *ps >= p.plane_rows
                 || kr.vector.is_segmented() || vr.vector.is_segmented()
-                || kp.vector.is_segmented() || vp.vector.is_segmented()
-                || kp.words != plane_words || vp.words != plane_words
+                || kp.words < min_words || vp.words < min_words
+                || kp.vector.len() < min_words || vp.vector.len() < min_words
+                || !kp.vector.len().is_multiple_of(row_words) || !vp.vector.len().is_multiple_of(row_words)
                 || Rc::strong_count(&kp.vector) != 1 || Rc::strong_count(&vp.vector) != 1
-                || !kp.vector.writable_from(0) || !vp.vector.writable_from(0)
+                || !kp.vector.writable_from(write_word) || !vp.vector.writable_from(write_word)
             {
                 return Ok(None);
             }

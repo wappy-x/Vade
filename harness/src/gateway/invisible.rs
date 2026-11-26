@@ -217,6 +217,22 @@ fn serve_with_limit(
     max_connections: usize,
 ) -> io::Result<()> {
     let active = Arc::new(AtomicUsize::new(0));
+    let worker_active = Arc::clone(&active);
+    let worker_stats = stats.clone();
+    let workers = super::pool::WorkerPool::new(
+        "invisible-relay",
+        max_connections,
+        Arc::new(move |socket: TcpStream| {
+            let _guard = super::ActiveGuard(Arc::clone(&worker_active));
+            let _ = handle_guarded(
+                socket,
+                &runtime,
+                worker_stats.as_deref(),
+                recorder.as_deref(),
+                &access,
+            );
+        }),
+    );
     for socket in incoming {
         let socket = match socket {
             Ok(socket) => socket,
@@ -234,17 +250,10 @@ fn serve_with_limit(
             continue;
         }
         active.fetch_add(1, Ordering::Relaxed);
-        let guard = super::ActiveGuard(active.clone());
-        let runtime = runtime.clone();
-        let stats = stats.clone();
-        let recorder = recorder.clone();
-        let access = access.clone();
-        thread::Builder::new()
-            .name("invisible-relay".into())
-            .spawn(move || {
-                let _guard = guard;
-                let _ = handle_guarded(socket, &runtime, stats.as_deref(), recorder.as_deref(), &access);
-            })?;
+        if let Err(error) = workers.dispatch(socket) {
+            super::active_decrement(&active);
+            return Err(error);
+        }
     }
     Ok(())
 }
@@ -308,39 +317,77 @@ impl WireHead {
         Ok(Self { parsed, lines })
     }
     fn forward(&self, writer: &mut impl Write, first: &str, owned: &str) -> io::Result<()> {
-        self.forward_headers(writer, first, owned, None, false)
+        let mut buf = Vec::with_capacity(first.len() + owned.len() + self.lines.len() * 48 + 32);
+        self.format_headers(&mut buf, first, owned, None, false);
+        writer.write_all(&buf)
     }
     fn forward_upstream(&self, writer: &mut impl Write, first: &str, owned: &str) -> io::Result<()> {
         let key = crate::auth::ApiKey::configured()?;
         let authorization = key.as_ref().map(crate::auth::ApiKey::bearer_header);
-        self.forward_headers(writer, first, owned, authorization.as_deref(), true)
+        let mut buf = Vec::with_capacity(
+            first.len()
+                + owned.len()
+                + authorization.as_ref().map_or(0, String::len)
+                + self.lines.len() * 48
+                + 64,
+        );
+        self.format_headers(&mut buf, first, owned, authorization.as_deref(), true);
+        writer.write_all(&buf)
     }
     /// `upstream` replaces the client's Accept-Encoding with identity: the relay reads plain bodies only.
-    fn forward_headers(&self, writer: &mut impl Write, first: &str, owned: &str, authorization: Option<&str>, upstream: bool) -> io::Result<()> {
-        write!(writer, "{first}\r\n")?;
+    fn format_headers(
+        &self,
+        out: &mut Vec<u8>,
+        first: &str,
+        owned: &str,
+        authorization: Option<&str>,
+        upstream: bool,
+    ) {
+        out.extend_from_slice(first.as_bytes());
+        out.extend_from_slice(b"\r\n");
         for line in self.lines.iter().skip(1) {
             let name = std::str::from_utf8(line)
                 .unwrap()
                 .split_once(':')
                 .unwrap()
-                .0
-                .to_ascii_lowercase();
-            if !transport::hop_header(&name, &self.parsed)
-                && !(upstream && name == "accept-encoding")
-                && !(authorization.is_some() && matches!(name.as_str(), "authorization" | "x-api-key")) {
-                writer.write_all(line)?;
-                writer.write_all(b"\r\n")?;
+                .0;
+            if !transport::hop_header(name, &self.parsed)
+                && !(upstream && name.eq_ignore_ascii_case("accept-encoding"))
+                && !(authorization.is_some()
+                    && (name.eq_ignore_ascii_case("authorization")
+                        || name.eq_ignore_ascii_case("x-api-key")))
+            {
+                out.extend_from_slice(line);
+                out.extend_from_slice(b"\r\n");
             }
         }
-        writer.write_all(owned.as_bytes())?;
+        out.extend_from_slice(owned.as_bytes());
         if upstream {
-            writer.write_all(b"Accept-Encoding: identity\r\n")?;
+            out.extend_from_slice(b"Accept-Encoding: identity\r\n");
         }
         if let Some(authorization) = authorization {
-            writer.write_all(authorization.as_bytes())?;
+            out.extend_from_slice(authorization.as_bytes());
         }
-        writer.write_all(b"\r\n")?;
-        writer.flush()
+        out.extend_from_slice(b"\r\n");
+    }
+    fn upstream_header_bytes(&self, authorization: bool) -> usize {
+        let mut bytes = 0usize;
+        for line in self.lines.iter().skip(1) {
+            let name = std::str::from_utf8(line)
+                .unwrap()
+                .split_once(':')
+                .unwrap()
+                .0;
+            if !transport::hop_header(name, &self.parsed)
+                && !name.eq_ignore_ascii_case("accept-encoding")
+                && !(authorization
+                    && (name.eq_ignore_ascii_case("authorization")
+                        || name.eq_ignore_ascii_case("x-api-key")))
+            {
+                bytes += line.len() + 2;
+            }
+        }
+        bytes
     }
     fn body_head(&self) -> Head {
         // Content codings are opaque payload bytes; framing remains validated.
@@ -493,14 +540,34 @@ fn forward_with_timeout(
     // limit gets the 400 of an oversized client head, before any folder or forwarding.
     // The first check, at the client's body length, also runs before the --clamp-limits
     // admission request; the second covers a body that the policy made longer.
-    let unforwardable = |length| runtime.origins().iter().any(|origin| upstream_head(&request, origin, length).is_ok_and(|head| head.len() > transport::MAX_HEADERS));
+    let auth_len = crate::auth::ApiKey::configured()
+        .ok()
+        .flatten()
+        .map(|k| k.bearer_header().len());
+    let base_header_bytes = request.upstream_header_bytes(auth_len.is_some());
+    let unforwardable = |length: usize| {
+        let len_digits = if length == 0 { 1 } else { length.ilog10() as usize + 1 };
+        runtime.origins().iter().any(|origin| {
+            let target = origin.target(path);
+            let total = method.len()
+                + 1
+                + target.len()
+                + " HTTP/1.1\r\n".len()
+                + base_header_bytes
+                + "Host: \r\nContent-Length: \r\nConnection: close\r\nAccept-Encoding: identity\r\n\r\n".len()
+                + origin.endpoint.authority.len()
+                + len_digits
+                + auth_len.unwrap_or(0);
+            total > transport::MAX_HEADERS
+        })
+    };
     if unforwardable(body.len()) {
         return refused(local_error(input.reader.get_mut(), messages, 400, "invalid or oversized HTTP headers"));
     }
     let prepared = runtime.prepare(method, path, &request.parsed, &body);
     // A refusal after the policy keeps its report in the stats row.
     metrics.policy = prepared.report;
-    if unforwardable(prepared.body.len()) {
+    if prepared.body.len() != body.len() && unforwardable(prepared.body.len()) {
         return refused(local_error(input.reader.get_mut(), messages, 400, "invalid or oversized HTTP headers"));
     }
     // Only a complete request that passed the access checks gets a folder on disk.
@@ -703,9 +770,8 @@ fn exchange(
     let parts: Vec<_> = request.parsed.first.split(' ').collect();
     let (method, path) = (parts[0], parts[1]);
     // forward refuses a head that grows past the limit; a replayed one fails here.
-    upstream.write_all(&fitting_head(request, origin, body.len())?)?;
-    upstream.write_all(body)?;
-    upstream.flush()?;
+    let head = fitting_head(request, origin, body.len())?;
+    upstream.write_all_coalesced(&head, body)?;
     upstream.gateway_response(method, path);
     let mut upstream = BufReader::new(upstream);
     if !upstream.fill_buf()?.is_empty() {
@@ -764,9 +830,20 @@ fn exchange(
 fn upstream_head(request: &WireHead, origin: &Origin, body_len: usize) -> io::Result<Vec<u8>> {
     let parts: Vec<_> = request.parsed.first.split(' ').collect();
     let first = format!("{} {} HTTP/1.1", parts[0], origin.target(parts[1]));
-    let mut head = Vec::new();
-    request.forward_upstream(&mut head, &first,
-        &format!("Host: {}\r\nContent-Length: {body_len}\r\nConnection: close\r\n", origin.endpoint.authority))?;
+    let key = crate::auth::ApiKey::configured()?;
+    let authorization = key.as_ref().map(crate::auth::ApiKey::bearer_header);
+    let owned = format!(
+        "Host: {}\r\nContent-Length: {body_len}\r\nConnection: close\r\n",
+        origin.endpoint.authority
+    );
+    let mut head = Vec::with_capacity(
+        first.len()
+            + owned.len()
+            + authorization.as_ref().map_or(0, String::len)
+            + request.lines.len() * 48
+            + 64,
+    );
+    request.format_headers(&mut head, &first, &owned, authorization.as_deref(), true);
     Ok(head)
 }
 
@@ -786,23 +863,26 @@ fn relay(
     recording: &mut Option<Recording>,
     chunked: bool,
 ) -> io::Result<()> {
+    let track_write = metrics.enabled();
+    let mut frame = Vec::new();
     loop {
         let bytes = body.fill_buf()?;
         if bytes.is_empty() {
             break;
         }
         let n = bytes.len();
-        let started = Instant::now();
-        if chunked {
-            write!(writer, "{n:x}\r\n")?;
-        }
-        writer.write_all(bytes)?;
-        let flushed = if chunked {
-            writer.write_all(b"\r\n").and_then(|_| writer.flush())
+        let started = track_write.then(Instant::now);
+        let written = if chunked {
+            frame.clear();
+            frame.reserve(n + 24);
+            let _ = write!(&mut frame, "{n:x}\r\n");
+            frame.extend_from_slice(bytes);
+            frame.extend_from_slice(b"\r\n");
+            writer.write_all(&frame)
         } else {
-            writer.flush()
+            writer.write_all(bytes)
         };
-        metrics.payload(bytes, started.elapsed());
+        metrics.payload(bytes, started.map_or(Duration::ZERO, |t| t.elapsed()));
         record::observe(recording, |r| r.payload(bytes));
         body.consume(n);
         if metrics.terminal() {
@@ -810,7 +890,7 @@ fn relay(
             // Validate the remaining upstream HTTP framing within a short bound.
             body.reader.get_mut().finish_framing();
         } else {
-            flushed?;
+            written?;
         }
     }
     metrics.upstream_complete = true;

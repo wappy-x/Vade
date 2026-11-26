@@ -5,17 +5,23 @@ use super::*;
 
 /// Smaller contexts tried, in order, after an engine memory refusal.
 const STEP_DOWN: [u32; 4] = [32768, 16384, 8192, 4096];
+/// Smaller contexts tried for looped block checkpoints (such as Inkling 2 Mini, 512K default).
+const LOOP_STEP_DOWN: [u32; 7] = [262144, 131072, 65536, 32768, 16384, 8192, 4096];
 
 /// The engine's context refusal ("Requested size does not fit." whose Asked:
-/// line names `CONTEXT=<n>`), or None for any other stop. Weight and allocator
+/// line names `CONTEXT=<n>`, or a loop text service memory refusal naming
+/// `CONTEXT=<n>`), or None for any other stop. Weight and allocator
 /// refusals say "CONTEXT and OUTPUT not supplied"; a smaller context cannot help.
 pub(crate) fn memory_refusal(log: &str) -> Option<String> {
     let lines: Vec<&str> = log.lines().collect();
-    let start = lines.iter().position(|line| line.contains("Requested size does not fit."))?;
-    let asked = lines.get(start + 1)?;
-    if !asked.trim_start().starts_with("Asked:") || !asked.contains("CONTEXT=") { return None; }
-    let refusal = lines[start..].iter().take(8).copied().collect::<Vec<_>>().join("\n");
-    refusal.contains("Available").then_some(refusal)
+    if let Some(start) = lines.iter().position(|line| line.contains("Requested size does not fit.")) {
+        let asked = lines.get(start + 1)?;
+        if !asked.trim_start().starts_with("Asked:") || !asked.contains("CONTEXT=") { return None; }
+        let refusal = lines[start..].iter().take(8).copied().collect::<Vec<_>>().join("\n");
+        return refusal.contains("Available").then_some(refusal);
+    }
+    lines.iter().find(|line| line.contains("text service memory refusal: CONTEXT=") && line.trim_end().ends_with("reduce CONTEXT"))
+        .map(|line| (*line).to_owned())
 }
 
 /// The saved local defaults (`format=vade-owner-v1`): checkpoint, limits, port
@@ -40,17 +46,18 @@ pub(super) struct Config {
 pub const DEFAULT_PORT: u16 = 18080;
 
 impl Config {
-    /// First-run defaults for `model`: the standard FP4-Local context (capped by the
-    /// checkpoint) and its default output.
+    /// First-run defaults for `model`: 512K context / 16K output for looped block
+    /// checkpoints (Inkling 2 Mini), or 32K / 8K for FP4-Local (capped by checkpoint).
     pub fn new(
         root: &Path,
         model: &model::Model,
     ) -> Result<Self, String> {
-        // Same default as vade up; the engine's admission may lower it at start.
-        let context = crate::cli::FP4_CONTEXT.min(model.context_limit);
+        let default_context = if model.loop_text { crate::cli::INKLING_CONTEXT } else { crate::cli::FP4_CONTEXT };
+        let context = default_context.min(model.context_limit);
         if context < 4096 {
             return Err("The model has less than 4096 tokens of context; this launcher needs a larger supported context.".into());
         }
+        let output = if model.loop_text { crate::cli::inkling_output(context) } else { crate::cli::fp4_output(context) };
         let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, DEFAULT_PORT))
             .or_else(|_| std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)))
             .map_err(|_| "Cannot reserve a local chat port.")?;
@@ -59,7 +66,7 @@ impl Config {
             model: model.path.clone(),
             model_bytes: model.bytes,
             context,
-            output: crate::cli::fp4_output(context),
+            output,
             port: listener
                 .local_addr()
                 .map_err(|_| "Cannot read the local chat port.")?
@@ -89,9 +96,12 @@ impl Config {
         let model = PathBuf::from(required(&fields, "model_path")?);
         let stage = PathBuf::from(required(&fields, "stage_dir")?);
         let state = PathBuf::from(required(&fields, "state_dir")?);
-        if !(4096..=262144).contains(&context)
+        let is_loop = model::loop_text(&model);
+        let max_context = if is_loop { u64::from(u32::MAX) } else { u64::from(crate::cli::FP4_CONTEXT_LIMIT) };
+        let max_output = if is_loop { context } else { u64::from(crate::cli::FP4_OUTPUT_LIMIT) };
+        if !(4096..=max_context).contains(&context)
             || output == 0
-            || output > context || output > u64::from(crate::cli::FP4_OUTPUT_LIMIT)
+            || output > context || output > max_output
             || !(1024..=65535).contains(&port)
             || !model.is_absolute()
             || stage != root.join("stage")
@@ -127,21 +137,26 @@ impl Config {
     /// Refuse options a local launch cannot honour: FP8, more than one Spark,
     /// `--chats` or a nonzero `--cache-bytes`.
     pub fn validate_options(options: &UpOptions) -> Result<(), String> {
-        Self::validate_for_model(options, false, 3)
+        if options.is_inkling() {
+            Self::validate_up_options(options)
+        } else {
+            Self::validate_for_model(options, false, 3)
+        }
     }
 
     /// Early option check for local `vade up` before the checkpoint plan is read:
-    /// allows `--diagnostic-unqualified-text` depths up to `MAX_DIAGNOSTIC_DEPTH`;
+    /// allows `--diagnostic-unqualified-text` or `inkling` depths up to `MAX_DIAGNOSTIC_DEPTH`;
     /// the checkpoint-specific limit is then enforced by [`Self::validate_for_model`].
     pub fn validate_up_options(options: &UpOptions) -> Result<(), String> {
-        let limit = if options.diagnostic_unqualified_text {
+        let deep = options.diagnostic_unqualified_text || options.is_inkling();
+        let limit = if deep {
             crate::text_service::MAX_DIAGNOSTIC_DEPTH
         } else {
             3
         };
         Self::validate_common(options)?;
         if options.mtp > limit {
-            return Err(if options.diagnostic_unqualified_text {
+            return Err(if deep {
                 format!("Set MTP to a whole number from 0 to {limit}.")
             } else {
                 "Local FP4-Local supports drafting depth 0..3; use the controller text service for deeper drafting.".into()
@@ -166,8 +181,16 @@ impl Config {
             if options.mtp_explicit && options.mtp > max_depth {
                 return Err(crate::text_service::TextService::alone_with_max_depth(max_depth).draft_refusal());
             }
-        } else if options.mtp > 3 {
-            return Err("Local FP4-Local supports drafting depth 0..3; use the controller text service for deeper drafting.".into());
+        } else {
+            if options.mtp > 3 {
+                return Err("Local FP4-Local supports drafting depth 0..3; use the controller text service for deeper drafting.".into());
+            }
+            if options.supplied_options.contains("--context") && options.context > crate::cli::FP4_CONTEXT_LIMIT {
+                return Err("FP4-Local context is limited to 262144 tokens. Set --context 4096..262144.".into());
+            }
+            if options.output_explicit && options.output > crate::cli::FP4_OUTPUT_LIMIT {
+                return Err("FP4-Local output is limited to 16384 tokens. Set --output 1024..16384.".into());
+            }
         }
         Ok(())
     }
@@ -249,12 +272,19 @@ impl Config {
     /// against this Spark's memory.
     pub fn check_resources(&self, model: &model::Model, identity: &detect::Identity) -> Result<(), String> {
         Self::supported_controls(self.chats, self.cache_bytes)?;
+        if !model.loop_text && self.context > crate::cli::FP4_CONTEXT_LIMIT {
+            return Err("FP4-Local context is limited to 262144 tokens; run vade up --context 262144 (or a smaller value).".into());
+        }
         if self.context > model.context_limit {
             return Err(format!("Requested context {} exceeds this checkpoint's {} token limit; run vade up --context {}.",
                 self.context, model.context_limit, model.context_limit));
         }
-        if self.output > self.context || self.output > 16384 {
-            return Err("Output must fit context and the FP4-Local engine's 16384 token limit; run vade up --output 8192 (or a smaller value).".into());
+        if self.output > self.context || (!model.loop_text && self.output > crate::cli::FP4_OUTPUT_LIMIT) {
+            return Err(if model.loop_text {
+                "Output must fit context; set --output no larger than --context.".into()
+            } else {
+                "Output must fit context and the FP4-Local engine's 16384 token limit; run vade up --output 8192 (or a smaller value).".into()
+            });
         }
         if self.memory_bytes == Some(0) || matches!((self.memory_bytes, self.cache_bytes), (Some(memory), Some(cache)) if cache >= memory) {
             return Err("Memory budget must be positive and larger than the KV pool; run vade up with corrected --memory-bytes and --cache-bytes.".into());
@@ -267,9 +297,17 @@ impl Config {
     /// After the engine refuses a default or saved context for memory, lower it
     /// to the next standard size; callers never lower an explicit --context.
     pub fn step_down(&mut self, explicit_output: bool) -> Option<u32> {
-        let next = STEP_DOWN.into_iter().find(|n| *n < self.context)?;
+        let is_loop = model::loop_text(&self.model);
+        let ladder: &[u32] = if is_loop { &LOOP_STEP_DOWN } else { &STEP_DOWN };
+        let next = ladder.iter().copied().find(|n| *n < self.context)?;
         self.context = next;
-        self.output = if explicit_output { self.output.min(next) } else { crate::cli::fp4_output(next) };
+        self.output = if explicit_output {
+            self.output.min(next)
+        } else if is_loop {
+            crate::cli::inkling_output(next)
+        } else {
+            crate::cli::fp4_output(next)
+        };
         Some(next)
     }
 

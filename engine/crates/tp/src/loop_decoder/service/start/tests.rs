@@ -117,6 +117,36 @@ fn a_whole_start_serves_a_chat_with_text_on_the_host_backend() {
         }
     });
 }
+/// At long contexts (`>= 131,072`) `serve_with_draft` raises the tokenizer's input byte limit to match
+/// `limits.tokenizer_limits()`, so prompts above the default 1 MiB tokenizer cap are tokenized instead of refused.
+#[test]
+fn serve_raises_tokenizer_input_byte_limit_past_one_mib() {
+    let folder=Folder::new("start-long-tok");
+    let config=crate::loop_decoder::fixture::SMALL
+        .replace(r#""vocab_size":24,"unpadded_vocab_size":20"#,r#""vocab_size":320,"unpadded_vocab_size":312"#)
+        .replace(r#""model_max_length":64"#,r#""model_max_length":600000"#)
+        .replace(r#""eos_token_id":1,"#,&format!(r#""eos_token_id":{},"#,folder.stop));
+    let fixture=crate::loop_decoder::fixture::Fixture::new(&config).unwrap();
+    let d=&fixture.description;
+    let settings=settings(&words("0 1 127.0.0.1:32112 127.0.0.1:32112 flash.ptx model 600000 127.0.0.1:0 1 --diagnostic-unqualified-text --mtp 0 --no-prompt-keep --diagnostic-host-arithmetic"),Some("16384".into())).unwrap();
+    let admitted=admit(d,&LoadBytes {device:1<<20,..Default::default()},settings.context,256<<20,4,super::super::tests::LIMITS).unwrap();
+    let listener=TcpListener::bind(settings.bind).unwrap();let address=listener.local_addr().unwrap();
+    let read=text(&folder.root,d).unwrap();
+    struct Stop<'a>(&'a AtomicBool);impl Drop for Stop<'_> {fn drop(&mut self) {self.0.store(true,Ordering::Relaxed);}}
+    let stop=AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        let (stop,settings,admitted,root,fixture)=(&stop,&settings,&admitted,folder.root.as_path(),&fixture);let _stop=Stop(stop);
+        scope.spawn(move ||serve(&Host,fixture,&fixture.description,read,admitted,settings,listener,root,"host",stop).unwrap());
+        let send=|text:String| {let mut stream=TcpStream::connect(address).unwrap();stream.set_read_timeout(Some(Duration::from_secs(120))).unwrap();
+            stream.write_all(text.as_bytes()).unwrap();let mut reply=String::new();stream.read_to_string(&mut reply).unwrap();reply};
+        let word=format!("{} ","ab".repeat(32));
+        let text_payload=word.repeat(17_000);
+        assert!(text_payload.len()>1_100_000);
+        let body=format!(r#"{{"prompt":"{text_payload}"}}"#);
+        let reply=post(&send,address,"/tokenize",&body);
+        assert!(ok(&reply) && !reply.contains("input byte limit exceeded") && reply.contains("\"count\":561000"),"{}",&reply[..reply.len().min(300)]);
+    });
+}
 /// A DEVICE START WITHOUT THE KERNEL IMAGE STOPS AT THE START, NOT AT THE FIRST CHAT: one clear line that names the
 /// build command. With the image, the start goes on.
 #[test]

@@ -194,7 +194,7 @@ fn chat<C:Compute<Value=Vec<f32>>,W:Weights<C>>(driver:&Driver<'_,C,W>,tokens:&[
 /// What a state holds, by position and not by offset: for each visit the key row and the value row of each position
 /// that the last token saw, then the four rings. Two drivers with two step row limits hold a chat in planes of two
 /// sizes, and they give the same list.
-fn by_position<C:Compute<Value=Vec<f32>>,W:Weights<C>>(driver:&Driver<'_,C,W>,state:&State<Vec<f32>>)->Vec<u32> {
+pub(super) fn by_position<C:Compute<Value=Vec<f32>>,W:Weights<C>>(driver:&Driver<'_,C,W>,state:&State<Vec<f32>>)->Vec<u32> {
     let (mut out,last)=(Vec::new(),state.position-1);
     for (layout,visit) in driver.layouts().iter().zip(&state.visits) {
         for position in last+1-layout.live(last).unwrap() as u64..=last {
@@ -227,6 +227,8 @@ fn the_byte_limit_over_keys_and_the_extra_ring_rows_change_no_word() {
         let (mut compared,mut pairs)=(0,0);
         for (step_rows,key_bytes,cut) in [(12,1<<30,vec![12]),(12,1,vec![12]),(12,2*row+1,vec![12]),(12,2*row+1,vec![2,3,4,3]),(5,1<<30,vec![5,5,2]),(5,1,vec![5,5,2]),(5,3*row,vec![4,5,3]),(1,1,vec![1;12])] {
             let driver=Driver::with_limits(&Host,&fixture,d,16,Limits {step_rows,key_bytes}).unwrap();
+            // These limits are under one whole check pass (`state::CHECK_ROWS`), so the state ring is the window.
+            assert_eq!(state::spare_rows(step_rows),0);
             assert!(driver.layouts().iter().all(|layout|layout.key_bytes==key_bytes && layout.rows==if layout.ring {layout.window} else {16} && layout.wide().rows==if layout.ring {layout.window+step_rows-1} else {16}));
             let (rows,state)=chat(&driver,&tokens,&cut);
             assert_eq!(rows,words,"{name}: step row limit {step_rows}, {key_bytes} bytes over keys, cut {cut:?}");
@@ -234,6 +236,28 @@ fn the_byte_limit_over_keys_and_the_extra_ring_rows_change_no_word() {
             compared+=rows.iter().map(Vec::len).sum::<usize>()+kept.len();pairs+=1;
         }
         println!("G4 {name}: {compared} words equal the token path, for {pairs} pairs of a step row limit and a byte limit over keys");
+        // Rings with spare rows (`state::spare_rows`): a step row limit of a whole check pass or more. A chat of 44
+        // tokens goes round those rings (19 and 18 rows) more than twice. A step of up to a check pass of rows writes
+        // straight into the ring, also where the ring goes round; a larger step works in the wide ring.
+        let (tokens,check)=(fixture.chat(44),state::CHECK_ROWS);
+        let one=Driver::new(&Host,&fixture,d,48).unwrap();
+        let (mut state,mut words)=(one.clean().unwrap(),Vec::new());
+        for &id in &tokens {
+            let mut row=Vec::new();
+            let step=one.step_seen(&mut state,id,|_,stream|{row.extend(bits(stream));Ok(())}).unwrap();
+            row.extend(bits(&step.logits));row.push(step.top);words.push(row);
+        }
+        let kept=by_position(&one,&state);
+        let (mut compared,mut pairs)=(0,0);
+        for (step_rows,key_bytes,cut) in [(check,1<<30,vec![3,16,1,16,2,6]),(check,1,vec![12,16,16]),(check+4,1<<30,vec![3,20,1,17,3]),(check+4,2*row+1,vec![16,5,20,3]),(2*check,1<<30,vec![1;44])] {
+            let driver=Driver::with_limits(&Host,&fixture,d,48,Limits {step_rows,key_bytes}).unwrap();
+            assert!(driver.layouts().iter().all(|layout|layout.rows==if layout.ring {layout.window+check-1} else {48} && layout.wide().rows==if layout.ring {layout.window+step_rows-1} else {48}));
+            let (rows,state)=chat(&driver,&tokens,&cut);
+            assert_eq!(rows,words,"{name}: spare ring rows, step row limit {step_rows}, {key_bytes} bytes over keys, cut {cut:?}");
+            assert_eq!(by_position(&driver,&state),kept,"{name}: the state by position with spare ring rows, step row limit {step_rows}, {key_bytes} bytes over keys, cut {cut:?}");
+            compared+=rows.iter().map(Vec::len).sum::<usize>()+kept.len();pairs+=1;
+        }
+        println!("G4 {name}: {compared} words equal the token path on rings with spare rows, for {pairs} pairs of a step row limit and a byte limit over keys");
     }
 }
 /// The rule of a step that fails (`Driver::step_rows_seen`): no position moves, nothing waits in a state, and the

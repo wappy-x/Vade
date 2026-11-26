@@ -8,6 +8,7 @@
 //! checksum list beside it, which the FP4-Local routes of `vade launch` and
 //! `vade up` use to check every byte before they serve the model (see
 //! docs/pull-models.md).
+pub(crate) mod alias;
 mod fetch;
 mod hub;
 mod models;
@@ -65,8 +66,15 @@ fn parse(args: &[String]) -> Result<Request, String> {
             _ => { spec = Some(arg.to_owned()); index += 1; }
         }
     }
-    let spec = spec.ok_or_else(|| format!("Name the model to pull, such as vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local. {usage}"))?;
-    let (repo, revision) = spec.split_once('@').unwrap_or((&spec, "main"));
+    let spec = spec.ok_or_else(|| format!("Name the model to pull, such as vade pull inkling or vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local. {usage}"))?;
+    let (raw_repo, explicit_rev) = match spec.split_once('@') {
+        Some((repo, rev)) => (repo, Some(rev)),
+        None => (spec.as_str(), None),
+    };
+    let (repo, revision) = match alias::resolve(raw_repo) {
+        Some(alias) => (alias.repo, explicit_rev.unwrap_or(alias.revision)),
+        None => (raw_repo, explicit_rev.unwrap_or("main")),
+    };
     hub::repo(repo)?;
     hub::revision(revision)?;
     Ok(Request { repo: repo.into(), revision: revision.into(), include, to })

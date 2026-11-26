@@ -87,28 +87,29 @@ fn configuration(config: &Config, home: &Path) -> Vec<(&'static str, String)> {
             (".claude.json", "{\"hasCompletedOnboarding\":true}\n".into()),
             ("CLAUDE.md", TOOL_RULE.into()),
         ],
-        Client::Codex => vec![
-            (
-                "config.toml",
-                format!(
-                    "model_catalog_json = {}\nmodel_context_window = {context}\nmodel_auto_compact_token_limit = {}\n{}web_search = \"disabled\"\ncheck_for_update_on_startup = false\nsandbox_mode = \"read-only\"\napproval_policy = \"never\"\n{}\n[analytics]\nenabled = false\n\n[features]\nmulti_agent = false\ngoals = false\n",
-                    quoted(&home.join("models.json").to_string_lossy()),
-                    context - output,
-                    // A model that cannot turn thinking off (GLM) refuses the "none" effort with
-                    // HTTP 400 on every request. There Codex names no effort and the model thinks.
-                    if crate::contract::thinking_off_supported(&config.model) { "model_reasoning_effort = \"none\"\n" } else { "" },
-                    config.snippet(endpoint)
+        Client::Codex => {
+            let compact = super::codex_auto_compact_limit(context, output);
+            vec![
+                (
+                    "config.toml",
+                    format!(
+                        "model_catalog_json = {}\nmodel_context_window = {context}\nmodel_auto_compact_token_limit = {compact}\n{}web_search = \"disabled\"\ncheck_for_update_on_startup = false\nsandbox_mode = \"read-only\"\napproval_policy = \"never\"\n{}\n[analytics]\nenabled = false\n\n[features]\nmulti_agent = false\ngoals = false\n",
+                        quoted(&home.join("models.json").to_string_lossy()),
+                        // A model that cannot turn thinking off (GLM) refuses the "none" effort with
+                        // HTTP 400 on every request. There Codex names no effort and the model thinks.
+                        if crate::contract::thinking_off_supported(&config.model) { "model_reasoning_effort = \"none\"\n" } else { "" },
+                        config.snippet(endpoint)
+                    ),
                 ),
-            ),
-            (
-                "models.json",
-                format!(
-                    "{{\"models\":[{{\"slug\":{model},\"display_name\":{model},\"description\":\"Explicit local provider\",\"default_reasoning_level\":null,\"supported_reasoning_levels\":[],\"shell_type\":\"shell_command\",\"visibility\":\"list\",\"supported_in_api\":true,\"priority\":1,\"upgrade\":null,\"base_instructions\":\"You are a coding assistant. Complete the user's request using the provided tools when needed. Follow workspace instructions and tool permissions.\",\"supports_reasoning_summaries\":false,\"default_reasoning_summary\":\"none\",\"support_verbosity\":false,\"default_verbosity\":null,\"apply_patch_tool_type\":\"freeform\",\"web_search_tool_type\":\"text\",\"truncation_policy\":{{\"mode\":\"tokens\",\"limit\":{output}}},\"supports_parallel_tool_calls\":false,\"supports_image_detail_original\":false,\"context_window\":{context},\"max_context_window\":{context},\"auto_compact_token_limit\":{},\"experimental_supported_tools\":[],\"input_modalities\":[\"text\"],\"supports_search_tool\":false,\"supports_experimental_context\":false,\"use_responses_lite\":false}}]}}\n",
-                    context - output
+                (
+                    "models.json",
+                    format!(
+                        "{{\"models\":[{{\"slug\":{model},\"display_name\":{model},\"description\":\"Explicit local provider\",\"default_reasoning_level\":null,\"supported_reasoning_levels\":[],\"shell_type\":\"shell_command\",\"visibility\":\"list\",\"supported_in_api\":true,\"priority\":1,\"upgrade\":null,\"base_instructions\":\"You are a coding assistant. Complete the user's request using the provided tools when needed. Follow workspace instructions and tool permissions.\",\"supports_reasoning_summaries\":false,\"default_reasoning_summary\":\"none\",\"support_verbosity\":false,\"default_verbosity\":null,\"apply_patch_tool_type\":\"freeform\",\"web_search_tool_type\":\"text\",\"truncation_policy\":{{\"mode\":\"tokens\",\"limit\":{output}}},\"supports_parallel_tool_calls\":false,\"supports_image_detail_original\":false,\"context_window\":{context},\"max_context_window\":{context},\"auto_compact_token_limit\":{compact},\"experimental_supported_tools\":[],\"input_modalities\":[\"text\"],\"supports_search_tool\":false,\"supports_experimental_context\":false,\"use_responses_lite\":false}}]}}\n"
+                    ),
                 ),
-            ),
-            ("AGENTS.md", TOOL_RULE.into()),
-        ],
+                ("AGENTS.md", TOOL_RULE.into()),
+            ]
+        }
         Client::Hermes => vec![
             (
                 "config.yaml",

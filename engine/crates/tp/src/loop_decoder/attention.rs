@@ -101,10 +101,12 @@ fn finish_row<C:Compute,W:Weights<C>>(run:&Run<'_,C,W>,layout:&Layout,state:&mut
     need(channels==heads*head && channels==layout.kv_channels && fixed.len()==channels*taps && f.made.is_none_or(|made|c.words(made)==heads*taps)
         && c.words(f.product)==channels && f.param>0.0,"the taps of a key or value convolution differ from the description")?;
     let plane=if f.which==Ring::Key {&mut state.keys} else {&mut state.values};
-    need(c.words(plane)==layout.rows*layout.row_words,"a key or value row differs from the layout")?;
+    let cap=state::plane_rows(c,layout,plane)?;
+    let slot=layout.slot(position)?;
+    need(slot<cap,"a key or value row differs from the layout")?;
     let step=state::step_words(c,&[layout.ring_slot(f.which,position)])?;
     let one=ConvFinish {shape:conv_shape(heads,channels,taps,f.made.is_some())?,finish:f.op,param:f.param as f32,fixed,made:f.made,step:&step,
-        product:f.product,plane_word:layout.slot(position)?*layout.row_words};
+        product:f.product,plane_word:slot*layout.row_words};
     // The one-launch form gives its finished row (no reader here): the caller keeps it while the next finish records.
     if let Some(row)=c.conv_finish(&one,&mut state.rings[f.which as usize],plane)? {return Ok(Some(row));}
     let y=stream_conv(run,layout,&mut state.rings,position,f.which,f.fixed,f.made,heads,f.product)?;
@@ -185,7 +187,8 @@ pub fn half<C:Compute,W:Weights<C>>(run:&Run<'_,C,W>,visit:&Visit,layout:&Layout
     // A backend with the one-launch form (`Compute::window_one`) gives the words of the four arms below in one launch;
     // otherwise arm `RelBias` gives the term of each head and distance, then the scores, the softmax and the values.
     let attended={
-        let (rows,live,group)=(layout.view_rows(position)?,layout.live(position)?,heads/kv_heads);
+        let plane_cap=state::plane_rows(c,layout,&state.keys)?;
+        let (rows,live,group)=(layout.view_rows_in(position,plane_cap)?,layout.live(position)?,heads/kv_heads);
         let step=state::step_words(c,&[live,layout.slot(position)?])?;
         let (keys,values)=(state::view(c,layout,&state.keys,rows)?,state::view(c,layout,&state.values,rows)?);
         let one=WindowOne {rows:1,heads,kv_heads,view:rows,extent,scale:score_scale(a.head_dim),query:&query,query_scale,query_bound:a.query_key_clip as f32,

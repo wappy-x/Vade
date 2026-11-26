@@ -57,6 +57,8 @@ pub enum Command {
     Pull(Vec<String>),
     /// `vade models`, with its arguments.
     Models(Vec<String>),
+    /// `vade connect`, with its arguments (parsed by [`crate::connect`]).
+    Connect(Vec<String>),
     /// The private `__worker` helper, with its arguments.
     Worker(Vec<String>),
 }
@@ -159,6 +161,9 @@ impl DraftFall {
 /// Options for `vade up` and `vade launch`, after defaults are applied.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UpOptions {
+    /// Optional short model alias resolved to its canonical `<org>/<name>` repository
+    /// (for example `vade up inkling` -> `thinkingmachines/Inkling-2-Mini`).
+    pub model: Option<String>,
     /// Launch flags supplied on the command line, independent of defaults or environment.
     pub supplied_options: std::collections::BTreeSet<String>,
     pub sparks: Option<usize>,
@@ -200,9 +205,17 @@ pub struct UpOptions {
     pub draft_fall: Option<DraftFall>,
 }
 
+impl UpOptions {
+    /// Whether this command explicitly named the Inkling 2 Mini alias.
+    pub fn is_inkling(&self) -> bool {
+        self.model.as_deref() == Some(crate::pull::alias::INKLING_REPO)
+    }
+}
+
 impl Default for UpOptions {
     fn default() -> Self {
         Self {
+            model: None,
             supplied_options: Default::default(),
             sparks: None,
             listed: false,
@@ -300,7 +313,7 @@ pub fn parse(args: &[String]) -> Result<Cli, String> {
         }
         return Err(format!("Unknown command {}. Run vade --help to see the commands.", crate::text::argument(command)));
     }
-    if args[1..].iter().any(|arg| matches!(*arg, "--help" | "-h")) {
+    if args[1..].iter().take_while(|arg| **arg != "--").any(|arg| matches!(*arg, "--help" | "-h")) {
         return Ok(Cli {
             command: Command::Help(Some(command.into())),
             dry_run,
@@ -342,9 +355,13 @@ pub fn parse(args: &[String]) -> Result<Cli, String> {
             return Err("Choose --release or source checkouts.".into());
         }
         Command::Run(options)
-    } else if matches!(command, "pull" | "models") {
+    } else if matches!(command, "pull" | "models" | "connect") {
         let rest = args[1..].iter().map(|arg| (*arg).to_owned()).collect();
-        if command == "pull" { Command::Pull(rest) } else { Command::Models(rest) }
+        match command {
+            "pull" => Command::Pull(rest),
+            "models" => Command::Models(rest),
+            _ => Command::Connect(rest),
+        }
     } else if command == "status" && args.get(1) == Some(&"--json") {
         if args.len() != 2 { return Err("Use vade status --json [--dry-run]. No other status options are supported.".into()); }
         Command::StatusJson
@@ -394,7 +411,7 @@ fn known_command(command: &str) -> bool {
     matches!(
         command,
         "run" | "up" | "down" | "status" | "logs" | "chat" | "sessions" | "doctor" | "install" | "update" | "version" | "detect" | "launch" | "config"
-            | "pull" | "models" | "setup"
+            | "pull" | "models" | "setup" | "connect"
     )
 }
 
@@ -490,9 +507,36 @@ fn parse_up(args: &[&str]) -> Result<UpOptions, String> {
     let mut replicas = 0;
     let mut listed = false;
     let mut index = 0;
+    let inkling_named = {
+        let mut scan = 0;
+        let mut found = false;
+        while scan < args.len() {
+            let word = args[scan];
+            if UP_VALUE_OPTIONS.contains(&word) || word == "--link" {
+                scan += 2;
+                continue;
+            }
+            if !word.starts_with('-') && crate::pull::alias::is_inkling(word) {
+                found = true;
+            }
+            scan += 1;
+        }
+        found
+    };
+    let deep_mtp_ok = args.contains(&"--diagnostic-unqualified-text") || inkling_named;
     while index < args.len() {
         // --fp8-legacy is the older spelling of --fp8; both name the same profile.
         let flag = if args[index] == "--fp8-legacy" { "--fp8" } else { args[index] };
+        if !flag.starts_with('-') {
+            if let Some(alias) = crate::pull::alias::resolve(flag) {
+                if options.model.replace(alias.repo.to_owned()).is_some() {
+                    return Err("Give one model name. Run vade up --help.".into());
+                }
+                index += 1;
+                continue;
+            }
+            return Err(format!("Unknown model {} for vade up. Use inkling or qwen, or set VADE_MODELS=<folder>. Run vade up --help.", crate::text::argument(flag)));
+        }
         if !seen.insert(flag) {
             return Err(format!("Use {flag} only once. Run vade up --help."));
         }
@@ -548,12 +592,12 @@ fn parse_up(args: &[&str]) -> Result<UpOptions, String> {
             }
             "--hosts" => options.hosts = ssh_targets(value).ok_or(HOSTS)?,
             "--mtp" => {
-                options.mtp = number(value, flag, 0, if args.contains(&"--diagnostic-unqualified-text") {7} else {3})?;
+                options.mtp = number(value, flag, 0, if deep_mtp_ok { 7 } else { 3 })?;
                 options.mtp_explicit = true;
             },
-            "--context" => options.context = number(value, flag, 4096, 262144)?,
+            "--context" => options.context = min_number(value, flag, 4096)?,
             "--output" => {
-                options.output = number(value, flag, if args.contains(&"--diagnostic-unqualified-text") {1} else {1024}, 262144)?;
+                options.output = min_number(value, flag, if deep_mtp_ok { 1 } else { 1024 })?;
                 options.output_explicit = true;
             }
             "--chats" => options.chats = Some(number(value, flag, 1, 32)? as usize),
@@ -568,18 +612,25 @@ fn parse_up(args: &[&str]) -> Result<UpOptions, String> {
         }
         index += 2;
     }
+    if options.is_inkling() && seen.contains("--fp8") {
+        return Err("Inkling 2 Mini runs on one Spark; omit --fp8. Run vade up --help.".into());
+    }
+    if options.is_inkling() && seen.contains("--fp4-local") {
+        return Err("Choose inkling or --fp4-local, not both. Run vade up --help.".into());
+    }
     if options.decode_fuse == Some(true) && (options.sparks.is_some_and(|n| n != 1) || !options.hosts.is_empty()) {
         return Err("--decode-fuse on runs on one Spark. Use --sparks 1, or leave it off.".into());
     }
     if !seen.contains("--mtp") {
+        let max_mtp = if options.diagnostic_unqualified_text || options.is_inkling() { 7 } else { 3 };
         match std::env::var("MTP") {
             Ok(value) => {
-                options.mtp = number(&value, "MTP", 0, if options.diagnostic_unqualified_text {7} else {3})?;
+                options.mtp = number(&value, "MTP", 0, max_mtp)?;
                 options.mtp_explicit = true;
             },
             Err(std::env::VarError::NotPresent) => {}
             Err(std::env::VarError::NotUnicode(_)) => {
-                return Err(format!("Set MTP to a whole number from 0 to {}.", if options.diagnostic_unqualified_text {7} else {3}));
+                return Err(format!("Set MTP to a whole number from 0 to {max_mtp}."));
             }
         }
     }
@@ -597,15 +648,28 @@ fn parse_up(args: &[&str]) -> Result<UpOptions, String> {
         }
         if options.hosts.is_empty() { options.sparks = Some(machines); }
     }
-    if options.fp4_local {
+    if options.is_inkling() {
+        if !seen.contains("--context") { options.context = INKLING_CONTEXT; }
+        if !options.output_explicit { options.output = inkling_output(options.context); }
+    } else if options.fp4_local {
         if !seen.contains("--context") { options.context = FP4_CONTEXT; }
         if !options.output_explicit { options.output = fp4_output(options.context); }
-        if options.output > FP4_OUTPUT_LIMIT {
+        let explicit_fp4 = seen.contains("--fp4-local") || options.model.is_some();
+        if explicit_fp4 && options.context > FP4_CONTEXT_LIMIT {
+            return Err("FP4-Local context is limited to 262144 tokens. Set --context 4096..262144.".into());
+        }
+        if explicit_fp4 && options.output > FP4_OUTPUT_LIMIT {
             return Err("FP4-Local output is limited to 16384 tokens. Set --output 1024..16384.".into());
         }
     } else {
         if !seen.contains("--context") { options.context = 131072; }
         if !options.output_explicit { options.output = 65536; }
+        if options.context > FP4_CONTEXT_LIMIT {
+            return Err("FP8 context is limited to 262144 tokens. Set --context 4096..262144.".into());
+        }
+        if options.output > FP4_CONTEXT_LIMIT {
+            return Err("FP8 output is limited to 262144 tokens. Set --output 1024..262144.".into());
+        }
     }
     if seen.contains("--sparks") && seen.contains("--hosts") {
         return Err("Choose --sparks or --hosts. Run vade up --help.".into());
@@ -652,6 +716,8 @@ fn parse_up(args: &[&str]) -> Result<UpOptions, String> {
 /// `--context 262144` selects the
 /// single-chat long-context preset explicitly.
 pub const FP4_CONTEXT: u32 = 32768;
+/// Largest FP4-Local context window.
+pub const FP4_CONTEXT_LIMIT: u32 = 262144;
 /// The FP4-Local default for a group of two or more Sparks, which `vade up` sets
 /// once it knows the group. A start that does not fit falls to [`FP4_CONTEXT`].
 pub const FP4_LONG_CONTEXT: u32 = 131072;
@@ -659,9 +725,15 @@ pub const FP4_LONG_CONTEXT: u32 = 131072;
 pub const FP4_OUTPUT: u32 = 8192;
 /// Largest explicit FP4-Local output limit.
 pub const FP4_OUTPUT_LIMIT: u32 = 16384;
+/// Default Inkling 2 Mini context window (512K with Paged KV).
+pub const INKLING_CONTEXT: u32 = 524_288;
+/// Default Inkling 2 Mini output limit (16K, capped at context).
+pub const INKLING_OUTPUT: u32 = 16384;
 
 /// Default FP4-Local output limit for a context.
 pub fn fp4_output(context: u32) -> u32 { context.min(FP4_OUTPUT) }
+/// Default Inkling 2 Mini output limit for a context.
+pub fn inkling_output(context: u32) -> u32 { context.min(INKLING_OUTPUT) }
 
 /// The error for a bad `--sparks`: the range of the help, and the list form.
 fn sparks_error() -> String {
@@ -717,6 +789,15 @@ fn number(value: &str, flag: &str, min: u32, max: u32) -> Result<u32, String> {
         return Ok(value);
     }
     Err(format!("Set {flag} to a whole number from {min} to {max}."))
+}
+
+fn min_number(value: &str, flag: &str, min: u32) -> Result<u32, String> {
+    if !value.is_empty() && value.bytes().all(|c| c.is_ascii_digit())
+        && let Ok(value) = value.parse::<u32>()
+        && value >= min {
+        return Ok(value);
+    }
+    Err(format!("Set {flag} to a whole number of at least {min}."))
 }
 
 /// A machine or host name: 1 to 64 ASCII letters, digits, `-` or `_`, starting
@@ -970,7 +1051,7 @@ mod tests {
     #[test]
     fn negative_numbers_and_equals_signs_get_the_error_that_names_the_fix() {
         // A negative number is a bad value, not a missing one; the next option is still missing.
-        assert_eq!(cli("up --context -5").unwrap_err(), "Set --context to a whole number from 4096 to 262144.");
+        assert_eq!(cli("up --context -5").unwrap_err(), "Set --context to a whole number of at least 4096.");
         assert_eq!(cli("up --mtp -1").unwrap_err(), "Set --mtp to a whole number from 0 to 3.");
         let Command::Up(fused) = cli("up --decode-fuse on").unwrap().command else { panic!() };
         assert_eq!(fused.decode_fuse, Some(true));
@@ -985,5 +1066,29 @@ mod tests {
             "Unknown option \"--context=32768\" for vade up. Put a space between --context and its value, not an equals sign. Run vade up --help.");
         assert!(cli("run qwen3-8b --port=9000").unwrap_err().contains("Put a space between --port and its value"));
         assert_eq!(cli("up --nope=1").unwrap_err(), "Unknown option \"--nope=1\" for vade up. Run vade up --help.");
+    }
+    #[test]
+    fn inkling_alias_and_connect_parse_cleanly() {
+        for cmd in ["up inkling", "up INKLING", "up inkling-2-mini", "launch inkling"] {
+            let (Command::Up(o) | Command::Launch(o)) = cli(cmd).unwrap().command else { panic!("{cmd}") };
+            assert_eq!(o.model.as_deref(), Some(crate::pull::alias::INKLING_REPO), "{cmd}");
+            assert!(o.is_inkling());
+            assert_eq!((o.context, o.output), (INKLING_CONTEXT, INKLING_OUTPUT), "{cmd}");
+        }
+        let Command::Up(o) = cli("up inkling --context 1048576 --output 65536 --mtp 7").unwrap().command else { panic!() };
+        assert_eq!((o.context, o.output, o.mtp, o.mtp_explicit), (1_048_576, 65536, 7, true));
+        assert!(cli("up inkling --mtp 8").is_err());
+        assert!(cli("up qwen --context 1048576").is_err());
+        assert!(cli("up --fp4-local --context 1048576").is_err());
+        let Command::Up(qwen) = cli("up qwen").unwrap().command else { panic!() };
+        assert_eq!(qwen.model.as_deref(), Some(crate::pull::alias::QWEN_REPO));
+        assert_eq!((qwen.context, qwen.output), (FP4_CONTEXT, FP4_OUTPUT));
+        assert!(cli("up inkling qwen").is_err());
+        assert!(cli("up unknown-model").unwrap_err().contains("Unknown model"));
+        assert_eq!(cli("connect --help").unwrap().command, Command::Help(Some("connect".into())));
+        let parsed = cli("connect codex --dry-run -- --help").unwrap();
+        assert!(parsed.dry_run);
+        let Command::Connect(args) = parsed.command else { panic!() };
+        assert_eq!(args, vec!["codex", "--", "--help"]);
     }
 }

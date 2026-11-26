@@ -30,7 +30,7 @@ Next, pull the model with `vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a
 | Qwen3.8 Flash-Next FP4-Local | 1, 2 or 4 | Supported, exact | `vade up` |
 | Qwen3.8 Flash-Next FP8 | 2 or 4 | Supported, exact | `vade up --fp8` (controller) |
 | GLM 5.3 Flash FP4-Local | 2 | Diagnostic text service, not qualified | `vade up --sparks 2 --diagnostic-unqualified-text` (controller) |
-| Inkling 2 Mini | 1 | Text-only preview, not qualified | `VADE_MODELS=<folder> vade up` |
+| Inkling 2 Mini | 1 | Text-only preview, not qualified | `vade up inkling` |
 
 </div>
 
@@ -87,11 +87,15 @@ Both models below run text only and are not qualified yet. [GLM and Inkling](doc
 **Inkling 2 Mini on one Spark:**
 
 ```sh
-vade pull thinkingmachines/Inkling-2-Mini@b85c3cfa615fc413cc9af3379f491b963f3b586a
-VADE_MODELS=~/models/thinkingmachines/Inkling-2-Mini vade up
+vade pull inkling
+vade up inkling
 ```
 
-On current `main`, Inkling keeps 20.69 GB of resident weights, admits 36–38 concurrent chats with `--mtp 7` (42–44 plain) at 32K context (the count follows the Spark's free memory at start), accepts configured contexts up to 1,048,576 tokens, and keeps the prompt cache on by default (`--cache-bytes 0` turns it off). `vade up` defaults to plain decode (`--mtp 0`) and accepts explicit `--mtp 0..=7` up to the checkpoint's declared draft depth.
+`vade pull inkling` downloads the pinned revision `thinkingmachines/Inkling-2-Mini@b85c3cfa615fc413cc9af3379f491b963f3b586a` (20.19 GB). `vade up inkling` checks `~/models/thinkingmachines/Inkling-2-Mini` first and also detects existing read-only Hugging Face Hub cache snapshots automatically.
+
+By default, `vade up inkling` starts with `--context 524288` (512K, configurable up to 1,048,576), `--output 16384`, `--mtp 7` bit-exact drafting on (`--mtp 0` disables drafting), and the prompt cache on (`--cache-bytes 0` disables it). A 2 MiB CUDA VMM paged KV cache keeps resident weights at 20.69 GB with an 883 MB entry reservation and about 79 GB of session and cache pool, admitting up to 89-90 concurrent chats at 512K or 1M context with zero token-ID differences across solo, batched, cached, and drafted runs.
+
+Connect external coding agents with one command via `vade connect <claude|codex|opencode|hermes|pi>`, or run `vade chat` (defaults to 300K auto-compact on 512K contexts and 8 concurrent 128K subagents; all limits are user-adjustable).
 
 **GLM 5.3 Flash on two Sparks.** Pull it on both Sparks, set the controller config to that folder and revision, then start it from the controller:
 

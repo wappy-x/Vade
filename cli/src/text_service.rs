@@ -39,9 +39,10 @@ impl TextService {
         Self::alone_with_max_depth(0)
     }
     /// One place and no neighbor, with the greatest draft depth its checkpoint plan declares.
-    /// Unnamed depth stays 0 (`--mtp 0`); named `--mtp 0..=max_depth` is passed through.
+    /// Unnamed depth defaults to `max_depth` (`--mtp <max_depth>`, e.g. 7 for Inkling 2 Mini,
+    /// or 0 when the checkpoint declares no draft model); explicit `--mtp 0..=max_depth` overrides it.
     pub fn alone_with_max_depth(max_depth: u32) -> Self {
-        Self { sparks: 1, default_depth: 0, max_depth }
+        Self { sparks: 1, default_depth: max_depth, max_depth }
     }
     /// Whether this service runs on one Spark with no transport.
     pub fn is_alone(self) -> bool {
@@ -73,7 +74,7 @@ impl TextService {
             max_depth: whole(fields, "text_draft_max")?,
         };
         if service == Self::pair()
-            || (service.sparks == 1 && service.default_depth == 0 && service.max_depth <= MAX_DIAGNOSTIC_DEPTH)
+            || (service.sparks == 1 && service.default_depth == service.max_depth && service.max_depth <= MAX_DIAGNOSTIC_DEPTH)
         {
             Ok(service)
         } else {
@@ -178,14 +179,18 @@ mod tests {
         assert_eq!(from_config_bytes(b"{}"), TextService::pair());
         assert_eq!(TextService::pair().default_depth, TEXT_DRAFT_DEPTH);
         assert!(TextService::alone().draft_refusal().contains("Drafting is not built"));
+        assert_eq!(TextService::alone_with_max_depth(7).default_depth, 7);
+        assert_eq!(TextService::alone().default_depth, 0);
         assert_eq!(TextService::alone_with_max_depth(7).draft_refusal(), "Set MTP to a whole number from 0 to 7.");
         let mut fields = Fields::new();
         fields.insert("text_sparks".into(), "1".into());
         fields.insert("text_draft_default".into(), "0".into());
         fields.insert("text_draft_max".into(), "0".into());
         assert_eq!(TextService::from_report(&fields).unwrap(), TextService::alone());
+        fields.insert("text_draft_default".into(), "7".into());
         fields.insert("text_draft_max".into(), "7".into());
         assert_eq!(TextService::from_report(&fields).unwrap(), TextService::alone_with_max_depth(7));
+        fields.insert("text_draft_default".into(), "8".into());
         fields.insert("text_draft_max".into(), "8".into());
         assert!(TextService::from_report(&fields).unwrap_err().contains("does not know"));
         fields.insert("text_draft_max".into(), "7".into());

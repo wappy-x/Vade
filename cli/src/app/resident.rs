@@ -28,8 +28,12 @@ impl<R: Runner> App<R> {
                 if options.fp4_local && !options.supplied_options.contains("--context") {
                     let sparks = if options.replicas { options.replica_sparks.max(1) } else { self.config.selected(&options)?.len() };
                     // A running engine keeps its size, which may be the fallback.
-                    if let Some(session) = existing { options.context = session.context; }
-                    else if sparks > 1 { options.context = crate::cli::FP4_LONG_CONTEXT; }
+                    if let Some(session) = existing {
+                        options.context = session.context;
+                        options.supplied_options.insert("--context".into());
+                    } else if sparks > 1 {
+                        options.context = crate::cli::FP4_LONG_CONTEXT;
+                    }
                 }
                 options
             }
@@ -150,6 +154,7 @@ impl<R: Runner> App<R> {
 
 pub(super) fn recorded_options(session: &Session) -> UpOptions {
     UpOptions {
+        model: None,
         // The context of a running engine stays, also after a restart.
         supplied_options: ["--context".to_owned()].into(),
         sparks: None,

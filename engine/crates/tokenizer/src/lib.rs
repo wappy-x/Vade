@@ -641,16 +641,22 @@ impl Tokenizer {
         Ok(out)
     }
     fn ordinary(&self, text: &str, out: &mut Vec<u32>) -> Result<()> {
-        // Preserve the legacy 1 MiB input's fourfold normalization allowance.
-        // Larger spans get a fixed work bound before split/merge allocations.
-        let work = if text.len() > Limits::default().max_input_bytes { 2 * 1024 * 1024 } else { 4 * 1024 * 1024 };
+        // Preserve the legacy 1 MiB input's fourfold normalization allowance and the 4 MiB split cap;
+        // long-context callers that opt into > 4 MiB inputs scale split/NFC bounds directly with
+        // `max_input_bytes` while keeping each individual BPE piece bounded to 2 MiB.
+        let (work, bpe_work, nfc_limit) = if self.limits.max_input_bytes > 4 * 1024 * 1024 {
+            (self.limits.max_input_bytes, 2 * 1024 * 1024, self.limits.max_input_bytes.saturating_mul(4))
+        } else {
+            let legacy = if text.len() > Limits::default().max_input_bytes { 2 * 1024 * 1024 } else { 4 * 1024 * 1024 };
+            (legacy, legacy, self.limits.max_input_bytes.saturating_mul(4).min(4 * 1024 * 1024))
+        };
         if self.is_gemma4() {
             // The artifact replaces only ASCII spaces; it does not add a
             // prefix space, split on words, or perform Unicode normalization.
             if text.chars().count() > work { return Err(err("BPE work limit exceeded")); }
             return self.bpe_chars(&text.replace(' ', "▁"), out, work);
         }
-        let normalized = if self.nfc { unicode::nfc(text, self.limits.max_input_bytes.saturating_mul(4).min(4 * 1024 * 1024))? } else { text.to_owned() };
+        let normalized = if self.nfc { unicode::nfc(text, nfc_limit)? } else { text.to_owned() };
         if normalized.len() > self.limits.max_input_bytes.saturating_mul(4) {
             return Err(err("normalized byte limit exceeded"));
         }
@@ -672,7 +678,7 @@ impl Tokenizer {
                 out.extend_from_within(range.clone());
             } else {
                 let start = out.len();
-                self.bpe(piece.as_bytes(), out, work)?;
+                self.bpe(piece.as_bytes(), out, bpe_work)?;
                 if normalized.len() >= 1024 && pieces.len() < 1024 && piece.len() <= 128 {
                     pieces.insert(piece, start..out.len());
                 }

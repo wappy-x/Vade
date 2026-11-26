@@ -931,7 +931,7 @@ impl<'a> Backend<'a> {
         stats.stream_wait_calls += 1;
         Ok(())
     }
-    pub fn segmented_vector(&self, maximum: usize, initial: usize) -> Result<DeviceVector<'a>, String> {
+    pub fn segmented_vector(&self, maximum: usize, initial: usize) -> Result<DeviceVector<'a>, String> { self.flush_resident_launches()?;
         if initial == 0 || initial > maximum || maximum > u32::MAX as usize { return Err("invalid segmented vector capacity".into()); }
         let timer = Some(Instant::now());
         let buffer = Buffer::segmented(self.context, byte_count(maximum, 4)?, byte_count(initial, 4)?)?;
@@ -939,7 +939,7 @@ impl<'a> Backend<'a> {
         Ok(DeviceVector { len: buffer.segment_capacity(byte_count(initial, 4)?)? / 4, buffer, managed: false,
             #[cfg(debug_assertions)] projection_scratch: Default::default() })
     }
-    pub fn grow_vector(&self, vector: &mut DeviceVector<'a>, len: usize) -> Result<(), String> {
+    pub fn grow_vector(&self, vector: &mut DeviceVector<'a>, len: usize) -> Result<(), String> { self.flush_resident_launches()?;
         self.check_vector(vector, vector.len)?;
         let timer = Some(Instant::now());
         vector.buffer.grow_segments(byte_count(len, 4)?)?;
@@ -957,7 +957,7 @@ impl<'a> Backend<'a> {
     }
     /// Alias complete prefix allocations and copy only the incomplete tail.
     /// Call writable_from before subsequent writes, including truncate/replay.
-    pub fn fork_vector(&self, source: &DeviceVector<'a>, committed: usize, needed: usize) -> Result<DeviceVector<'a>, String> {
+    pub fn fork_vector(&self, source: &DeviceVector<'a>, committed: usize, needed: usize) -> Result<DeviceVector<'a>, String> { self.flush_resident_launches()?;
         self.check_vector(source, source.len)?;
         let timer = Some(Instant::now());
         let (buffer, shared) = source.buffer.fork_segments(byte_count(committed, 4)?, byte_count(needed, 4)?)?;
@@ -1287,6 +1287,7 @@ impl<'a> Backend<'a> {
         self.check_vector(destination, destination.len)?;
         if source_offset.checked_add(len).is_none_or(|n| n > source.len) || destination_offset.checked_add(len).is_none_or(|n| n > destination.len) { return Err("device copy exceeds vector".into()); }
         if len == 0 { return Ok(()); }
+        if !destination.writable_from(destination_offset) { return Err("device copy target is shared".into()); }
         if self.record_resident_copy(source.device_address()+(source_offset*4) as u64,destination.device_address()+(destination_offset*4) as u64,len)? {return Ok(());} self.context.activate()?;
         let timer = if self.profiling.get() { Some(Event::record(&self.stream)?) } else { None };
         self.context.decode_enqueue();

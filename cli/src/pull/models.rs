@@ -43,7 +43,7 @@ impl Support {
             Route::Fp4Local => "Qwen3.8 Flash-Next FP4-Local; serve it with vade launch or vade up".into(),
             Route::Fp8 => "Qwen3.8 Flash-Next FP8; serve it from a controller with vade up --fp8".into(),
             Route::Qwen3Bf16 => "the pinned Qwen3-8B BF16 files; serve them with vade run qwen3-8b".into(),
-            Route::OneSparkPreview => "a text-only preview on one Spark, not qualified; serve it on that Spark with VADE_MODELS=<folder> vade up".into(),
+            Route::OneSparkPreview => "a text-only preview on one Spark, not qualified; serve it on that Spark with vade up inkling (or VADE_MODELS=<folder> vade up)".into(),
             Route::TwoSparkDiagnostic => "a diagnostic text service on two Sparks, not qualified; start it from a controller with vade up --sparks 2 --diagnostic-unqualified-text".into(),
             Route::Incomplete => "a pull did not finish; run the same vade pull again".into(),
             Route::Unsupported => self.reason.clone(),
@@ -60,7 +60,15 @@ impl Support {
         let saved = crate::launch::saved_model(root).filter(|saved| fs::canonicalize(saved).ok() != folder_path);
         let shown = quote(folder);
         match self.route {
-            Route::Fp4Local | Route::OneSparkPreview => Some(if folder_path.is_some() && crate::launch::served_model(root, home) == folder_path {
+            Route::OneSparkPreview => Some(if folder_path.as_deref() == fs::canonicalize(home.join("models").join(super::alias::INKLING_REPO)).ok().as_deref() {
+                ("vade up inkling".into(), None)
+            } else if folder_path.is_some() && crate::launch::served_model(root, home) == folder_path {
+                ("vade up".into(), None)
+            } else {
+                (format!("VADE_MODELS={shown} vade up"), saved.map(|saved|
+                    format!("vade up then serves this checkpoint in place of the saved {}, and saves it.", quote(&saved))))
+            }),
+            Route::Fp4Local => Some(if folder_path.is_some() && crate::launch::served_model(root, home) == folder_path {
                 ("vade up".into(), None)
             } else {
                 (format!("VADE_MODELS={shown} vade up"), saved.map(|saved|
@@ -101,7 +109,7 @@ pub(crate) fn support(folder: &Path, hashes: Option<&BTreeMap<String, String>>) 
     // Only a plan the GLM parser accepts, with tokenizer and weight files present on disk.
     let config = super::read_small(&folder.join("config.json"), 1 << 20, true).ok();
     let has_weights = folder.join("model.safetensors.index.json").is_file() || folder.join("model.safetensors").is_file();
-    let has_tokenizer = folder.join("tokenizer.json").is_file();
+    let has_tokenizer = folder.join("tokenizer.json").is_file() || folder.join("tiktoken/tokenizer.model").is_file();
     if has_weights && has_tokenizer && config.is_some_and(|bytes| matches!(engine_model::plan::ConfigPlan::from_config(&bytes), Ok(engine_model::plan::ConfigPlan::Deferred(_)))) {
         return Support { route: Route::TwoSparkDiagnostic, reason: String::new() };
     }
@@ -138,8 +146,12 @@ pub fn run(args: &[String]) -> Result<(), String> {
     // From here, with --json, a failure is the schema object with error and next.
     if json { crate::checks::set_json(Some(crate::checks::Answer { schema: "vade.models.v1", mode: "models", dry: false })); }
     let home = std::env::var_os("HOME").filter(|home| !home.is_empty()).map(PathBuf::from).ok_or("Cannot find your home folder. Set HOME.")?;
+    let default_root = root.is_none();
     let root = root.unwrap_or_else(|| home.join("models"));
-    let rows = list(&root)?;
+    let mut rows = list(&root)?;
+    if default_root {
+        append_hf_cache_rows(&home, &mut rows);
+    }
     let shown = super::display(&root, &home);
     if json {
         let models = rows.iter().map(|row| json::object(vec![
@@ -151,9 +163,47 @@ pub fn run(args: &[String]) -> Result<(), String> {
         return crate::checks::print_json(&value);
     }
     if rows.is_empty() {
-        return crate::output::line(format_args!("No models in {shown} yet. Download one with vade pull <org>/<name>; see vade pull --help."));
+        return crate::output::line(format_args!("No models in {shown} yet. Download one with vade pull inkling or vade pull <org>/<name>; see vade pull --help."));
     }
     crate::output::text(format_args!("{}", table(&rows, &shown)))
+}
+
+/// Append read-only Hugging Face Hub cache snapshots for known aliases when not already listed.
+fn append_hf_cache_rows(home: &Path, rows: &mut Vec<Row>) {
+    let seen_paths: std::collections::BTreeSet<PathBuf> = rows.iter()
+        .filter_map(|row| fs::canonicalize(&row.path).ok())
+        .collect();
+    let hub = super::alias::hf_hub_dir(home);
+    for alias in super::alias::ALIASES {
+        let Some((snapshot, commit)) = super::alias::find_in_hf_hub(&hub, alias.repo, Some(alias.revision)) else { continue };
+        let Ok(canon) = fs::canonicalize(&snapshot) else { continue };
+        if seen_paths.contains(&canon) { continue; }
+        let Some(bytes) = super::alias::valid_hf_snapshot_bytes(&canon) else { continue };
+        let support = match support(&canon, None) {
+            s if !matches!(s.route, Route::Unsupported) => s,
+            _ => hf_snapshot_support(&canon),
+        };
+        if matches!(support.route, Route::Unsupported) { continue; }
+        rows.push(Row {
+            name: format!("{} (HF cache)", alias.repo),
+            path: canon,
+            repo: Some(alias.repo.into()),
+            commit: Some(commit),
+            bytes,
+            support,
+        });
+    }
+}
+
+fn hf_snapshot_support(snapshot: &Path) -> Support {
+    let Ok(bytes) = super::read_small(&snapshot.join("config.json"), 1 << 20, true) else {
+        return Support { route: Route::Unsupported, reason: String::new() };
+    };
+    match engine_model::plan::ConfigPlan::from_config(&bytes) {
+        Ok(engine_model::plan::ConfigPlan::Loop(_)) => Support { route: Route::OneSparkPreview, reason: String::new() },
+        _ if engine_model::flash::Config::parse(&bytes).is_ok_and(|cfg| cfg.mixed.is_some()) => Support { route: Route::Fp4Local, reason: String::new() },
+        _ => Support { route: Route::Unsupported, reason: String::new() },
+    }
 }
 
 /// The `vade models` table: two lines for each folder.

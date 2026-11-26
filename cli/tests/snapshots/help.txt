@@ -1,13 +1,16 @@
 $ vade --help
-Vade runs Qwen3.8 Flash-Next on your DGX Spark, as FP4-Local or FP8.
+Vade runs Inkling 2 Mini and Qwen3.8 Flash-Next on your DGX Spark.
 
 Examples:
+  vade pull inkling   Download Inkling 2 Mini (pinned) and check every file
+  vade up inkling     Start Inkling 2 Mini (512K context, MTP 7, cache on)
+  vade verify         Prove 0-diff bit-exactness, drafting ON vs OFF
+  vade connect codex  Connect Codex, Claude Code, OpenCode, Hermes or Pi
+  vade chat           Chat with the running engine
+  vade status         See what is running
+  vade down           Stop what vade started
   vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a6887e18c089fdea8509a33e63429a3300
-               Download the model and check every file
-  vade up      Start the engine on this Spark
-  vade chat    Chat with the running engine
-  vade status  See what is running
-  vade down    Stop what vade started
+    Download Qwen3.8 FP4-Local, then run vade up
 
 Usage: vade <COMMAND> [OPTIONS]
 
@@ -19,6 +22,7 @@ Start and stop:
 
 Use:
   chat      Chat with the running engine
+  connect   Wire Claude Code, Codex, OpenCode, Hermes or Pi to the engine
   sessions  List, export or delete saved chat sessions
   read      Print a file as Markdown (text, HTML, CSV, PDF, office, data, code)
   tools     List the tools chat offers: native and MCP

@@ -28,6 +28,8 @@ impl Children {
         host: child_agents::NativeToolHost,
         generation: vade_harness::contract::GenerationOptions,
         mut grants: BTreeMap<String, child_agents::Scope>,
+        max_subagents: Option<usize>,
+        subagent_context: Option<usize>,
         cancel: Arc<AtomicBool>,
     ) -> io::Result<Scheduler> {
         let web = host.web && vade_harness::web::offered();
@@ -37,14 +39,29 @@ impl Children {
                 && advertised.is_some_and(|tools| tools.iter().any(|tool| tool.get("function")
                     .and_then(|f| f.get("name")).and_then(vade_harness::json::Value::as_str) == Some(name)))));
         }
+        let mut config = child_agents::Config {
+            policy: child_agents::ToolPolicy::native_with_web(web).with_parent_tools(advertised.into_iter().flatten()
+                .filter_map(|tool| tool.get("function").and_then(|f| f.get("name")).and_then(vade_harness::json::Value::as_str))),
+            grants,
+            ..child_agents::Config::default()
+        };
+        if let Some(n) = max_subagents {
+            config.max_concurrent = n;
+            config.max_tasks = config.max_tasks.max(n);
+            config.total_model_turns = config.total_model_turns.max(config.max_tasks.saturating_mul(config.default_quota.model_turns));
+            config.total_tool_calls = config.total_tool_calls.max(config.max_tasks.saturating_mul(config.default_quota.tool_calls));
+            config.total_history_bytes = config.total_history_bytes.max(config.max_tasks.saturating_mul(config.default_quota.history_bytes));
+            config.total_tool_output_bytes = config.total_tool_output_bytes.max(config.max_tasks.saturating_mul(config.default_quota.tool_output_bytes));
+        }
+        if let Some(ctx) = subagent_context {
+            config.default_quota.tokens = ctx as u64;
+        }
+        config.total_tokens = config
+            .total_tokens
+            .max((config.max_tasks as u64).saturating_mul(config.default_quota.tokens));
         let scheduler = Scheduler::new(
             StablePrefix::from_parent(parent)?,
-            child_agents::Config {
-                policy: child_agents::ToolPolicy::native_with_web(web).with_parent_tools(advertised.into_iter().flatten()
-                    .filter_map(|tool| tool.get("function").and_then(|f| f.get("name")).and_then(vade_harness::json::Value::as_str))),
-                grants,
-                ..child_agents::Config::default()
-            },
+            config,
             cancel,
             child_agents::native_http_factory_with_generation(endpoint, host, generation)?,
         )?;

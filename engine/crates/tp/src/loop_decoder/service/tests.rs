@@ -522,6 +522,119 @@ fn multi_chat_auto_and_strict_drafting_matches_direct_decode() {
     assert!(model.proposals.load(Ordering::Relaxed)>0,"multi-chat batched drafter never ran");
 }
 #[test]
+fn drafted_prefix_cache_restores_draft_state_and_matches_direct_decode() {
+    use super::super::draft::DraftChat;
+    use spark_serve::Session;
+    struct MockDraft {cfg:engine_model::mtp_draft::MtpConfig,proposals:std::sync::atomic::AtomicUsize}
+    impl mtp::Model<Host,Fixture> for MockDraft {
+        fn config(&self)->&engine_model::mtp_draft::MtpConfig {&self.cfg}
+        fn chat(&self)->DraftChat<Vec<f32>> {DraftChat::new(0,CONTEXT)}
+        fn push(&self,_:&Host,chat:&mut DraftChat<Vec<f32>>,taps:&[Vec<f32>],rows:usize)->Result<()> {
+            assert_eq!(taps.len(),self.cfg.target_layer_ids.len());
+            assert!(taps.iter().all(|t|t.len()==rows*self.cfg.hidden_size));
+            chat.advance_len(rows);
+            Ok(())
+        }
+        fn propose(&self,_:&Host,_:&Fixture,chat:&DraftChat<Vec<f32>>,anchor:u32,_:&Vec<f32>,depth:usize)->Result<Vec<u32>> {
+            assert!(!chat.is_empty(),"restored draft chat must carry committed prefix length");
+            self.proposals.fetch_add(1,Ordering::Relaxed);
+            Ok((0..depth).map(|k|(anchor+1+k as u32)%20).collect())
+        }
+        fn propose_confident(&self,c:&Host,w:&Fixture,chat:&mut DraftChat<Vec<f32>>,anchor:u32,embed:&Vec<f32>,depth:usize,_:f32)->Result<(Vec<u32>,Vec<f32>)> {
+            let ids=self.propose(c,w,chat,anchor,embed,depth)?;
+            let probs=vec![0.96;ids.len()];
+            Ok((ids,probs))
+        }
+    }
+    let fixture=Fixture::small();
+    let cfg=engine_model::mtp_draft::MtpConfig {
+        hidden_size:fixture.description.hidden as usize,intermediate_size:16,num_layers:0,num_heads:2,num_kv_heads:2,
+        head_dim:4,sliding_window_size:4,block_size:8,markov_rank:4,vocab_size:fixture.description.vocab as usize,
+        unpadded_vocab_size:fixture.description.head_rows as usize,max_position_embeddings:CONTEXT,
+        rms_norm_eps:1e-6,rope_theta:10000.0,final_logit_softcapping:30.0,local_layer_ids:Vec::new(),
+        target_layer_ids:vec![0,fixture.description.visits.len()],
+    };
+    {
+        let model=MockDraft {cfg:cfg.clone(),proposals:std::sync::atomic::AtomicUsize::new(0)};
+        let mut service=Service::new(&Host,&fixture,&fixture.description,CONTEXT,vec![1],seats(2)).unwrap();
+        service.model=Some(&model);service.depth=7;
+        let mut lim=limits(CONTEXT,24).unwrap();lim.next_mtp_depth=Some(7);
+        let auto_req=spark_serve::protocol::parse(br#"{"prompt_token_ids":[3],"max_tokens":4,"temperature":0}"#,false,&lim).unwrap();
+        let plain_req=spark_serve::protocol::parse(br#"{"prompt_token_ids":[3],"max_tokens":4,"temperature":0,"draft":"plain"}"#,false,&lim).unwrap();
+        let mut chat=service.session().unwrap();
+        chat.configure_request(&auto_req).unwrap();
+        chat.prefill(PROMPTS[0]).unwrap();
+        assert!(chat.can_fork(),"drafted chat is forkable right after prefill");
+        let page=Host.plane_page_bytes();
+        let target_only=state::prefix_bytes::<Vec<f32>>(service.driver.layouts(),PROMPTS[0].len() as u64,page);
+        let draft_only=DraftChat::<Vec<f32>>::prefix_bytes(&cfg,PROMPTS[0].len(),CONTEXT,page);
+        assert_eq!(chat.retained_bytes(),Some(target_only+draft_only),"retained_bytes includes draft prefix");
+        let _=chat.step(PROMPTS[1][0]).unwrap();
+        assert!(!chat.can_fork(),"lagging draft chat cannot fork before settle_prefix");
+        chat.settle_prefix().unwrap();
+        assert!(chat.can_fork(),"settle_prefix catches up lagged draft taps");
+        let kept=chat.fork().unwrap();
+        assert_eq!(kept.retained_bytes(),chat.retained_bytes(),"kept snapshot accounts exact same bytes");
+        drop(chat);
+        let mut warm_draft=kept.fork().unwrap();
+        warm_draft.configure_request(&auto_req).unwrap();
+        assert!(warm_draft.draft_target().is_some(),"restored drafted snapshot enables drafting");
+        warm_draft.prefill(&[PROMPTS[1][1]]).unwrap();
+        assert!(warm_draft.can_fork(),"1-token continuation prefill flushes draft immediately");
+        drop(warm_draft);
+        let mut warm_plain=kept.fork().unwrap();
+        warm_plain.configure_request(&plain_req).unwrap();
+        assert!(warm_plain.draft_target().is_none(),"plain request drops restored draft state");
+    }
+    let model=MockDraft {cfg,proposals:std::sync::atomic::AtomicUsize::new(0)};
+    let turn1:Vec<u32>=vec![3,5,2,7,11,13,4,6,8,10,12];
+    let mut turn2=turn1.clone();turn2.extend([14,15,16]);
+    let mut turn3=turn2.clone();turn3.extend([17]);
+    let exp1=direct(&fixture,&turn1,10);
+    let exp2=direct(&fixture,&turn2,10);
+    let exp3=direct(&fixture,&turn3,10);
+    let listener=TcpListener::bind("127.0.0.1:0").unwrap();let address=listener.local_addr().unwrap();
+    struct Stop<'a>(&'a AtomicBool);impl Drop for Stop<'_> {fn drop(&mut self) {self.0.store(true,Ordering::Relaxed);}}
+    let stop=AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        let stop=&stop;let _stop=Stop(stop);
+        let model_ref=&model;let fixture_ref=&fixture;
+        scope.spawn(move || {
+            let s=Seats {limits:Limits {step_rows:4,key_bytes:1<<20},chat:CHAT_BYTES,room:ROOM,most:2};
+            let mut service=Service::new(&Host,fixture_ref,&fixture_ref.description,CONTEXT,vec![1],s).unwrap();
+            service.model=Some(model_ref);service.depth=7;
+            let mut lim=limits(CONTEXT,24).unwrap();lim.next_mtp_depth=Some(7);
+            let (cache,config)=service.schedule();
+            spark_serve::scheduler::serve_requests(listener,&service,None::<&spark_serve::tokenizer::ModelTokenizer>,&lim,&cache,&config,stop,"made-up",5).unwrap();
+            assert_eq!((service.fatal_error(),service.live()),(None,0));
+        });
+        let send=|text:String| {let mut stream=TcpStream::connect(address).unwrap();stream.set_read_timeout(Some(Duration::from_secs(120))).unwrap();
+            stream.write_all(text.as_bytes()).unwrap();let mut reply=String::new();
+            if let Err(error)=stream.read_to_string(&mut reply) {reply.push_str(&format!("\nREAD ERROR {error}"));}reply};
+        let r1=ask(&send,address,&turn1,10,r#","temperature":0,"ignore_eos":true"#);
+        assert!(ok(&r1) && r1.contains(r#""cached_tokens":0}"#),"{r1}");
+        assert_eq!(ids(&r1),exp1);
+        let p_after_t1=model.proposals.load(Ordering::Relaxed);
+        assert!(p_after_t1>0,"turn 1 must draft");
+        let r2=ask(&send,address,&turn2,10,r#","temperature":0,"ignore_eos":true"#);
+        assert!(ok(&r2) && r2.contains(&format!(r#""cached_tokens":{}}}"#,turn1.len())),"{r2}");
+        assert_eq!(ids(&r2),exp2);
+        let p_after_t2=model.proposals.load(Ordering::Relaxed);
+        assert!(p_after_t2>p_after_t1,"turn 2 must keep drafting after cache restore");
+        let r3=ask(&send,address,&turn3,10,r#","temperature":0,"ignore_eos":true"#);
+        assert!(ok(&r3) && r3.contains(&format!(r#""cached_tokens":{}}}"#,turn2.len())),"{r3}");
+        assert_eq!(ids(&r3),exp3);
+        let p_after_t3=model.proposals.load(Ordering::Relaxed);
+        assert!(p_after_t3>p_after_t2,"turn 3 must keep drafting after 1-token suffix cache restore");
+        let r2_plain=ask(&send,address,&turn2,10,r#","temperature":0,"draft":"plain","ignore_eos":true"#);
+        assert!(ok(&r2_plain) && r2_plain.contains(&format!(r#""cached_tokens":{}}}"#,turn2.len())),"{r2_plain}");
+        assert_eq!(ids(&r2_plain),exp2);
+        let r2_cold=ask(&send,address,&turn2,10,r#","temperature":0,"cache":false,"ignore_eos":true"#);
+        assert!(ok(&r2_cold) && r2_cold.contains(r#""cached_tokens":0}"#),"{r2_cold}");
+        assert_eq!(ids(&r2_cold),exp2);
+    });
+}
+#[test]
 fn a_draft_failure_keeps_plain_peers_batched_and_their_answers_in_order() {
     let fixture=Fixture::small();
     let service=Service::new(&Host,&fixture,&fixture.description,CONTEXT,vec![1],seats(3)).unwrap();
@@ -574,7 +687,9 @@ fn the_engine_holds_its_chats_and_reports_its_limits() {
     let fixture=Fixture::small();let d=&fixture.description;
     let service=Service::new(&Host,&fixture,d,CONTEXT,vec![1,7],seats(1)).unwrap();
     assert_eq!((service.context_limit(),service.vocab_size(),service.eos_token_ids()),(CONTEXT,d.head_rows as usize,&[1u32,7][..]));
-    assert_eq!((service.session_reservation_bytes(),service.request_reservation_bytes(1),service.request_reservation_bytes(CONTEXT)),(Some(CHAT_BYTES),Some(CHAT_BYTES),Some(CHAT_BYTES)));
+    let min_chat=service.chat_bytes();
+    assert!(min_chat<CHAT_BYTES,"paged straight planes reserve less than full context at 1 token");
+    assert_eq!((service.session_reservation_bytes(),service.request_reservation_bytes(1),service.request_reservation_bytes(CONTEXT)),(Some(min_chat),Some(min_chat),Some(CHAT_BYTES)));
     assert_eq!((service.request_reservation_bytes(0),service.request_reservation_bytes(CONTEXT+1)),(None,None));
     let mut chat=service.session().unwrap();assert_eq!(service.live(),1);
     assert!(service.session().err().unwrap().contains("every chat of this service is in use"));
@@ -607,19 +722,19 @@ fn the_engine_holds_its_chats_and_reports_its_limits() {
     // are the chats of the service. A chat of a service of several chats reserves one more set of rings for each
     // other chat.
     let step=service.step_bytes();
-    assert!(step>0 && step<ROOM);assert_eq!((service.pool(),service.chat_bytes()),(ROOM-step,CHAT_BYTES));
+    assert!(step>0 && step<ROOM);assert_eq!((service.pool(),service.chat_bytes()),(ROOM-step,min_chat));
     let wide=built(CHAT_BYTES,ROOM,3).unwrap();
     assert_eq!((wide.schedule().1.active,wide.shared_decode_rows(),wide.chats()),(3,3,3));
     // The step of a service of more chats holds more: the rings of every chat wait in it.
     assert!(wide.step_bytes()>step && wide.pool()==ROOM-wide.step_bytes(),"{} {step}",wide.step_bytes());
-    let rings=wide.chat_bytes()-CHAT_BYTES;
-    assert!(rings>0 && wide.chat_bytes()==CHAT_BYTES+rings,"{}",wide.chat_bytes());
-    assert_eq!((wide.session_reservation_bytes(),wide.request_reservation_bytes(1)),(Some(CHAT_BYTES+rings),Some(CHAT_BYTES+rings)));
-    // Room for exactly two chats gives two, also when the caller takes up to four. One byte less gives one.
+    let rings=wide.chat_bytes()-min_chat;
+    assert!(rings>0 && wide.chat_bytes()==min_chat+rings,"{}",wide.chat_bytes());
+    assert_eq!((wide.session_reservation_bytes(),wide.request_reservation_bytes(1),wide.request_reservation_bytes(CONTEXT)),(Some(min_chat+rings),Some(min_chat+rings),Some(CHAT_BYTES+rings)));
+    // Room for exactly two paged chats gives two, also when the caller takes up to four. One byte less gives one.
     let pair=built(CHAT_BYTES,ROOM,2).unwrap();
-    let two=pair.step_bytes()+2*pair.chat_bytes();assert_eq!(pair.chat_bytes(),CHAT_BYTES+rings);
+    let two=pair.step_bytes()+2*pair.chat_bytes();assert_eq!(pair.chat_bytes(),min_chat+rings);
     assert_eq!(built(CHAT_BYTES,two,LIMITS.step_rows).unwrap().chats(),2);
-    let one=built(CHAT_BYTES,two-1,LIMITS.step_rows).unwrap();assert_eq!((one.chats(),one.chat_bytes(),one.pool()),(1,CHAT_BYTES,two-1-step));
+    let one=built(CHAT_BYTES,two-1,LIMITS.step_rows).unwrap();assert_eq!((one.chats(),one.chat_bytes(),one.pool()),(1,min_chat,two-1-step));
     assert_eq!(built(CHAT_BYTES,step+CHAT_BYTES,LIMITS.step_rows).unwrap().chats(),1);
     // No room for one chat beside the values of a step: the start is refused with the numbers.
     let none=built(CHAT_BYTES,step+CHAT_BYTES-1,LIMITS.step_rows).err().unwrap();
@@ -750,4 +865,90 @@ fn a_chat_with_text_is_rendered_and_served_with_the_ids_of_the_direct_decode() {
         let reply=post(send,address,"/v1/chat/completions",&body(r#","temperature":0"#));
         assert!(reply.starts_with("HTTP/1.1 400 ") && reply.contains("backend stop tokens do not match the checkpoint EOS set"),"{reply}");
     });
+}
+/// Paged straight KV planes grow across page boundaries (`16 -> 32 -> 48` on `Host`) and run mixed-length cohorts
+/// in both `step_batch` and `verify_many` with zero token-ID drift vs direct single-chat decode.
+#[test]
+fn paged_mixed_length_cohort_and_prefix_cache_match_direct_decode() {
+    use spark_serve::Session;
+    for fixture in [Fixture::small(),Fixture::wide()] {
+        let d=&fixture.description;
+        let service=Service::new(&Host,&fixture,d,CONTEXT,vec![1],Seats {limits:Limits {step_rows:16,key_bytes:1<<20},chat:CHAT_BYTES,room:ROOM,most:4}).unwrap();
+        let long_prompt:Vec<u32>=(0..34).map(|i|((i*7+3)%(d.head_rows as usize)) as u32).collect();
+        let mid_prompt:Vec<u32>=(0..19).map(|i|((i*5+2)%(d.head_rows as usize)) as u32).collect();
+        let short_prompt:Vec<u32>=(0..4).map(|i|((i*3+1)%(d.head_rows as usize)) as u32).collect();
+        let want_long=direct(&fixture,&long_prompt,8);
+        let want_mid=direct(&fixture,&mid_prompt,8);
+        let want_short=direct(&fixture,&short_prompt,8);
+        // Three chats at 3 different mapped straight-plane page counts (48, 32, 16 rows) share one batch step.
+        let (mut a,mut b,mut c)=(service.session().unwrap(),service.session().unwrap(),service.session().unwrap());
+        let top=|logits:&[f32]|crate::bounded_decoder::greedy_logits(logits,logits.len()).unwrap();
+        let mut next=[top(&a.prefill(&long_prompt).unwrap()),top(&b.prefill(&mid_prompt).unwrap()),top(&c.prefill(&short_prompt).unwrap())];
+        assert_eq!(next,[want_long[0],want_mid[0],want_short[0]]);
+        // Short chat keeps its 1-page straight planes while long chat has grown to 3 pages.
+        {
+            let slots=service.slots.borrow();
+            let layouts=service.driver.layouts();
+            let straight=layouts.iter().position(|l|!l.ring).unwrap();
+            let sa=slots[a.active_slot().unwrap()].as_ref().unwrap().state.visits[straight].keys.len()/layouts[straight].row_words;
+            let sb=slots[b.active_slot().unwrap()].as_ref().unwrap().state.visits[straight].keys.len()/layouts[straight].row_words;
+            let sc=slots[c.active_slot().unwrap()].as_ref().unwrap().state.visits[straight].keys.len()/layouts[straight].row_words;
+            assert!(sc<sb && sb<sa,"distinct page counts: short={sc} mid={sb} long={sa}");
+        }
+        // Mixed-length cohort steps stay bit-exact with direct single-chat decode.
+        for step in 1..8 {
+            let answers=service.step_batch(&mut [
+                BatchRows {session:&mut a,tokens:&next[0..1],output:BatchOutput::All,greedy:true,top_k:0},
+                BatchRows {session:&mut b,tokens:&next[1..2],output:BatchOutput::All,greedy:true,top_k:0},
+                BatchRows {session:&mut c,tokens:&next[2..3],output:BatchOutput::All,greedy:true,top_k:0},
+            ]).map_err(|e|e.message).unwrap();
+            let got:Vec<u32>=answers.into_iter().map(|p|match p {Predictions::Greedy(v)=>v[0],_=>panic!("greedy")}).collect();
+            assert_eq!(got,[want_long[step],want_mid[step],want_short[step]],"mixed-length step {step}");
+            next=[got[0],got[1],got[2]];
+        }
+        // Prefix cache snapshot and restore across page boundaries (> 1 page) stays bit-exact, and reservations scale with pages.
+        let mut src=service.session().unwrap();
+        let _=src.prefill(&long_prompt).unwrap();
+        let kept=src.fork().unwrap();
+        drop(src);
+        assert!(service.request_reservation_bytes(short_prompt.len()).unwrap()<service.request_reservation_bytes(long_prompt.len()).unwrap());
+        let big_layout=state::Layout {rows:262_144,window:262_144,step_rows:4096,key_bytes:1<<30,ring:false,row_words:512,kv_channels:1024,kv_taps:4,channels:4096,taps:4};
+        let p_short=state::prefix_bytes::<Vec<f32>>(&[big_layout],1024,2*1024*1024);
+        let p_long=state::prefix_bytes::<Vec<f32>>(&[big_layout],65_536,2*1024*1024);
+        assert!(p_short<p_long,"paged prefix cache scales with 2 MiB VMM pages: {p_short} < {p_long}");
+        let mut restored=kept.fork().unwrap();
+        let next_id=top(&restored.step(want_long[0]).unwrap());
+        assert_eq!(next_id,want_long[1],"forked multi-page prefix stays bit-exact");
+    }
+}
+/// Long-context fixes: tokenizer limits accept > 1 MiB text when configured from `limits()`, `request_body_bytes`
+/// covers 512K-1M token ID arrays, and `CacheLimits` keeps full `context` tokens per entry past 262,144.
+#[test]
+fn long_context_limits_tokenizer_and_cache_caps_scale_past_256k() {
+    let folder=Folder::new("long-ctx-limits");
+    let mut tokenizer=spark_serve::tokenizer::ModelTokenizer::from_directory(&folder.root).unwrap();
+    let big_text="ab ".repeat(400_000);
+    assert!(big_text.len()>1_048_576);
+    assert!(spark_serve::Tokenizer::encode(&tokenizer,&big_text).is_err(),"default 1 MiB limit refuses >1 MiB text");
+    let lim=limits(524_288,8192).unwrap();
+    assert_eq!(lim.body_bytes,8*1024*1024);
+    tokenizer.set_limits(lim.tokenizer_limits()).unwrap();
+    let encoded=spark_serve::Tokenizer::encode(&tokenizer,&big_text).unwrap();
+    assert!(!encoded.is_empty(),"wired tokenizer_limits accepts >1 MiB text");
+    let lim_1m=limits(1_048_576,8192).unwrap();
+    assert_eq!(lim_1m.body_bytes,16*1024*1024);
+    // 524K token-ID JSON body (> 4 MiB) parses cleanly under 512K service limits.
+    let ids_body=format!(r#"{{"prompt_token_ids":[{}],"max_tokens":1,"temperature":0}}"#,vec!["12345";400_000].join(","));
+    assert!(ids_body.len()>2*1024*1024 && ids_body.len()<lim.body_bytes);
+    assert!(spark_serve::protocol::parse(ids_body.as_bytes(),false,&lim).is_ok());
+    // Active prefix cache permits entries up to 1M tokens and > 128 entries (bounded by retained bytes, no arbitrary cap).
+    for ctx in [262_144usize,524_288,1_048_576] {
+        let cl=spark_serve::cache::CacheLimits {entries:256,retained_bytes:1<<30,tokens_per_entry:ctx,logits_per_entry:200_000,idle_ttl:Duration::from_secs(60)};
+        assert!(spark_serve::cache::SessionCache::<()>::new(cl).is_ok(),"cache limits accept context {ctx}");
+    }
+    // Service admission derives chat count and cache entries from actual memory budget, with no arbitrary 32-chat or 8-entry cap.
+    let fixture=Fixture::small();
+    let wide=Service::new(&Host,&fixture,&fixture.description,CONTEXT,vec![1],Seats {limits:Limits {step_rows:64,key_bytes:1<<20},chat:CHAT_BYTES,room:256<<20,most:64}).unwrap();
+    assert_eq!(wide.chats(),64,"memory-derived chat count is not capped at 32");
+    assert_eq!(wide.schedule().0.entries,64,"prefix cache entry count scales with admitted chats");
 }

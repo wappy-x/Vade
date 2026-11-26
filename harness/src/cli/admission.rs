@@ -406,9 +406,10 @@ impl App {
                         .set_generation_seed(seed)?;
                 }
                 if !self.config.auto_compact
-                    && usage.near_limit(
+                    && usage.near_limit_at(
                         self.config.context_budget(&self.context),
                         self.config.output_reserve(&self.context),
+                        self.config.auto_compact_tokens,
                     )
                 {
                     self.run_notice(&format!(

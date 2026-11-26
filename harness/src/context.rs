@@ -11,6 +11,23 @@ pub use rollover::{Budget, BudgetTracker, ContextHost, CountOnly, KEEP_TURNS, RE
 pub const DEFAULT_CONTEXT_TOKENS: usize = 131_072;
 pub const DEFAULT_RESERVE: usize = 4096;
 pub const COMPACTION_OUTPUT_TOKENS: usize = 8192;
+/// Context window at or above which default auto-compaction triggers at 300K tokens.
+pub const LARGE_CONTEXT_COMPACT_WINDOW: usize = 400_000;
+/// Default auto-compaction trigger for large contexts (>= 400K tokens): 300K (307,200).
+pub const LARGE_CONTEXT_AUTO_COMPACT_TOKENS: usize = 307_200;
+
+/// Effective auto-compaction token threshold for `window` and an optional
+/// explicit `--auto-compact-tokens` override. When unset, windows >= 400K
+/// compact at 307,200 tokens (300K) and smaller windows compact at 80%.
+pub fn auto_compact_threshold(window: usize, override_tokens: Option<usize>) -> usize {
+    match override_tokens {
+        Some(tokens) => tokens.min(window),
+        None if window >= LARGE_CONTEXT_COMPACT_WINDOW => {
+            LARGE_CONTEXT_AUTO_COMPACT_TOKENS.min(window)
+        }
+        None => window.saturating_mul(4) / 5,
+    }
+}
 
 /// What automatic compaction keeps, scaled from the context window in tokens.
 /// `rounds`: newest closed tool rounds kept word for word (4 at 32,768, 8 at
@@ -113,11 +130,26 @@ impl AutoCompaction {
         self.retry_next_turn = true;
     }
     pub fn observe(&mut self, usage: &Usage, limit: usize, reserve: usize) -> bool {
-        let limit = usage.context_limit(limit);
-        if usage.compaction_required(limit, reserve) <= limit.saturating_mul(3) / 5 {
+        self.observe_threshold(usage, limit, reserve, None)
+    }
+    pub fn observe_threshold(
+        &mut self,
+        usage: &Usage,
+        limit: usize,
+        reserve: usize,
+        auto_compact_tokens: Option<usize>,
+    ) -> bool {
+        let window = usage.context_limit(limit);
+        let threshold = auto_compact_threshold(window, auto_compact_tokens);
+        let rearm = if auto_compact_tokens.is_none() && window < LARGE_CONTEXT_COMPACT_WINDOW {
+            window.saturating_mul(3) / 5
+        } else {
+            threshold.saturating_mul(3) / 4
+        };
+        if usage.compaction_required(limit, reserve) <= rearm {
             self.armed = true;
         }
-        if self.armed && usage.near_limit(limit, reserve) {
+        if self.armed && usage.near_limit_at(limit, reserve, auto_compact_tokens) {
             self.armed = false;
             return true;
         }
@@ -259,7 +291,16 @@ impl Usage {
             .saturating_add(reserve.max(self.requested_output))
     }
     pub fn near_limit(&self, limit: usize, reserve: usize) -> bool {
-        self.compaction_required(limit, reserve) >= self.context_limit(limit).saturating_mul(4) / 5
+        self.near_limit_at(limit, reserve, None)
+    }
+    pub fn near_limit_at(
+        &self,
+        limit: usize,
+        reserve: usize,
+        auto_compact_tokens: Option<usize>,
+    ) -> bool {
+        let window = self.context_limit(limit);
+        self.compaction_required(limit, reserve) >= auto_compact_threshold(window, auto_compact_tokens)
     }
     pub fn compaction_required(&self, limit: usize, reserve: usize) -> usize {
         let (input, output) = self.exact.map_or(

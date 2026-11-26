@@ -1019,7 +1019,6 @@ pub fn check_kv_finish_direct(
     let fixed_b = width.checked_mul(taps).and_then(f32_bytes);
     let made_b = rows.checked_mul(kv_heads).and_then(|n| n.checked_mul(taps)).and_then(f32_bytes);
     let every_b = rows.checked_mul(taps).and_then(|n| n.checked_mul(width)).and_then(f32_bytes);
-    let plane_b = plane_rows.checked_mul(width / 2).and_then(f32_bytes);
     let row_b = f32_bytes(width / 2).ok_or("fast kv direct: row byte overflow")?;
     for (inp, fix, mad, ev) in [(key_in, key_fixed, key_made, key_every), (val_in, val_fixed, val_made, val_every)] {
         if !inp.valid(in_b) || !fix.valid(fixed_b) || !ev.valid(every_b) {
@@ -1037,7 +1036,10 @@ pub fn check_kv_finish_direct(
     writes[1] = val_every;
     let mut n_writes = 2usize;
     for &(kr, vr, rslot, kp, vp, pslot) in chats {
-        if rslot >= taps || pslot >= plane_rows || !kr.valid(ring_b) || !vr.valid(ring_b) || !kp.valid(plane_b) || !vp.valid(plane_b) {
+        let min_plane_b = (pslot as u64).checked_add(1).and_then(|n| n.checked_mul(row_b));
+        let plane_ok = |p: Span| p.address != 0 && p.address % 4 == 0 && p.address.checked_add(p.bytes).is_some()
+            && min_plane_b.is_some_and(|need| p.bytes >= need) && p.bytes % row_b == 0;
+        if rslot >= taps || pslot >= plane_rows || !kr.valid(ring_b) || !vr.valid(ring_b) || !plane_ok(kp) || !plane_ok(vp) {
             return Err("fast kv direct: chat ring, plane, or slot mismatch");
         }
         let k_row = Span { address: kp.address + (pslot as u64) * row_b, bytes: row_b };

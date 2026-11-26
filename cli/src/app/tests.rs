@@ -210,8 +210,8 @@ fn admitted_chats_come_from_the_last_engine_ready_line() {
     use crate::state::admitted_chats;
     let ready = |active: &str| format!("flashnext ready world=1 model=m context=32768 concurrency=rows active={active} connections=16");
     assert_eq!(admitted_chats(&format!("load\n{}\nrequest\n", ready("8"))), Some(8));
-    assert_eq!(admitted_chats(&format!("{}\n{}\n", ready("1"), ready("8"))), Some(8));
-    for log in ["", "Fake engine log.", "flash_serve ready slots=900", &ready("0"), &ready("33"), &ready("x")] {
+    assert_eq!((admitted_chats(&format!("{}\n{}\n", ready("1"), ready("8"))), admitted_chats(&ready("89"))), (Some(8), Some(89)));
+    for log in ["", "Fake engine log.", "flash_serve ready slots=900", &ready("0"), &ready("x")] {
         assert_eq!(admitted_chats(log), None, "{log}");
     }
     let mut f = Fixture::fp4(1, false);

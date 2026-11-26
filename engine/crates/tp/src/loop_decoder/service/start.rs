@@ -136,26 +136,22 @@ pub fn serve<C:Compute,W:Weights<C>>(compute:&C,weights:&W,description:&LoopText
 }
 #[allow(clippy::too_many_arguments)]
 pub fn serve_with_draft<C:Compute,W:Weights<C>>(compute:&C,weights:&W,description:&LoopTextDescription,text:Text,admitted:&Admitted,settings:&Settings,listener:TcpListener,root:&Path,backend:&str,stop:&AtomicBool,model:Option<&dyn super::mtp::Model<C,W>>)->Result<()> {
-    let Text {tokenizer,identity,eos}=text;
+    let Text {mut tokenizer,identity,eos}=text;
     let auth=spark_serve::auth::ApiKey::load(settings.options.key.as_deref(),false)?;
     need(admitted.context==settings.context,||"the admitted context differs from the context of the start".to_owned())?;
-    let mut seats=admitted.seats()?;
+    let seats=admitted.seats()?;
     if let Some(model)=model {
         let cfg=model.config();
         need(settings.options.depth<=cfg.gamma() && description.declared_draft.as_ref().is_some_and(|d|d.taps.iter().copied().eq(cfg.target_layer_ids.iter().map(|&n|n as u64))),||"draft depth or taps differ from the checkpoint".into())?;
-        let kv=settings.context.checked_mul(cfg.kv_width()).and_then(|n|n.checked_mul(8*cfg.num_layers)).ok_or("draft chat size overflow")?;
-        // Contended chats retire drafting, so reserve a bounded draft KV pool (up to 8 chats) off room
-        // instead of charging full draft KV to every chat slot.
-        let pool=kv.checked_mul(seats.most.min(8)).ok_or("draft reservation overflow")?;
-        let charge=if seats.room>=pool.saturating_add(seats.chat) {pool} else {kv};
-        seats.room=seats.room.checked_sub(charge).ok_or("text service memory refusal: no room for draft KV")?;
     }
     let mut service=Service::new(compute,weights,description,settings.context,eos,seats)?.with_prompt_keep(!settings.options.no_prompt_keep);
     service.model=model;service.depth=settings.options.depth;
-    compute.step_spares(spares(service.step_bytes(),service.chat_bytes(),service.chats(),service.pool()));
+    compute.step_spares(spares(service.step_bytes(),service.fixed_chat_bytes(),service.chats(),service.pool()));
+    compute.fund_kv_pages(service.pool());
     let mut limits=limits(settings.context,settings.output)?;
     limits.next_mtp_depth=Some(service.depth);limits.api_key=auth;limits.metadata=Some(spark_serve::metadata::Metadata::loop_text(&identity,backend));limits.identity=Some(identity);
     limits.validate()?;
+    tokenizer.set_limits(limits.tokenizer_limits()).map_err(|e|e.to_string())?;
     let (cache,config)=service.schedule();
     let name=root.file_name().ok_or("checkpoint needs a directory name")?.to_string_lossy().to_ascii_lowercase();
     eprintln!("LOOP TEXT ROWS step_rows={} key_group_bytes={} room_bytes={} step_bytes={} session_pool_bytes={} chats={} chat_bytes={} ledger_chat_bytes={} chat_state_bytes={}",

@@ -304,7 +304,7 @@ fn key(n: u8) -> SessionKey {
 #[test]
 fn disabled_cache_accepts_the_full_service_context() {
     for (retained_bytes,tokens_per_entry,valid) in [(0,524288,true),(0,1_048_576,true),
-        (0,1_048_577,false),(1024,262144,true),(1024,262145,false)] {
+        (0,1_048_577,false),(1024,262144,true),(1024,524288,true),(1024,1_048_576,true),(1024,1_048_577,false)] {
         assert_eq!(CacheLimits {retained_bytes,tokens_per_entry,..limits()}.validate().is_ok(),valid);
     }
 }

@@ -57,3 +57,44 @@ fn zero_tool_quota_rejects_proposal_without_executing() {
     assert_eq!(result.report.unwrap().tool_calls, 0);
     assert!(result.tools.is_empty());
 }
+
+#[test]
+fn defaults_support_8_concurrent_128k_subagents_without_arbitrary_upper_caps() {
+    let config = Config::default();
+    assert_eq!(config.max_concurrent, 8);
+    assert_eq!(config.default_quota.tokens, 131_072);
+    assert!(config.total_tokens >= 8 * 131_072);
+    assert_eq!(config.default_quota.limits().max_context_tokens, 131_072);
+
+    // Rule 17: higher concurrency, turns, history and context are accepted cleanly.
+    let wide = Config {
+        max_concurrent: 16,
+        max_tasks: 64,
+        default_quota: Quota {
+            model_turns: 120,
+            tool_calls: 512,
+            tokens: 262_144,
+            history_bytes: 6 * 1024 * 1024,
+            ..Quota::default()
+        },
+        total_tokens: 64 * 262_144,
+        ..Config::default()
+    };
+    let scheduler = Scheduler::new(
+        StablePrefix::from_parent(&parent()).unwrap(),
+        wide,
+        Arc::new(AtomicBool::new(false)),
+        factory(vec![], Arc::new(AtomicUsize::new(0))),
+    );
+    assert!(scheduler.is_ok(), "wide subagent limits must be accepted");
+
+    // Invariant: max_concurrent must remain in 1..=max_tasks.
+    let defaults = Config::default();
+    let bad = Config { max_concurrent: defaults.max_tasks + 1, ..defaults };
+    assert!(Scheduler::new(
+        StablePrefix::from_parent(&parent()).unwrap(),
+        bad,
+        Arc::new(AtomicBool::new(false)),
+        factory(vec![], Arc::new(AtomicUsize::new(0))),
+    ).is_err());
+}

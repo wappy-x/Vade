@@ -15,6 +15,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 mod access;
+mod pool;
 mod routing;
 mod sampling;
 mod system_turns;
@@ -167,6 +168,26 @@ fn serve_listener(listener: TcpListener, upstream: Upstream, stop: Option<&Atomi
         Upstream::Cluster(cluster) => Some(ProbeWorkers::start(cluster, &cancellation)?),
         Upstream::Single(_) => None,
     };
+    let worker_active = Arc::clone(&active);
+    let worker_upstream = upstream.clone();
+    let worker_pool_conn = pool.clone();
+    let worker_cancel = Arc::clone(&cancellation);
+    let worker_access = Arc::clone(&access);
+    let workers = pool::WorkerPool::new(
+        "gateway-request",
+        max_connections,
+        Arc::new(move |socket: TcpStream| {
+            let _guard = ActiveGuard(Arc::clone(&worker_active));
+            // No request headers, body, credentials, or upstream URL are logged.
+            let _ = handle_target(
+                socket,
+                &worker_upstream,
+                Some(&worker_cancel),
+                &worker_pool_conn,
+                &worker_access,
+            );
+        }),
+    );
     loop {
         if stop.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
             return Ok(());
@@ -182,21 +203,7 @@ fn serve_listener(listener: TcpListener, upstream: Upstream, stop: Option<&Atomi
                     continue;
                 }
                 active.fetch_add(1, Ordering::Relaxed);
-                let worker_active = Arc::clone(&active);
-                let upstream = upstream.clone();
-                let pool = pool.clone();
-                let cancellation = Arc::clone(&cancellation);
-                let access = Arc::clone(&access);
-                let spawned =
-                    thread::Builder::new()
-                        .name("gateway-request".into())
-                        .spawn(move || {
-                            let _guard = ActiveGuard(worker_active);
-                            // No request headers, body, credentials, or upstream URL are logged.
-                            let _ = handle_target(socket, &upstream, Some(&cancellation), &pool, &access);
-                        });
-                if spawned.is_err() {
-                    // A failed spawn drops the closure; its guard wasn't constructed.
+                if workers.dispatch(socket).is_err() {
                     active_decrement(&active);
                     return Err(io::Error::other("unable to start gateway request worker"));
                 }
@@ -913,16 +920,20 @@ fn relay_observed(
     writer: &mut impl Write,
     mut observe: impl FnMut(&[u8]),
 ) -> io::Result<()> {
+    let mut frame = Vec::new();
     loop {
-        // The previous chunk is flushed before waiting for the next upstream read.
+        // The previous chunk is written before waiting for the next upstream read.
         let bytes = body.fill_buf()?;
         if bytes.is_empty() {
             break;
         }
         let n = bytes.len();
-        write!(writer, "{n:x}\r\n")?;
-        writer.write_all(bytes)?;
-        writer.write_all(b"\r\n")?;
+        frame.clear();
+        frame.reserve(n + 24);
+        write!(&mut frame, "{n:x}\r\n")?;
+        frame.extend_from_slice(bytes);
+        frame.extend_from_slice(b"\r\n");
+        writer.write_all(&frame)?;
         writer.flush()?;
         observe(bytes);
         body.consume(n);

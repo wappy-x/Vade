@@ -7,8 +7,10 @@ impl<'d> Backend<'d> {
     pub fn draft_lanes(&self,op:crate::draft_ops::DraftOp,input:[Option<&DeviceVector<'_>>;3])->Result<DeviceVector<'d>,String> {
         if self.arm_capture() {return Err("draft lane operation inside a stream capture".into());}
         let (lens,out,lanes,[kind,a,b,c,d,e])=op.layout().ok_or("invalid draft operation dimensions")?;
+        let allow_seg_kv = matches!(op, crate::draft_ops::DraftOp::FlashAttn { .. } | crate::draft_ops::DraftOp::Scores { .. } | crate::draft_ops::DraftOp::Values { .. });
         let mut ptr=[0;3];
         for (i,v) in input.into_iter().enumerate() {match v {
+            Some(v) if lens[i]>0 && allow_seg_kv && i>=1=>{self.check_vector_prefix(v,lens[i])?;ptr[i]=v.device_address();}
             Some(v) if lens[i]>0 && !v.is_segmented()=>{self.check_vector(v,lens[i])?;ptr[i]=v.device_address();}
             None if lens[i]==0=>(),_=>return Err("draft lane input extent differs".into()),
         }}
@@ -109,15 +111,20 @@ impl<'a> Backend<'a> {
         self.require_arm_kernels(&[kind.kernel()])?;
         let operand=|v:&DeviceVector<'_>|Operand {address:v.device_address(),words:v.len(),contiguous:!v.is_segmented(),own_context:self.check_vector(v,v.len()).is_ok()};
         let counts=crate::block_rows::lengths(shape,rows,2);
+        let plane_words=counts.ok_or("invalid per-chat attention shape")?.0[1];
         let [a,b,c]=x.map(operand);
         let out=operand(output);
+        let out_span=(output.device_address(),output.device_address()+4*output.len() as u64);
         let args=crate::causal_ops::Arguments {input:[a.address,4,b.address,c.address],weight:4,output:out.address,shape};
         let mut command=crate::resident_launch_encode::causal(args);
         command.kind=kind as u32;
         command.put(crate::block_ops::device::ROWS_AT,&(rows as u32).to_ne_bytes());
         command.put(crate::block_ops::device::SHARED_AT,&2u32.to_ne_bytes());
         for (i,plane) in planes.iter().enumerate() {
-            let plane=operand(plane);
+            self.check_vector_prefix(plane,plane_words)?;
+            let p_end=plane.device_address().checked_add(4*plane.len() as u64).ok_or("per-chat plane ends past address space")?;
+            if out_span.0<p_end && plane.device_address()<out_span.1 {return Err("block arm output overlaps an operand".into());}
+            let plane=Operand {address:plane.device_address(),words:plane_words,contiguous:true,own_context:true};
             operands(counts,[Some(a),Some(plane),Some(b),Some(c)],None,out,self.arm_capture())?;
             command.put(PLANES_AT+i*8,&plane.address.to_ne_bytes());
         }
@@ -214,7 +221,19 @@ impl<'a> Backend<'a> {
         use crate::resident_launch::Kind;
         let operand=|v:&DeviceVector<'_>|crate::block_check::Operand {address:v.device_address(),words:v.len(),contiguous:!v.is_segmented(),own_context:self.check_vector(v,v.len()).is_ok()};
         let counts=match row_launch {Some((count,shared))=>crate::block_rows::lengths(shape,count,shared),None=>crate::block_ops::checked_lengths(shape)};
-        let (_,_,checked_units,_)=crate::block_check::operands(counts,input.map(|v|v.map(operand)),weight.map(operand),operand(output),self.arm_capture())?;
+        let kv_plane_slot=matches!(shape.op,crate::causal_ops::Op::WindowScores|crate::causal_ops::Op::WindowValues);
+        let mut checked_inputs=input.map(|v|v.map(operand));
+        if kv_plane_slot {
+            if let (Some(v),Some((lengths,_,_,_)))=(input[1],counts) {
+                if self.check_vector_prefix(v,lengths[1]).is_ok() {
+                    let p_end=v.device_address().checked_add(4*v.len() as u64).ok_or("block arm input 1 ends past the address space")?;
+                    let out_end=output.device_address().checked_add(4*output.len() as u64).ok_or("block arm output ends past the address space")?;
+                    if output.device_address()<p_end && v.device_address()<out_end {return Err("block arm output overlaps an operand".into());}
+                    checked_inputs[1]=Some(crate::block_check::Operand {address:v.device_address(),words:lengths[1],contiguous:true,own_context:true});
+                }
+            }
+        }
+        let (_,_,checked_units,_)=crate::block_check::operands(counts,checked_inputs,weight.map(operand),operand(output),self.arm_capture())?;
         if checked_units!=units {return Err("block arm units differ from the checked counts".into());}
         let addresses=input.map(|v|v.map_or(4,|v|v.device_address()));
         // Every field of the shape in the command is the checked shape (review REVPACK finding 3), the floats by their bits.

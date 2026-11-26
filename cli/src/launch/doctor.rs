@@ -40,15 +40,15 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
             |_| "engine, kernels and chat match their saved file metadata".into(), next)?;
         let model = report.check("model files", model::discover_existing(&self.home,
             config.as_ref().map(|config| config.model.as_path())).and_then(|model| {
-                if !model.fp4_local {
-                    return Err("Local launch requires nvidia/Qwen3.8-Flash-Next-FP4-Local.".into());
+                if !model.fp4_local && !model.loop_text {
+                    return Err("Local launch requires nvidia/Qwen3.8-Flash-Next-FP4-Local or Inkling 2 Mini.".into());
                 }
                 if config.as_ref().is_some_and(|config| config.model != model.path) {
                     return Err("The saved checkpoint is unavailable; another checkpoint was selected by VADE_MODELS.".into());
                 }
                 Ok(model)
             }), |model| format!("{} ({} bytes; startup verifies the model manifest)", model.path.display(), model.bytes),
-            "Set VADE_MODELS to the complete FP4-Local checkpoint, then run vade launch. When replacing a valid saved checkpoint, first run vade down with the existing VADE_HOME, then choose a fresh VADE_HOME.")?;
+            "Set VADE_MODELS to the complete checkpoint, or pull one with vade pull inkling, then run vade up. When replacing a valid saved checkpoint, first run vade down with the existing VADE_HOME, then choose a fresh VADE_HOME.")?;
         let known_model = model.as_ref().map(|model| model.path.clone())
             .or_else(|| config.as_ref().map(|config| config.model.clone()))
             .or_else(|| std::env::var_os("VADE_MODELS").map(|value| {
@@ -63,10 +63,21 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
                 // vade launch serves one Spark, where an unset prefix cache switch means on.
                 let (context, output, mtp, cache) = if let Some(config) = &config {
                     let planned = config.planned(&options);
-                    (planned.context, planned.output, planned.mtp(), planned.prefix_cache().map(|value| Some(value.as_deref() != Some("0"))))
+                    let mtp = planned.mtp().or_else(|| model::loop_text(&planned.model).then(|| model::local_default_mtp(&planned.model)));
+                    (planned.context, planned.output, mtp, planned.prefix_cache().map(|value| Some(value.as_deref() != Some("0"))))
                 } else {
-                    let context = model.as_ref().map_or(options.context, |model| options.context.min(model.context_limit));
-                    (context, options.output.min(context), options.mtp_explicit.then_some(options.mtp), crate::doctor::prefix_cache().map(|value| Some(value.unwrap_or(true))))
+                    let is_loop = model.as_ref().is_some_and(|m| m.loop_text);
+                    let default_context = if is_loop { crate::cli::INKLING_CONTEXT } else { options.context };
+                    let context = model.as_ref().map_or(default_context, |model| default_context.min(model.context_limit));
+                    let output = if is_loop { crate::cli::inkling_output(context) } else { options.output.min(context) };
+                    let mtp = if options.mtp_explicit {
+                        Some(options.mtp)
+                    } else if is_loop {
+                        model.as_ref().map(|m| model::local_default_mtp(&m.path))
+                    } else {
+                        None
+                    };
+                    (context, output, mtp, crate::doctor::prefix_cache().map(|value| Some(value.unwrap_or(true))))
                 };
                 crate::doctor::defaults(&mut report, context, output, mtp, cache)?;
             }

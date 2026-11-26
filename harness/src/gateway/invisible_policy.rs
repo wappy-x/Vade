@@ -184,10 +184,15 @@ impl Runtime {
             String::new()
         };
         let endpoint = path.split('?').next().unwrap_or(path);
-        let generation =
-            method == "POST" && matches!(endpoint, "/v1/chat/completions" | "/v1/responses");
+        let generation = method == "POST"
+            && matches!(
+                endpoint,
+                "/v1/chat/completions" | "/chat/completions" | "/v1/responses" | "/responses"
+            );
         // Messages gets only the cache fields; limit clamps stay Chat and Responses only.
-        let messages = method == "POST" && endpoint == "/v1/messages" && self.flags.stable;
+        let messages = method == "POST"
+            && matches!(endpoint, "/v1/messages" | "/messages")
+            && self.flags.stable;
         let mut report = Report::new(index);
         let Some(value) = parsed.filter(|v| {
             (generation || messages)
@@ -239,7 +244,11 @@ impl Runtime {
         report: &mut Report,
         admit: &mut impl FnMut(usize, &str, &[u8], u64, &Limits) -> io::Result<u64>,
     ) -> io::Result<()> {
-        let endpoint = path.split('?').next().unwrap_or(path);
+        let endpoint = match path.split('?').next().unwrap_or(path) {
+            "/chat/completions" => "/v1/chat/completions",
+            "/responses" => "/v1/responses",
+            other => other,
+        };
         let preferred = if endpoint == "/v1/responses" {
             "max_output_tokens"
         } else {
@@ -452,6 +461,42 @@ pub(super) fn hash(bytes: &[u8]) -> u64 {
         (h ^ *b as u64).wrapping_mul(0x100000001b3)
     })
 }
+/// Append canonical compact JSON bytes for cache-key hashing while ignoring
+/// ephemeral Anthropic `cache_control` markers that clients move from turn 1
+/// to turn 2+. Never changes request bytes.
+fn append_stable_json(value: View<'_>, out: &mut Vec<u8>) {
+    if let Some(fields) = value.fields() {
+        out.push(b'{');
+        let mut first = true;
+        for (name, item) in fields {
+            if name.as_ref() == "cache_control" {
+                continue;
+            }
+            if !first {
+                out.push(b',');
+            }
+            first = false;
+            out.extend_from_slice(json::quote(name.as_ref()).as_bytes());
+            out.push(b':');
+            append_stable_json(item, out);
+        }
+        out.push(b'}');
+    } else if let Some(items) = value.array() {
+        out.push(b'[');
+        let mut first = true;
+        for item in items {
+            if !first {
+                out.push(b',');
+            }
+            first = false;
+            append_stable_json(item, out);
+        }
+        out.push(b']');
+    } else {
+        out.extend_from_slice(value.raw().as_bytes());
+    }
+}
+
 pub(super) fn key(v: Option<View<'_>>, head: &Head) -> String {
     if let Some(key) = v.and_then(|v| text(v, "prompt_cache_key")) {
         return key;
@@ -474,7 +519,7 @@ pub(super) fn key(v: Option<View<'_>>, head: &Head) -> String {
             if let Some(value) = v.get(field) {
                 prefix.extend_from_slice(field.as_bytes());
                 prefix.push(0);
-                prefix.extend_from_slice(value.raw().as_bytes());
+                append_stable_json(value, &mut prefix);
             }
         }
         if let Some(messages) = v.get("messages").or_else(|| v.get("input")) {
@@ -483,14 +528,14 @@ pub(super) fn key(v: Option<View<'_>>, head: &Head) -> String {
                     let role = text(message, "role");
                     if matches!(role.as_deref(), Some("system" | "developer" | "user")) {
                         prefix.push(0);
-                        prefix.extend_from_slice(message.raw().as_bytes());
+                        append_stable_json(message, &mut prefix);
                     }
                     if role.as_deref() == Some("user") {
                         break;
                     }
                 }
             } else {
-                prefix.extend_from_slice(messages.raw().as_bytes());
+                append_stable_json(messages, &mut prefix);
             }
         }
     }

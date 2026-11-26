@@ -64,6 +64,8 @@ pub struct Limits {
     pub max_history_bytes: usize,
     pub max_context_tokens: usize,
     pub output_reserve_tokens: usize,
+    /// Optional explicit auto-compaction token trigger (`--auto-compact-tokens N`).
+    pub auto_compact_tokens: Option<usize>,
     /// Continue length-limited prose within the same request's existing budget.
     pub auto_continue: bool,
     pub wire: WireLimits,
@@ -81,6 +83,7 @@ impl Default for Limits {
             max_history_bytes: 4 * 1024 * 1024,
             max_context_tokens: crate::context::DEFAULT_CONTEXT_TOKENS,
             output_reserve_tokens: crate::context::DEFAULT_RESERVE,
+            auto_compact_tokens: None,
             auto_continue: true,
             wire: WireLimits::default(),
         }
@@ -254,6 +257,7 @@ impl Limits {
     fn validate(self) -> io::Result<()> {
         if self.max_context_tokens < 1024
             || self.output_reserve_tokens >= self.max_context_tokens
+            || self.auto_compact_tokens == Some(0)
             || self.max_model_turns > 1024
             || self.max_tool_turns > 1024
             || self.max_tool_calls > 4096

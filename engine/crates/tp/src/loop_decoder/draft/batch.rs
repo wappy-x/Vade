@@ -1,6 +1,6 @@
 //! Batched DSpark context push and multi-chat proposal sharing draft weights across `B >= 2` chats.
 //! Every token ID and probability matches single-chat `push_values` + `propose_confident` bit for bit.
-use super::{DraftChat,Drafter,Lanes,kv_capacity,need,packed};
+use super::{DraftChat,Drafter,Lanes,need,packed};
 use crate::{Result,loop_decoder::{mix::Weights,operands::weights::ResidentProduct,rows}};
 use spark_gpu_probe::draft_ops::{DRAFT_BATCH_MAX,DraftOp,PANEL_INPUTS_MAX};
 
@@ -51,20 +51,9 @@ impl<'a,V,A> Drafter<'a,V,A> {
             let mut off=0usize;
             for &idx in &active {
                 let (chat,_,rows)=&mut items[idx];
-                let end=chat.len+*rows;
-                let need_rows=end.saturating_add(cfg.block_size).min(chat.limit);
-                if chat.kv[i].as_ref().is_none_or(|(keys,_)|c.words(keys)/kv<need_rows) {
-                    let words=kv_capacity(end,cfg.block_size,chat.limit).checked_mul(kv).ok_or("draft cache shape overflow")?;
-                    let (mut keys,mut vals)=(c.zeros(words)?,c.zeros(words)?);
-                    if let Some((before,other))=&chat.kv[i] {
-                        c.state_fill(&mut keys,0,&c.range(before,0,chat.len*kv)?)?;
-                        c.state_fill(&mut vals,0,&c.range(other,0,chat.len*kv)?)?;
-                    }
-                    chat.kv[i]=Some((keys,vals));
-                }
-                let (keys,vals)=chat.kv[i].as_mut().ok_or("missing draft cache")?;
-                c.state_fill(keys,chat.len*kv,&c.range(&k_all,off*kv,*rows*kv)?)?;
-                c.state_fill(vals,chat.len*kv,&c.range(&v_all,off*kv,*rows*kv)?)?;
+                let k_slice=c.range(&k_all,off*kv,*rows*kv)?;
+                let v_slice=c.range(&v_all,off*kv,*rows*kv)?;
+                self.push_layer_kv(c,chat,i,&k_slice,&v_slice,*rows)?;
                 off+=*rows;
             }
         }
@@ -160,13 +149,16 @@ impl<'a,V,A> Drafter<'a,V,A> {
                 let k_new=c.range(&k_all,b*rows*kv,rows*kv)?;
                 let v_new=c.range(&v_all,b*rows*kv,rows*kv)?;
                 let start=if cfg.is_local(i) {chat.len.saturating_sub(cfg.sliding_window_size.saturating_sub(1))} else {0};
+                let base=chat.local_base[i];
+                need(base<=start,"draft local window base passed read start")?;
+                let (rel_start,rel_pos)=(start-base,chat.len-base);
                 let keys=chat.len-start+rows;
                 let (ck,cv)=chat.kv[i].as_mut().ok_or("draft keys missing")?;
-                let (k_ctx,v_ctx)=if c.words(ck)/kv>=chat.len+rows {
-                    c.state_fill(ck,chat.len*kv,&k_new)?;c.state_fill(cv,chat.len*kv,&v_new)?;
-                    (c.range(ck,start*kv,keys*kv)?,c.range(cv,start*kv,keys*kv)?)
+                let (k_ctx,v_ctx)=if c.words(ck)/kv>=rel_pos+rows {
+                    c.state_fill(ck,rel_pos*kv,&k_new)?;c.state_fill(cv,rel_pos*kv,&v_new)?;
+                    (c.range(ck,rel_start*kv,keys*kv)?,c.range(cv,rel_start*kv,keys*kv)?)
                 } else {
-                    let append=|ctx:&A,new:&A|c.join(&[&c.range(ctx,start*kv,(chat.len-start)*kv)?,new]);
+                    let append=|ctx:&A,new:&A|c.join(&[&c.range(ctx,rel_start*kv,(chat.len-start)*kv)?,new]);
                     (append(ck,&k_new)?,append(cv,&v_new)?)
                 };
                 let a_b=if flash_attn {

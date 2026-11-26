@@ -370,7 +370,7 @@ if test {rdma} = 1; then
   test "$rdma_device" = 1 || {{ printf 'missing=rdma-device\n'; exit 1; }}
   test "$(ulimit -Sl)" = unlimited && test "$(ulimit -Hl)" = unlimited || {{ printf 'missing=rdma-memlock\n'; exit 1; }}
 fi
-if test -d {model} && test -f {model}/config.json && test -f {model}/tokenizer.json && {{ test -f {model}/model.safetensors.index.json || find {model} -maxdepth 1 -name '*.safetensors' -print -quit | /usr/bin/grep -q .; }}; then
+if test -d {model} && test -f {model}/config.json && {{ test -f {model}/tokenizer.json || test -f {model}/tiktoken/tokenizer.model; }} && {{ test -f {model}/model.safetensors.index.json || find {model} -maxdepth 1 -name '*.safetensors' -print -quit | /usr/bin/grep -q .; }}; then
   printf 'weights=present\n'
 else
   printf 'weights=missing\n'

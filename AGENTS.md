@@ -67,6 +67,10 @@ values ([FP8 defaults](docs/install-fp8.md#defaults-and-drafting)).
   (code that runs on the CPU, not the GPU) need no Spark. Changes to engine
   behavior need the device gate below: a set of checks on real Sparks that
   must pass before merge.
+- **No arbitrary limits.** Do not add arbitrary limits that do not correspond
+  to actual hardware limits that cannot be exceeded. Do not add a limit because
+  you have not tested beyond it. Do not add a limit because you ran out of
+  memory once. Remove any arbitrary limits you encounter along the way.
 
 ## Legacy code
 

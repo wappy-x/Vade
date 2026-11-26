@@ -88,6 +88,32 @@ fn native_child_grants_require_host_opt_in_and_exact_bounded_paths() {
 }
 
 #[test]
+fn subagent_and_auto_compact_cli_flags_parse_and_validate() {
+    let parsed = config(&[
+        "--auto-compact-tokens",
+        "250000",
+        "--max-subagents",
+        "12",
+        "--subagent-context",
+        "262144",
+    ])
+    .unwrap();
+    assert_eq!(parsed.auto_compact_tokens, Some(250_000));
+    assert_eq!(parsed.max_subagents, Some(12));
+    assert_eq!(parsed.subagent_context, Some(262_144));
+
+    for bad in [
+        vec!["--auto-compact-tokens", "0"],
+        vec!["--auto-compact-tokens", "512"],
+        vec!["--no-compact", "--auto-compact-tokens", "200000"],
+        vec!["--max-subagents", "0"],
+        vec!["--subagent-context", "512"],
+    ] {
+        assert!(config(&bad).is_err(), "{bad:?}");
+    }
+}
+
+#[test]
 fn shared_parent_child_approval_lane_serializes_exact_operations_and_clears_receipts() {
     let (tx, rx) = interaction::lanes();
     let gate = Arc::new(ToolPreviews {

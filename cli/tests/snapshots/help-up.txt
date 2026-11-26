@@ -2,15 +2,19 @@ $ vade up --help
 Start the engine without opening chat.
 
 Examples:
+  vade up inkling
+  vade up inkling --context 1048576
   vade up
   vade up --sparks spark-a,spark-b,spark-c,spark-d
-  vade up --context 262144 --output 16384
   VADE_CONFIG=cluster.conf vade up --sparks 2
 
-Usage: vade up [OPTIONS]
+Usage: vade up [MODEL] [OPTIONS]
 
 Options:
-  --fp4-local          Qwen3.8 Flash-Next FP4-Local (the default; optional)
+  MODEL                Optional short alias: inkling (Inkling 2 Mini) or qwen
+                       (Qwen3.8 FP4-Local)
+  --fp4-local          Qwen3.8 Flash-Next FP4-Local (the default without MODEL;
+                       optional)
   --fp8                Qwen3.8 Flash-Next FP8 on 2 or 4 Sparks; 6 Sparks start
                        but are not covered (older spelling: --fp8-legacy):
                        context 131072, output 65536 (or the context if smaller),
@@ -27,20 +31,21 @@ Options:
                        local gateway
   --pairs              With --replicas 2..12: N two-Spark tensor-split servers
                        on 2N Sparks instead
-  --mtp N              Drafting depth 0..3; 0 turns drafting off. Unset: the
-                       engine chooses, and controller FP8 passes 2. From a
-                       controller with --diagnostic-unqualified-text, a
-                       two-Spark text service takes 0..7 and loads 3 when this
-                       and MTP are unset; a plan that declares one Spark uses 0
-  --context N          Context window in tokens, 4096..262144 (default 32768)
-  --output N           Output limit in tokens, 1024..16384 (default 8192, or the
-                       context if smaller)
+  --mtp N              Drafting depth (Inkling 0..7, default 7; FP4-Local 0..3,
+                       engine chooses; controller FP8 passes 2; 0 turns drafting
+                       off). From a controller with
+                       --diagnostic-unqualified-text, a two-Spark text service
+                       takes 0..7 and loads 3 when this and MTP are unset; a
+                       one-Spark plan uses its checkpoint default
+  --context N          Context window in tokens, 4096 or more (Inkling default
+                       524288; FP4-Local 4096..262144, default 32768)
+  --output N           Output limit in tokens (Inkling default 16384 up to
+                       context; FP4-Local 1024..16384, default 8192)
   --chats N            Concurrent FP8 chats, 1..32 (controller)
   --memory-bytes N     Memory budget per rank, in bytes
   --cache-bytes N      FP8 retained prompt cache, in bytes; 0 disables it. Local
-                       FP4 and --diagnostic-unqualified-text accept only 0. A
-                       two-Spark text service keeps prompts unless this is 0; a
-                       plan that declares one Spark keeps none
+                       FP4, Inkling and --diagnostic-unqualified-text accept
+                       only 0 (prompt cache is on by default)
   --decode-fuse MODE   on for one Spark by default; off disables the decode
                        kernel chain
   --diagnostic-unqualified-text
@@ -50,6 +55,12 @@ Options:
   --dry-run            Show what would happen; change nothing
 
 Notes:
+  - vade up inkling starts Inkling 2 Mini on one Spark with context 524288 (up
+    to the checkpoint limit with --context), output 16384 (up to context),
+    drafting depth 7 (--mtp 0 disables drafting) and prompt cache on
+    (--cache-bytes 0 disables it). Checks
+    ~/models/thinkingmachines/Inkling-2-Mini first, then the read-only Hugging
+    Face Hub cache.
   - Default: Qwen3.8 Flash-Next FP4-Local on one Spark.
   - FP4-Local runs on 1, 2 or 4 Sparks over RDMA, or as a layer chain of 3 to 24
     Sparks over TCP. We have measured chains up to four Sparks.
@@ -64,12 +75,12 @@ Notes:
     aside, and a running engine stops first. The same Sparks in the same order
     start with no new setup. After that, vade up alone starts the same Sparks,
     vade down stops them and vade chat opens a chat.
-  - Local up and launch start with context 32768 and output 8192 (or the context
-    if smaller). They reuse saved limits. A memory refusal lowers a default or
-    saved context to a smaller size from 32768, 16384, 8192 and 4096. The first
-    size that starts is saved. A refused explicit --context is an error. Local
-    --chats and positive --cache-bytes are refused; --cache-bytes 0 disables
-    retention.
+  - Local up and launch reuse saved limits. FP4-Local starts with context 32768
+    and output 8192 (or the context if smaller). A memory refusal lowers a
+    default or saved context to a smaller size from 32768, 16384, 8192 and 4096.
+    The first size that starts is saved. A refused explicit --context is an
+    error. Local --chats and positive --cache-bytes are refused; --cache-bytes 0
+    disables retention.
   - Controller FP4 defaults match local ones on one Spark: context 32768, output
     8192 (or the context if smaller). On 2 or more Sparks in one group, a chain
     or a pair, the default context is 131072; if it does not fit in memory, up
@@ -91,10 +102,11 @@ Notes:
     unset. A request with draft=plain turns drafting off for that request;
     draft=strict asks for it when a predictor is loaded.
   - A diagnostic text plan that declares one Spark (vade up --sparks 1
-    --diagnostic-unqualified-text) runs on one Spark with no transport, passes
-    --mtp 0 when --mtp is unset, refuses a depth above its plan's max, and keeps
-    no prompt cache. With --replicas N, each replica is one Spark; --replicas
-    with --pairs is refused.
+    --diagnostic-unqualified-text) runs on one Spark with no transport, defaults
+    to the checkpoint's max drafting depth (7 for Inkling 2 Mini; --mtp 0
+    disables drafting), refuses a depth above its plan's max, and keeps prompt
+    cache on unless --cache-bytes 0 is set. With --replicas N, each replica is
+    one Spark; --replicas with --pairs is refused.
   - Two FP4-Local Sparks run the tensor split, the only two-Spark path for
     FP4-Local: both Sparks work on every token. It needs RDMA, so vade up
     refuses SEQPAR_RDMA=0 (TCP) for two FP4-Local Sparks. FP8 on two Sparks

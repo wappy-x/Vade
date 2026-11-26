@@ -83,26 +83,22 @@ pub fn limits(context:usize,output:usize)->Result<spark_serve::Limits> {
         // The GLM chat template has no /think or /no_think switch: message text never changes a request.
         thinking_soft_switch:false,next_mtp_depth:Some(0),
         generation_timeout:spark_serve::Limits::MAX_GENERATION_TIMEOUT,..Default::default()};
-    limits.output_bytes=output.saturating_mul(256).clamp(1<<20,16<<20);limits.body_bytes=request_body_bytes(context);limits.validate()?;Ok(limits)
+    limits.output_bytes=output.saturating_mul(256).max(1<<20);limits.body_bytes=request_body_bytes(context);limits.validate()?;Ok(limits)
 }
 /// The byte limit of one request of a text service at this context. A request carries its whole prompt: as token IDs
 /// (`prompt_token_ids`) a token takes up to 8 bytes of JSON (six digits, a comma, a space), as text about 4 bytes, more
 /// where JSON escapes it. The serve default (256 KiB) let in about 35,000 token IDs at any context: a prompt of 60,000
 /// IDs at context 65,536 was refused before it was read (run ctx-base-1, 2026-11-15). 16 bytes a context token, never
-/// under the serve default, never over the 4 MiB that `Limits::validate` accepts.
-pub fn request_body_bytes(context:usize)->usize {context.saturating_mul(16).clamp(spark_serve::Limits::default().body_bytes,4<<20)}
-#[test]
-fn a_request_as_long_as_the_context_fits_the_byte_limit() {
-    // Independent literals. 8 bytes a token ID: 32,768 IDs are 262,144 bytes, already the old limit with no byte left
-    // for the rest of the request. The new limit holds every ID of the context twice over.
+/// under the serve default, never over `Limits::MAX_BODY_BYTES` (16 MiB) that `Limits::validate` accepts.
+pub fn request_body_bytes(context:usize)->usize {context.saturating_mul(16).clamp(spark_serve::Limits::default().body_bytes,spark_serve::Limits::MAX_BODY_BYTES)}
+#[test] fn a_request_as_long_as_the_context_fits_the_byte_limit() {
     assert_eq!(spark_serve::Limits::default().body_bytes,262_144);
-    for (context,bytes) in [(2048usize,262_144usize),(16_384,262_144),(32_768,524_288),(65_536,1_048_576),(131_072,2_097_152),(262_144,4_194_304)] {
+    for (context,bytes) in [(2048usize,262_144usize),(16_384,262_144),(32_768,524_288),(65_536,1_048_576),(131_072,2_097_152),(262_144,4_194_304),(524_288,8_388_608),(1_048_576,16_777_216)] {
         let limits=limits(context,256).unwrap();assert_eq!(limits.body_bytes,bytes,"context {context}");
-        assert!(limits.body_bytes>=262_144 && limits.body_bytes/8>=context.min(262_144),"context {context}: its token IDs do not fit");
-        // The tokenizer reads what the request may carry.
+        assert!(limits.body_bytes>=262_144 && limits.body_bytes/8>=context.min(1_048_576),"context {context}");
         assert!(limits.tokenizer_limits().max_input_bytes>=bytes);
     }
-    assert_eq!(request_body_bytes(usize::MAX),4_194_304);assert_eq!(request_body_bytes(0),262_144);
+    assert_eq!((request_body_bytes(usize::MAX),request_body_bytes(0)),(16_777_216,262_144));
 }
 impl<C:Compute,E:Exchange> Compute for Split<C,E> {
     fn work<T>(&self,run:impl FnOnce()->Result<T>)->Result<T> {self.compute.work(run)}
@@ -117,6 +113,10 @@ impl<C:Compute,E:Exchange> Compute for Split<C,E> {
     fn vector_pool_counts(&self)->Option<(usize,usize,usize)> {self.compute.vector_pool_counts()}
     type Value=C::Value;type Pass=C::Pass;
     fn state_allocations(&self,v:&C::Value,out:&mut Vec<(usize,usize)>)->bool {self.compute.state_allocations(v,out)}
+    fn plane_page_bytes(&self)->usize {self.compute.plane_page_bytes()} fn plane_alloc(&self,m:usize,i:usize)->Result<C::Value> {self.compute.plane_alloc(m,i)}
+    fn plane_grow(&self,p:&mut C::Value,n:usize,m:usize)->Result<()> {self.compute.plane_grow(p,n,m)} fn plane_trim(&self,p:&mut C::Value,k:usize)->Result<()> {self.compute.plane_trim(p,k)}
+    fn plane_fork(&self,s:&C::Value,c:usize,n:usize,m:usize)->Result<C::Value> {self.compute.plane_fork(s,c,n,m)} fn plane_prefix_allocations(&self,v:&C::Value,c:usize,o:&mut Vec<(usize,usize)>)->bool {self.compute.plane_prefix_allocations(v,c,o)}
+    fn fund_kv_pages(&self,b:usize) {self.compute.fund_kv_pages(b)} fn kv_reserve_cohort(&self,c:usize) {self.compute.kv_reserve_cohort(c)} fn kv_conversation_ended(&self,b:usize) {self.compute.kv_conversation_ended(b)}
     fn plan_cost(&self,name:&str,ns:u128) {self.compute.plan_cost(name,ns)}
     fn serving_trace(&self)->bool {self.compute.serving_trace()}
     fn profile_tick_begin(&self,tick:u64) {self.compute.profile_tick_begin(tick)}

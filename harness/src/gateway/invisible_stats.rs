@@ -283,8 +283,13 @@ impl Metrics {
             }
         }
     }
+    pub(super) fn enabled(&self) -> bool {
+        self.enabled
+    }
     pub(super) fn first_byte(&mut self) {
-        self.first_byte = Some(self.ms());
+        if self.enabled {
+            self.first_byte = Some(self.ms());
+        }
     }
     pub(super) fn terminal(&self) -> bool {
         self.observed.terminal && !self.observed.invalid

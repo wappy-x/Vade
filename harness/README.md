@@ -21,86 +21,58 @@ encryption, and Vade cannot see that.
 
 # Vade Harness
 
-Vade Harness is the terminal program that you use to work with the model. It
-is a coding agent and a chat client. It is written in first-party Rust with no
-third-party crates.
+Vade Harness is the terminal coding agent, chat client, and passthrough gateway
+for the [Vade Engine](../engine/README.md), written from scratch in Rust with
+zero third-party crates.
 
-The model runs in the [engine workspace](../engine/README.md) in this
-monorepo. The engine does the inference and keeps the KV state, the attention
-memory that it holds for each conversation (see
-[KV cache](../docs/GLOSSARY.md#ho) in the glossary).
+Why use Vade Harness or `vade-gateway` in front of Vade Engine:
+
+- **Zero-bottleneck passthrough.** Pooled workers and single-write coalesced
+  SSE frames keep loopback gateway overhead sub-millisecond with zero
+  throughput loss vs direct engine streaming.
+- **Engine KV prefix cache preserved across turns.** The engine retains its
+  multi-gigabyte KV prefix pool (~54–85 GB depending on model and context) across
+  turns. Both the native agent and `vade-gateway` keep system prompts, tools,
+  memory, history, and cache keys byte-stable across turns so follow-ups reuse
+  the prior prefix instead of re-prefilling.
+- **Exact greedy reproducibility.** Requests without explicit sampling controls
+  default to deterministic greedy decoding; explicit sampling fields pass
+  through byte for byte.
+- **1-command client setup.** `vade-harness setup` generates isolated, ready-to-run
+  homes for Claude Code, Codex, Hermes, OpenCode, and Pi without touching your
+  existing client configs.
 
 The harness gives you these parts:
 
-- **Native agent.** A tool-aware agent reads and lists files and makes exact
-  patch edits. On macOS, it also runs sandboxed commands after you approve
-  them. All of this stays inside a workspace that you pick, within fixed
-  limits.
-- **Text chat.** Direct chat streams the reply. Its only tools are local
-  commands that you type, such as `/ls` and `/read`.
-- **Demo.** An offline demo gives a scripted response and needs no engine.
-- **Memory.** [Project memory](docs/memory.md) keeps facts, preferences,
-  decisions and corrections across chats.
-- **Gateway.** A gateway command sits between another client and the engine.
-- **Hand-off.** The harness can hand each turn to **Codex** (through its
-  app-server) or to a **Hermes** agent (over ACP v1), if you have one
-  installed.
+- **Native agent.** Bounded workspace read, search, line-edit, exact patch, and
+  (on macOS) sandboxed shell tools inside one chosen workspace.
+- **Text chat & demo.** Direct streaming chat with local `/ls` and `/read`, plus
+  an offline scripted demo needing no engine.
+- **Memory & project rules.** [Project memory](docs/memory.md) and frozen
+  `AGENTS.md`/`CLAUDE.md` rules with tail-only mid-session updates.
+- **Gateway & hand-off.** Standalone `vade-gateway` and `vade-harness gateway`
+  for external coding clients, plus direct Codex and Hermes hand-off modes.
 
-The harness keeps its requests [greedy](../docs/GLOSSARY.md#dg) and
-cache-friendly.
-
-At main `ee5dafb`, the native harness had 101,731 lines of Rust in 217 files
-under `src/` (`wc -l`, tests inside `src/` included). The largest folders are
-`cli/` (10,748 lines), `readers/` (10,278), `shell/` (8,719) and `gateway/`
-(6,847). These counts leave out files beside the folders, such as
-`gateway.rs`, and the PDF reader in `pdf/`.
-
-If you already have a coding client that you like, you can keep it. Put
-Vade's gateway in front of the engine instead. Way 2 below shows how.
-
-This page starts with a first run and the four ways to use Vade. Then it
-covers the native agent, the terminal and client setup. The finer details
-come after [Going deeper](#going-deeper): gateway routing, how requests are
-built and the agent's deeper limits. [What has been
-validated](#what-has-been-validated) says what has and has not been checked.
+Keep your existing coding client if you like—point it at `vade-gateway` (Way 2
+below). Reference details sit under [Going deeper](#going-deeper); validation
+scope sits under [What has been validated](#what-has-been-validated).
 
 ## Build and run from source
 
-Start with the offline demo. It needs no engine, no Spark and no network. Run
-these commands from `harness/` in this monorepo, with the pinned Rust `1.99.0`
-compiler:
+Start with the offline demo (needs no engine, GPU, or network). From `harness/` with Rust `1.99.0`:
 
 ```sh
 cargo +1.99.0 build --offline
 cargo +1.99.0 run --offline -- demo
 cargo +1.99.0 run --offline -- --demo --prompt "Show me the local demo"
-cargo +1.99.0 run --offline -- --help
 export PATH="$PWD/target/debug:$PATH"
 ```
 
-With no mode argument you get the **demo**. It gives a clearly labeled scripted
-response and makes no network requests.
-
-To talk to a model, you need a running engine (next section). Direct mode
-needs an endpoint and a model. Native agent mode also needs an explicit
-workspace.
-
-The commands below expect an OpenAI-compatible server that already listens on
-`127.0.0.1:18080` and serves a model named `mock`. This page does not set one
-up. Bring your own, or start the engine first and put its model ID in place
-of `mock`.
-
-Choose one of the three commands:
-
-- **`direct` and `agent`.** Each one opens a client for that server.
-- **`gateway`.** It starts a listener on `127.0.0.1:8787` that forwards
-  incoming requests to that server.
-
-Stop the client or the gateway with Ctrl+C before you choose another:
+To talk to a running engine at `127.0.0.1:18080` serving `MODEL`, pick direct chat, native agent (`--workspace` required), or the gateway on `127.0.0.1:8787`:
 
 ```sh
-vade-harness direct --endpoint http://127.0.0.1:18080/v1/chat/completions --model mock
-vade-harness agent --endpoint http://127.0.0.1:18080/v1/chat/completions --model mock --workspace .
+vade-harness direct --endpoint http://127.0.0.1:18080/v1/chat/completions --model MODEL
+vade-harness agent --endpoint http://127.0.0.1:18080/v1/chat/completions --model MODEL --workspace .
 vade-harness gateway --upstream http://127.0.0.1:18080 --bind 127.0.0.1:8787
 ```
 
@@ -337,35 +309,18 @@ Commands show the whole executed command with shell quoting. Key `5` shows
 the argv JSON, timeout, execution folder, environment, scan exclusions, build
 environment and safety findings.
 
-Every prompt starts with the action. A square marks a risk of lost work or
-sent data. A triangle marks a smaller risk. The risk text comes next, then
-`Your turn.` and choice `1` on the same row. Other choices line up below it.\nRed and amber carry the risk: the target
-and the key numbers are bold red for a square and bold amber for a triangle.
-The top line and the marks are bold Petrol. The risk mark and words also work without color.
-Plain mode, redirected output and `NO_COLOR` have no color codes.
+Every prompt starts with the action. A square marks a risk of lost work or sent
+data; a triangle marks a smaller risk. Risk text comes next, followed by
+`Your turn.` and numbered choices (`1` yes once, `2` no, `3` session scope, `4`
+saved scope, `5` full preview). Plain mode, redirected output, and `NO_COLOR`
+omit ANSI color while keeping all marks and labels intact.
 
-The block uses the terminal width up to 64 cells. The tag and project scope
-line up at the right edge. Long targets stay complete; risk sentences and
-choices wrap with their own indents.
-
-Only offered choices work. `1` is Yes one time. `2` is always No. `3` allows
-the displayed scope until you close Vade. `4` saves that scope for later
-chats. The prompt names the scope: an exact command, a website, web searches,
-or project note changes. An empty answer never approves anything.
-
-- A `1`/`2` typed while there is a draft in the editor, during `/paste`, or
-  within 400 ms of the prompt appearing is kept as text. In the full-screen
-  editor, Enter can send a one-line draft as the answer. The draft must be one
-  line that you typed, and it must be only `1` or `2` (or `3` or
-  `4` for a command). A pasted, recalled or multiline draft stays text.
-- In plain line mode (`--plain`, or input from a pipe), a sent line of only
-  `1` or `2` (or `3` or `4` for a command) answers the prompt.
-  During line-mode `/paste`, such a line is part of the pasted text.
-- `/approve` and `/deny` answer the displayed operation once, exactly like 1/2,
-  and sending them never authorizes a later operation.
-- With a draft already in the input, type `/approve` or `/deny` on its own final
-  line and press Enter. The earlier draft stays. Pasted or recalled multiline
-  text cannot trigger this final-line shortcut.
+- A `1`/`2` typed with an existing draft, during `/paste`, or within 400 ms of
+  the prompt stays text. In raw TTY mode, Enter submits a fresh one-line
+  `1`/`2` (or `3`/`4` for commands); in `--plain`/piped mode, a single-line
+  digit answers the prompt.
+- `/approve` and `/deny` answer the active prompt once (including as the final
+  typed line of an existing draft). Pasted or recalled text never triggers them.
 
 **What auto still denies.** Under `auto`, writes stay limited to the workspace
 and the private session build/cache/temp area. Network, hidden paths,
@@ -756,42 +711,12 @@ coverage](docs/setup-doctor.md).
 
 ## Going deeper
 
-The rest of this page is reference. Read it when you need it, not before your
-first run:
+The rest of this page is reference:
 
-- [Workspace and privacy](#workspace-and-privacy) and [API
-  authentication](#api-authentication): what stays local, what is stored, and
-  how keys are read.
-- [Measure concurrent sessions](#measure-concurrent-sessions): the `workload`
-  command.
-- [Gateway relay, Codex and Hermes in
-  detail](#gateway-relay-codex-and-hermes-in-detail): routing, replicas, access
-  rules and the Codex and Hermes modes.
-- [How the harness builds requests](#how-the-harness-builds-requests): caching,
-  history, seeds, output room, thinking and continuation.
-- [Native agent in depth](#native-agent-in-depth): waits, build checks, child
-  agents, forks, compaction, tool output, project rules and skills.
+- [Workspace and privacy](#workspace-and-privacy) · [API authentication](#api-authentication) · [Measure concurrent sessions](#measure-concurrent-sessions)
+- [Gateway relay, Codex and Hermes in detail](#gateway-relay-codex-and-hermes-in-detail) · [How the harness builds requests](#how-the-harness-builds-requests) · [Native agent in depth](#native-agent-in-depth)
 
-Longer guides sit in `harness/docs/`:
-
-- [Native agent tools and limits](docs/agent-tools.md)
-- [Project instructions](docs/project-instructions.md): the AGENTS.md, CLAUDE.md
-  and .vade/instructions.md files that go into the system prompt
-- [How the harness talks to the engine](docs/engine-contract.md)
-- [Gateway routing](docs/gateway-routing.md) and the [standalone
-  gateway](docs/invisible-gateway.md)
-- [Other clients through the gateway](docs/passthrough-matrix.md)
-- [Setup and doctor details](docs/setup-doctor.md)
-- [Cache defaults](docs/cache-defaults.md) and the [stable prefix and
-  performance](docs/performance.md)
-- [Child agents](docs/child-agents.md), [context, project rules and
-  branches](docs/context-and-projects.md) and [engine
-  checkpoints](docs/engine-checkpoints.md)
-- [Context and compaction](../docs/context-and-compaction.md): the token
-  budget after each turn, the local compaction at the window edge, the
-  `/compact` rollover and the hard stop
-- [Workload guide](docs/workload.md) and the [bridge
-  contract](docs/bridge-contract.md)
+Guides in `harness/docs/`: [agent tools](docs/agent-tools.md), [project instructions](docs/project-instructions.md), [engine contract](docs/engine-contract.md), [gateway routing](docs/gateway-routing.md), [standalone gateway](docs/invisible-gateway.md), [other clients](docs/passthrough-matrix.md), [setup & doctor](docs/setup-doctor.md), [cache defaults](docs/cache-defaults.md), [performance](docs/performance.md), [child agents](docs/child-agents.md), [context & projects](docs/context-and-projects.md), [engine checkpoints](docs/engine-checkpoints.md), [context & compaction](../docs/context-and-compaction.md), [workload](docs/workload.md), and [bridge contract](docs/bridge-contract.md).
 
 ## Workspace and privacy
 
@@ -1142,27 +1067,19 @@ its configured catalog family, and unknown model names do not get an invented
 family.
 
 The harness only ever appends to history, and it refuses any edit to earlier
-messages. Fixed options and tools come first, then history. Optional KV hints go
-after the messages. This way, each request starts byte for byte like the last
-one, and the engine can reuse its cache when retention is on. Direct and native
-clients also stay alive across user turns and keep their HTTP connections open
-for reuse. Details, including what this byte rule does not cover, are in [the
-prefix and performance contract](docs/performance.md).
+messages. Fixed options and tools come first, then history, then optional KV
+hints. Direct mode freezes its system instructions after turn 1 (reset on
+`/new`), and native agent mode appends changed instructions at the tail so
+earlier prefix tokens never shift. Both gateways coalesce headers and SSE
+chunks on pooled worker threads and keep `prompt_cache_key` stable across
+Anthropic `cache_control` moves. Details are in
+[the prefix and performance contract](docs/performance.md).
 
-For direct and demo chat, the fixed system prefix goes to the core builder
-unchanged, and successful user/assistant exchanges keep their exact contents.
-The history these modes remember locally (recall) has fixed bounds:
-
-- Local recall evicts the oldest **whole exchanges** at 32 turns or 256 KiB, and
-  an oversized exchange is left out. Direct mode then needs `/new` before it
-  sends another request, so evicted history is never quietly resent as a
-  changed prefix.
-- Demo recall is bounded too.
-- Prompts are limited to 64 KiB and response display to 1 MiB.
-
-Status reports local bytes and turns. `/context` labels exact admission, rough
-estimates and provider-reported usage separately, and never infers cache hits
-from request bytes or affinity.
+Direct and demo local recall evicts whole exchanges past 32 turns or 256 KiB
+(oversized exchanges are skipped, and direct mode then asks for `/new` rather
+than silently resending a shifted prefix). Prompts cap at 64 KiB and display at
+1 MiB. `/context` reports exact admission, estimates, and server-reported cache
+usage separately.
 
 ### Sampling and seeds
 
@@ -1319,7 +1236,9 @@ delta give no decode rate.
 
 **Native children are opt-in.** Add `--children`, or type `/children on` before
 the first prompt of a fresh native conversation. This gives the parent
-`child_spawn`, `child_list`, `child_wait` and `child_cancel`.
+`child_spawn`, `child_list`, `child_wait` and `child_cancel`. By default up to
+`8` subagents run concurrently, each with a `131,072` (128K) token context cap;
+override either with `--max-subagents N` or `--subagent-context N`.
 
 Children use the same endpoint, model, workspace boundary, contract client and
 native loop, with fresh task histories and their own cache affinity. By default
@@ -1431,9 +1350,10 @@ not a tokenizer. `--context-tokens N` overrides the context size. Without it,
 the engine's advertised limit is used (for example 262,144), or 131,072 when the
 engine advertises none.
 
-When a conversation gets close to the context limit (80%), the agent compacts
-it. Older turns are replaced with a shorter version so that the next request
-fits.
+When a conversation reaches its auto-compaction threshold, the agent compacts
+it (`307,200` tokens on windows of `400,000` or more such as 512K, or 80% on
+smaller windows; override with `--auto-compact-tokens N`). Older turns are
+replaced with a shorter version so that the next request fits.
 
 - `/compact` does this now.
 - `/compact-preview` shows the plan first.
@@ -1563,17 +1483,7 @@ contract](docs/bridge-contract.md).
 ## Design references
 
 These projects shaped our UI and interface choices:
-
-- [Hermes Agent](https://github.com/NousResearch/hermes-agent): visible
-  conversation controls, multiline terminal entry, and interruptible
-  interaction.
-- [Pi coding
-  agent](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent):
-  a minimal harness with interactive and noninteractive operating modes.
-- [Codex CLI](https://github.com/openai/codex): a local terminal entry point for
-  a coding assistant.
-
-We learned a lot from these projects. None of them is a dependency. No code
-was copied from them or from any other coding agent. Vade's workspace
-boundary, session journal, coding tools and core/UI contract are our own. We
-wrote them from scratch in Rust for this project.
+[Hermes Agent](https://github.com/NousResearch/hermes-agent) (visible controls, multiline entry, interruption),
+[Pi coding agent](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent) (minimal interactive/noninteractive modes),
+and [Codex CLI](https://github.com/openai/codex) (local terminal coding entry point).
+None is a dependency, and no code was copied; Vade's workspace boundary, journal, tools, and UI contract are original first-party Rust.

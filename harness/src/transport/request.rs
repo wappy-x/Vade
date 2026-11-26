@@ -327,7 +327,7 @@ pub(super) fn request_with_policy<'a>(
         downstream
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .check()?;
+            .check(Instant::now(), true)?;
     }
     let api_key = crate::auth::ApiKey::configured()?;
     let socket = if let Some(socket) = pool.take(endpoint) {
@@ -380,9 +380,7 @@ pub(super) fn request_with_policy<'a>(
         return Err(invalid("forwarded HTTP headers exceed limit"));
     }
     headers.push_str("\r\n");
-    socket.write_all(headers.as_bytes())?;
-    socket.write_all(body)?;
-    socket.flush()?;
+    socket.write_all_coalesced(headers.as_bytes(), body)?;
     socket.idle_timeout = policy.response_idle_timeout;
     if let Some(on_dispatched) = policy.on_dispatched {
         on_dispatched();

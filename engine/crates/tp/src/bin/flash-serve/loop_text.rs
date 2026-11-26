@@ -125,8 +125,9 @@ fn serve(args:&[String],root:&Path,output:Option<String>,memory:Option<String>,s
         } else {
             admitted
         };
-        // Retain freed working vectors only after measuring the loaded weight bytes.
+        // Retain freed working vectors and VMM KV pages only after measuring the loaded weight bytes.
         backend.configure_vector_pool(VECTOR_POOL_MARGIN);
+        backend.configure_kv_reserve(VECTOR_POOL_MARGIN);
         let served=start::serve_with_draft(&compute,&weights,d,text,&admitted,&settings,listener,root,"device",&stop,draft.as_ref().map(|m|m as &_));
         let drained=backend.synchronize();
         served.and(drained)

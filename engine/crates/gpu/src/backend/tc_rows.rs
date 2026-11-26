@@ -671,25 +671,31 @@ impl<'a> Backend<'a> {
         if self.arm_capture() { return Err("flash window: refused inside a stream capture".into()); }
         self.require_resident_stream()?;
         let span = |v: &DeviceVector<'_>| FwSpan { address: v.device_address(), bytes: v.len() as u64 * 4 };
+        let kv_words = view * kv_heads * (head_dim / 2);
+        let prefix_span = |v: &DeviceVector<'_>, words: usize| FwSpan { address: v.device_address(), bytes: words as u64 * 4 };
         flash_window::check_flash_window_form(
             rows, heads, kv_heads, head_dim, rel_dim, view, extent, scale, half_out,
-            span(query), span(keys), span(values), span(moved), span(rel_table), span(sink), span(gate), span(steps), span(output),
+            span(query), prefix_span(keys, kv_words), prefix_span(values, kv_words), span(moved), span(rel_table), span(sink), span(gate), span(steps), span(output),
         )?;
         let out_words = if half_out { rows * heads * head_dim / 2 } else { rows * heads * head_dim };
         self.check_vector(query, rows * heads * head_dim)?;
-        self.check_vector(keys, view * kv_heads * (head_dim / 2))?;
-        self.check_vector(values, view * kv_heads * (head_dim / 2))?;
+        self.check_vector_prefix(keys, kv_words)?;
+        self.check_vector_prefix(values, kv_words)?;
         self.check_vector(moved, rows * heads * rel_dim)?;
         self.check_vector(rel_table, rel_dim * extent)?;
         self.check_vector(sink, rows * heads)?;
         self.check_vector(gate, rows * heads * head_dim)?;
         self.check_vector(steps, rows * 2)?;
         self.check_vector(output, out_words)?;
-        for inp in [query, keys, values, moved, rel_table, sink, gate, steps] {
+        for inp in [query, moved, rel_table, sink, gate, steps] {
             if inp.is_segmented() { return Err("flash window: input must be contiguous".into()); }
         }
         if output.is_segmented() || !output.writable_from(0) {
             return Err("flash window: output requires private contiguous storage".into());
+        }
+        let meets = |a: FwSpan, b: FwSpan| a.address < b.address.saturating_add(b.bytes) && b.address < a.address.saturating_add(a.bytes);
+        if meets(span(output), span(keys)) || meets(span(output), span(values)) {
+            return Err("flash window: output overlaps KV plane".into());
         }
         if let Some(clips) = &clips {
             if clips.written_keys.is_some() || clips.written_values.is_some() {
@@ -775,21 +781,27 @@ impl<'a> Backend<'a> {
             values.device_address() as usize, flash_window::FW_THREADS, grid, split) {
             return Err("flash window one: shape outside the exact form".into());
         }
+        let kv_words = view * kv_heads * (head_dim / 2);
+        let prefix_span = |v: &DeviceVector<'_>, words: usize| FwSpan { address: v.device_address(), bytes: words as u64 * 4 };
         flash_window::check_flash_window(
             rows, heads, kv_heads, head_dim, rel_dim, view, extent, scale,
-            span(query), span(keys), span(values), span(moved), span(rel_table), span(sink), span(gate), span(steps), span(output),
+            span(query), prefix_span(keys, kv_words), prefix_span(values, kv_words), span(moved), span(rel_table), span(sink), span(gate), span(steps), span(output),
         )?;
         self.check_vector(query, rows * heads * head_dim)?;
-        self.check_vector(keys, view * kv_heads * (head_dim / 2))?;
-        self.check_vector(values, view * kv_heads * (head_dim / 2))?;
+        self.check_vector_prefix(keys, kv_words)?;
+        self.check_vector_prefix(values, kv_words)?;
         self.check_vector(moved, rows * heads * rel_dim)?;
         self.check_vector(rel_table, rel_dim * extent)?;
         self.check_vector(sink, rows * heads)?;
         self.check_vector(gate, rows * heads * head_dim)?;
         self.check_vector(steps, 2 * rows)?;
         self.check_vector(output, rows * heads * head_dim)?;
-        for inp in [query, keys, values, moved, rel_table, sink, gate, steps] {
+        for inp in [query, moved, rel_table, sink, gate, steps] {
             if inp.is_segmented() { return Err("flash window one: input must be contiguous".into()); }
+        }
+        let meets = |a: FwSpan, b: FwSpan| a.address < b.address.saturating_add(b.bytes) && b.address < a.address.saturating_add(a.bytes);
+        if meets(span(output), span(keys)) || meets(span(output), span(values)) {
+            return Err("flash window one: output overlaps KV plane".into());
         }
         if !(clips.query_bound > 0.0 && clips.moved_bound > 0.0) { return Err("flash window one: a clip threshold is not positive".into()); }
         for (v, n) in [(clips.query_scale, heads * head_dim), (clips.moved_scale, heads * rel_dim), (clips.position, rows)] {
@@ -841,9 +853,9 @@ impl<'a> Backend<'a> {
         command.word(flash_window::FW_PLANE_COUNT, planes.len() as u64);
         for (row, &(key, value)) in planes.iter().enumerate() {
             for (side, plane) in [key, value].into_iter().enumerate() {
-                self.check_vector(plane, view * kv_heads * (head_dim / 2))?;
+                self.check_vector_prefix(plane, kv_words)?;
                 let p = span(plane);
-                if plane.is_segmented() || p.address == 0 || p.address % 16 != 0 ||
+                if p.address == 0 || p.address % 16 != 0 ||
                     p.address.checked_add(p.bytes).is_none_or(|end| span(output).address < end && p.address < span(output).address + span(output).bytes) {
                     return Err("flash window: invalid chat plane or overlap with output".into());
                 }
@@ -929,20 +941,30 @@ impl<'a> Backend<'a> {
             return Err("flash window split: shape outside split-KV envelope".into());
         }
         let span = |v: &DeviceVector<'_>| FwSpan { address: v.device_address(), bytes: v.len() as u64 * 4 };
+        let row_words = kv_heads * (head_dim / 2);
+        let kv_words = view * row_words;
+        let prefix_span = |v: &DeviceVector<'_>, words: usize| FwSpan { address: v.device_address(), bytes: words as u64 * 4 };
         flash_window::check_flash_window(
             rows, heads, kv_heads, head_dim, rel_dim, view, extent, scale,
-            span(query), span(keys), span(values), span(moved), span(rel_table), span(sink), span(gate), span(steps), span(output),
+            span(query), prefix_span(keys, kv_words), prefix_span(values, kv_words), span(moved), span(rel_table), span(sink), span(gate), span(steps), span(output),
         )?;
         self.check_vector(query, rows * heads * head_dim)?;
-        self.check_vector(keys, view * kv_heads * (head_dim / 2))?;
-        self.check_vector(values, view * kv_heads * (head_dim / 2))?;
+        if multi_chat && !is_ring {
+            let (pos0, live0) = row_pos_live[0];
+            let need0 = if live0 > 0 { (pos0 as usize + 1) * row_words } else { row_words };
+            self.check_vector_prefix(keys, need0)?;
+            self.check_vector_prefix(values, need0)?;
+        } else {
+            self.check_vector_prefix(keys, kv_words)?;
+            self.check_vector_prefix(values, kv_words)?;
+        }
         self.check_vector(moved, rows * heads * rel_dim)?;
         self.check_vector(rel_table, rel_dim * extent)?;
         self.check_vector(sink, rows * heads)?;
         self.check_vector(gate, rows * heads * head_dim)?;
         self.check_vector(steps, 2 * rows)?;
         self.check_vector(output, rows * heads * head_dim)?;
-        for inp in [query, keys, values, moved, rel_table, sink, gate, steps] {
+        for inp in [query, moved, rel_table, sink, gate, steps] {
             if inp.is_segmented() { return Err("flash window split: input must be contiguous".into()); }
         }
         if output.is_segmented() || !output.writable_from(0) {
@@ -955,6 +977,9 @@ impl<'a> Backend<'a> {
         let out_sp = span(output);
         let part_sp = span(&partials);
         if meets(out_sp, part_sp) { return Err("flash window split: partials overlaps output".into()); }
+        if meets(out_sp, span(keys)) || meets(out_sp, span(values)) || meets(part_sp, span(keys)) || meets(part_sp, span(values)) {
+            return Err("flash window split: KV plane overlaps output or partials".into());
+        }
         for (v, n) in [(clips.query_scale, heads * head_dim), (clips.moved_scale, heads * rel_dim), (clips.position, rows)] {
             if let Some(v) = v {
                 self.check_vector(v, n)?;
@@ -998,15 +1023,22 @@ impl<'a> Backend<'a> {
         cmd1.word(flash_window::FW_SP_PLANE_COUNT_WORD, planes.len() as u64);
         cmd1.word(flash_window::FW_SP_ROWS_PER_CTA_WORD, rows_per_cta as u64);
         for (chat, &(key, value)) in planes.iter().enumerate() {
+            let (pos, live) = row_pos_live[chat];
+            let need_words = if is_ring {
+                kv_words
+            } else if live > 0 {
+                (pos as usize + 1) * row_words
+            } else {
+                row_words
+            };
             for (side, plane) in [key, value].into_iter().enumerate() {
-                self.check_vector(plane, view * kv_heads * (head_dim / 2))?;
+                self.check_vector_prefix(plane, need_words)?;
                 let p = span(plane);
-                if plane.is_segmented() || p.address == 0 || p.address % 16 != 0 || meets(out_sp, p) || meets(part_sp, p) {
+                if p.address == 0 || p.address % 16 != 0 || meets(out_sp, p) || meets(part_sp, p) {
                     return Err("flash window split: invalid chat plane or overlap".into());
                 }
                 cmd1.word(flash_window::FW_SP_PLANES_AT + 2 * chat + side, plane.device_address());
             }
-            let (pos, live) = row_pos_live[chat];
             cmd1.word(flash_window::FW_SP_POS_AT + chat, pos);
             cmd1.word(flash_window::FW_SP_LIVE_AT + chat, live as u64);
         }
@@ -1061,7 +1093,7 @@ impl<'a> Backend<'a> {
         let row_end = plane_word.checked_add(width / 2).ok_or("conv finish: plane row overflow")?;
         self.check_vector(product, width)?;
         self.check_vector(plane, plane.len())?;
-        if product.is_segmented() || plane.is_segmented() || row_end > plane.len() || !plane.writable_from(plane_word) || !ring.writable_from(0) || !output.writable_from(0) {
+        if product.is_segmented() || row_end > plane.len() || !plane.writable_from(plane_word) || !ring.writable_from(0) || !output.writable_from(0) {
             return Err("conv finish: product, plane row or ring is not private contiguous storage".into());
         }
         // Byte ranges: the ring and the plane row are written, so neither may meet any other operand or each other.

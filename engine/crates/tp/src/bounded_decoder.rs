@@ -257,6 +257,19 @@ pub trait Compute {
     /// Host metadata only. List every allocation this state plane keeps alive.
     /// False means this backend cannot keep this plane without more work.
     fn state_allocations(&self,_:&Self::Value,_:&mut Vec<(usize,usize)>)->bool {false}
+    /// Growing straight KV plane hooks (`plane_page_bytes == 0`: full planes up front; GPU VMM uses 2 MiB pages).
+    fn plane_page_bytes(&self)->usize {0}
+    fn plane_alloc(&self,maximum_words:usize,_initial_words:usize)->Result<Self::Value> {let none=self.zeros(0)?;self.state_restore(&none,maximum_words)}
+    fn plane_grow(&self,_plane:&mut Self::Value,_needed_words:usize,_maximum_words:usize)->Result<()> {Ok(())}
+    fn plane_fork(&self,source:&Self::Value,committed_words:usize,needed_words:usize,_maximum_words:usize)->Result<Self::Value> {
+        let live=self.range(source,0,committed_words)?;let target=needed_words.max(committed_words);
+        if committed_words<target {self.state_restore(&live,target)} else {self.rows_append(None,0,&live,1)}
+    }
+    fn plane_trim(&self,_plane:&mut Self::Value,_keep_words:usize)->Result<()> {Ok(())}
+    fn plane_prefix_allocations(&self,v:&Self::Value,_committed_words:usize,out:&mut Vec<(usize,usize)>)->bool {self.state_allocations(v,out)}
+    fn fund_kv_pages(&self,_bytes:usize) {}
+    fn kv_reserve_cohort(&self,_chats:usize) {}
+    fn kv_conversation_ended(&self,_bytes:usize) {}
     fn projects_complete_rows(&self)->bool {false}
     fn sparse_topology(&self)->Topology {Topology {rank:0,parts:1}}
     fn owned_expansion(&self,_:&str,_:&Self::Value,_:usize,_:crate::sparse_heads::Layout)->Result<Option<Self::Value>> {Ok(None)}
@@ -1468,16 +1481,11 @@ pub use verify::{Verify,CARRIED_ROWS,VERIFY_ROWS,TRAIL_ROWS,PROMPT_TRAIL,SEED_PA
 #[path="bounded_decoder/host.rs"] mod host;
 pub use host::Host;
 #[cfg(test)] pub(crate) use host::shadow_fixture::Checkpoint as TestCheckpoint;
-#[cfg(target_os="linux")]
-#[path="bounded_decoder/device.rs"] mod device;
-#[cfg(all(target_os="linux",feature="kernel-bench"))]
-#[path="bounded_decoder/projection_probe.rs"] mod projection_probe;
-#[cfg(target_os="linux")]
-pub use device::{Device,Value,SLAB_ROWS};
-#[cfg(target_os="linux")]
-#[path="bounded_decoder/factory.rs"] mod factory;
-#[cfg(target_os="linux")]
-pub use factory::{Factory,ResidentFactory};
+#[cfg(target_os="linux")] #[path="bounded_decoder/device.rs"] mod device;
+#[cfg(all(target_os="linux",feature="kernel-bench"))] #[path="bounded_decoder/projection_probe.rs"] mod projection_probe;
+#[cfg(target_os="linux")] pub use device::{Device,Value,SLAB_ROWS};
+#[cfg(target_os="linux")] #[path="bounded_decoder/factory.rs"] mod factory;
+#[cfg(target_os="linux")] pub use factory::{Factory,ResidentFactory};
 #[cfg(test)]
 mod selection_read_tests {
     use engine_model::plan::description::PoolIndexerDescription;

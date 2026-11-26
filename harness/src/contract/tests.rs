@@ -312,3 +312,19 @@ fn strip_context_is_zero_only_for_a_known_empty_conversation() {
     assert_eq!(with(zero, false).strip(32768, false), ["ctx 0/32.8k", "in 0", "out 0"]);
     assert_eq!(with(known, false).strip(32768, false), ["ctx 26.3k/32.8k", "in 26.3k", "out 40"]);
 }
+
+#[test]
+fn forced_tool_choice_unsupported_suppresses_required_tool_recovery() {
+    let mut contract = Contract::default();
+    contract.context.capabilities = Capabilities::parse(include_str!(
+        "../../tests/fixtures/engine-capabilities-v1.json"
+    ))
+    .unwrap();
+    contract.context.capabilities.as_mut().unwrap().prompt_cache_key = false;
+    contract.tool_recovery = true;
+    let base = r#"{"model":"mock","tools":[{"type":"function","function":{"name":"read"}}]}"#;
+    assert!(contract.decorate(base).unwrap().contains(r#""tool_choice":"required""#));
+    contract.forced_tool_choice_unsupported = true;
+    let fallback = contract.decorate(base).unwrap();
+    assert!(json::view(&fallback).unwrap().get("tool_choice").is_none(), "{fallback}");
+}

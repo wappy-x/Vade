@@ -13,6 +13,9 @@ struct Call {grid:Grid,command:Command,copy_bytes:u64}
 #[path="resident_conv_ring.rs"] mod conv_ring;
 // Recorder declares the executables before their shared table, so they drop first.
 struct Piece<'a> {graph:DecodeGraph<'a>,used:u64}
+const CMD_STAGE_HALF:usize=4*1024*1024;
+/// Two-half pinned ring for direct command-table uploads without synchronizing the compute stream.
+struct CmdStage<'a> {ready:[Event<'a>;2],buffer:Pinned<'a>,half:usize,used:usize,armed:[bool;2]}
 /// After a real wait the GPU is idle. The recorder then submits a short first
 /// part and longer later parts, so the GPU works while the host records. The
 /// limits count arithmetic commands and depend only on the recorded order.
@@ -33,7 +36,7 @@ struct Piece<'a> {graph:DecodeGraph<'a>,used:u64}
 /// it (nsys, one Spark). A next part of 128 left 0.3 ms; the ramp starts again from 32.
 const RAMP:usize=128;
 fn part_limit(fed:usize,tail:bool)->usize {
-    if tail {match fed {0=>1,n if n<RAMP=>1<<n.ilog2(),_=>usize::MAX}} else {match fed {0=>3,1=>16,2=>64,3=>192,4=>384,_=>usize::MAX}}
+    if tail {match fed {0=>1,n if n<RAMP=>1<<n.ilog2(),_=>usize::MAX}} else {match fed {0=>4,1=>16,2=>64,3=>192,4=>384,_=>usize::MAX}}
 }
 /// The second part after a wait that is not a selection read leaves alone when its first arithmetic command is a weight
 /// batch, and it does not move the ramp. Reason: since the boundary is one fused launch, a decode step's first part is the
@@ -81,6 +84,10 @@ pub(super) struct Recorder<'a> {enabled:bool,paused:bool,rows:bool,row_pass:bool
     heavy:usize,fed:usize,tail:bool,clock:u64,copies:crate::resident_launch::CopyCounts,seen_keys:crate::resident_launch::capture_keys::Seen,
     // SHADOW-STREAM: the second stream a side-branch prefetch is captured on, and whether prefetch-only launches use it.
     side:Option<Stream<'a>>,side_off:bool,side_placed:u64,
+    // Dedicated capture-only stream (never executes kernels on GPU) so graph capture and updates never drain `self.stream`.
+    cap_stream:Option<Stream<'a>>,
+    // Two-half pinned command-upload ring (lazily allocated if budget permits) so table uploads never serialize or double-copy.
+    cmd_stage:Option<CmdStage<'a>>,cmd_stage_tried:bool,
     // Print only. `ramp`: parts that left when recording reached their limit (the executable existed); limits reached with no
     // executable; parts that then left late, with a later flush. `missed`, `early`: this part's state for the third count.
     // `shadow`: side prefetches not placed because a BF16 batch launch lies between the take and the target, because the
@@ -99,7 +106,10 @@ impl Recorder<'_> {
     /// The ramp starts again (`Backend::feed_resident_launches`: the caller says the device is fed; no stream wait proves it).
     fn fed(&mut self) {self.fed=0;self.tail=false;}
     /// A real stream wait has ended: nothing is queued on the device, so no retained executable has a replay in flight.
-    pub(super) fn drained(&mut self) {self.fed();self.drained_at=self.clock;}
+    pub(super) fn drained(&mut self) {
+        self.fed();self.drained_at=self.clock;
+        if let Some(cs)=&mut self.cmd_stage {cs.used=0;cs.armed=[false,false];}
+    }
     /// The storage charge of the retained executables before the one used longest ago is retired.
     fn retained_limit(&self)->usize {
         #[cfg(test)]
@@ -126,7 +136,7 @@ fn donor_floor(retained:usize,storage:usize,limit:usize)->usize {if retained.sat
 /// its own executable, so keys that come back in a short cycle (the four phases of a pooled step, the four row counts past
 /// the selection budget) stay hits. At it, a grid set that is new on every step (an extent that follows the context) takes
 /// the executable used longest ago, and the set stops growing.
-const SAME_KERNELS:usize=8;
+const SAME_KERNELS:usize=4;
 /// A launch that may start while the launch before it on the capture stream runs (a programmatic launch): a decode panel
 /// product (the one-row panel form, whose shared bytes differ from `ONE_BLOCK_BYTES`) right after a norm. The norm releases
 /// it at its start; the product loads its first panel tiles, then runs griddepcontrol.wait before it reads the norm's
@@ -629,18 +639,13 @@ impl<'a> Backend<'a> {
     }
     fn finish_recorded_part(&self,grouped:bool)->Result<(),String> {
         let mut r=self.recorder.borrow_mut();if grouped {r.heavy=r.heavy.saturating_sub(1);}
-        // Submit this part now only when its executable exists: a capture
-        // must first drain the stream, and that would stop the device.
+        // Graph capture runs on the dedicated capture stream without draining `self.stream`, so
+        // every ramp boundary submits immediately — cold keys included — keeping the GPU fed.
         // Never while a side call waits for its join: the flush keeps them in one part.
         let limit=if leaves_alone(r.fed,r.tail,first_arithmetic(&r.calls)) {1} else {part_limit(r.fed,r.tail)};
-        if r.heavy==limit && !r.lane_open {let key=zero_grid(&r.zeros).into_iter().chain(r.calls.iter().map(|c|c.grid)).collect::<Vec<_>>();
-            let hit=r.pieces.contains_key(&key) || {
-                let (mut same,mut oldest)=(0usize,None::<u64>);
-                for (_old,piece) in r.pieces.iter().filter(|(old,_)|same_kernels(old,&key)) {same+=1;if oldest.is_none_or(|used|piece.used<used) {oldest=Some(piece.used);}}
-                oldest.is_some_and(|used|used<=r.drained_at && same>=r.donor_floor(key.len()))
-            } || (r.fed==0 && !r.tail && r.calls.len()<=32);
-            if hit {r.ramp[0]+=1;r.early=true;drop(r);return self.flush_resident_launches();}
-            r.ramp[1]+=1;r.missed=true;}
+        if r.heavy==limit && !r.lane_open {
+            r.ramp[0]+=1;r.early=true;drop(r);return self.flush_resident_launches();
+        }
         Ok(())
     }
     /// A new allocation is fresh until the next recorded command. No pending
@@ -948,16 +953,17 @@ impl<'a> Backend<'a> {
         let staged_once=Cell::new(false);
         // SAFETY: Each captured node uses its original validated ABI and grid.
         // The shared device table stays aligned and owned by the recorder, which
-        // drops its graphs first. Uploads and replay share one stream. Queue retention covers every indirect
-        // operand through submission and the eventual real completion, including
-        // the capture constructor drain. The table contains initialized fields.
-        // Merged zero rows name the private zero source and fresh private outputs
-        // that no other command of this piece wrote before. Their words fit the
-        // source, and their row table is uploaded before this replay.
-        // Staged operand tables are whole initialized bytes in the recorder's
-        // private area. Their upload precedes every part of this flush on the same
-        // stream, and each reader was recorded in this flush together with its table.
-        // Parts keep the recorded command order on the one stream.
+        // drops its graphs first. Uploads and replay share `self.stream`. Graph
+        // capture runs on the recorder's dedicated non-executing `cap_stream`
+        // (CU_STREAM_CAPTURE_MODE_THREAD_LOCAL), so it never executes kernels or
+        // races with in-flight work on `self.stream`, and every kernel handle is
+        // resolved before capture begins. Queue retention covers every indirect
+        // operand through submission and the eventual real completion. The table
+        // contains initialized fields; direct pinned-ring uploads guard each half
+        // with its stream completion event before reuse. Merged zero rows name the
+        // private zero source and fresh private outputs that no other command of
+        // this piece wrote before. Staged operand tables are whole initialized
+        // bytes in the recorder's private area. Parts keep recorded order on `self.stream`.
         let result:Result<(),String>=unsafe {(|| {
             // One part of a flush: its merged zero fill, then its commands in order.
             let submit=|calls:&[Call],zeros:&[(usize,u64,u32,bool)],bells:&[(usize,std::sync::Arc<crate::tp_mailbox_host::Bell>,u64)]|->Result<(),String> {
@@ -981,79 +987,163 @@ impl<'a> Backend<'a> {
             let count=calls.len()+usize::from(first.is_some());
             let table_bytes=count*core::mem::size_of::<Command>();
             let table_offset=COMMAND_BYTES.checked_sub(table_bytes).ok_or("resident command table exceeds capacity")?;
-            let table_address=self.recorder.borrow().stage.as_ref().ok_or("resident stage area is absent")?.device_address()+table_offset as u64;
+            let (stage_address,stage_bytes)={let r=self.recorder.borrow();let s=r.stage.as_ref().ok_or("resident stage area is absent")?;(s.device_address(),s.buffer.bytes)};
+            let table_address=stage_address+table_offset as u64;
             let key=first.iter().chain(calls).map(|c|c.grid).collect::<Vec<_>>();
-            // SAFETY: The table is private aligned persistent storage. Each
-            // replay node names one exact command index and the original
-            // validated grid. Capture allocates no storage or reads results.
-            // All indirect operands remain retained while unsubmitted is
-            // true, including the capture constructor's real stream drain.
-            // A side-branch command forks from the capturing stream at its place and is launched on the second
-            // stream; every branch joins after the last command, so the piece is one graph that ends when all of it
-            // has run. The events live until the capture has ended.
-            if first.iter().chain(calls).any(|call|call.grid.kind==Kind::ShadowSide) && self.recorder.borrow().side.is_none() {
-                let side=Stream::new(self.context)?;self.recorder.borrow_mut().side=Some(side);}
-            let side=self.recorder.borrow().side.as_ref().map(|stream|stream.raw);
-            // PROJ-DELIVERY side lane: a run of SIDE calls waits on an event recorded on the capture stream at its place and
-            // launches on the lane stream; a JOIN call, and the end of the piece, wait on an event recorded on the lane stream
-            // after its last call. The graph keeps those edges.
-            let fork=self.recorder.borrow().lane_fork.as_ref().map(|(stream,fork,join)|(stream.raw,fork.raw,join.raw));
-            // The launches of this piece, into an open capture. `events` holds the side-branch events of that capture; they
-            // live until it has ended, and the list is emptied then.
-            let events=RefCell::new(Vec::new());
-            let launches=||->Result<(),String> {
-                let (mut forked,mut pending)=(false,false);
-                // The last operation on the capture stream when it is a launch of this piece (no event between).
-                let mut chained:Option<Grid>=None;
-                let join=|pending:&mut bool|->Result<(),String> {if !*pending {return Ok(());}*pending=false;let (lane,_,done)=fork.ok_or("resident side lane stream is absent")?;
-                    check(cuEventRecord(done,lane),"resident side lane join record")?;check(cuStreamWaitEvent(self.stream.raw,done,0),"resident side lane join wait")};
-                for (index,call) in first.iter().chain(calls).enumerate() {let g=call.grid;let (mut address,mut index)=(table_address,index as u64);
-                    if g.kind==Kind::ShadowSide {
-                        let side=side.ok_or("resident side stream is absent")?;
-                        let fork=Event::record(&self.stream)?;check(cuStreamWaitEvent(side,fork.raw,0),"resident side fork")?;
-                        let function=self.module_for(g.kind.kernel())?.function(g.kind.kernel())?;self.context.receipt_launch(function,g.threads,g.shared)?;
-                        self.context.check_execution(launch_kernel(false,function,[g.blocks,g.rows,g.planes],g.threads,g.shared,side,[parameter(&mut address),parameter(&mut index)].as_mut_ptr()),"resident side launch")?;
-                        let done=Event::record_raw(self.context,side)?;events.borrow_mut().push(fork);events.borrow_mut().push(done);chained=None;continue;
-                    }
-                    if g.lane==SIDE {let (lane,start,_)=fork.ok_or("resident side lane stream is absent")?;
-                        if !forked {check(cuEventRecord(start,self.stream.raw),"resident side lane fork record")?;check(cuStreamWaitEvent(lane,start,0),"resident side lane fork wait")?;forked=true;pending=true;}
-                        self.side_launch.set(lane);chained=None;
-                    } else {forked=false;if g.lane==JOIN {join(&mut pending)?;chained=None;}}
-                    self.programmatic.set(chained.is_some_and(|before|dependent_launch(&before,&g)));
-                    let launched=self.launch_flash_grid(g.kind.kernel(),g.blocks,g.rows,g.planes,g.threads,g.shared,&mut [parameter(&mut address),parameter(&mut index)]);
-                    self.programmatic.set(false);
-                    self.side_launch.set(ptr::null_mut());launched?;chained=(g.lane!=SIDE).then_some(g);
+            // Capture a source graph onto the dedicated capture stream (no drain of `self.stream`).
+            let capture_source=||->Result<Handle,String> {
+                if self.recorder.borrow().cap_stream.is_none() {
+                    let cap=Stream::new(self.context)?;self.recorder.borrow_mut().cap_stream=Some(cap);
                 }
-                join(&mut pending)?;
-                for done in events.borrow().iter().skip(1).step_by(2) {check(cuStreamWaitEvent(self.stream.raw,done.raw,0),"resident side join")?;}
-                Ok(())
+                if first.iter().chain(calls).any(|call|call.grid.kind==Kind::ShadowSide) && self.recorder.borrow().side.is_none() {
+                    let side=Stream::new(self.context)?;self.recorder.borrow_mut().side=Some(side);
+                }
+                let (cap_raw,side,fork)={let r=self.recorder.borrow();(
+                    r.cap_stream.as_ref().ok_or("resident capture stream is absent")?.raw,
+                    r.side.as_ref().map(|stream|stream.raw),
+                    r.lane_fork.as_ref().map(|(stream,fork,join)|(stream.raw,fork.raw,join.raw)),
+                )};
+                let mut resolved=Vec::with_capacity(count);
+                for call in first.iter().chain(calls) {
+                    let g=call.grid;
+                    let module=self.module_for(g.kind.kernel())?;
+                    let func=module.function(g.kind.kernel())?;
+                    self.context.receipt_launch(func,g.threads,g.shared)?;
+                    resolved.push(func);
+                }
+                self.context.activate()?;
+                check(cuStreamBeginCapture_v2(cap_raw,1),"cuStreamBeginCapture")?;
+                self.context.capturing.set(true);
+                let mut side_events=Vec::new();
+                let launched=(||->Result<(),String> {
+                    let (mut forked,mut pending)=(false,false);
+                    let mut chained:Option<Grid>=None;
+                    let join=|pending:&mut bool|->Result<(),String> {
+                        if !*pending {return Ok(());}*pending=false;
+                        let (lane,_,done)=fork.ok_or("resident side lane stream is absent")?;
+                        check(cuEventRecord(done,lane),"resident side lane join record")?;
+                        check(cuStreamWaitEvent(cap_raw,done,0),"resident side lane join wait")
+                    };
+                    for (index,(call,&func)) in first.iter().chain(calls).zip(&resolved).enumerate() {
+                        let g=call.grid;let (mut address,mut index)=(table_address,index as u64);
+                        if g.shared!=0 {let _=self.module_for(g.kind.kernel())?.function_with_shared(g.kind.kernel(),g.shared)?;}
+                        if g.kind==Kind::ShadowSide {
+                            let side=side.ok_or("resident side stream is absent")?;
+                            let fork_ev=Event::record_raw(self.context,cap_raw)?;
+                            check(cuStreamWaitEvent(side,fork_ev.raw,0),"resident side fork")?;
+                            self.context.check_execution(launch_kernel(false,func,[g.blocks,g.rows,g.planes],g.threads,g.shared,side,[parameter(&mut address),parameter(&mut index)].as_mut_ptr()),"resident side launch")?;
+                            let done=Event::record_raw(self.context,side)?;
+                            side_events.push(fork_ev);side_events.push(done);chained=None;continue;
+                        }
+                        let target=if g.lane==SIDE {
+                            let (lane,start,_)=fork.ok_or("resident side lane stream is absent")?;
+                            if !forked {
+                                check(cuEventRecord(start,cap_raw),"resident side lane fork record")?;
+                                check(cuStreamWaitEvent(lane,start,0),"resident side lane fork wait")?;
+                                forked=true;pending=true;
+                            }
+                            chained=None;lane
+                        } else {
+                            forked=false;
+                            if g.lane==JOIN {join(&mut pending)?;chained=None;}
+                            cap_raw
+                        };
+                        let prog=g.lane!=SIDE && chained.is_some_and(|before|dependent_launch(&before,&g));
+                        self.context.check_execution(launch_kernel(prog,func,[g.blocks,g.rows,g.planes],g.threads,g.shared,target,[parameter(&mut address),parameter(&mut index)].as_mut_ptr()),"resident captured launch")?;
+                        chained=(g.lane!=SIDE).then_some(g);
+                    }
+                    join(&mut pending)?;
+                    for done in side_events.iter().skip(1).step_by(2) {
+                        check(cuStreamWaitEvent(cap_raw,done.raw,0),"resident side join")?;
+                    }
+                    Ok(())
+                })();
+                let mut graph=ptr::null_mut();
+                let ended=check(cuStreamEndCapture(cap_raw,&mut graph),"cuStreamEndCapture");
+                self.context.capturing.set(false);
+                drop(side_events);
+                match launched.and(ended) {
+                    Ok(())=>Ok(graph),
+                    Err(error)=>{
+                        if !graph.is_null() {self.context.record_cleanup(cuGraphDestroy(graph),"cuGraphDestroy");}
+                        Err(error)
+                    }
+                }
             };
-            // A new executable for this key: room in the retained set first, then a capture (it begins with a stream wait).
+            let instantiate=|graph:Handle,allowance:crate::GraphAllowance,maximum:usize|->Result<DecodeGraph<'a>,String> {
+                let mut nodes=0;
+                let counted=check(cuGraphGetNodes(graph,ptr::null_mut(),&mut nodes),"cuGraphGetNodes").and_then(|_|allowance.storage_bytes(nodes));
+                let storage_bytes=match counted {
+                    Ok(bytes)=>bytes,
+                    Err(error)=>{self.discard_capture(graph,maximum);return Err(error);}
+                };
+                let mut raw=ptr::null_mut();
+                let instantiated=check(cuGraphInstantiate_v2(&mut raw,graph,ptr::null_mut(),ptr::null_mut(),0),"cuGraphInstantiate");
+                let destroyed=cuGraphDestroy(graph);
+                self.context.record_cleanup(destroyed,"cuGraphDestroy");
+                if let Err(error)=instantiated {
+                    let released=if raw.is_null() {true} else {
+                        let code=cuGraphExecDestroy(raw);
+                        self.context.record_cleanup(code,"cuGraphExecDestroy");
+                        code==0
+                    };
+                    if destroyed==0 && released {self.context.graph_storage.set(self.context.graph_storage.get()-maximum);}
+                    return Err(error);
+                }
+                if destroyed!=0 {
+                    let code=cuGraphExecDestroy(raw);
+                    self.context.record_cleanup(code,"cuGraphExecDestroy");
+                    return Err("CUDA captured graph destruction failed".into());
+                }
+                self.context.graph_storage.set(self.context.graph_storage.get()-(maximum-storage_bytes));
+                self.stats.borrow_mut().graph_captures+=1;
+                Ok(DecodeGraph {raw,context:self.context,storage_bytes})
+            };
+            // A new executable for this key: room in the retained set first, then non-draining capture on `cap_stream`.
             let capture=||->Result<(),String> {
-                let storage=crate::GraphAllowance::flash(count)?.maximum_bytes();
+                let allowance=crate::GraphAllowance::flash(count)?;
+                let maximum=allowance.maximum_bytes();
                 let mut retired=false;
                 loop {
-                    let r=self.recorder.borrow();
-                    let retained=r.pieces.values().map(|piece|piece.graph.storage_bytes).sum::<usize>();
-                    let fits=retained.saturating_add(storage)<=r.retained_limit();
-                    let evict=!fits && !r.pieces.is_empty();drop(r);if !evict {break;}
-                    // Retire the executable used longest ago, after its replays have ended.
-                    if !retired {self.synchronize()?;retired=true;}let mut r=self.recorder.borrow_mut();
+                    let (evict,victim_in_flight)={
+                        let r=self.recorder.borrow();
+                        let retained=r.pieces.values().map(|piece|piece.graph.storage_bytes).sum::<usize>();
+                        let fits=retained.saturating_add(maximum)<=r.retained_limit();
+                        let evict=!fits && !r.pieces.is_empty();
+                        let in_flight=if evict {r.pieces.values().min_by_key(|p|p.used).is_some_and(|p|p.used>r.drained_at)} else {false};
+                        (evict,in_flight)
+                    };
+                    if !evict {break;}
+                    // Only drain the compute stream if the LRU victim may still have a replay in flight.
+                    if victim_in_flight && !retired {self.synchronize()?;retired=true;}
+                    let mut r=self.recorder.borrow_mut();
                     if let Some(old)=r.pieces.iter().min_by_key(|(_,piece)|piece.used).map(|(key,_)|key.clone()) {r.pieces.remove(&old);r.copies.piece_evictions+=1;}
                 }
-                let graph=self.capture_batch_bounded(count,launches);events.borrow_mut().clear();let graph=graph?;
+                if !self.context.cleanup_errors.borrow().is_empty() {return Err("context poisoned by cleanup error".into());}
+                self.context.make_room(maximum)?;
+                let storage=self.context.graph_storage.get().checked_add(maximum).ok_or("graph storage accounting overflow")?;
+                if storage>self.context.graph_budget.get()
+                    || crate::allocation_budget::required(self.allocated_bytes(),storage,self.context.pinned_staging.get(),0)?>self.context.budget.get() {
+                    return Err(crate::admission::allocation(
+                        if storage>self.context.graph_budget.get() {storage as u128} else {crate::allocation_budget::required(self.allocated_bytes(),storage,self.context.pinned_staging.get(),0)? as u128},
+                        if storage>self.context.graph_budget.get() {self.context.graph_budget.get()} else {self.context.budget.get()},
+                        &format!("graph storage {storage} bytes (graph ceiling {} bytes); live {} bytes; weights/rank, sessions, CONTEXT and OUTPUT not supplied to graph allocator",self.context.graph_budget.get(),self.allocated_bytes())));
+                }
+                self.context.graph_storage.set(storage);
+                self.context.peak_graph_storage.set(self.context.peak_graph_storage.get().max(storage));
+                self.context.peak_accounted.set(self.context.peak_accounted.get().max(self.accounted_bytes()));
+                let graph=match capture_source() {
+                    Ok(g)=>g,
+                    Err(error)=>{self.context.graph_storage.set(self.context.graph_storage.get()-maximum);return Err(error);}
+                };
+                let graph=instantiate(graph,allowance,maximum)?;
                 let mut r=self.recorder.borrow_mut();r.pieces.insert(key.clone(),Piece {graph,used:0});
-                // Print only: was this key captured before, and evicted since?
                 let hash=crate::resident_launch::capture_keys::hash(key.iter().map(|g|[g.kind as u32,g.blocks,g.rows,g.planes,g.threads,g.shared]));
-                if r.seen_keys.note(hash) {r.copies.captures_new_key+=1;} else {r.copies.captures_seen_key+=1;}Ok(())
+                if r.seen_keys.note(hash) {r.copies.captures_new_key+=1;} else {r.copies.captures_seen_key+=1;}
+                Ok(())
             };
-            // The retained executable of this key runs the piece. When the key is absent and `SAME_KERNELS` executables of
-            // the same kernels are retained, the one used longest ago is the donor, if its replays have ended (used at or
-            // before the last real stream wait): it is updated in place below, after this piece's table upload. A launch
-            // whose extent follows the context (a row count, a zero fill) then costs an update of one executable, not the
-            // capture of a new one with its stream wait, and the retained set does not grow by a piece a step. When a new
-            // executable would not fit the retained limit, one such executable is enough (`donor_floor`). With no donor, a
-            // new executable is captured now.
+            // The retained executable of this key runs the piece. When the key is absent and `donor_floor` executables of
+            // the same kernels are retained, the idle one used longest ago is updated in place on `cap_stream`.
             let donor=if self.recorder.borrow().pieces.contains_key(&key) {None} else {
                 let r=self.recorder.borrow();let (mut same,mut oldest)=(0usize,None::<(&Vec<Grid>,u64)>);
                 for (old,piece) in r.pieces.iter().filter(|(old,_)|same_kernels(old,&key)) {same+=1;if oldest.is_none_or(|(_,used)|piece.used<used) {oldest=Some((old,piece.used));}}
@@ -1063,52 +1153,102 @@ impl<'a> Backend<'a> {
             let replay=||->Result<(),String> {
                 let mut piece=self.recorder.borrow_mut().pieces.remove(&key).ok_or("resident piece disappeared")?;
                 {let mut r=self.recorder.borrow_mut();r.clock+=1;piece.used=r.clock;}
-                // SAFETY: The executable owns only its persistent table address.
-                // All table-referenced operands are held by queue deferred frees
-                // until this replay has actually completed. Table replacement is
-                // ordered after prior replay. Captured grids and ABI are unchanged.
                 let result=self.replay_decode(&piece.graph);
                 self.recorder.borrow_mut().pieces.insert(key.clone(),piece);result
             };
-            let mut bytes=Vec::with_capacity(count*core::mem::size_of::<Command>());
-            for call in first.iter().chain(calls) {bytes.extend_from_slice(&call.command.kind.to_ne_bytes());for word in call.command.reserved {bytes.extend_from_slice(&word.to_ne_bytes());}bytes.extend_from_slice(&call.command.payload);}
-            // One contiguous upload carries commands, zero rows and operand tables.
-            // All earlier readers finish on this stream before any byte is replaced.
-            let payload=if staged_once.replace(true) {&[]} else {staged.as_slice()};
-            if !zero_rows.is_empty() || !payload.is_empty() {
-                bytes.resize(table_bytes+ZERO_BYTES,0);bytes[table_bytes..table_bytes+zero_rows.len()].copy_from_slice(&zero_rows);bytes.extend_from_slice(payload);
+            // Lazily allocate the two-half pinned command ring once when funded, so table uploads skip Vec alloc + double copy.
+            if !self.recorder.borrow().cmd_stage_tried {
+                self.recorder.borrow_mut().cmd_stage_tried=true;
+                let need=2*CMD_STAGE_HALF;
+                if self.context.allocation_required(need).is_ok_and(|req|req<=self.context.budget.get()) {
+                    if let (Ok(e0),Ok(e1),Ok(buf))=(Event::ready(&self.stream),Event::ready(&self.stream),Pinned::new(self.context,need)) {
+                        self.recorder.borrow_mut().cmd_stage=Some(CmdStage {ready:[e0,e1],buffer:buf,half:0,used:0,armed:[false,false]});
+                    }
+                }
             }
-            // write_buffer's immutable pinned staging stays retained until the
-            // actual drain, and upload/replay/next upload share one stream.
-            let stage=self.recorder.borrow_mut().stage.take().ok_or("resident stage area is absent")?;
-            let uploaded=self.write_buffer(&stage.buffer,table_offset,&bytes);self.recorder.borrow_mut().stage=Some(stage);
+            let payload=if staged_once.replace(true) {&[]} else {staged.as_slice()};
+            let has_tail=!zero_rows.is_empty() || !payload.is_empty();
+            let total_bytes=if has_tail {table_bytes+ZERO_BYTES+payload.len()} else {table_bytes};
+            if table_offset.checked_add(total_bytes).is_none_or(|end|end>stage_bytes) {return Err("resident command upload exceeds stage".into());}
+            let mut cmd_stage=self.recorder.borrow_mut().cmd_stage.take();
+            let uploaded=if let Some(cs)=cmd_stage.as_mut().filter(|_|total_bytes.div_ceil(64)*64<=CMD_STAGE_HALF) {
+                let step=total_bytes.div_ceil(64)*64;
+                let switched=if cs.used+step>CMD_STAGE_HALF {
+                    let old=cs.half;let next=1-old;
+                    let rec=cs.ready[old].record_again(&self.stream);
+                    cs.armed[old]=true;
+                    let wait=rec.and_then(|()| if cs.armed[next] {cs.ready[next].wait(self.spin_waits.get())} else {Ok(())});
+                    cs.armed[next]=false;cs.half=next;cs.used=0;wait
+                } else {Ok(())};
+                switched.and_then(|()| {
+                    self.context.activate()?;
+                    let dst=cs.buffer.address.cast::<u8>().add(cs.half*CMD_STAGE_HALF+cs.used);
+                    let mut p=dst;
+                    let cmd_bytes=core::mem::size_of::<Command>();
+                    for call in first.iter().chain(calls) {
+                        ptr::copy_nonoverlapping((&call.command as *const Command).cast::<u8>(),p,cmd_bytes);p=p.add(cmd_bytes);
+                    }
+                    if has_tail {
+                        if !zero_rows.is_empty() {ptr::copy_nonoverlapping(zero_rows.as_ptr(),dst.add(table_bytes),zero_rows.len());}
+                        if zero_rows.len()<ZERO_BYTES {ptr::write_bytes(dst.add(table_bytes+zero_rows.len()),0,ZERO_BYTES-zero_rows.len());}
+                        if !payload.is_empty() {ptr::copy_nonoverlapping(payload.as_ptr(),dst.add(table_bytes+ZERO_BYTES),payload.len());}
+                    }
+                    check(cuMemcpyHtoDAsync_v2(stage_address+table_offset as u64,dst.cast(),total_bytes,self.stream.raw),"resident table upload")?;
+                    cs.used+=step;
+                    Ok(())
+                })
+            } else {
+                let mut bytes=Vec::with_capacity(total_bytes);
+                for call in first.iter().chain(calls) {bytes.extend_from_slice(&call.command.kind.to_ne_bytes());for word in call.command.reserved {bytes.extend_from_slice(&word.to_ne_bytes());}bytes.extend_from_slice(&call.command.payload);}
+                if has_tail {bytes.resize(table_bytes+ZERO_BYTES,0);bytes[table_bytes..table_bytes+zero_rows.len()].copy_from_slice(&zero_rows);bytes.extend_from_slice(payload);}
+                let stage=self.recorder.borrow_mut().stage.take().ok_or("resident stage area is absent")?;
+                let res=self.write_buffer(&stage.buffer,table_offset,&bytes);self.recorder.borrow_mut().stage=Some(stage);res
+            };
+            self.recorder.borrow_mut().cmd_stage=cmd_stage;
             self.context.pending.set(true);
             let result=uploaded.and_then(|_| {
                 let Some(old)=donor else {return replay();};
-                // The donor takes this piece's grids in place: a capture with no stream wait (it launches nothing), then an
-                // update of the executable, which changes only its later launches, then its replay (`end_segment` does the
-                // three). The capture needs free upload staging and funding for its source graph; without them the donor
-                // stays as it is and a new executable is captured the usual way. The table is uploaded already.
-                let mut piece=self.recorder.borrow_mut().pieces.remove(&old).ok_or("resident donor piece disappeared")?;
-                if !self.begin_segment(count.saturating_sub(32).div_ceil(64).max(1),1)? {
-                    self.recorder.borrow_mut().pieces.insert(old,piece);capture()?;return replay();
-                }
-                if let Err(error)=launches() {self.abort_segment();events.borrow_mut().clear();self.recorder.borrow_mut().pieces.insert(old,piece);return Err(error);}
-                let mut slot=Some(piece.graph);let ended=self.end_segment(&mut slot);events.borrow_mut().clear();
+                // Update the idle donor in place using `cap_stream` (no drain of `self.stream`, no `self.uploads` gate).
+                let piece=self.recorder.borrow_mut().pieces.remove(&old).ok_or("resident donor piece disappeared")?;
+                let allowance=crate::GraphAllowance::flash(count)?;
+                let maximum=allowance.maximum_bytes();
+                self.context.make_room(maximum)?;
+                let funded=crate::allocation_budget::graph_storage(self.allocated_bytes(),self.context.graph_storage.get(),self.context.pinned_staging.get(),maximum,self.context.graph_budget.get(),self.context.budget.get())?;
+                let Some(storage)=funded else {
+                    // Tight graph budget: drop the idle donor to free its bytes, then capture cleanly.
+                    drop(piece);capture()?;return replay();
+                };
+                self.context.graph_storage.set(storage);
+                self.context.peak_graph_storage.set(self.context.peak_graph_storage.get().max(storage));
+                self.context.peak_accounted.set(self.context.peak_accounted.get().max(self.accounted_bytes()));
+                let graph=match capture_source() {
+                    Ok(g)=>g,
+                    Err(error)=>{self.context.graph_storage.set(self.context.graph_storage.get()-maximum);self.recorder.borrow_mut().pieces.insert(old,piece);return Err(error);}
+                };
+                let mut info=GraphExecUpdateInfo {result:0,error_node:ptr::null_mut(),error_from_node:ptr::null_mut()};
+                let updated=cuGraphExecUpdate_v2(piece.graph.raw,graph,&mut info)==0;
+                let final_piece=if updated {
+                    let destroyed=cuGraphDestroy(graph);
+                    self.context.record_cleanup(destroyed,"cuGraphDestroy");
+                    if destroyed!=0 {self.recorder.borrow_mut().pieces.insert(old,piece);return Err("CUDA captured graph destruction failed".into());}
+                    self.context.graph_storage.set(self.context.graph_storage.get()-maximum);
+                    Ok((true,piece.graph))
+                } else {
+                    drop(piece);
+                    instantiate(graph,allowance,maximum).map(|g|(false,g))
+                };
+                let (was_updated,exec)=final_piece?;
+                let replayed=self.replay_decode(&exec);
                 let mut r=self.recorder.borrow_mut();
-                match (ended,slot) {
-                    (Ok(updated),Some(graph))=>{
-                        r.clock+=1;piece=Piece {graph,used:r.clock};r.pieces.insert(key.clone(),piece);
-                        // Not updated: the driver refused the update and `end_segment` put a new executable in the donor's place.
-                        if updated {r.updates+=1;} else {
+                match replayed {
+                    Ok(())=>{
+                        r.clock+=1;let used=r.clock;r.pieces.insert(key.clone(),Piece {graph:exec,used});
+                        if was_updated {r.updates+=1;} else {
                             let hash=crate::resident_launch::capture_keys::hash(key.iter().map(|g|[g.kind as u32,g.blocks,g.rows,g.planes,g.threads,g.shared]));
                             if r.seen_keys.note(hash) {r.copies.captures_new_key+=1;} else {r.copies.captures_seen_key+=1;}
                         }Ok(())
-                    },
-                    // The update or the replay failed. An executable that is left stays retained under the donor's key.
-                    (Err(error),Some(graph))=>{r.pieces.insert(old,Piece {graph,used:0});Err(error)},
-                    (Err(error),None)=>Err(error),
-                    (Ok(_),None)=>Err("resident piece update left no executable".into()),
+                    }
+                    Err(error)=>{r.pieces.insert(if was_updated {old} else {key.clone()},Piece {graph:exec,used:0});Err(error)}
                 }
             });
             if result.is_ok() {let mut r=self.recorder.borrow_mut();
@@ -1258,9 +1398,9 @@ fn resident_piece_eviction_preserves_output() -> Result<(), String> {
         assert!(!leaves_alone(1,false,None));
     }
     #[test] fn the_ramp_counts_commands_only_after_a_selection_read() {
-        // After a wait that is not a selection read the ramp counts parts (3, 16, 64, 192, 384, then no limit).
-        assert_eq!(parts(0,400,false).0,[3,16,64,192,125]);assert_eq!(parts(0,900,false).0,[3,16,64,192,384,241]);
-        for (fed,limit) in [(0,3),(1,16),(2,64),(3,192),(4,384),(5,usize::MAX),(usize::MAX,usize::MAX)] {assert_eq!(part_limit(fed,false),limit);}
+        // After a wait that is not a selection read the ramp counts parts (4, 16, 64, 192, 384, then no limit).
+        assert_eq!(parts(0,400,false).0,[4,16,64,192,124]);assert_eq!(parts(0,900,false).0,[4,16,64,192,384,240]);
+        for (fed,limit) in [(0,4),(1,16),(2,64),(3,192),(4,384),(5,usize::MAX),(usize::MAX,usize::MAX)] {assert_eq!(part_limit(fed,false),limit);}
         // There a part that is forced out early ends a step of the ramp: 1 forced, 2 forced, then 64.
         assert_eq!(part_limit(2,false),64);
         // After a selection read, with nothing forced out: each part is as large as all before it, until the host is far ahead.

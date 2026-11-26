@@ -37,9 +37,11 @@ impl<'a> Backend<'a> {
         if self.arm_capture() { return Err("prefill flash window: refused inside a stream capture".into()); }
         self.require_resident_stream()?;
         let span = |v: &DeviceVector<'_>| FwSpan { address: v.device_address(), bytes: v.len() as u64 * 4 };
+        let kv_words = view * kv_heads * (head_dim / 2);
+        let prefix_span = |v: &DeviceVector<'_>, words: usize| FwSpan { address: v.device_address(), bytes: words as u64 * 4 };
         flash_window::check_flash_window_form(
             rows, heads, kv_heads, head_dim, rel_dim, view, extent, scale, half_out,
-            span(query), span(keys), span(values), span(moved), span(rel_table), span(sink), span(gate), span(steps), span(output),
+            span(query), prefix_span(keys, kv_words), prefix_span(values, kv_words), span(moved), span(rel_table), span(sink), span(gate), span(steps), span(output),
         )?;
         let threads = flash_window_prefill_threads(heads, kv_heads);
         if !flash_window_prefill_admitted(
@@ -53,19 +55,23 @@ impl<'a> Backend<'a> {
         }
         let out_words = if half_out { rows * heads * head_dim / 2 } else { rows * heads * head_dim };
         self.check_vector(query, rows * heads * head_dim)?;
-        self.check_vector(keys, view * kv_heads * (head_dim / 2))?;
-        self.check_vector(values, view * kv_heads * (head_dim / 2))?;
+        self.check_vector_prefix(keys, kv_words)?;
+        self.check_vector_prefix(values, kv_words)?;
         self.check_vector(moved, rows * heads * rel_dim)?;
         self.check_vector(rel_table, rel_dim * extent)?;
         self.check_vector(sink, rows * heads)?;
         self.check_vector(gate, rows * heads * head_dim)?;
         self.check_vector(steps, rows * 2)?;
         self.check_vector(output, out_words)?;
-        for inp in [query, keys, values, moved, rel_table, sink, gate, steps] {
+        for inp in [query, moved, rel_table, sink, gate, steps] {
             if inp.is_segmented() { return Err("prefill flash window: input must be contiguous".into()); }
         }
         if output.is_segmented() || !output.writable_from(0) {
             return Err("prefill flash window: output requires private contiguous storage".into());
+        }
+        let meets = |a: FwSpan, b: FwSpan| a.address < b.address.saturating_add(b.bytes) && b.address < a.address.saturating_add(a.bytes);
+        if meets(span(output), span(keys)) || meets(span(output), span(values)) {
+            return Err("prefill flash window: output overlaps KV plane".into());
         }
         if let Some(clips) = &clips {
             if clips.written_keys.is_some() || clips.written_values.is_some() {

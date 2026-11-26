@@ -859,12 +859,14 @@ impl<'b,'d> Device<'b,'d> {
         {
             return Ok(None);
         }
-        let operands=[a.query,a.keys,a.values,a.moved,a.sink,a.gate,a.steps];
+        let operands=[a.query,a.moved,a.sink,a.gate,a.steps];
         for v in operands.iter().chain(a.position.iter()) {if v.vector.is_segmented() {return Ok(None);}}
+        let kv_words=view*kv_heads*(head_dim/2);
+        if a.keys.words!=kv_words || a.values.words!=kv_words || a.keys.vector.len()<kv_words || a.values.vector.len()<kv_words {return Ok(None);}
         if (a.query.vector.device_address()|a.keys.vector.device_address()|a.values.vector.device_address()|a.moved.vector.device_address()|a.gate.vector.device_address())&15!=0 {
             return Ok(None);
         }
-        for v in operands.iter().chain(a.position.iter()) {self.ready(v)?;}
+        for v in operands.iter().chain([a.keys,a.values].iter()).chain(a.position.iter()) {self.ready(v)?;}
         let stamp=self.cost.start(self.backend);
         let upload=|words:&[f32]|self.parameters.borrow_mut().resolve(words,None,|values|self.backend.upload_vector(values)?.into_resident_shared());
         let table=upload(a.rel_table)?.ok_or("flash window half: relative table empty")?;

@@ -617,6 +617,11 @@ impl<C:Compute,W:Weights<C>> Chat<'_,'_,C,W> {
         // One new token of a chat whose rings are its own: the token pass (`Driver::step_taps`), as a plain chat's.
         let single=decode && !verify && tokens.len()==1 && wanted!=Wanted::None && !slot.shared;
         let started=Instant::now();
+        // Grow straight target KV planes and global draft KV planes BEFORE entering `compute.work` so CUDA VMM
+        // page mapping never runs inside an unsubmitted resident launch queue.
+        let need_pos=(slot.state.position as usize).saturating_add(slot.pending_accept.map_or(0,|(_,k)|k)).saturating_add(tokens.len());
+        s.driver.ensure_capacity(&mut slot.state,need_pos)?;
+        ctx.chat.ensure_global_capacity(c,cfg,ctx.read_to().saturating_add(tokens.len()))?;
         // A plain step that pushes the waiting rows (`LAG_ROWS` of them) is not the price of a plain step.
         let mut flushed=false;
         let result=c.work(|| {
@@ -632,7 +637,7 @@ impl<C:Compute,W:Weights<C>> Chat<'_,'_,C,W> {
                 (step.tops,step.logits.as_ref().map(|x|c.read(x)).transpose()?.unwrap_or_default(),taps)
             };
             if verify {ctx.pending=taps;ctx.rows=tokens.len();}
-            else if tokens.len()==1 {flushed=ctx.lagged+1==LAG_ROWS;ctx.wait(c,model,&taps)?;}
+            else if decode && tokens.len()==1 {flushed=ctx.lagged+1==LAG_ROWS;ctx.wait(c,model,&taps)?;}
             else {ctx.catch_up(c,model)?;model.push(c,&mut ctx.chat,&taps,tokens.len())?;}
             Ok((tops,values))
         })?;
@@ -675,9 +680,10 @@ impl<C:Compute,W:Weights<C>> Target for Chat<'_,'_,C,W> {
             let taps=std::mem::take(&mut d.pending);
             d.defer_push(taps,keep);
         } else {
+            let m=s.model.ok_or("draft model missing")?;
+            d.chat.ensure_global_capacity(s.compute,m.config(),d.chat.len().saturating_add(keep))?;
             let started=Instant::now();
             s.compute.work(||{s.flush_accept(slot)?;s.driver.accept(&mut slot.state,d.rows,keep)?;
-                let m=s.model.ok_or("draft model missing")?;
                 let taps=d.pending.iter().map(|v|s.compute.range(v,0,keep*m.config().hidden_size)).collect::<Result<Vec<_>>>()?;
                 m.push(s.compute,&mut d.chat,&taps,keep)})?;
             let ms=started.elapsed().as_secs_f64()*1000.0;
@@ -739,6 +745,7 @@ impl<C:Compute,W:Weights<C>> Target for Chat<'_,'_,C,W> {
             if depth==0 || d.read_to()+block_rows>cfg.max_position_embeddings {d.drops[0]+=1;Vec::new()} else {
                 // Chain-aware early abort on short-chain chats (saves ~1.36 ms on hopeless drafts; 0.0 on wide chats).
                 let abort_below=if depth>1 {d.choose.abort_below(&d.prices)} else {0.0};
+                d.chat.ensure_global_capacity(s.compute,cfg,d.read_to().saturating_add(block_rows))?;
                 let (mut drafted,mut probs)=s.compute.work(||{d.catch_up(s.compute,m)?;caught=started.elapsed().as_secs_f64()*1000.0;
                     m.propose_confident(s.compute,s.driver.run.weights,&mut d.chat,anchor,&s.driver.embedding(anchor)?,depth,abort_below)})?;
                 let draft_ms=started.elapsed().as_secs_f64()*1000.0-caught;

@@ -141,6 +141,21 @@ fn cleanup(code: c_int, operation: &str) {
     if let Err(error) = check(code, operation) { eprintln!("cleanup error: {error}"); }
 }
 
+thread_local! {
+    static CURRENT_CONTEXT: Cell<Handle> = const { Cell::new(ptr::null_mut()) };
+}
+
+/// Sub-octave size classes for resident-queued pooled vectors:
+/// <= 4 KiB -> 4 KiB; <= 256 KiB -> power of two; <= 8 MiB -> 2 steps/octave; > 8 MiB -> 4 steps/octave.
+fn resident_vector_class(bytes: usize) -> usize {
+    if bytes <= 4096 { return 4096; }
+    if bytes <= 262_144 { return bytes.next_power_of_two(); }
+    let shift = (usize::BITS - 1 - bytes.leading_zeros()) as usize;
+    let step_bits = if bytes <= 8 * 1024 * 1024 { 1 } else { 2 };
+    let quantum = 1usize << (shift - step_bits);
+    bytes.checked_add(quantum - 1).map_or(bytes, |n| n & !(quantum - 1))
+}
+
 struct Context {
     raw: Handle,
     device: c_int,
@@ -167,12 +182,14 @@ struct Context {
     resident_queued: Cell<bool>, resident_unsubmitted: Cell<bool>,
     side_lane_active: Cell<bool>,
     deferred_frees: RefCell<Vec<(DevicePtr, usize, Option<Handle>, Reuse)>>,
-    stream_spares: RefCell<Vec<(DevicePtr, usize)>>,
+    stream_spares: RefCell<std::collections::BTreeMap<usize, Vec<DevicePtr>>>,
     deferred_total: Cell<usize>,
     kv_reserve: RefCell<segments::Reserve>,
     // VADE_VECTOR_POOL: freed device vectors (Backend::vector, vector_arena, vector_workspace)
     // keyed by exact byte length; empty until a server configures it.
     vector_pool: RefCell<segments::Reserve>,
+    /// Upper-bound size index of non-segment spares currently in `vector_pool` (O(log K) filter before linear `take`).
+    pool_sizes: RefCell<std::collections::BTreeMap<usize, usize>>,
     decode_reserve: RefCell<crate::decode_reserve::DecodeReserve>,
     /// A decode step runs: pooled vectors come from and return to the decode reserve.
     decoding: Cell<bool>,
@@ -207,8 +224,9 @@ impl Context {
             if multiprocessors <= 0 { return Err("CUDA device has no multiprocessors".into()); }
             let mut raw = ptr::null_mut();
             check(cuCtxCreate_v2(&mut raw, 0, device), "cuCtxCreate_v2")?;
+            CURRENT_CONTEXT.with(|c| c.set(raw));
             drop(initialization);
-            let context = Self { raw, device, multiprocessors: multiprocessors as usize, _thread: PhantomData, cleanup_errors: RefCell::new(Vec::new()), execution_error: RefCell::new(None), allocated: Cell::new(0), peak_allocated: Cell::new(0), graph_storage: Cell::new(0), peak_graph_storage: Cell::new(0), peak_accounted: Cell::new(0), graph_budget: Cell::new(usize::MAX), pinned_staging: Cell::new(0), peak_pinned_staging: Cell::new(0), budget: Cell::new(usize::MAX), memory_baseline: Cell::new(None), pending: Cell::new(false), capturing: Cell::new(false), resident_queued: Cell::new(false), resident_unsubmitted: Cell::new(false), side_lane_active: Cell::new(false), deferred_frees: RefCell::new(Vec::new()), stream_spares: RefCell::new(Vec::new()), deferred_total: Cell::new(0), kv_reserve: RefCell::new(segments::Reserve::default()), vector_pool: RefCell::new(segments::Reserve::vectors()), decode_reserve: RefCell::new(Default::default()), decoding: Cell::new(false), progress, decode_profile, jit_receipts };
+            let context = Self { raw, device, multiprocessors: multiprocessors as usize, _thread: PhantomData, cleanup_errors: RefCell::new(Vec::new()), execution_error: RefCell::new(None), allocated: Cell::new(0), peak_allocated: Cell::new(0), graph_storage: Cell::new(0), peak_graph_storage: Cell::new(0), peak_accounted: Cell::new(0), graph_budget: Cell::new(usize::MAX), pinned_staging: Cell::new(0), peak_pinned_staging: Cell::new(0), budget: Cell::new(usize::MAX), memory_baseline: Cell::new(None), pending: Cell::new(false), capturing: Cell::new(false), resident_queued: Cell::new(false), resident_unsubmitted: Cell::new(false), side_lane_active: Cell::new(false), deferred_frees: RefCell::new(Vec::new()), stream_spares: RefCell::new(std::collections::BTreeMap::new()), deferred_total: Cell::new(0), kv_reserve: RefCell::new(segments::Reserve::default()), vector_pool: RefCell::new(segments::Reserve::vectors()), pool_sizes: RefCell::new(std::collections::BTreeMap::new()), decode_reserve: RefCell::new(Default::default()), decoding: Cell::new(false), progress, decode_profile, jit_receipts };
             if report {
                 println!("device={:?} ordinal={ordinal} driver_api={version} compute={major}.{minor} multiprocessors={multiprocessors}",
                     CStr::from_ptr(name.as_ptr()).to_string_lossy());
@@ -255,11 +273,17 @@ impl Context {
         self.clear_reserves();
         let raw = std::mem::replace(&mut self.raw, ptr::null_mut());
         unsafe { self.record_cleanup(cuCtxDestroy_v2(raw), "cuCtxDestroy_v2"); }
+        CURRENT_CONTEXT.with(|c| if c.get() == raw { c.set(ptr::null_mut()); });
         if let Some(error) = self.execution_error.borrow_mut().take() { self.cleanup_errors.borrow_mut().push(error); }
         let errors = self.cleanup_errors.borrow();
         if errors.is_empty() { Ok(()) } else { Err(errors.join("; ")) }
     }
-    fn activate(&self) -> Result<(), String> { unsafe { check(cuCtxSetCurrent(self.raw), "cuCtxSetCurrent") } }
+    fn activate(&self) -> Result<(), String> {
+        if CURRENT_CONTEXT.with(|c| c.get() == self.raw) { return Ok(()); }
+        unsafe { check(cuCtxSetCurrent(self.raw), "cuCtxSetCurrent")?; }
+        CURRENT_CONTEXT.with(|c| c.set(self.raw));
+        Ok(())
+    }
     fn receipt_launch(&self, function: Handle, threads: u32, shared: u32) -> Result<(), String> {
         if let Some(receipts) = &self.jit_receipts { receipts.borrow_mut().launched(function, threads, shared)?; }
         Ok(())
@@ -298,7 +322,9 @@ impl Context {
         let frees = std::mem::take(&mut *self.deferred_frees.borrow_mut());
         for (address, bytes, host, reuse) in frees { self.free(address, bytes, host, reuse); }
         let spares = std::mem::take(&mut *self.stream_spares.borrow_mut());
-        for (address, bytes) in spares { self.free(address, bytes, None, Reuse::Vector); }
+        for (bytes, addrs) in spares {
+            for address in addrs { self.free(address, bytes, None, Reuse::Vector); }
+        }
     }
     fn free(&self, address: DevicePtr, bytes: usize, host: Option<Handle>, reuse: Reuse) {
         if reuse == Reuse::Decode && host.is_none() && self.cleanup_errors.borrow().is_empty() {
@@ -314,7 +340,12 @@ impl Context {
             if let Some(spares) = spares {
                 let mut reserve = spares.borrow_mut();
                 reserve.prepare_return(self);
-                if reserve.keep_newest(self, address, bytes) { return; }
+                if reserve.keep_newest(self, address, bytes) {
+                    if matches!(reuse, Reuse::Vector | Reuse::Decode) {
+                        *self.pool_sizes.borrow_mut().entry(bytes).or_default() += 1;
+                    }
+                    return;
+                }
             }
         }
         let (code, operation) = unsafe { if let Some(host) = host { (cuMemFreeHost(host), "cuMemFreeHost") } else { (cuMemFree_v2(address), "cuMemFree_v2") } };
@@ -344,7 +375,7 @@ impl Context {
         self.kv_reserve.borrow_mut().make_room(self, bytes)
     }
     fn clear_decode_reserve(&self) { let all = self.decode_reserve.borrow_mut().drain(); self.release_decode(all, None); }
-    fn clear_vector_pool(&self) { self.vector_pool.borrow_mut().clear(self); self.clear_decode_reserve(); }
+    fn clear_vector_pool(&self) { self.vector_pool.borrow_mut().clear(self); self.pool_sizes.borrow_mut().clear(); self.clear_decode_reserve(); }
     fn trim_vector_pool(&self, room: usize) { self.vector_pool.borrow_mut().trim(self, room); }
     fn group_vector_pool(&self, cap: usize, ceiling: usize) { self.vector_pool.borrow_mut().group_cap(cap, ceiling); }
     fn end_group_vector_pool(&self) { self.vector_pool.borrow_mut().end_group(); }
@@ -352,6 +383,7 @@ impl Context {
     fn clear_reserves(&self) {
         self.clear_decode_reserve();
         self.vector_pool.borrow_mut().clear(self);
+        self.pool_sizes.borrow_mut().clear();
         self.kv_reserve.borrow_mut().clear(self);
     }
     fn sync(&self) -> Result<(), String> {
@@ -424,6 +456,7 @@ impl Drop for Context {
             self.capturing.set(false);
             if self.activate().is_ok() { self.release_deferred(); self.clear_reserves(); }
             unsafe { cleanup(cuCtxDestroy_v2(self.raw), "cuCtxDestroy_v2"); }
+            CURRENT_CONTEXT.with(|c| if c.get() == self.raw { c.set(ptr::null_mut()); });
         }
     }
 }
@@ -458,11 +491,15 @@ impl<'a> Buffer<'a> {
         Self::pooled_inner(context, bytes, true)
     }
     fn pooled_inner(context: &'a Context, bytes: usize, fresh_only: bool) -> Result<Self, String> {
-        let bucketed=context.resident_queued.get() && context.vector_pool.borrow().configured();
-        let capacity=if bucketed {crate::reserve_policy::vector_capacity(bytes,usize::MAX)} else {bytes};
+        let (bucketed, prompt_cohort) = {
+            let pool = context.vector_pool.borrow();
+            (context.resident_queued.get() && pool.configured(), pool.prompt_cohort_active())
+        };
         // A decode step takes from the decode reserve first, then from the pool, and whatever it
         // takes or allocates returns to the reserve. Prompt code sees the pool only.
         let decode=context.decoding.get() && context.decode_reserve.borrow().configured();let reuse=if decode {Reuse::Decode} else {Reuse::Vector};
+        let class_bucket = bucketed && !decode && !prompt_cohort;
+        let capacity=if class_bucket {resident_vector_class(bytes)} else if bucketed {crate::reserve_policy::vector_capacity(bytes,usize::MAX)} else {bytes};
         if bytes != 0 && context.cleanup_errors.borrow().is_empty() {
             if decode {
                 let spare={let mut reserve=context.decode_reserve.borrow_mut();reserve.take(capacity).map(|address|(address,capacity))
@@ -477,22 +514,52 @@ impl<'a> Buffer<'a> {
                 // `stream_reused = true` skips `note_fresh_allocation` so zero-fill hoisting cannot reorder ahead of prior reads.
                 let spare = {
                     let mut spares = context.stream_spares.borrow_mut();
-                    spares.iter().position(|&(_, b)| b == capacity)
-                        .or_else(|| if capacity != bytes { spares.iter().position(|&(_, b)| b == bytes) } else { None })
-                        .map(|idx| spares.swap_remove(idx))
+                    let take_key = if spares.contains_key(&capacity) {
+                        Some(capacity)
+                    } else if !class_bucket && capacity != bytes && spares.contains_key(&bytes) {
+                        Some(bytes)
+                    } else if class_bucket {
+                        let ceiling = capacity.saturating_add(capacity / 2);
+                        spares.range(bytes..=ceiling).next().map(|(&b, _)| b)
+                    } else {
+                        None
+                    };
+                    take_key.and_then(|b| {
+                        let list = spares.get_mut(&b)?;
+                        let addr = list.pop();
+                        if list.is_empty() { spares.remove(&b); }
+                        addr.map(|a| (a, b))
+                    })
                 };
                 if let Some((address, capacity)) = spare {
                     context.vector_pool.borrow_mut().reused_elsewhere(capacity);
                     return Ok(Self { address, bytes: capacity, _context: context, owner: None, segments: None, host: None, reuse, stream_reused: true });
                 }
             }
-            let spare={let mut pool=context.vector_pool.borrow_mut();pool.take(capacity,false).map(|address|(address,capacity))
-                .or_else(||if capacity!=bytes {pool.take(bytes,false).map(|address|(address,bytes))} else {None})};
+            let spare={
+                let mut pool=context.vector_pool.borrow_mut();
+                let mut sizes=context.pool_sizes.borrow_mut();
+                let take_indexed=|pool:&mut segments::Reserve,sizes:&mut std::collections::BTreeMap<usize,usize>,size:usize|->Option<(DevicePtr,usize)> {
+                    if !sizes.contains_key(&size) {return None;}
+                    if let Some(address)=pool.take(size,false) {
+                        if let Some(cnt)=sizes.get_mut(&size) { *cnt-=1; if *cnt==0 { sizes.remove(&size); } }
+                        Some((address,size))
+                    } else {
+                        sizes.remove(&size);
+                        None
+                    }
+                };
+                take_indexed(&mut pool,&mut sizes,capacity)
+                    .or_else(||if !class_bucket && capacity!=bytes {take_indexed(&mut pool,&mut sizes,bytes)} else {None})
+            };
             if let Some((address,capacity)) = spare {
                 return Ok(Self { address, bytes:capacity, _context: context, owner: None, segments: None, host: None, reuse, stream_reused: false });
             }
         }
-        let capacity=if bucketed {crate::reserve_policy::vector_capacity(bytes,context.budget.get().saturating_sub(context.accounted_bytes()))} else {bytes};
+        let available = context.budget.get().saturating_sub(context.accounted_bytes());
+        let capacity = if class_bucket && capacity <= available { capacity }
+            else if bucketed { crate::reserve_policy::vector_capacity(bytes, available) }
+            else { bytes };
         let mut buffer = Self::new(context, capacity)?;
         buffer.reuse = reuse;
         let mut pool = context.vector_pool.borrow_mut();
@@ -550,7 +617,7 @@ impl Drop for Buffer<'_> {
                 && self._context.cleanup_errors.borrow().is_empty()
                 && { let pool = self._context.vector_pool.borrow(); pool.configured() && !pool.prompt_cohort_active() }
             {
-                self._context.stream_spares.borrow_mut().push((self.address, self.bytes));
+                self._context.stream_spares.borrow_mut().entry(self.bytes).or_default().push(self.address);
                 return;
             }
             self._context.defer_free(self.address, self.bytes, self.host.take(), self.reuse);
@@ -998,4 +1065,19 @@ pub fn ab_ptx_from_env() -> Result<Option<CString>, String> {
         CString::new(std::fs::read(path).map_err(|e| format!("VADE_AB_PTX: {e}"))?)
             .map_err(|e| format!("VADE_AB_PTX: {e}"))
     }).transpose()
+}
+
+#[cfg(test)]
+mod vector_class_tests {
+    use super::resident_vector_class;
+    #[test]
+    fn resident_vector_classes_are_consistent_and_bounded() {
+        for &b in &[1usize, 4, 4096, 4097, 8192, 65536, 262_144, 262_145, 393_216, 524_288, 1 << 20, (1 << 20) + 1, 8 << 20, (8 << 20) + 1, 10_000_000] {
+            let c = resident_vector_class(b);
+            assert!(c >= b, "class {c} < {b}");
+            assert_eq!(resident_vector_class(c), c, "not idempotent at {c}");
+            if b > 8 * 1024 * 1024 { assert!(c - b < b / 4, "over-padded {b} -> {c}"); }
+            else if b > 262_144 { assert!(c - b < b / 2, "over-padded {b} -> {c}"); }
+        }
+    }
 }

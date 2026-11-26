@@ -452,6 +452,92 @@ fn a_greedy_chat_checked_in_drafted_steps_keeps_the_ids_and_the_state_of_the_pla
         println!("{name}: {round} checks, kept rows {kept:?}, {} tokens equal the plain greedy chat",out.len()+1);
     }
 }
+/// The gate of the spare ring rows (`state::spare_rows`) on the two made-up checkpoints (windows of 4 and 3 tokens;
+/// with a step row limit of whole check passes their state rings hold 19 and 18 rows): three greedy chats whose next
+/// tokens are checked together in steps of drafted rows (`Driver::verify_many`, `Driver::accept`) give the token IDs
+/// of their plain greedy chats on the token path, and after each check the state of each chat holds, by position,
+/// the words of its plain chat.
+/// - The new key and value rows of a chat go into its rings, also past the end of a ring; they wait apart
+///   (`VisitState::written`) only where a chat has more rows than a ring takes (`state::many::room`), or is alone.
+/// - Before every third check, a check of the most rows that a ring takes (made-up tokens) runs and is dropped. Its
+///   rows stay in the rings; the next check and every later token must not read one of them.
+/// - A chat keeps 1 to 5 of up to 17 rows, so rows that were not kept stay in the rings too.
+#[test]
+fn chats_checked_together_write_their_rows_into_rings_with_spare_rows() {
+    for (name,fixture) in [("small",Fixture::small()),("wide",Fixture::wide())] {
+        let d=&fixture.description;let (width,visits,check)=(d.hidden as usize,d.visits.len() as u64,state::CHECK_ROWS);
+        let (chats,new,capacity)=(3usize,36usize,48u64);
+        let driver=Driver::with_limits(&Host,&fixture,d,capacity,rows::Limits {step_rows:chats*check+2,key_bytes:1<<20}).unwrap();
+        assert!(driver.layouts().iter().all(|layout|layout.rows==if layout.ring {layout.window+check-1} else {capacity as usize}));
+        // The plain greedy chats on the token path: its rings hold the window alone. The IDs, and the state by
+        // position after each token.
+        let all=fixture.chat(12);let prompts=(0..chats).map(|chat|all[3*chat..3*chat+3].to_vec()).collect::<Vec<_>>();
+        let one=Driver::new(&Host,&fixture,d,capacity).unwrap();
+        // Chat 0 writes the most tokens and chat 2 the fewest, so the last checks have two chats and then one.
+        let plain=prompts.iter().enumerate().map(|(chat,prompt)|{
+            let (mut state,mut ids,mut states)=(one.clean().unwrap(),prompt.clone(),Vec::new());
+            for at in 0..prompt.len()+new-8*chat {let step=one.step(&mut state,ids[at]).unwrap();states.push(super::meter::by_position(&one,&state));if at+1>=prompt.len() {ids.push(step.top);}}
+            (ids,states)
+        }).collect::<Vec<_>>();
+        // The drafted chats: the prompts in one step, then checks of the anchor and the drafted tokens of each chat.
+        let mut states=(0..chats).map(|_|driver.clean().unwrap()).collect::<Vec<_>>();
+        driver.step_rows(&mut states.iter_mut().zip(&prompts).map(|(state,prompt)|ChatStep {state,tokens:&prompt[..prompt.len()-1],wanted:Wanted::None,logits:false}).collect::<Vec<_>>()).unwrap();
+        let mut out=prompts.iter().map(|prompt|prompt[..prompt.len()-1].to_vec()).collect::<Vec<_>>();
+        let mut anchors=prompts.iter().map(|prompt|prompt[prompt.len()-1]).collect::<Vec<_>>();
+        // Counts of window visits of chats in a check: rows into the ring, of them past the end of the ring, rows
+        // apart for a chat beside others, and rows apart for a chat alone.
+        let (mut round,mut direct,mut past,mut apart,mut alone,mut dropped,mut kept)=(0usize,0usize,0usize,0usize,0usize,0usize,[0usize;6]);
+        loop {
+            let turn=(0..chats).filter(|&chat|out[chat].len()+2<plain[chat].0.len()).collect::<Vec<_>>();
+            if turn.is_empty() {break;}
+            // A check that is dropped: the most rows that a ring takes past its first turn, of made-up tokens.
+            if round%3==0 && turn.len()>1 {
+                let made=turn.iter().map(|&chat|(0..check.min(capacity as usize-out[chat].len())).map(|row|((7*round+3*chat+5*row)%d.head_rows as usize) as u32).collect::<Vec<_>>()).collect::<Vec<_>>();
+                let mut held=states.iter_mut().enumerate().filter(|(chat,_)|turn.contains(chat)).map(|(_,state)|state).zip(&made).map(|(state,tokens)|(state,&tokens[..])).collect::<Vec<_>>();
+                driver.verify_many(&mut held,&[visits]).unwrap();
+                assert!(held.iter().all(|(state,_)|state.visits.iter().all(|visit|visit.written.is_none() && visit.next.iter().all(Option::is_some))),"{name} round {round}: a dropped check of {check} rows goes into the rings");
+                state::discard(&mut held.iter_mut().map(|(state,_)|&mut **state).collect::<Vec<_>>());dropped+=1;
+            }
+            // The drafts: the plain chat with one wrong token at place `(3 * round + chat) % 5` (none past the end).
+            let drafts=turn.iter().map(|&chat|{
+                let (at,ids)=(out[chat].len(),&plain[chat].0);
+                let drafted=[4usize,1,0,2,7,3,16,5][(round+2*chat)%8].max(usize::from(turn.len()==1)).min(ids.len()-at-2);
+                (0..drafted).map(|place|if place==(3*round+chat)%5 {(ids[at+1+place]+1)%d.head_rows as u32} else {ids[at+1+place]}).collect::<Vec<_>>()
+            }).collect::<Vec<_>>();
+            let tokens=turn.iter().zip(&drafts).map(|(&chat,draft)|[&[anchors[chat]][..],draft].concat()).collect::<Vec<_>>();
+            let (tops,taps)={
+                let mut held=states.iter_mut().enumerate().filter(|(chat,_)|turn.contains(chat)).map(|(_,state)|state).zip(&tokens).map(|(state,tokens)|(state,&tokens[..])).collect::<Vec<_>>();
+                driver.verify_many(&mut held,&[visits]).unwrap()
+            };
+            let total=tokens.iter().map(Vec::len).sum::<usize>();assert_eq!((tops.len(),taps[0].len()),(total,total*width));
+            // Where the new rows of each window visit wait until the chat keeps them.
+            for (&chat,list) in turn.iter().zip(&tokens) {
+                let first=out[chat].len() as u64;assert_eq!(states[chat].position,first);
+                for (layout,visit) in driver.layouts().iter().zip(&states[chat].visits) {
+                    let waits=layout.ring && (turn.len()==1 || list.len()>state::many::room(layout,first));
+                    assert_eq!(visit.written.is_some(),waits,"{name} round {round} chat {chat}: {} rows from position {first}",list.len());
+                    if !layout.ring {continue;}
+                    if !waits {direct+=1;if first+list.len() as u64>layout.rows as u64 {past+=1;}} else if turn.len()>1 {apart+=1;} else {alone+=1;}
+                }
+            }
+            // Greedy accept: the drafted tokens that equal the top row before them, then the top row of the next row.
+            let mut next=0;
+            for ((&chat,list),draft) in turn.iter().zip(&tokens).zip(&drafts) {
+                let (tops,ids)=(&tops[next..next+list.len()],&plain[chat].0);next+=list.len();
+                let good=draft.iter().zip(tops).take_while(|(drafted,top)|drafted==top).count();
+                driver.accept(&mut states[chat],list.len(),good+1).unwrap();kept[(good+1).min(5)]+=1;
+                out[chat].push(anchors[chat]);out[chat].extend_from_slice(&draft[..good]);anchors[chat]=tops[good];
+                assert_eq!(states[chat].position,out[chat].len() as u64);
+                assert_eq!(&out[chat][..],&ids[..out[chat].len()],"{name} round {round} chat {chat}: the kept tokens");
+                assert_eq!(anchors[chat],ids[out[chat].len()],"{name} round {round} chat {chat}: the next token");
+                assert_eq!(super::meter::by_position(&driver,&states[chat]),plain[chat].1[out[chat].len()-1],"{name} round {round} chat {chat}: the state by position after {} tokens",out[chat].len());
+            }
+            round+=1;
+        }
+        assert!(past>0 && apart>0 && alone>0 && dropped>2 && kept[1..].iter().all(|&n|n>0),"{name}: every case ran: {direct} {past} {apart} {alone} {dropped} {kept:?}");
+        println!("{name}: {round} checks of {chats} chats, {dropped} dropped; window visits with rows in the ring {direct} ({past} past the end of the ring), apart {apart}, alone {alone}; kept rows {kept:?}");
+    }
+}
 
 /// The token pass with taps (`step_taps`) gives, step by step, the top row, the logits, every tap and the state of a
 /// step of one row with taps (`step_rows_taps`): a drafting chat may take either for a plain step.

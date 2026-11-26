@@ -557,6 +557,7 @@ impl App {
                     self.timed_out_prompt = None;
                     self.reset_recall();
                     self.reset_answers();
+                    self.direct_instructions = None;
                     self.direct_prefix_blocked = false;
                     self.context = vade_harness::contract::Context::default();
                     if let Some(http) = self.http.as_mut() {

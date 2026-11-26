@@ -104,8 +104,8 @@ fn a_step_that_is_dropped_leaves_the_rings_and_the_positions() {
 #[test]
 fn the_rows_of_a_chat_go_into_a_plane_as_in_steps_of_one_row() {
     let fixture=Fixture::small();let d=&fixture.description;
-    // Step row limits 1, 3 and 6: a ring of the window, of 2 more rows and of 5 more rows.
-    for limit in [1usize,3,6] {
+    // Step row limits 1, 3, 6 and 16: a ring of the window, of 2 more rows, of 5 more rows and of 15 more rows.
+    for limit in [1usize,3,6,16] {
         let l=layouts_for(d,16,limit).unwrap();
         for layout in [&l[0],&l[1]] {
             let key=|position:u64|(0..layout.kv_channels as u32).map(|i|f32::from_bits((0x3f00+position as u32*64+i)<<16)).collect::<Vec<_>>();
@@ -184,6 +184,78 @@ fn a_chat_with_many_rows_works_in_a_wide_ring_and_the_state_keeps_the_window_rin
         assert!(super::widen(&Host,layout,&vec![0.0;1],4).is_err() && super::narrow(&Host,layout,&vec![0.0;1],4).is_err());
     }
     assert_eq!(super::moves(5,12,4,6),[(1,5,1),(2,0,2),(0,2,4)]);
+}
+/// The rule of a check pass of many chats (`held_apart`, `room`) on a model of a ring: each slot holds the position
+/// whose row was written there last. Rows that go into the ring must leave every key that a row of the step sees,
+/// and every key that the chat sees after it kept any count of the rows (none: the step is dropped).
+#[test]
+fn the_rows_of_a_check_go_into_a_ring_only_where_no_row_reads_what_they_write_over() {
+    let fixture=Fixture::small();let base=state::layouts_for(&fixture.description,16,Limits::ONE).unwrap()[0];
+    let (mut direct,mut round,mut apart)=(0usize,0usize,0usize);
+    for window in 1..=5usize {for spare in [0usize,1,3,state::CHECK_ROWS-1] {
+        let layout=Layout {rows:window+spare,window,..base};
+        for first in 0..3*layout.rows as u64 {for count in 1..=spare+3 {
+            let span=Span {first,count};let other=Span {first:0,count:1};
+            // One chat alone waits apart; a step that keeps no row (a prompt, a plain step) never does.
+            assert!(held_apart(&layout,&list(&[span]).keeping().unwrap(),span) && !held_apart(&layout,&list(&[span,other]),span));
+            let held=held_apart(&layout,&list(&[span,other]).keeping_many(),span);
+            assert_eq!(held,count>room(&layout,first),"window {window} spare {spare} first {first} count {count}");
+            // The ring after every position before the step, then after the rows of the step.
+            let mut ring=vec![None;layout.rows];
+            for position in (0..first).chain((first..).take(count)) {ring[layout.slot(position).unwrap()]=Some(position);}
+            // The keys of the row at `position` that are older than `before`: each stands at the slot of its position.
+            let sees=|position:u64,before:u64|(position+1-layout.live(position).unwrap() as u64..=position).filter(|&key|key<before).all(|key|ring[layout.slot(key).unwrap()]==Some(key));
+            let safe=(first..).take(count).all(|position|sees(position,u64::MAX)) && (0..=count as u64).all(|kept|sees(first+kept,first+kept));
+            if held {
+                apart+=1;
+                // The bound is exact: with one row more than the room, a row reads a slot that the step wrote over.
+                if count==room(&layout,first)+1 {assert!(!safe,"window {window} spare {spare} first {first} count {count}: the room is not the most rows");}
+            } else {
+                assert!(safe,"window {window} spare {spare} first {first} count {count}: a row reads a slot that the step wrote over");
+                direct+=1;if first+count as u64>layout.rows as u64 {round+=1;}
+            }
+        }}
+        // Past its first turn a ring takes its spare rows and one more a step, and no more.
+        assert_eq!((room(&layout,layout.rows as u64),room(&layout,1_000_003)),(spare+1,spare+1));
+    }}
+    assert!(direct>0 && round>0 && apart>0);
+    println!("check passes of a ring model: {direct} go into the ring ({round} of them past the end of the ring), {apart} wait apart");
+}
+/// A state ring with spare rows (`state::spare_rows`): a step of up to a whole check pass of rows goes straight into
+/// it, also where the ring goes round, and a larger step works in the wide ring and comes back (`widen`, `narrow`).
+/// Every key that the newest token sees is the key of the ring of token steps, which holds the window alone.
+#[test]
+fn a_ring_with_spare_rows_takes_a_check_pass_and_a_larger_step_takes_the_wide_ring() {
+    let fixture=Fixture::small();let d=&fixture.description;let check=state::CHECK_ROWS;
+    let token=state::layouts_for(d,16,Limits::ONE).unwrap()[0];
+    for limit in [check,check+1,check+4] {
+        let layout=state::layouts_for(d,16,Limits {step_rows:limit,key_bytes:1<<20}).unwrap()[0];let words=layout.row_words;
+        assert!(layout.ring && token.rows==layout.window && layout.rows==layout.window+check-1 && layout.wide().rows==layout.window+limit-1);
+        let key=|position:u64|(0..layout.kv_channels as u32).map(|i|f32::from_bits((0x3f00+(position as u32%200)*64+i)<<16)).collect::<Vec<_>>();
+        let (mut one,mut many)=(clean(&Host,std::slice::from_ref(&token)).unwrap(),clean(&Host,std::slice::from_ref(&layout)).unwrap());
+        let (mut position,mut step,mut straight,mut wide)=(0u64,0usize,0usize,0usize);
+        while position<90 {
+            let count=[1,check,3,limit,2,check-1,limit,check][step%8];step+=1;
+            let span=Span {first:position,count};let fit=Layout {step_rows:count,..layout};
+            let packed=pack(&Host,&(position..).take(count).flat_map(key).collect::<Vec<_>>()).unwrap();
+            // The rule of `attention::half_rows` for a step that keeps no row.
+            if fit.wide().rows>layout.rows && position+count as u64>layout.rows as u64 {
+                assert!(count>room(&layout,position));
+                assert!(write_rows(&Host,&layout,&mut many.visits[0].keys,span,&packed).unwrap_err().contains("more rows of one chat"));
+                let mut plane=super::widen(&Host,&fit,&many.visits[0].keys,position).unwrap();
+                write_rows(&Host,&fit.wide(),&mut plane,span,&packed).unwrap();
+                many.visits[0].keys=super::narrow(&Host,&fit,&plane,position+count as u64).unwrap();wide+=1;
+            } else {write_rows(&Host,&layout,&mut many.visits[0].keys,span,&packed).unwrap();straight+=1;}
+            for at in (position..).take(count) {write_row(&Host,&token,&mut one.visits[0].keys,at,&key(at)).unwrap();}
+            position+=count as u64;
+            let last=position-1;
+            for seen in last+1-layout.live(last).unwrap() as u64..=last {
+                let (a,b)=(layout.slot(seen).unwrap()*words,token.slot(seen).unwrap()*words);
+                assert_eq!(bits(&many.visits[0].keys[a..a+words]),bits(&one.visits[0].keys[b..b+words]),"limit {limit}: key {seen} after position {last}");
+            }
+        }
+        assert!(straight>0 && (wide>0)==(limit>check),"limit {limit}: {straight} steps into the ring, {wide} in the wide ring");
+    }
 }
 #[test]
 fn a_cohort_is_cut_into_the_fewest_direct_parts_of_even_size() {

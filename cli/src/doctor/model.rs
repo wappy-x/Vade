@@ -46,6 +46,13 @@ pub(super) fn local(report: &mut Report, folder: &Path) -> Result<(), String> {
         };
         fields.insert(format!("model_{key}"), state.into());
     }
+    if fields.get("model_tokenizer").map(String::as_str) == Some("missing")
+        && let Some(tiktoken) = fs::canonicalize(root.join("tiktoken/tokenizer.model")).ok().filter(|path| path.starts_with(&root))
+        && fs::metadata(&tiktoken).is_ok_and(|meta| meta.is_file() && meta.len() > 0)
+        && fs::File::open(&tiktoken).is_ok()
+    {
+        fields.insert("model_tiktoken".into(), "present".into());
+    }
     let mut shards = Vec::new();
     let mut complete = true;
     let names = json_field(&fields, "index").and_then(|index| index_names(&index));
@@ -99,6 +106,7 @@ vade_model_json() {{
 }}
 vade_model_json config "$vade_model/config.json"
 vade_model_json tokenizer "$vade_model/tokenizer.json"
+if vade_model_file "$vade_model/tiktoken/tokenizer.model" && test "$(vade_model_size "$vade_resolved")" -gt 0; then printf 'model_tiktoken=present\n'; fi
 vade_model_json index "$vade_model/model.safetensors.index.json"
 vade_count=0
 vade_bytes=0
@@ -214,9 +222,15 @@ pub(super) fn rows(report: &mut Report, prefix: &str, folder: &str, fields: &Fie
     } else {
         report.fail(&label("model folder"), &format!("The model folder is missing or unreadable at {folder}."), fix)?;
     }
-    for (key, file) in [("config", "config.json"), ("tokenizer", "tokenizer.json")] {
-        report.check(&label(file), json_field(fields, key), |_| format!("{file} is valid JSON"),
-            &format!("Copy a complete {file} from the same checkpoint, then run vade doctor."))?;
+    report.check(&label("config.json"), json_field(fields, "config"), |_| "config.json is valid JSON".into(),
+        "Copy a complete config.json from the same checkpoint, then run vade doctor.")?;
+    if fields.get("model_tokenizer").map(String::as_str) == Some("missing")
+        && fields.get("model_tiktoken").map(String::as_str) == Some("present")
+    {
+        report.ok(&label("tiktoken/tokenizer.model"), "tiktoken/tokenizer.model is present")?;
+    } else {
+        report.check(&label("tokenizer.json"), json_field(fields, "tokenizer"), |_| "tokenizer.json is valid JSON".into(),
+            "Copy a complete tokenizer.json from the same checkpoint, then run vade doctor.")?;
     }
     let inventory = inventory(fields);
     report.check(&label("safetensors"), inventory.as_ref().map_err(Clone::clone), |shards| {

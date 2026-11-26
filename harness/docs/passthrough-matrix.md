@@ -2,27 +2,16 @@
 
 HTTP links stay on this machine by default; see [network setup](../../docs/network-setup.md) for SSH tunnels and the explicit opt-in.
 
-This page shows how to use your own coding client with Vade.
+Point any compatible coding client (**Claude Code, Codex, Hermes, OpenCode, or Pi**) at `vade-gateway` with one offline `vade-harness setup` command:
 
-Setup can write a complete dedicated home for Claude Code, Codex, Hermes,
-OpenCode and Pi. It generates the configuration offline. The gateway relays
-the API that you pick. It keeps request bodies, tools, cache identity,
-response usage, SSE and errors as they are. The separate engine owns
-inference and KV caching.
+- **Zero-bottleneck passthrough.** Pooled worker threads and single-write coalesced HTTP/SSE framing keep loopback gateway overhead sub-millisecond with identical streaming throughput to direct engine connections.
+- **Engine KV prefix cache preserved across turns.** The engine retains ~54–85 GB of prompt prefix KV state in device memory (depending on model and context). `vade-gateway` preserves request bodies, tool order, and history byte-for-byte, and with `--stable-prefix` attaches a deterministic `prompt_cache_key` (stable even when Anthropic clients slide `cache_control` markers across turns) plus `"cache": true`.
+- **Exact greedy reproducibility.** Requests with no sampling controls receive deterministic greedy defaults (`temperature: 0`, fixed seed); requests with any explicit sampling field pass through unchanged.
+- **Isolated 1-command homes.** `setup --dedicated-home` generates a private config, instructions file, and clean-environment `launch.sh` without reading or modifying your installed client homes.
 
-For a current FP4-Local server, follow [INSTALL.md](../../docs/INSTALL.md):
+For a current server, follow [INSTALL.md](../../docs/INSTALL.md): `vade launch` / `vade up` on the Spark starts the engine without a tunnel; `vade up` on a controller starts the engine and opens a detached SSH tunnel to `127.0.0.1:18080`. Read exact model ID and limits from `/v1/capabilities` below.
 
-- **On the Spark itself.** `vade launch` or `vade up` starts an engine that
-  keeps running. It opens no tunnel.
-- **On a controller.** `vade up` starts the engine, opens a detached SSH
-  tunnel to the configured local port (default `18080`), and returns.
-
-The engine, and on a controller its tunnel, stay up until `vade down`. Direct
-and gateway clients can connect at any time in between. Read the exact model
-ID and limits from the capabilities, as shown below.
-
-If the harness is not on your PATH, use `harness/target/release/vade-harness`
-from the repo root instead of `vade-harness`.
+If the harness is not on your PATH, use `harness/target/release/vade-harness` from the repo root.
 
 ## Create a dedicated home
 

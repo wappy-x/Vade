@@ -698,13 +698,15 @@ fn a_looped_block_checkpoint_passes_detect_as_the_one_spark_text_service() {
     // `vade launch` and `vade models` do not offer it: it is a diagnostic start only.
     assert_eq!(serving_format(&path).unwrap_err(), LOOP_TEXT_ONLY);
     assert!(loop_text(&path) && !loop_text(&f.0.join("models/org/none")));
-    // The local start hands it to the engine's loop text service, passing --mtp 0 when unset or the
-    // requested depth when set, with none of FP4-Local's options, and prints the preview line built
-    // from the plan's binding whenever it adds the diagnostic option.
+    // The local start hands it to the engine's loop text service, passing the checkpoint's default depth
+    // (7 for Inkling 2 Mini) when unset or the requested depth when set, with none of FP4-Local's options,
+    // and prints the preview line built from the plan's binding whenever it adds the diagnostic option.
     let (args, note) = crate::launch::local_start("k.ptx", &path, 32768, "18080", true, true, None).unwrap();
     let shown = path.to_string_lossy();
-    assert_eq!(args, ["0", "1", "127.0.0.1:0", "127.0.0.1:0", "k.ptx", &*shown, "32768", "127.0.0.1:18080", "0", "--diagnostic-unqualified-text", "--mtp", "0"]);
+    assert_eq!(args, ["0", "1", "127.0.0.1:0", "127.0.0.1:0", "k.ptx", &*shown, "32768", "127.0.0.1:18080", "0", "--diagnostic-unqualified-text", "--mtp", "7"]);
     assert_eq!(note.as_deref(), Some("read only starts as a preview: text only. Image input is not built yet. It has not been through qualification."));
+    let (args, _) = crate::launch::local_start("k.ptx", &path, 32768, "18080", true, true, Some(0)).unwrap();
+    assert_eq!(args, ["0", "1", "127.0.0.1:0", "127.0.0.1:0", "k.ptx", &*shown, "32768", "127.0.0.1:18080", "0", "--diagnostic-unqualified-text", "--mtp", "0"]);
     let (args, note) = crate::launch::local_start("k.ptx", &path, 32768, "18080", true, true, Some(7)).unwrap();
     assert_eq!(args, ["0", "1", "127.0.0.1:0", "127.0.0.1:0", "k.ptx", &*shown, "32768", "127.0.0.1:18080", "0", "--diagnostic-unqualified-text", "--mtp", "7"]);
     assert_eq!(note.as_deref(), Some("read only starts as a preview: text only. Image input is not built yet. It has not been through qualification."));

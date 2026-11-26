@@ -46,7 +46,8 @@ pub(super) fn check_model(path: &Path) -> Result<(), String> {
     let entries = fs::read_dir(path).map_err(|_| {
         "Model weights are missing. Check the configured model directory; for Flash-Next, follow docs/INSTALL.md step 3 for verified weights.".to_string()
     })?;
-    if !path.join("config.json").is_file() || !path.join("tokenizer.json").is_file() {
+    let has_tokenizer = path.join("tokenizer.json").is_file() || path.join("tiktoken/tokenizer.model").is_file();
+    if !path.join("config.json").is_file() || !has_tokenizer {
         return Err("Model configuration or tokenizer is missing. Check the configured model directory; for Flash-Next, follow docs/INSTALL.md step 3 for verified weights.".into());
     }
     let index_path = path.join("model.safetensors.index.json");

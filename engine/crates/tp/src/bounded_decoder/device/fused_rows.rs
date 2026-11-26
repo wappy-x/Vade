@@ -25,18 +25,21 @@ impl<'b, 'd> Device<'b, 'd> {
             || wk.vector.len() != wk.words || wv.vector.len() != wv.words || (wk.vector.device_address() | wv.vector.device_address()) & 15 != 0) {
             return Ok(None);
         }
-        let operands = [a.query, a.keys, a.values, a.moved, a.sink, a.gate, a.steps];
+        let operands = [a.query, a.moved, a.sink, a.gate, a.steps];
         for v in operands.iter().chain(a.position.iter()) {
             if v.vector.is_segmented() || v.vector.len() != v.words { return Ok(None); }
+        }
+        if a.keys.vector.len() < a.keys.words || a.values.vector.len() < a.values.words {
+            return Ok(None);
         }
         if (a.query.vector.device_address() | a.moved.vector.device_address() | a.gate.vector.device_address()) & 15 != 0 {
             return Ok(None);
         }
-        for v in operands.iter().chain(a.position.iter()) { self.ready(v)?; }
+        for v in operands.iter().chain([a.keys, a.values].iter()).chain(a.position.iter()) { self.ready(v)?; }
         if let Some((wk, wv)) = a.written { self.ready(wk)?; self.ready(wv)?; }
         for (key, value) in planes {
             for plane in [key, value] {
-                if plane.words != a.keys.words || plane.vector.is_segmented() || plane.vector.device_address() % 16 != 0 { return Ok(None); }
+                if plane.words != a.keys.words || plane.vector.len() < plane.words || plane.vector.device_address() % 16 != 0 { return Ok(None); }
                 self.ready(plane)?;
             }
         }
@@ -74,8 +77,10 @@ impl<'b, 'd> Device<'b, 'd> {
             || (!s.planes.is_empty() && (s.planes.len() != rows || s.delta.is_some())) {
             return Ok(None);
         }
+        let row_words = kv_heads * (head_dim / 2);
+        let multi_straight = !s.planes.is_empty() && !s.is_ring;
         if a.query.words != rows * heads * head_dim || a.gate.words != rows * heads * head_dim
-            || a.keys.words != view * kv_heads * (head_dim / 2) || a.values.words != a.keys.words
+            || (!multi_straight && (a.keys.words != view * row_words || a.values.words != a.keys.words))
             || a.moved.words != rows * heads * rel_dim || a.sink.words != rows * heads
             || a.steps.words != 2 * rows || a.rel_table.len() != rel_dim * extent
             || !(a.query_scale.is_empty() || a.query_scale.len() == heads * head_dim)
@@ -84,30 +89,39 @@ impl<'b, 'd> Device<'b, 'd> {
             || !(a.query_bound > 0.0 && a.moved_bound > 0.0) {
             return Ok(None);
         }
-        let operands = [a.query, a.keys, a.values, a.moved, a.sink, a.gate, a.steps];
-        for v in operands.iter().chain(a.position.iter()) {
+        let contig = [a.query, a.moved, a.sink, a.gate, a.steps];
+        for v in contig.iter().chain(a.position.iter()) {
             if v.vector.is_segmented() || v.vector.len() != v.words { return Ok(None); }
+        }
+        if a.keys.vector.len() < a.keys.words || a.values.vector.len() < a.values.words {
+            return Ok(None);
         }
         if (a.query.vector.device_address() | a.keys.vector.device_address() | a.values.vector.device_address()
             | a.moved.vector.device_address() | a.gate.vector.device_address()) & 15 != 0 {
             return Ok(None);
         }
         if let Some((dk, dv)) = s.delta {
-            let need_d = rows * kv_heads * (head_dim / 2);
+            let need_d = rows * row_words;
             for d in [dk, dv] {
                 if d.words != need_d || d.vector.is_segmented() || d.vector.len() != d.words || d.vector.device_address() & 15 != 0 {
                     return Ok(None);
                 }
             }
         }
-        for (key, value) in s.planes {
+        for (chat, (key, value)) in s.planes.iter().enumerate() {
+            let need_words = if multi_straight {
+                let (pos, live) = s.row_pos_live[chat];
+                if live > 0 { (pos as usize + 1) * row_words } else { row_words }
+            } else {
+                view * row_words
+            };
             for plane in [key, value] {
-                if plane.words != a.keys.words || plane.vector.is_segmented() || plane.vector.len() != plane.words || plane.vector.device_address() & 15 != 0 {
+                if plane.words < need_words || plane.vector.len() < need_words || plane.vector.device_address() & 15 != 0 {
                     return Ok(None);
                 }
             }
         }
-        for v in operands.iter().chain(a.position.iter()) { self.ready(v)?; }
+        for v in contig.iter().chain([a.keys, a.values].iter()).chain(a.position.iter()) { self.ready(v)?; }
         if let Some((dk, dv)) = s.delta { self.ready(dk)?; self.ready(dv)?; }
         for (key, value) in s.planes { self.ready(key)?; self.ready(value)?; }
         let planes = s.planes.iter().map(|(k, v)| (&*k.vector, &*v.vector)).collect::<Vec<_>>();
@@ -150,15 +164,19 @@ impl<'b, 'd> Device<'b, 'd> {
             || !(a.query_bound > 0.0 && a.moved_bound > 0.0) || a.written.is_some() {
             return Ok(None);
         }
-        let operands = [a.query, a.keys, a.values, a.moved, a.sink, a.gate, a.steps];
+        let operands = [a.query, a.moved, a.sink, a.gate, a.steps];
         for v in operands.iter().chain(a.position.iter()) {
             if v.vector.is_segmented() { return Ok(None); }
+        }
+        let kv_words = view * kv_heads * (head_dim / 2);
+        if a.keys.words != kv_words || a.values.words != kv_words || a.keys.vector.len() < kv_words || a.values.vector.len() < kv_words {
+            return Ok(None);
         }
         if (a.query.vector.device_address() | a.keys.vector.device_address() | a.values.vector.device_address()
             | a.moved.vector.device_address() | a.gate.vector.device_address()) & 15 != 0 {
             return Ok(None);
         }
-        for v in operands.iter().chain(a.position.iter()) { self.ready(v)?; }
+        for v in operands.iter().chain([a.keys, a.values].iter()).chain(a.position.iter()) { self.ready(v)?; }
         let stamp = self.cost.start(self.backend);
         let upload = |words: &[f32]| self.parameters.borrow_mut().resolve(words, None, |values| self.backend.upload_vector(values)?.into_resident_shared());
         let table = upload(a.rel_table)?.ok_or("flash window: relative table empty")?;
@@ -189,9 +207,10 @@ impl<'b, 'd> Device<'b, 'd> {
             || a.made.is_some_and(|m| m.words != heads * taps) || a.plane_word.checked_add(width / 2).is_none_or(|end| end > plane.words) {
             return Ok(None);
         }
-        for v in [a.product, a.step, &*ring, &*plane].into_iter().chain(a.made) {
+        for v in [a.product, a.step, &*ring].into_iter().chain(a.made) {
             if v.vector.is_segmented() || v.vector.len() != v.words { return Ok(None); }
         }
+        if plane.vector.len() < plane.words || !plane.vector.writable_from(a.plane_word) { return Ok(None); }
         if Rc::get_mut(&mut ring.vector).is_none() || Rc::get_mut(&mut plane.vector).is_none() { return Ok(None); }
         for v in [a.product, a.step, &*ring, &*plane].into_iter().chain(a.made) { self.ready(v)?; }
         let stamp = self.cost.start(self.backend);

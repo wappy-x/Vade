@@ -271,6 +271,26 @@ impl Session {
         if let Some(service) = service && service.is_alone() && options.mtp_explicit && options.mtp > service.max_depth {
             return Err(service.draft_refusal());
         }
+        let is_loop_service = service.is_some_and(TextService::is_alone);
+        let context = if is_loop_service && !options.supplied_options.contains("--context") {
+            crate::cli::INKLING_CONTEXT
+        } else {
+            options.context
+        };
+        let output = if is_loop_service && !options.output_explicit {
+            crate::cli::inkling_output(context)
+        } else {
+            options.output
+        };
+        if !is_loop_service && options.fp4_local && context > crate::cli::FP4_CONTEXT_LIMIT {
+            return Err("FP4-Local context is limited to 262144 tokens. Set --context 4096..262144.".into());
+        }
+        if !is_loop_service && options.fp4_local && output > crate::cli::FP4_OUTPUT_LIMIT {
+            return Err("FP4-Local output is limited to 16384 tokens. Set --output 1024..16384.".into());
+        }
+        if output > context {
+            return Err("Output must fit in context. Set --output no larger than --context.".into());
+        }
         if machines.len() % group != 0 {
             return Err("Each pair needs two machines. Give --replicas N --pairs 2N machines.".into());
         }
@@ -366,8 +386,8 @@ impl Session {
             mtp: if options.diagnostic_unqualified_text && !options.mtp_explicit { if options.draft_fall.is_some() {0} else {service.map(|item| item.default_depth).unwrap_or(options.mtp)} } else {options.mtp},
             mtp_explicit: options.mtp_explicit || !options.fp4_local || (options.diagnostic_unqualified_text && service.is_some()),
             fp4_local: options.fp4_local,
-            context: options.context,
-            output: options.output,
+            context,
+            output,
             chats: options.chats,
             admitted_chats: None,
             fast_prompts: options.fast_prompts,
@@ -670,9 +690,10 @@ impl Session {
             || session.replica_sparks == 0
             || (session.replica_sparks > 1 && (!session.replicas || !session.ranks.len().is_multiple_of(session.replica_sparks)))
             || session.mtp > if session.diagnostic_unqualified_text { crate::text_service::TextService::pair().max_depth } else { 3 }
-            || !(4096..=262144).contains(&session.context)
+            || session.context < 4096
             || !((if session.diagnostic_unqualified_text {1} else {1024})..=session.context).contains(&session.output)
-            || [session.chats, session.admitted_chats].into_iter().flatten().any(|chats| !(1..=32).contains(&chats))
+            || session.chats.is_some_and(|chats| !(1..=32).contains(&chats))
+            || session.admitted_chats == Some(0)
             || (!session.supports_output && session.output != session.context.min(8192))
             || session.memory_bytes == Some(0)
             || matches!((session.memory_bytes, session.cache_bytes), (Some(memory), Some(cache)) if cache >= memory)
@@ -689,7 +710,7 @@ impl Session {
 /// FP4-Local prints `flashnext ready ... active=N`.
 /// The one-Spark loop text service prints `text_service ... ready ... path=loop_driver ... max_chats=N`
 /// (`loop_decoder/service/start.rs`). The two-Spark text service's `max_chats` is not read, as on main.
-/// None when that count is missing or outside 1..=32.
+/// None when that count is missing or zero.
 pub fn admitted_chats(log: &str) -> Option<usize> {
     let line = log.lines().rev().find(|line| {
         line.contains("flashnext ready ")
@@ -697,7 +718,7 @@ pub fn admitted_chats(log: &str) -> Option<usize> {
     })?;
     let key = if line.contains("flashnext ready ") { "active=" } else { "max_chats=" };
     line.split_whitespace().find_map(|word| word.strip_prefix(key))?
-        .parse().ok().filter(|chats| (1..=32).contains(chats))
+        .parse().ok().filter(|chats| *chats >= 1)
 }
 
 pub(crate) fn dual_rail_enabled() -> Result<bool, String> {

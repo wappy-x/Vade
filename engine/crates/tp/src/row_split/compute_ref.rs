@@ -12,6 +12,15 @@ impl<C:Compute> Compute for &C {
     fn vector_pool_counts(&self)->Option<(usize,usize,usize)> {(**self).vector_pool_counts()}
     type Value=C::Value;type Pass=C::Pass;
     fn state_allocations(&self,v:&C::Value,out:&mut Vec<(usize,usize)>)->bool {(**self).state_allocations(v,out)}
+    fn plane_page_bytes(&self)->usize {(**self).plane_page_bytes()}
+    fn plane_alloc(&self,maximum_words:usize,initial_words:usize)->Result<C::Value> {(**self).plane_alloc(maximum_words,initial_words)}
+    fn plane_grow(&self,plane:&mut C::Value,needed_words:usize,maximum_words:usize)->Result<()> {(**self).plane_grow(plane,needed_words,maximum_words)}
+    fn plane_fork(&self,source:&C::Value,committed_words:usize,needed_words:usize,maximum_words:usize)->Result<C::Value> {(**self).plane_fork(source,committed_words,needed_words,maximum_words)}
+    fn plane_trim(&self,plane:&mut C::Value,keep_words:usize)->Result<()> {(**self).plane_trim(plane,keep_words)}
+    fn plane_prefix_allocations(&self,v:&C::Value,committed_words:usize,out:&mut Vec<(usize,usize)>)->bool {(**self).plane_prefix_allocations(v,committed_words,out)}
+    fn fund_kv_pages(&self,bytes:usize) {(**self).fund_kv_pages(bytes);}
+    fn kv_reserve_cohort(&self,chats:usize) {(**self).kv_reserve_cohort(chats);}
+    fn kv_conversation_ended(&self,bytes:usize) {(**self).kv_conversation_ended(bytes);}
     fn plan_cost(&self,name:&str,ns:u128) {(**self).plan_cost(name,ns)}
     fn serving_trace(&self)->bool {(**self).serving_trace()}
     fn profile_tick_begin(&self,tick:u64) {(**self).profile_tick_begin(tick)}

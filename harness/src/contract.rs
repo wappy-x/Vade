@@ -601,6 +601,7 @@ pub(crate) struct Contract {
     automatic_reservation: bool,
     snapshot_capabilities: bool,
     pub(crate) tool_recovery: bool,
+    pub(crate) forced_tool_choice_unsupported: bool,
 }
 impl Contract {
     pub(crate) fn native(options: GenerationOptions) -> Self {
@@ -813,7 +814,9 @@ impl Contract {
         }
         // Recovery changes only an omitted tool policy, never an explicit
         // caller policy or sampling controls. Plain chat/fallback stays intact.
-        if self.tool_recovery && !self.options.disable_tools
+        if self.tool_recovery
+            && !self.forced_tool_choice_unsupported
+            && !self.options.disable_tools
             && caps.is_some_and(|caps| caps.tools)
             && value.get("tool_choice").is_none()
             && value.get("tools").and_then(|v| v.array()).is_some_and(|mut tools| tools.next().is_some())

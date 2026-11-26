@@ -2,35 +2,41 @@ $ vade launch --help
 Install if needed, start Vade on this Spark, then open chat.
 
 Examples:
+  vade launch inkling
   vade launch
   vade launch --context 262144 --output 16384
   vade launch --dry-run
 
-Usage: vade launch [OPTIONS]
+Usage: vade launch [MODEL] [OPTIONS]
 
 Options:
-  --context N       Context window in tokens, 4096..262144 (default 32768)
-  --output N        Output limit in tokens, 1024..16384 (default 8192, or the
-                    context if smaller)
-  --mtp N           Drafting depth 0..3; 0 turns drafting off (default: the
-                    engine chooses)
+  --context N       Context window in tokens, 4096 or more (Inkling default
+                    524288; FP4-Local 4096..262144, default 32768)
+  --output N        Output limit in tokens (Inkling default 16384 up to context;
+                    FP4-Local 1024..16384, default 8192)
+  --mtp N           Drafting depth (Inkling 0..7, default 7; FP4-Local 0..3,
+                    engine chooses; 0 turns drafting off)
   --memory-bytes N  Memory budget for this Spark, in bytes
   --cache-bytes 0   Turn the retained prompt cache off
   --dry-run         Show what would happen; change nothing
 
 Notes:
-  - Finds the FP4-Local checkpoint, saves defaults, installs if missing and
-    starts the engine. It opens chat when standard input is a terminal. Run it
-    again to attach.
-  - Local defaults match vade up from a controller: context 32768, output 8192
-    (or the context if smaller), drafting depth chosen by the engine.
+  - With inkling (or inkling-2-mini), starts Inkling 2 Mini on this Spark with
+    524288 context (up to the checkpoint limit), 16384 output, MTP 7 drafting
+    and prompt cache on. Checks ~/models/thinkingmachines/Inkling-2-Mini first,
+    then the read-only Hugging Face cache.
+  - Without a model alias, finds the FP4-Local checkpoint, saves defaults,
+    installs if missing and starts the engine. Opens chat when standard input is
+    a terminal. Run it again to attach.
+  - FP4-Local defaults match vade up from a controller: context 32768, output
+    8192 (or the context if smaller), drafting depth chosen by the engine.
   - If the engine refuses the default or saved context for memory, launch tries
     smaller sizes from 32768, 16384, 8192 and 4096. It saves the first size that
     starts. A refused explicit --context is an error.
-  - The checkpoint comes from a VADE_MODELS that names a checkpoint folder (it
-    replaces the saved one), then the saved config, then any other VADE_MODELS,
-    then the FP4-Local checkpoint under ~/models; launch asks if it is missing.
-    Files install under ~/.vade (or VADE_HOME).
+  - The checkpoint comes from an explicit alias (inkling or qwen), a VADE_MODELS
+    that names a checkpoint folder (it replaces the saved one), then the saved
+    config, then any other VADE_MODELS, then ~/models; launch asks if it is
+    missing. Files install under ~/.vade (or VADE_HOME).
   - Local launch does not take --chats or a positive --cache-bytes. See vade up
     --help for memory options. Unset VADE_CONFIG to use the local setup.
   - Launch also takes --fp4-local, --sparks 1 and --fast-prompts from vade up;

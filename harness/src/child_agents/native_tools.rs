@@ -58,8 +58,16 @@ pub fn native_http_factory_with_generation(
             name: name.clone(),
             store: None,
         })));
+        let mut child_generation = generation;
+        child_generation.context_limit = Some(
+            child_generation
+                .context_limit
+                .map_or(context.quota.tokens, |limit| limit.min(context.quota.tokens)),
+        );
         Ok(ChildWorker {
-            model: Box::new(HttpChildModel::new(&endpoint)?.with_generation_options(generation)),
+            model: Box::new(
+                HttpChildModel::new(&endpoint)?.with_generation_options(child_generation),
+            ),
             tools: Box::new(NativeTools {
                 id: context.id,
                 uncertain: false,

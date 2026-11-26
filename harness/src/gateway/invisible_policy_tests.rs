@@ -354,3 +354,33 @@ fn messages_keys_follow_the_system_prompt_and_the_claude_code_session() {
     assert_eq!(key(view(a.as_bytes()), &session("s1")), key(view(b.as_bytes()), &session("s1")));
     assert_ne!(key(view(a.as_bytes()), &session("s1")), key(view(a.as_bytes()), &session("s2")));
 }
+
+#[test]
+fn moving_anthropic_cache_control_between_turns_keeps_the_same_cache_key() {
+    let turn1 = br#"{"model": "mock", "system": [{"type": "text", "text": "rules", "cache_control": {"type": "ephemeral"}}], "messages": [{"role": "user", "content": [{"type": "text", "text": "first", "cache_control": {"type": "ephemeral"}}]}]}"#;
+    let turn2 = br#"{"model": "mock", "system": [{"type": "text", "text": "rules", "cache_control": {"type": "ephemeral"}}], "messages": [{"role": "user", "content": [{"type": "text", "text": "first"}]}, {"role": "assistant", "content": "ok"}, {"role": "user", "content": [{"type": "text", "text": "second", "cache_control": {"type": "ephemeral"}}]}]}"#;
+    let runtime = configured(Flags { stable: true, ..Flags::default() });
+    let p1 = runtime.prepare("POST", "/v1/messages", &head(), turn1);
+    let p2 = runtime.prepare("POST", "/v1/messages", &head(), turn2);
+    let k1 = text(view(&p1.body).unwrap(), "prompt_cache_key");
+    let k2 = text(view(&p2.body).unwrap(), "prompt_cache_key");
+    assert_eq!(k1, k2, "moving cache_control off turn 1 must not change prompt_cache_key even with spaced JSON");
+    assert_eq!(
+        view(&p1.body).unwrap().get("messages").unwrap().raw(),
+        view(turn1).unwrap().get("messages").unwrap().raw(),
+        "wire bytes must remain unchanged"
+    );
+}
+
+#[test]
+fn stable_prefix_covers_bare_alias_routes() {
+    let runtime = configured(Flags { stable: true, ..Flags::default() });
+    for path in ["/chat/completions", "/responses", "/messages"] {
+        let field = if path == "/responses" { "input" } else { "messages" };
+        let body = format!(r#"{{"model":"mock","{field}":[{{"role":"user","content":"hi"}}],"temperature":0}}"#);
+        let prepared = runtime.prepare("POST", path, &head(), body.as_bytes());
+        let patched = view(&prepared.body).unwrap();
+        assert_eq!(patched.get("cache").unwrap().raw(), "true", "{path}");
+        assert!(text(patched, "prompt_cache_key").is_some_and(|k| k.starts_with("vade-")), "{path}");
+    }
+}

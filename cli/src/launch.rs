@@ -63,11 +63,11 @@ pub fn root() -> Result<PathBuf, String> {
 
 /// The engine arguments of the local one-Spark start, and the line the start prints. FP4-Local: `--fp4-local` and
 /// the decode fuse, no line. A looped block checkpoint: its text service, which starts only behind
-/// `--diagnostic-unqualified-text` and passes `--mtp N` (0 when unset, or the validated explicit depth); whenever the
-/// start adds that option it also says so in plain words (`model::loop_preview_line`), and with no such line it does
-/// not add the option.
+/// `--diagnostic-unqualified-text` and passes `--mtp N` (the checkpoint's default depth — `7` for Inkling 2 Mini —
+/// when unset, or the validated explicit depth); whenever the start adds that option it also says so in plain words
+/// (`model::loop_preview_line`), and with no such line it does not add the option.
 pub(crate) fn local_start(ptx: &str, model: &Path, context: u32, port: &str, decode_fuse: bool, loop_text: bool, mtp: Option<u32>) -> Result<(Vec<String>, Option<String>), String> {
-    let depth = if loop_text { mtp.unwrap_or(0) } else { 0 };
+    let depth = if loop_text { mtp.unwrap_or_else(|| model::local_default_mtp(model)) } else { 0 };
     let note = if loop_text { Some(model::loop_preview_line(model, depth).ok_or("This engine cannot bind this looped checkpoint for a preview start.")?) } else { None };
     Ok((local_engine_args(ptx, &model.to_string_lossy(), context, port, decode_fuse, note.is_some(), depth), note))
 }
@@ -141,7 +141,15 @@ pub(crate) fn saved_settings() -> Result<Option<(PathBuf, Vec<(&'static str, Str
     use crate::evals::json::Value;
     let root = root()?;
     let Some(config) = Config::load(&root)? else { return Ok(None) };
-    let drafting = match config.mtp() { None => "engine default".into(), Some(0) => "off (--mtp 0)".into(), Some(depth) => format!("depth {depth}") };
+    let drafting = match config.mtp() {
+        None if model::loop_text(&config.model) => {
+            let depth = model::local_default_mtp(&config.model);
+            if depth == 0 { "off (default)".into() } else { format!("depth {depth} (default)") }
+        }
+        None => "engine default".into(),
+        Some(0) => "off (--mtp 0)".into(),
+        Some(depth) => format!("depth {depth}"),
+    };
     Ok(Some((root.join("config"), vec![
         ("Model", config.model.display().to_string(), "model_path", config.model.to_string_lossy().as_ref().into()),
         ("Size", format!("{} bytes", config.model_bytes), "model_bytes", Value::Int(config.model_bytes as i64)),
@@ -318,6 +326,7 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
                 Command::Sessions(_) => "List, export or delete saved chat sessions",
                 Command::Logs => "Show the local engine log",
                 Command::Install => "Detect this Spark and model; save defaults; install locally; prepare the private GPU startup cache",
+                Command::Up(ref options) if options.is_inkling() => "Start or attach to the local Inkling 2 Mini engine; use saved defaults or discover the checkpoint",
                 Command::Up(_) => "Start or attach to the local FP4-Local engine; use saved defaults or detect a first setup",
                 Command::Update => "Refresh local engine and chat from VADE_BUNDLE or the current source checkout; stop first with vade down",
                 Command::Doctor => "Check this Spark, driver, memory, disk, model, installed files and the running engine",
@@ -333,8 +342,12 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
             }
             output::line(format_args!("Local config: {}", self.root.join("config").display()))?;
             if let Command::Up(options) | Command::Launch(options) = &command {
-                // A start keeps the saved limits unless a flag overrides them.
-                let saved = Config::load(&self.root)?;
+                // A start keeps the saved limits unless a flag overrides them or another model alias is named.
+                let saved = Config::load(&self.root)?.filter(|config| match options.model.as_deref() {
+                    None => true,
+                    Some(repo) => model::named_alias_path(&self.home, repo, &self.root)
+                        .map_or_else(|| model::loop_text(&config.model) == options.is_inkling(), |path| path == config.model),
+                });
                 let planned = saved.as_ref().map(|config| config.planned(options));
                 let context = if options.supplied_options.contains("--context") { format!("{} (explicit)", options.context) }
                     else if let Some(config) = &planned { format!("{} (saved; lowered only on engine refusal)", config.context) }
@@ -392,17 +405,34 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
                     // in Prepare before the first start.
                     let (mut config, chosen) = if let Some(record) = &prior {
                         let config = configured.ok_or("Run vade down before repairing the local config.")?;
-                        // A start (not vade install) that names another checkpoint folder cannot attach to this engine.
-                        if command != Command::Install
-                            && let Some(requested) = model::named_checkpoint(&self.home).filter(|path| *path != config.model) {
-                            return Err(format!("The running engine serves {}, but VADE_MODELS selects {}. Run vade down, then run vade up again to start that checkpoint.",
-                                text::terminal_text(&config.model.to_string_lossy()), text::terminal_text(&requested.to_string_lossy())));
+                        // A start (not vade install) that names another model alias or checkpoint folder cannot attach to this engine.
+                        if command != Command::Install {
+                            if let Some(repo) = &options.model {
+                                let requested = model::named_alias_path(&self.home, repo, &self.root);
+                                let differs = requested.as_deref().map_or_else(
+                                    || model::loop_text(&config.model) != options.is_inkling(),
+                                    |path| path != config.model,
+                                );
+                                if differs {
+                                    let chosen = requested.as_ref().map_or_else(|| repo.clone(), |p| p.to_string_lossy().into_owned());
+                                    return Err(format!("The running engine serves {}, but this command selects {}. Run vade down, then run vade up again to start that checkpoint.",
+                                        text::terminal_text(&config.model.to_string_lossy()), text::terminal_text(&chosen)));
+                                }
+                            } else if let Some(requested) = model::named_checkpoint(&self.home).filter(|path| *path != config.model) {
+                                return Err(format!("The running engine serves {}, but VADE_MODELS selects {}. Run vade down, then run vade up again to start that checkpoint.",
+                                    text::terminal_text(&config.model.to_string_lossy()), text::terminal_text(&requested.to_string_lossy())));
+                            }
                         }
                         (config.check_running_options(&options, record)?, false)
                     } else {
-                        let saved = configured.as_ref().map(|config| config.model.as_path());
-                        let saved = if command == Command::Install { saved } else { model::start_saved(&self.home, saved) };
-                        let (model, identity) = self.detection(saved, if installed.is_some() { 0 } else { INSTALL_SPACE })?;
+                        let install_space = if installed.is_some() { 0 } else { INSTALL_SPACE };
+                        let (model, identity) = if let Some(repo) = &options.model {
+                            self.detection_named(repo, install_space)?
+                        } else {
+                            let saved = configured.as_ref().map(|config| config.model.as_path());
+                            let saved = if command == Command::Install { saved } else { model::start_saved(&self.home, saved) };
+                            self.detection(saved, install_space)?
+                        };
                         let configured_phase = phase("Config", "choose and save local defaults")?;
                         let previous = configured.as_ref().map(Config::display);
                         let changed_model = configured.as_ref().is_some_and(|c| c.model != model.path);
@@ -631,6 +661,21 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
         Ok((model, identity))
     }
 
+    /// Resolve a model named explicitly via a short alias (such as `vade up inkling`),
+    /// checking `~/models/<repo>` first and then the read-only Hugging Face Hub cache.
+    fn detection_named(
+        &mut self,
+        repo: &str,
+        install_space: u64,
+    ) -> Result<(model::Model, detect::Identity), String> {
+        let start = phase("Detect", "read this Spark and the model on disk")?;
+        let model = model::discover_named(&self.home, repo, Some(&self.root))?;
+        let identity = self.identify(&model, install_space)?;
+        output::text(format_args!("{}", identity.display(Some(&model.path))))?;
+        done("Detect", start)?;
+        Ok((model, identity))
+    }
+
     /// The checks `vade detect` makes with and without `--json`: this Spark,
     /// an FP4-Local checkpoint, and room for it.
     fn identify(&mut self, model: &model::Model, install_space: u64) -> Result<detect::Identity, String> {
@@ -763,9 +808,10 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
                         // Saved only after the lowered start succeeded; a total failure keeps the original.
                         text::atomic_write(&self.root.join("config"), &config.display())?;
                         let lowered = if config.output < first_output { format!("; output {first_output} lowered to {}", config.output) } else { String::new() };
+                        let default_context = if loop_text { crate::cli::INKLING_CONTEXT } else { crate::cli::FP4_CONTEXT };
                         output::line(format_args!("Context {} selected (the engine refused {} for memory){lowered}; saved; run vade launch --context {first} to try {} again.",
                             config.context, refused.iter().map(u32::to_string).collect::<Vec<_>>().join(" and "),
-                            if first == crate::cli::FP4_CONTEXT { "the default" } else { "it" }))?;
+                            if first == default_context { "the default" } else { "it" }))?;
                     }
                     return Ok(record);
                 }
@@ -857,6 +903,7 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
                     self.root.join("state/cache").to_string_lossy().into_owned(),
                 ),
             ]);
+            let disable_prompt_keep = loop_text && prefix_cache.as_deref() == Some("0");
             if let Some(value) = prefix_cache {
                 request.insert("env.VADE_FLASHNEXT_PREFIX_CACHE".into(), value);
             }
@@ -867,8 +914,11 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
                 );
             }
             config.engine_env(&mut request);
-            let (args, note) = local_start(required(artifacts, "ptx")?, &config.model, config.context,
+            let (mut args, note) = local_start(required(artifacts, "ptx")?, &config.model, config.context,
                 &config.port.to_string(), config.decode_fuse(), loop_text, config.mtp())?;
+            if disable_prompt_keep {
+                args.push("--no-prompt-keep".into());
+            }
             if let Some(note) = note { output::line(format_args!("{note}"))?; }
             for (index, value) in args.into_iter().enumerate() {
                 request.insert(format!("arg.{index}"), value);
@@ -1099,6 +1149,7 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
         // and the engine hashes in the background, so nothing is hashed here.
         let result = match model {
             None => self.worker(&record, "warm-ptx", request, false),
+            Some(model) if model::loop_text(model) => self.worker(&record, "warm-ptx", request, false),
             Some(model) => self.stage_manifest(model).and_then(|manifest| {
                 if supplied_manifest(model)?.is_none() {
                     output::line(format_args!("Prepare: no checksum list for this checkpoint ({}.sha256 beside it, or manifest.sha256 inside it). Vade cannot check its files against the published hashes. To check them, see Check the files in docs/INSTALL.md.",
@@ -1139,7 +1190,7 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
 
     fn chat(&mut self, config: &Config, artifacts: &Fields, record: &Fields, options: &crate::cli::ChatOptions) -> Result<(), String> {
         let context = record.get("context_tokens").and_then(|value| value.parse::<u32>().ok())
-            .filter(|value| (4096..=262144).contains(value))
+            .filter(|value| *value >= 4096)
             .ok_or("Invalid or missing recorded context; run vade down, then vade launch.")?;
         if context < chat::AGENT_MIN_CONTEXT && *options != crate::cli::ChatOptions::default() {
             return Err(format!("Context {context} is below the agent minimum of {}, so vade chat opens direct text chat, which saves no transcript. --resume and --name need the agent.", chat::AGENT_MIN_CONTEXT));
@@ -1310,3 +1361,5 @@ fn open_regular(path: &Path) -> std::io::Result<fs::File> {
 mod tests;
 #[cfg(test)]
 mod health_tests;
+#[cfg(test)]
+mod inkling_tests;

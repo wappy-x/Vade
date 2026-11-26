@@ -220,6 +220,10 @@ impl<'a,C:Compute,W:Weights<C>> Driver<'a,C,W> {
     }
     /// The state of a new chat.
     pub fn clean(&self)->Result<State<C::Value>> {state::clean(self.run.compute,&self.layouts)}
+    /// Ensure straight KV planes of `state` are mapped for at least `needed_tokens` tokens (capped at `capacity`).
+    pub fn ensure_capacity(&self,state:&mut State<C::Value>,needed_tokens:usize)->Result<()> {
+        state::ensure_capacity(self.run.compute,&self.layouts,state,needed_tokens)
+    }
     /// Give every ring of `state` a value of its own. No word of the state changes.
     ///
     /// Why: after a step of many chats the rings of a chat are ranges of values that hold the rings of all chats of
@@ -455,10 +459,23 @@ impl<'a,C:Compute,W:Weights<C>> Driver<'a,C,W> {
         for (number,chat) in chats.iter().enumerate() {
             let refuse=|ok:bool,why:&str|if ok {Ok(())} else {Err(format!("loop decoder: chat {number} of the step: {why}"))};
             refuse(chat.state.visits.len()==self.layouts.len(),"the state differs from the visits of the description")?;
-            // A state of a driver with another capacity has planes of another size (the step row limit changes none).
+            // A state of a driver with another capacity has planes of another size. So has a state of a driver whose
+            // step row limit gives its window rings other spare rows (`state::spare_rows`).
+            // Straight KV planes may be paged on backends with `plane_page_bytes() > 0` (`plane_rows_for` multiples).
+            let page_bytes=c.plane_page_bytes();
+            let end_tokens=chat.state.position.saturating_add(chat.tokens.len() as u64);
             refuse(chat.state.visits.iter().zip(&self.layouts).all(|(visit,layout)|{
-                let plane=layout.rows*layout.row_words;
-                c.words(&visit.keys)==plane && c.words(&visit.values)==plane && Ring::ALL.iter().all(|&ring|{let (channels,taps)=layout.ring_size(ring);c.words(&visit.rings[ring as usize])==channels*taps})
+                let max_words=layout.rows*layout.row_words;
+                let planes_ok=if layout.ring || page_bytes==0 {
+                    c.words(&visit.keys)==max_words && c.words(&visit.values)==max_words
+                } else {
+                    let (kw,vw)=(c.words(&visit.keys),c.words(&visit.values));
+                    let min_words=layout.plane_rows_for(end_tokens.min(layout.rows as u64) as usize,page_bytes)*layout.row_words;
+                    let page_rows=layout.plane_rows_for(1,page_bytes);
+                    kw==vw && kw>=min_words && kw<=max_words && kw.is_multiple_of(layout.row_words)
+                        && (kw==max_words || (kw/layout.row_words).is_multiple_of(page_rows))
+                };
+                planes_ok && Ring::ALL.iter().all(|&ring|{let (channels,taps)=layout.ring_size(ring);c.words(&visit.rings[ring as usize])==channels*taps})
             }),"the state has the sizes of another driver (another capacity)")?;
             refuse(chat.state.visits.iter().all(|visit|visit.next.iter().all(Option::is_none) && visit.planes.is_none() && visit.every.iter().all(Option::is_none) && visit.written.is_none()),"a ring of the state still waits for the end of a step")?;
             refuse(!chat.tokens.is_empty(),"it has no token")?;
@@ -519,7 +536,8 @@ impl<'a,C:Compute,W:Weights<C>> Driver<'a,C,W> {
                     let key=(layout.ring,layout.window,layout.rows);
                     if !seen_layouts.contains(&key) {
                         seen_layouts.push(key);
-                        let any_wraps=rows.keeps() && layout.ring && spans.iter().any(|s|s.first+s.count as u64>layout.rows as u64);
+                        // The rule of `attention::half_rows` for the chats whose rows wait apart from their rings.
+                        let any_wraps=spans.iter().any(|&span|state::many::held_apart(layout,rows,span));
                         if !any_wraps && spans.len()>=2 {
                             let all_pos:Vec<u64>=spans.iter().flat_map(|s|(0..s.count).map(move |r|s.first+r as u64)).collect();
                             for chunk in all_pos.chunks(spark_gpu_probe::flash_window::FW_SPLIT_ROWS_MAX) {

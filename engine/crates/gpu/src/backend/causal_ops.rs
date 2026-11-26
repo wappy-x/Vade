@@ -69,9 +69,20 @@ impl<'a> Backend<'a> {
         let weights=if bf16 {weights/2} else {weights};
         let mut addresses=[4u64;4];
         for (i,(vector,count)) in input.into_iter().zip(lengths).enumerate() {
-            match vector {Some(v) if count>0=>{self.check_vector(v,count)?;
-                if v.is_segmented() {return Err("causal operation input must be contiguous".into());}addresses[i]=v.device_address();},
-                None if count==0=>{},_=>return Err("causal operation input count differs".into())}
+            let allow_segmented_prefix = i == 1 && matches!(shape.op, Op::WindowScores | Op::WindowValues);
+            match vector {
+                Some(v) if count > 0 && allow_segmented_prefix => {
+                    self.check_vector_prefix(v, count)?;
+                    addresses[i] = v.device_address();
+                }
+                Some(v) if count > 0 => {
+                    self.check_vector(v, count)?;
+                    if v.is_segmented() { return Err("causal operation input must be contiguous".into()); }
+                    addresses[i] = v.device_address();
+                }
+                None if count == 0 => {}
+                _ => return Err("causal operation input count differs".into()),
+            }
         }
         let address=match weight {Some(w) if weights>0=>{self.check_vector(w,weights)?;
             if w.is_segmented() {return Err("causal operation weight must be contiguous".into());}w.device_address()},

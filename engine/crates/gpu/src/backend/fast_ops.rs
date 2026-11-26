@@ -692,9 +692,13 @@ impl<'a> Backend<'a> {
         if self.arm_capture() { return Err("fast short conv: refused inside a stream capture".into()); }
         self.require_resident_stream()?;
         let span = |v: &DeviceVector<'_>| Span { address: v.device_address(), bytes: v.len() as u64 * 4 };
-        fast_ops::check_short_conv_form(rows, heads, dim, taps, form, bound, span(window), token_taps.map(span), addend.map(span),
-            span(fixed_taps), ring.map(|(v, first)| (span(v), first)), span(output), every.as_ref().map(|(v, first)| (span(v), *first)), kv, multi)?;
         let width = heads * dim;
+        let out_span = kv.map_or_else(
+            || span(output),
+            |kv| Span { address: output.device_address(), bytes: (kv.plane_rows * (width / 2)) as u64 * 4 },
+        );
+        fast_ops::check_short_conv_form(rows, heads, dim, taps, form, bound, span(window), token_taps.map(span), addend.map(span),
+            span(fixed_taps), ring.map(|(v, first)| (span(v), first)), out_span, every.as_ref().map(|(v, first)| (span(v), *first)), kv, multi)?;
         let history = if ring.is_some() { 0 } else { taps - 1 };
         self.check_vector(window, (rows + history) * width)?;
         if let Some((v, _)) = ring {
@@ -705,9 +709,24 @@ impl<'a> Backend<'a> {
         if let Some(tt) = token_taps { self.check_vector(tt, rows * heads * taps)?; if tt.is_segmented() { return Err("fast short conv: token_taps segmented".into()); } }
         if let Some(ad) = addend { self.check_vector(ad, rows * width)?; if ad.is_segmented() { return Err("fast short conv: addend segmented".into()); } }
         self.check_vector(fixed_taps, width * taps)?;
-        self.check_vector(output, kv.map_or(rows * width, |kv| kv.plane_rows * (width / 2)))?;
         if window.is_segmented() || fixed_taps.is_segmented() { return Err("fast short conv: operand must be contiguous".into()); }
-        if output.is_segmented() || !output.writable_from(0) { return Err("fast short conv: output requires private contiguous storage".into()); }
+        if let Some(kv) = kv {
+            self.check_vector_prefix(output, kv.plane_rows * (width / 2))?;
+            let write_start = if kv.first + rows <= kv.plane_rows { kv.first * (width / 2) } else { 0 };
+            if !output.writable_from(write_start) {
+                return Err("fast short conv: KV plane is shared".into());
+            }
+            let full_out = span(output);
+            let reads = [Some(span(window)), token_taps.map(span), addend.map(span), Some(span(fixed_taps)), ring.map(|(v, _)| span(v)), every.as_ref().map(|(v, _)| span(v))];
+            if reads.iter().flatten().any(|r| full_out.meets(*r)) {
+                return Err("fast short conv: KV plane overlaps operand".into());
+            }
+        } else {
+            self.check_vector(output, rows * width)?;
+            if output.is_segmented() || !output.writable_from(0) {
+                return Err("fast short conv: output requires private contiguous storage".into());
+            }
+        }
         if let Some((v, _)) = &every {
             self.check_vector(v, rows * taps * width)?;
             if v.is_segmented() || !v.writable_from(0) { return Err("fast short conv: kept rings require private contiguous storage".into()); }
@@ -1150,17 +1169,18 @@ impl<'a> Backend<'a> {
             }
         }
         let row_words = width / 2;
-        let plane_words = plane_rows.checked_mul(row_words).ok_or("fast kv direct: plane overflow")?;
         let mut ring_slots = 0u64;
-        for (r, &(kr, vr, rs, kp, vp, _)) in chats.iter().enumerate() {
+        for (r, &(kr, vr, rs, kp, vp, ps)) in chats.iter().enumerate() {
             for ring in [kr, vr] {
                 self.check_vector(ring, taps * width)?;
                 if ring.is_segmented() { return Err("fast kv direct: chat ring segmented".into()); }
             }
+            let min_words = ps.checked_add(1).and_then(|n| n.checked_mul(row_words)).ok_or("fast kv direct: plane overflow")?;
+            let write_word = ps.checked_mul(row_words).ok_or("fast kv direct: plane overflow")?;
             for plane in [kp, vp] {
-                self.check_vector(plane, plane_words)?;
-                if plane.is_segmented() || !plane.writable_from(0) {
-                    return Err("fast kv direct: chat plane requires private contiguous storage".into());
+                self.check_vector_prefix(plane, min_words)?;
+                if !plane.len().is_multiple_of(row_words) || !plane.writable_from(write_word) {
+                    return Err("fast kv direct: chat plane requires private aligned storage".into());
                 }
             }
             ring_slots |= (rs as u64) << (4 * r);

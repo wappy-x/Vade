@@ -7,13 +7,13 @@ const TRANSPORT: &str = "One Spark needs no fabric or RDMA; linked Sparks use RD
 const GPU_BUSY: &str = "Only a running compute app or power draw of at least 30 W makes a GPU busy; a stale utilization reading is reported and never blocks.";
 const DRY_RUN: (&str, &str) = ("--dry-run", "Show what would happen; change nothing");
 const API_KEY: (&str, &str) = ("--api-key-file PATH", "Bearer credential file (or VADE_API_KEY_FILE)");
-const CONTEXT: (&str, &str) = ("--context N", "Context window in tokens, 4096..262144 (default 32768)");
-const OUTPUT: (&str, &str) = ("--output N", "Output limit in tokens, 1024..16384 (default 8192, or the context if smaller)");
-/// `vade up`: every start it can make. A local start takes 0..3 ([`MTP_LOCAL`]).
-/// A two-Spark text service takes 0..7. A plan that declares one Spark uses 0.
-const MTP: (&str, &str) = ("--mtp N", "Drafting depth 0..3; 0 turns drafting off. Unset: the engine chooses, and controller FP8 passes 2. From a controller with --diagnostic-unqualified-text, a two-Spark text service takes 0..7 and loads 3 when this and MTP are unset; a plan that declares one Spark uses 0");
-/// `vade launch`: a local start on this Spark. It has no text service and refuses a depth above 3.
-const MTP_LOCAL: (&str, &str) = ("--mtp N", "Drafting depth 0..3; 0 turns drafting off (default: the engine chooses)");
+const CONTEXT: (&str, &str) = ("--context N", "Context window in tokens, 4096 or more (Inkling default 524288; FP4-Local 4096..262144, default 32768)");
+const OUTPUT: (&str, &str) = ("--output N", "Output limit in tokens (Inkling default 16384 up to context; FP4-Local 1024..16384, default 8192)");
+/// `vade up`: every start it can make. FP4-Local takes 0..3. Inkling 2 Mini takes 0..7 (default 7).
+/// A two-Spark text service takes 0..7 and loads 3 when unset.
+const MTP: (&str, &str) = ("--mtp N", "Drafting depth (Inkling 0..7, default 7; FP4-Local 0..3, engine chooses; controller FP8 passes 2; 0 turns drafting off). From a controller with --diagnostic-unqualified-text, a two-Spark text service takes 0..7 and loads 3 when this and MTP are unset; a one-Spark plan uses its checkpoint default");
+/// `vade launch`: local start on this Spark. FP4-Local takes 0..3; `vade launch inkling` takes 0..7 (default 7).
+const MTP_LOCAL: (&str, &str) = ("--mtp N", "Drafting depth (Inkling 0..7, default 7; FP4-Local 0..3, engine chooses; 0 turns drafting off)");
 /// The README's model command. It stays on one line, wider than [`style::WIDTH`], so it pastes as it is.
 pub const PINNED_PULL: &str = "vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a6887e18c089fdea8509a33e63429a3300";
 
@@ -36,14 +36,18 @@ fn top(on: bool) -> String {
         let rows: Vec<(&str, String)> = rows.iter().map(|(name, text)| (*name, (*text).to_owned())).collect();
         format!("{}\n{}\n", heading(name), style::table_at(&rows, 2, width))
     };
-    let mut out = format!("{} runs Qwen3.8 Flash-Next on your DGX Spark, as FP4-Local or FP8.\n\n{}\n  {PINNED_PULL}\n", style::style(Token::Title, "Vade", on), heading("Examples:"));
+    let mut out = format!("{} runs Inkling 2 Mini and Qwen3.8 Flash-Next on your DGX Spark.\n\n{}\n", style::style(Token::Title, "Vade", on), heading("Examples:"));
     out += &style::table(&[
-        ("", "Download the model and check every file".into()),
-        ("vade up", "Start the engine on this Spark".into()),
+        ("vade pull inkling", "Download Inkling 2 Mini (pinned) and check every file".into()),
+        ("vade up inkling", "Start Inkling 2 Mini (512K context, MTP 7, cache on)".into()),
+        ("vade verify", "Prove 0-diff bit-exactness, drafting ON vs OFF".into()),
+        ("vade connect codex", "Connect Codex, Claude Code, OpenCode, Hermes or Pi".into()),
         ("vade chat", "Chat with the running engine".into()),
         ("vade status", "See what is running".into()),
         ("vade down", "Stop what vade started".into()),
     ], 2);
+    out += &format!("  {PINNED_PULL}\n");
+    out += &style::table(&[("", "Download Qwen3.8 FP4-Local, then run vade up".into())], 2);
     out += &format!("\n{} vade <COMMAND> [OPTIONS]\n\n", heading("Usage:"));
     out += &group("Start and stop:", &[
         ("setup", "Ask which Sparks, checkpoint and model; install, start, check"),
@@ -53,6 +57,7 @@ fn top(on: bool) -> String {
     ], 8);
     out += &group("Use:", &[
         ("chat", "Chat with the running engine"),
+        ("connect", "Wire Claude Code, Codex, OpenCode, Hermes or Pi to the engine"),
         ("sessions", "List, export or delete saved chat sessions"),
         ("read", "Print a file as Markdown (text, HTML, CSV, PDF, office, data, code)"),
         ("tools", "List the tools chat offers: native and MCP"),
@@ -109,23 +114,25 @@ fn page(command: &str) -> Option<Page<'static>> {
     Some(match command {
         "launch" => Page {
             summary: "Install if needed, start Vade on this Spark, then open chat.",
-            usage: &["vade launch [OPTIONS]"],
+            usage: &["vade launch [MODEL] [OPTIONS]"],
             options: &[CONTEXT, OUTPUT, MTP_LOCAL, ("--memory-bytes N", "Memory budget for this Spark, in bytes"), ("--cache-bytes 0", "Turn the retained prompt cache off"), DRY_RUN],
-            examples: &["vade launch", "vade launch --context 262144 --output 16384", "vade launch --dry-run"],
+            examples: &["vade launch inkling", "vade launch", "vade launch --context 262144 --output 16384", "vade launch --dry-run"],
             notes: &[
-                "Finds the FP4-Local checkpoint, saves defaults, installs if missing and starts the engine. It opens chat when standard input is a terminal. Run it again to attach.",
-                "Local defaults match vade up from a controller: context 32768, output 8192 (or the context if smaller), drafting depth chosen by the engine.",
+                "With inkling (or inkling-2-mini), starts Inkling 2 Mini on this Spark with 524288 context (up to the checkpoint limit), 16384 output, MTP 7 drafting and prompt cache on. Checks ~/models/thinkingmachines/Inkling-2-Mini first, then the read-only Hugging Face cache.",
+                "Without a model alias, finds the FP4-Local checkpoint, saves defaults, installs if missing and starts the engine. Opens chat when standard input is a terminal. Run it again to attach.",
+                "FP4-Local defaults match vade up from a controller: context 32768, output 8192 (or the context if smaller), drafting depth chosen by the engine.",
                 "If the engine refuses the default or saved context for memory, launch tries smaller sizes from 32768, 16384, 8192 and 4096. It saves the first size that starts. A refused explicit --context is an error.",
-                "The checkpoint comes from a VADE_MODELS that names a checkpoint folder (it replaces the saved one), then the saved config, then any other VADE_MODELS, then the FP4-Local checkpoint under ~/models; launch asks if it is missing. Files install under ~/.vade (or VADE_HOME).",
+                "The checkpoint comes from an explicit alias (inkling or qwen), a VADE_MODELS that names a checkpoint folder (it replaces the saved one), then the saved config, then any other VADE_MODELS, then ~/models; launch asks if it is missing. Files install under ~/.vade (or VADE_HOME).",
                 "Local launch does not take --chats or a positive --cache-bytes. See vade up --help for memory options. Unset VADE_CONFIG to use the local setup.",
                 "Launch also takes --fp4-local, --sparks 1 and --fast-prompts from vade up; they change nothing here.",
             ],
         },
         "up" => Page {
             summary: "Start the engine without opening chat.",
-            usage: &["vade up [OPTIONS]"],
+            usage: &["vade up [MODEL] [OPTIONS]"],
             options: &[
-                ("--fp4-local", "Qwen3.8 Flash-Next FP4-Local (the default; optional)"),
+                ("MODEL", "Optional short alias: inkling (Inkling 2 Mini) or qwen (Qwen3.8 FP4-Local)"),
+                ("--fp4-local", "Qwen3.8 Flash-Next FP4-Local (the default without MODEL; optional)"),
                 ("--fp8", "Qwen3.8 Flash-Next FP8 on 2 or 4 Sparks; 6 Sparks start but are not covered (older spelling: --fp8-legacy): context 131072, output 65536 (or the context if smaller), drafting depth 2; output limit up to 262144"),
                 ("--sparks a,b", "The Sparks as you type them after ssh, in any order. Vade reads the cables and sets them up"),
                 ("--sparks N", "How many Sparks of your setup to start, from 1 to 24"),
@@ -136,24 +143,25 @@ fn page(command: &str) -> Option<Page<'static>> {
                 MTP, CONTEXT, OUTPUT,
                 ("--chats N", "Concurrent FP8 chats, 1..32 (controller)"),
                 ("--memory-bytes N", "Memory budget per rank, in bytes"),
-                ("--cache-bytes N", "FP8 retained prompt cache, in bytes; 0 disables it. Local FP4 and --diagnostic-unqualified-text accept only 0. A two-Spark text service keeps prompts unless this is 0; a plan that declares one Spark keeps none"),
+                ("--cache-bytes N", "FP8 retained prompt cache, in bytes; 0 disables it. Local FP4, Inkling and --diagnostic-unqualified-text accept only 0 (prompt cache is on by default)"),
                 ("--decode-fuse MODE", "on for one Spark by default; off disables the decode kernel chain"),
                 ("--diagnostic-unqualified-text", "Unqualified text diagnostics on loopback only; default off"),
                 ("--fast-prompts", "Older option, kept for scripts; it has no effect"),
                 DRY_RUN,
             ],
-            examples: &["vade up", "vade up --sparks spark-a,spark-b,spark-c,spark-d", "vade up --context 262144 --output 16384", "VADE_CONFIG=cluster.conf vade up --sparks 2"],
+            examples: &["vade up inkling", "vade up inkling --context 1048576", "vade up", "vade up --sparks spark-a,spark-b,spark-c,spark-d", "VADE_CONFIG=cluster.conf vade up --sparks 2"],
             notes: &[
+                "vade up inkling starts Inkling 2 Mini on one Spark with context 524288 (up to the checkpoint limit with --context), output 16384 (up to context), drafting depth 7 (--mtp 0 disables drafting) and prompt cache on (--cache-bytes 0 disables it). Checks ~/models/thinkingmachines/Inkling-2-Mini first, then the read-only Hugging Face Hub cache.",
                 "Default: Qwen3.8 Flash-Next FP4-Local on one Spark.",
                 crate::config::FP4_SPARKS,
                 crate::config::FP8_SPARKS,
                 "--sparks a,b is all you need for 1 to 24 Sparks. Vade checks each Spark over SSH, reads the cables, prints the chain, copies itself to each Spark and starts them. Type the Sparks in any order. Each name is what you type after ssh, or user@address.",
                 "A new list replaces the last setup: one line says so, the old file moves aside, and a running engine stops first. The same Sparks in the same order start with no new setup. After that, vade up alone starts the same Sparks, vade down stops them and vade chat opens a chat.",
-                "Local up and launch start with context 32768 and output 8192 (or the context if smaller). They reuse saved limits. A memory refusal lowers a default or saved context to a smaller size from 32768, 16384, 8192 and 4096. The first size that starts is saved. A refused explicit --context is an error. Local --chats and positive --cache-bytes are refused; --cache-bytes 0 disables retention.",
+                "Local up and launch reuse saved limits. FP4-Local starts with context 32768 and output 8192 (or the context if smaller). A memory refusal lowers a default or saved context to a smaller size from 32768, 16384, 8192 and 4096. The first size that starts is saved. A refused explicit --context is an error. Local --chats and positive --cache-bytes are refused; --cache-bytes 0 disables retention.",
                 "Controller FP4 defaults match local ones on one Spark: context 32768, output 8192 (or the context if smaller). On 2 or more Sparks in one group, a chain or a pair, the default context is 131072; if it does not fit in memory, up falls to 32768 and says so. --context 262144 requests a larger context. The engine still sets the chat count from context and memory.",
                 "Controller FP4 checks and passes on --chats and --cache-bytes, but its engine does not use them: it admits chats from memory and uses its own prefix cache setting.",
                 "A two-Spark text service (vade up --sparks 2 --diagnostic-unqualified-text) loads the predictor at depth 3 unless --mtp or MTP is set. When the model has no drafting layer, or free memory is too small for drafting, that start runs without drafting and says so. At loaded depth 3 or more, a greedy request of more than 64 tokens that names no drafting field is tried with drafting and keeps it only when it is faster. At loaded depth 1 or 2 that request decodes plain. A sampled request, a short request, mtp_depth 0 and several chats at once decode plain. --mtp 0 turns drafting off. Loading the predictor takes about 3.4 GB of device memory from the room for chats. One FP4 Spark leaves the depth to the engine. Controller FP8 passes --mtp 2 when unset. A request with draft=plain turns drafting off for that request; draft=strict asks for it when a predictor is loaded.",
-                "A diagnostic text plan that declares one Spark (vade up --sparks 1 --diagnostic-unqualified-text) runs on one Spark with no transport, passes --mtp 0 when --mtp is unset, refuses a depth above its plan's max, and keeps no prompt cache. With --replicas N, each replica is one Spark; --replicas with --pairs is refused.",
+                "A diagnostic text plan that declares one Spark (vade up --sparks 1 --diagnostic-unqualified-text) runs on one Spark with no transport, defaults to the checkpoint's max drafting depth (7 for Inkling 2 Mini; --mtp 0 disables drafting), refuses a depth above its plan's max, and keeps prompt cache on unless --cache-bytes 0 is set. With --replicas N, each replica is one Spark; --replicas with --pairs is refused.",
                 "Two FP4-Local Sparks run the tensor split, the only two-Spark path for FP4-Local: both Sparks work on every token. It needs RDMA, so vade up refuses SEQPAR_RDMA=0 (TCP) for two FP4-Local Sparks. FP8 on two Sparks keeps its ring and may use TCP.",
                 "FP8 needs an FP8 config such as cli/examples/vade.conf. See docs/benchmarks.md.",
                 "--sparks N above 2 needs a setup with that many Sparks in cable order.",
@@ -334,20 +342,48 @@ fn page(command: &str) -> Option<Page<'static>> {
                 "Reads only. To change local limits, run vade down, then vade launch with the new flags. To change controller settings, stop the engine with its current config, then edit the file shown here.",
             ],
         },
+        "connect" => Page {
+            summary: "Configure and launch an external coding agent against the running engine.",
+            usage: &["vade connect <CLIENT> [OPTIONS] [-- CLIENT_ARGS...]"],
+            options: &[
+                ("--print", "Print the generated client configuration and launch command"),
+                ("--dry-run", "Show what would be configured and launched; change nothing"),
+                ("--url URL", "Server base URL (default: VADE_API_URL or the active setup)"),
+                ("--target direct|gateway", "Direct loopback or gateway mode (default: direct)"),
+                ("--write", "Write the client configuration file to disk"),
+                ("--client-bin PATH", "Override the external client binary path"),
+                ("--no-launch", "Configure the client without launching it"),
+                API_KEY,
+            ],
+            examples: &[
+                "vade connect codex --print",
+                "vade connect claude --dry-run",
+                "vade connect opencode",
+                "vade connect hermes --write --no-launch",
+            ],
+            notes: &[
+                "Supported clients: claude, codex, opencode, hermes, pi.",
+                "Reads GET <endpoint>/v1/capabilities from the running engine to pick the served model, context_limit and output_limit automatically.",
+                "Pass extra arguments to the client after --, for example: vade connect codex -- --help.",
+            ],
+        },
         "pull" => Page {
             summary: "Download a model from the Hugging Face Hub.",
-            usage: &["vade pull <org>/<name>[@revision] [OPTIONS]"],
+            usage: &["vade pull <ALIAS | org/name[@revision]> [OPTIONS]"],
             options: &[
                 ("--include PATTERN", "Download only matching paths; repeat for more (* matches any text, / too)"),
                 ("--to DIR", "Model folder (default ~/models/<org>/<name>)"),
                 ("--dry-run", "Ask the Hub for the file list and sizes; download nothing"),
             ],
             examples: &[
+                "vade pull inkling",
+                "vade pull qwen",
                 PINNED_PULL,
                 "vade pull org/name --dry-run",
                 "vade pull org/name --include '*.json' --to ~/models/org/name-metadata",
             ],
             notes: &[
+                "Short aliases resolve to pinned commits: inkling (or inkling-2-mini) pulls thinkingmachines/Inkling-2-Mini; qwen (or qwen3.8) pulls nvidia/Qwen3.8-Flash-Next-FP4-Local.",
                 "Without --include, pull takes the weights (*.safetensors and the index), every JSON config, the tokenizer files, the chat template, the README and the license. The revision is a branch, tag or commit; the default is main. docs/pull-models.md gives the pinned command for each checkpoint Vade serves.",
                 "Every file is checked after download: size, then the SHA-256 the Hub lists for large files or the Git blob ID for small ones. Run the same command again to continue an interrupted pull; partial files resume.",
                 "Writes .vade-model.json in the folder (repository, commit, files, sizes, hashes, time, license and support state) and <folder>.sha256 beside it, which vade launch and vade up check before they serve FP4-Local. Ctrl-C stops the pull and writes no records.",
@@ -360,7 +396,7 @@ fn page(command: &str) -> Option<Page<'static>> {
             options: &[("--json", "Print one vade.models.v1 object")],
             examples: &["vade models", "vade models /data/models --json"],
             notes: &[
-                "Looks three folders deep under DIR (default ~/models). Each row shows the size on disk, the repository and commit from .vade-model.json and the support state.",
+                "Looks three folders deep under DIR (default ~/models). Without DIR, also checks the Hugging Face Hub cache ($HF_HOME/hub or ~/.cache/huggingface/hub) read-only for supported models. Each row shows the size on disk, the repository and commit and the support state.",
                 "The support state comes from the same metadata checks vade launch runs; no weights are read. A folder with partial files from vade pull shows as incomplete.",
             ],
         },
@@ -418,7 +454,7 @@ mod tests {
     use super::*;
     #[test]
     fn every_page_fits_the_width_and_names_its_usage() {
-        for command in [None, Some("launch"), Some("up"), Some("down"), Some("status"), Some("logs"), Some("chat"), Some("sessions"), Some("doctor"),
+        for command in [None, Some("launch"), Some("up"), Some("down"), Some("status"), Some("logs"), Some("chat"), Some("connect"), Some("sessions"), Some("doctor"),
             Some("install"), Some("setup"), Some("update"), Some("detect"), Some("version"), Some("run"), Some("verify"), Some("read"), Some("config"), Some("bench"), Some("test"), Some("pull"), Some("models")] {
             let text = help(command);
             assert!(text.lines().all(|line| line.chars().count() <= style::WIDTH || line.trim_start() == PINNED_PULL), "{command:?}:\n{text}");
@@ -430,30 +466,29 @@ mod tests {
     #[test]
     fn the_top_page_names_both_checkpoints_and_the_readme_commands() {
         let text = help(None);
-        assert_eq!(text.lines().next(), Some("Vade runs Qwen3.8 Flash-Next on your DGX Spark, as FP4-Local or FP8."));
+        assert_eq!(text.lines().next(), Some("Vade runs Inkling 2 Mini and Qwen3.8 Flash-Next on your DGX Spark."));
         let examples = text.split("\nUsage:").next().unwrap();
         let mut at = 0;
-        for command in [PINNED_PULL, "vade up ", "vade chat ", "vade status ", "vade down "] {
+        for command in ["vade pull inkling", "vade up inkling", "vade verify", "vade connect codex", "vade chat ", "vade status ", "vade down "] {
             at += examples[at..].find(&format!("\n  {command}")).unwrap_or_else(|| panic!("{command}:\n{examples}"));
         }
+        assert!(help(Some("pull")).contains("\n  vade pull inkling\n"));
         assert!(help(Some("pull")).contains(&format!("\n  {PINNED_PULL}\n")));
     }
     #[test]
     fn each_page_names_the_drafting_depths_its_own_start_takes() {
         let flat = |page| help(Some(page)).split_whitespace().collect::<Vec<_>>().join(" ");
-        // vade launch is a local start. It has no text service and refuses a depth above 3
-        // (launch::tests::saved_local_fp4_config_rejects_text_only_depths).
         let launch = flat("launch");
-        assert!(launch.contains("--mtp N Drafting depth 0..3; 0 turns drafting off (default: the engine chooses)"), "{launch}");
-        assert!(!launch.contains("0..7") && !launch.contains("--diagnostic-unqualified-text"), "{launch}");
-        // vade up takes 0..3, and 0..7 with the text service flag, whose unset depth is TEXT_DRAFT_DEPTH.
+        assert!(launch.contains("Inkling 0..7, default 7") && launch.contains("FP4-Local 0..3"), "{launch}");
+        assert!(!launch.contains("--diagnostic-unqualified-text"), "{launch}");
         let up = flat("up");
         assert!(up.contains(&format!("takes 0..7 and loads {} when this and MTP are unset", crate::state::TEXT_DRAFT_DEPTH)), "{up}");
-        assert!(up.contains("a plan that declares one Spark uses 0"), "{up}");
-        assert!(up.contains("vade up --sparks 1 --diagnostic-unqualified-text") && up.contains("passes --mtp 0 when --mtp is unset"), "{up}");
+        assert!(up.contains("vade up inkling") && up.contains("context 524288") && up.contains("1048576"), "{up}");
+        assert!(up.contains("vade up --sparks 1 --diagnostic-unqualified-text") && up.contains("7 for Inkling 2 Mini"), "{up}");
         assert!(!up.contains("GLM"), "{up}");
         let parse = |args: &str| crate::cli::parse(&args.split(' ').map(str::to_owned).collect::<Vec<_>>());
         assert!(parse("up --mtp 3").is_ok() && parse("up --mtp 4").is_err());
+        assert!(parse("up inkling --mtp 7").is_ok() && parse("up inkling --mtp 8").is_err());
         assert!(parse("up --diagnostic-unqualified-text --mtp 7").is_ok() && parse("up --diagnostic-unqualified-text --mtp 8").is_err());
     }
     #[test]

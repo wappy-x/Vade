@@ -82,7 +82,7 @@ impl Identity {
             .map_err(|e| e.to_string())?;
         let kind = value.object().map_err(|e| e.to_string())?.get("model_type")
             .and_then(|v| v.string().ok()).unwrap_or("");
-        let thinking = matches!(kind, "qwen3" | "qwen3_moe" | "qwen3_5" | "qwen3_5_moe" | "qwen4_exp" | "gemma4" | "glm5_next" | "glm5_next_text");
+        let thinking = matches!(kind, "qwen3" | "qwen3_moe" | "qwen3_5" | "qwen3_5_moe" | "qwen4_exp" | "gemma4" | "glm5_next" | "glm5_next_text" | "inkling2_loop" | "inkling2_loop_text");
         let tools = thinking || kind == "llama";
         let mut names = std::fs::read_dir(root).map_err(|_| "cannot list checkpoint artifacts")?
             .map(|entry| entry.map(|e| e.path()).map_err(|_| "cannot list checkpoint artifact"))
@@ -310,5 +310,26 @@ mod identity_tests {
         with.insert(5, include_bytes!("tokenizer/inkling.rs"));with.insert(10, include_bytes!("chat_output/inkling.rs"));
         assert_eq!(identity.template, digest(&std::fs::read(root.join("tokenizer_config.json")).unwrap(), &with));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn inkling_identity_advertises_tools_and_thinking_capabilities() {
+        let domain = Domain::new().unwrap();
+        let cache = crate::cache::CacheLimits {
+            entries: 4,
+            retained_bytes: 1 << 20,
+            tokens_per_entry: 131072,
+            logits_per_entry: 32,
+            idle_ttl: std::time::Duration::from_secs(300),
+        };
+        for kind in ["inkling2_loop", "inkling2_loop_text"] {
+            let root = folder(&format!("caps-{kind}"), kind, crate::tokenizer::inkling::TEMPLATE);
+            let identity = Identity::load(&root).unwrap();
+            assert!(identity.tools && identity.thinking, "{kind}: expected tools=true, thinking=true");
+            let limits = Limits { identity: Some(identity), ..Limits::default() };
+            let json = domain.capabilities("inkling", 131072, &limits, None, false, true, false, &cache);
+            assert!(json.contains(r#""tools":true,"thinking":true"#), "{kind}: {json}");
+            let _ = std::fs::remove_dir_all(&root);
+        }
     }
 }

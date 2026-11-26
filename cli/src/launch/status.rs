@@ -48,6 +48,10 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
     pub(super) fn status_table(&self, config: &Config, record: &Fields, events: &[String]) -> Result<String, String> {
         let field = |name: &str| record.get(name).map(|value| text::terminal_text(value).into_owned());
         let drafting = match record.get("mtp").map(String::as_str) {
+            Some("engine_default") | None if model::loop_text(&config.model) => {
+                let depth = model::local_default_mtp(&config.model);
+                if depth == 0 { "off (default)".to_owned() } else { format!("MTP {depth} (default)") }
+            }
             Some("engine_default") | None => "engine default".to_owned(),
             Some("0") => "off (--mtp 0)".to_owned(),
             Some(depth) => format!("MTP {}", text::terminal_text(depth)),
@@ -122,9 +126,14 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
             Some(value) if value.parse::<u32>().is_ok() => "explicit",
             _ => "unknown",
         };
+        let is_loop = model::loop_text(&config.model);
+        let effective_mtp = match record.get("mtp").map(String::as_str) {
+            Some("engine_default") | None if is_loop => Value::Int(model::local_default_mtp(&config.model).into()),
+            _ => recorded("mtp"),
+        };
         report.set("settings", json::object(vec![
-            ("fp4_local", true.into()),
-            ("mtp", recorded("mtp")),
+            ("fp4_local", (!is_loop).into()),
+            ("mtp", effective_mtp),
             ("mtp_source", mtp_source.into()),
             ("context_limit", recorded("context_tokens")),
             ("output_limit", recorded("output_tokens")),

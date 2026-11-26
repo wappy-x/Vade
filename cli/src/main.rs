@@ -37,6 +37,7 @@ mod catalog;
 mod checks;
 mod cli;
 mod config;
+mod connect;
 mod help;
 mod detect;
 mod doctor;
@@ -230,10 +231,14 @@ fn run_main(mut args: Vec<String>) {
         public_output(&cli::help(command.as_deref()));
         return;
     }
-    // Downloads and the model list need no setup.
+    // Downloads, model list and client passthrough setup need no controller config.
     if let cli::Command::Pull(arguments) | cli::Command::Models(arguments) = &parsed.command {
         let result = if matches!(parsed.command, cli::Command::Pull(_)) { pull::run(arguments, parsed.dry_run) } else { pull::models(arguments) };
         if let Err(error) = result { fail(&error); }
+        return;
+    }
+    if let cli::Command::Connect(arguments) = &parsed.command {
+        if let Err(error) = connect::run(arguments, parsed.dry_run) { fail(&error); }
         return;
     }
     // From here every error of a --json command still ends in its one object

@@ -21,6 +21,9 @@ fn verify_local(model: &Path, worker: &Path) -> Result<Fields, String> {
     }
     crate::text::private_dir(&cache)?;
     crate::text::reject_symlinks(&manifest)?;
+    if crate::text_service::from_dir(&model).is_some_and(crate::text_service::TextService::is_alone) {
+        return Ok(Fields::new());
+    }
     let plan = engine_model::flash::manifest::ReceiptPlan::open(&model).map_err(|e| e.to_string())?;
     if plan.format != engine_model::flash::WeightFormat::Nvfp4 { return Ok(Fields::new()); }
     let began = Instant::now();

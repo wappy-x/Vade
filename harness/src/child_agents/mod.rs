@@ -36,6 +36,10 @@ use std::time::{Duration, Instant};
 const MONITOR_INTERVAL: Duration = Duration::from_millis(10);
 const MAX_GOAL_BYTES: usize = 16 * 1024;
 const MAX_SUMMARY_BYTES: usize = 4096;
+/// Default token budget and context cap per subagent (128K).
+pub const DEFAULT_SUBAGENT_CONTEXT: u64 = 131_072;
+/// Default concurrent subagent count (user-adjustable via `--max-subagents`).
+pub const DEFAULT_MAX_CONCURRENT: usize = 8;
 static NEXT_SCHEDULER: AtomicU64 = AtomicU64::new(1);
 
 /// A child task's identity, unique per scheduler; displayed as `child-S-N`.
@@ -70,10 +74,10 @@ impl Default for Quota {
         Self {
             model_turns: 8,
             tool_calls: 16,
-            tokens: 32_768,
+            tokens: DEFAULT_SUBAGENT_CONTEXT,
             output_tokens_per_turn: 1024,
             wall_time: Duration::from_secs(120),
-            history_bytes: 512 * 1024,
+            history_bytes: 4 * 1024 * 1024,
             tool_output_bytes: 128 * 1024,
         }
     }
@@ -81,18 +85,19 @@ impl Default for Quota {
 
 impl Quota {
     fn validate(&self) -> bool {
-        (1..=64).contains(&self.model_turns)
-            && self.tool_calls <= 128
-            && (1..=1_048_576).contains(&self.tokens)
-            && (1..=16_384).contains(&self.output_tokens_per_turn)
+        self.model_turns >= 1
+            && self.tokens >= 1
+            && self.output_tokens_per_turn >= 1
             && self.output_tokens_per_turn <= self.tokens
             && !self.wall_time.is_zero()
-            && self.wall_time <= Duration::from_secs(600)
-            && (1024..=2 * 1024 * 1024).contains(&self.history_bytes)
-            && (128..=1024 * 1024).contains(&self.tool_output_bytes)
+            && (1024..=crate::json::MAX_INPUT_BYTES).contains(&self.history_bytes)
+            && (128..=crate::json::MAX_INPUT_BYTES).contains(&self.tool_output_bytes)
     }
 
     fn limits(self) -> Limits {
+        let max_context_tokens = usize::try_from(self.tokens)
+            .unwrap_or(usize::MAX)
+            .max(crate::context::DEFAULT_CONTEXT_TOKENS);
         Limits {
             max_model_turns: self.model_turns,
             max_tool_turns: self.model_turns,
@@ -100,6 +105,7 @@ impl Quota {
             max_tool_output_bytes: self.tool_output_bytes.min(64 * 1024),
             max_total_output_bytes: self.tool_output_bytes,
             max_history_bytes: self.history_bytes,
+            max_context_tokens,
             ..Limits::default()
         }
     }
@@ -145,16 +151,18 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
+        let default_quota = Quota::default();
+        let max_tasks = 16;
         Self {
-            max_concurrent: 4,
-            max_tasks: 16,
-            total_model_turns: 64,
-            total_tool_calls: 128,
-            total_tokens: 262_144,
-            total_history_bytes: 8 * 1024 * 1024,
-            total_tool_output_bytes: 1024 * 1024,
+            max_concurrent: DEFAULT_MAX_CONCURRENT,
+            max_tasks,
+            total_model_turns: max_tasks * default_quota.model_turns,
+            total_tool_calls: max_tasks * default_quota.tool_calls,
+            total_tokens: (max_tasks as u64) * default_quota.tokens,
+            total_history_bytes: max_tasks * default_quota.history_bytes,
+            total_tool_output_bytes: max_tasks * default_quota.tool_output_bytes,
             wall_time: Duration::from_secs(300),
-            default_quota: Quota::default(),
+            default_quota,
             policy: ToolPolicy::default(),
             grants: BTreeMap::new(),
         }
@@ -518,18 +526,11 @@ impl Scheduler {
         parent_cancel: Arc<AtomicBool>,
         factory: Arc<Factory>,
     ) -> io::Result<Self> {
-        if !(1..=8).contains(&config.max_concurrent)
-            || !(1..=32).contains(&config.max_tasks)
+        if config.max_concurrent == 0
+            || config.max_tasks == 0
             || config.max_concurrent > config.max_tasks
             || !config.default_quota.validate()
-            || config.total_model_turns > 256
-            || config.total_tool_calls > 1024
-            || config.total_tokens > 4_194_304
-            || config.total_history_bytes > 32 * 1024 * 1024
-            || config.total_tool_output_bytes > 8 * 1024 * 1024
             || config.wall_time.is_zero()
-            || config.wall_time > Duration::from_secs(1800)
-            || config.grants.len() > 32
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,

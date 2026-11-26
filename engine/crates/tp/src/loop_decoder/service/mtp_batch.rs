@@ -387,6 +387,14 @@ impl<'a,C:Compute,W:Weights<C>> Service<'a,C,W> {
                 cap_depth=cap_depth.min(max_uniform);
             }
             for d in &mut neural_depths {*d=(*d).min(cap_depth);}
+            // Pre-grow global draft KV planes BEFORE entering `compute.work` so CUDA VMM page maps never run
+            // while resident launches are queued.
+            for row in rows.iter_mut() {
+                if let Some(d)=row.session.draft.as_mut() {
+                    let need=d.read_to().saturating_add(cfg.block_size.saturating_mul(2));
+                    d.chat.ensure_global_capacity(self.compute,cfg,need).map_err(err)?;
+                }
+            }
             // Flush deferred accepts and variable-row `push_batch` unrecorded BEFORE `propose_confident_batch` so
             // variable accepted counts never instantiate unique CUDA graphs or evict warm verify/draft graphs.
             let p0=Instant::now();
@@ -539,8 +547,12 @@ impl<'a,C:Compute,W:Weights<C>> Service<'a,C,W> {
             let mut taken=Vec::with_capacity(pieces.len());
             for piece in pieces {
                 let slot=open.get_mut(called[piece.row]).and_then(Option::take).ok_or("loop text service: a row names a chat that is not open")?;
-                let ctx=rows[piece.row].session.draft.as_ref().ok_or("draft context missing")?;
+                let count=piece.to-piece.from;
+                let need_pos=(slot.state.position as usize).saturating_add(slot.pending_accept.map_or(0,|(_,k)|k)).saturating_add(count);
+                self.driver.ensure_capacity(&mut slot.state,need_pos)?;
+                let ctx=rows[piece.row].session.draft.as_mut().ok_or("draft context missing")?;
                 need(ctx.pending.is_empty(),"a draft window is still open")?;
+                ctx.chat.ensure_global_capacity(self.compute,model.config(),ctx.read_to().saturating_add(count))?;
                 taken.push(slot);
             }
             let (tops,logits,flushed)=self.compute.work(|| {
@@ -653,8 +665,12 @@ impl<'a,C:Compute,W:Weights<C>> Service<'a,C,W> {
             let mut taken=Vec::with_capacity(group.len());
             for &idx in &group {
                 let slot=open.get_mut(called[idx]).and_then(Option::take).ok_or("loop text service: a row names a chat that is not open")?;
-                let ctx=rows[idx].session.draft.as_ref().ok_or("draft context missing")?;
+                let count=rows[idx].tokens.len();
+                let need_pos=(slot.state.position as usize).saturating_add(slot.pending_accept.map_or(0,|(_,k)|k)).saturating_add(count);
+                self.driver.ensure_capacity(&mut slot.state,need_pos)?;
+                let ctx=rows[idx].session.draft.as_mut().ok_or("draft context missing")?;
                 need(ctx.pending.is_empty(),"a draft window is still open")?;
+                ctx.chat.ensure_global_capacity(self.compute,model.config(),ctx.read_to().saturating_add(count))?;
                 taken.push(slot);
             }
             let group_ids=sorted_ids(group.iter().map(|&idx|rows[idx].session.id));

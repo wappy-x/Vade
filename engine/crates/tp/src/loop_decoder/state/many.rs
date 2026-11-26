@@ -296,13 +296,29 @@ pub fn room(layout:&Layout,first:u64)->usize {
     let left=(layout.rows as u64).saturating_sub(first).min(usize::MAX as u64) as usize;
     if layout.ring {left.max(layout.rows-layout.window+1)} else {left}
 }
+/// True where a step that keeps each row (a check pass of drafted rows) holds the new key and value rows of a chat
+/// apart from its window ring until `accept` (`VisitState::written`): the chat is alone in the step (its attention
+/// launch reads those rows beside the ring), or it has more rows than its ring takes from that position (`room`).
+/// False: the rows go into the ring before the attention reads it. They take only slots that no row from position
+/// `first` on reads, so a chat that keeps fewer rows, or none, still holds every key that it sees, and the next step
+/// writes the rows that were not kept again before any row reads them. `Driver::rows_visits` asks the same rule for
+/// the step words that it loads before the first visit.
+pub fn held_apart(layout:&Layout,step:&Rows,span:ChatRows)->bool {
+    step.keeps() && layout.ring && (step.chats().len()==1 || span.count>room(layout,span.first))
+}
 /// Put the finished keys or values of the rows of one chat into its plane. `packed` is `[count][row words]`: the
 /// rows as `pack` gives them. One write, or two where a ring goes round. No other row changes.
 pub fn write_rows<C:Compute>(compute:&C,layout:&Layout,plane:&mut C::Value,span:ChatRows,packed:&C::Value)->Result<()> {
     let words=layout.row_words;
-    need(span.count>0 && compute.words(packed)==span.count*words && compute.words(plane)==layout.rows*words,"the rows of a key or value write differ from the layout")?;
+    let cap=super::plane_rows(compute,layout,plane)?;
+    need(span.count>0 && compute.words(packed)==span.count*words,"the rows of a key or value write differ from the layout")?;
     need(span.count<=room(layout,span.first),"a step has more rows of one chat than its state takes")?;
-    let (slot,head)=(layout.slot(span.first)?,span.count.min(layout.rows-layout.slot(span.first)?));
+    let slot=layout.slot(span.first)?;
+    if !layout.ring {
+        need(slot.checked_add(span.count).is_some_and(|end|end<=cap),"a straight plane write exceeds mapped rows")?;
+        return compute.state_fill(plane,slot*words,packed);
+    }
+    let head=span.count.min(layout.rows-slot);
     if head==span.count {return compute.state_fill(plane,slot*words,packed);}
     compute.state_fill(plane,slot*words,&compute.range(packed,0,head*words)?)?;
     compute.state_fill(plane,0,&compute.range(packed,head*words,(span.count-head)*words)?)

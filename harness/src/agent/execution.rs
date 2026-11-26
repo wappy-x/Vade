@@ -89,7 +89,7 @@ fn appended_context_stop(
         crate::context::Usage::with_appended(conversation, staged).with_count(&input)
     });
     if allow_compaction && let Ok(usage) = &counted
-        && usage.near_limit(limits.max_context_tokens, reserve)
+        && usage.near_limit_at(limits.max_context_tokens, reserve, limits.auto_compact_tokens)
     {
         let counted_limits = Limits { output_reserve_tokens: reserve, ..limits };
         let mut host = LoopHost { model: &mut *model, staged, wire: limits.wire, cancel, error: None };

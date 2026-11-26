@@ -338,9 +338,10 @@ impl App {
         }
         let usage = context::Usage::for_conversation(self.native.as_ref().unwrap());
         if self.config.verbose
-            && usage.near_limit(
+            && usage.near_limit_at(
                 self.config.context_budget(&self.context),
                 self.config.output_reserve(&self.context),
+                self.config.auto_compact_tokens,
             )
         {
             self.run_notice(&format!(
@@ -830,10 +831,11 @@ impl RunObserver for CompactingJournal {
             .trigger
             .lock()
             .map_err(|_| io::Error::other("compaction lock failed"))?
-            .observe(
+            .observe_threshold(
                 usage,
                 limits.max_context_tokens,
                 limits.output_reserve_tokens,
+                limits.auto_compact_tokens,
             );
         // Hysteresis avoids optional repeated rewrites, but must never prevent
         // recovery when a growing active task reaches actual admission refusal.
@@ -911,10 +913,11 @@ impl RunObserver for CompactingJournal {
         self.trigger
             .lock()
             .map_err(|_| io::Error::other("compaction lock failed"))?
-            .observe(
+            .observe_threshold(
                 &after,
                 limits.max_context_tokens,
                 limits.output_reserve_tokens,
+                limits.auto_compact_tokens,
             );
         super::approval::request_tool_preview(
             &self.events,

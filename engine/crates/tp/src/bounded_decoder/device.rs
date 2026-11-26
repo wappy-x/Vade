@@ -6,8 +6,7 @@ use super::lineage::Lineage;
 #[path="device/loop_product.rs"] mod loop_product;
 #[path="device/draft.rs"] mod draft;
 #[path="device/loop_packed.rs"] mod loop_packed;
-#[path="device/fast_ops.rs"] mod fast_ops;
-#[path="device/fused_rows.rs"] mod fused_rows;
+#[path="device/fast_ops.rs"] mod fast_ops; #[path="device/fused_rows.rs"] mod fused_rows; #[path="device/planes.rs"] mod planes;
 pub struct Device<'b,'d> {pub backend:&'b Backend<'d>,weights:Rc<RefCell<crate::resident_weights::Weights<'b,'d>>>,
     expert_panels:Rc<BTreeMap<u64,DeviceVector<'d>>>,
     memo_bound:Rc<crate::projection_memo::Bound>,
@@ -387,6 +386,10 @@ impl<'b,'d> Compute for Device<'b,'d> {
         if let Some(middle)=&v.prompt_middle {middle.allocations(out);}
         true
     }
+    fn plane_page_bytes(&self)->usize {2*1024*1024} fn plane_alloc(&self,m:usize,i:usize)->Result<Value<'b,'d>> {self.alloc_plane(m,i)}
+    fn plane_grow(&self,p:&mut Value<'b,'d>,n:usize,m:usize)->Result<()> {self.grow_plane(p,n,m)} fn plane_trim(&self,p:&mut Value<'b,'d>,k:usize)->Result<()> {self.trim_plane(p,k)}
+    fn plane_fork(&self,s:&Value<'b,'d>,c:usize,n:usize,m:usize)->Result<Value<'b,'d>> {self.fork_plane(s,c,n,m)} fn plane_prefix_allocations(&self,v:&Value<'b,'d>,c:usize,o:&mut Vec<(usize,usize)>)->bool {self.prefix_plane_allocations(v,c,o)}
+    fn fund_kv_pages(&self,b:usize) {self.backend.fund_kv_pages(b);} fn kv_reserve_cohort(&self,c:usize) {self.backend.kv_reserve_cohort(c);} fn kv_conversation_ended(&self,b:usize) {self.backend.kv_conversation_ended(b);}
     fn projects_complete_rows(&self)->bool {true}
     fn sparse_topology(&self)->Topology {self.weights.borrow().sparse_topology()}
     fn owned_expansion(&self,name:&str,input:&Value<'b,'d>,tokens:usize,layout:crate::sparse_heads::Layout)->Result<Option<Value<'b,'d>>> {
@@ -736,7 +739,8 @@ impl<'b,'d> Compute for Device<'b,'d> {
         self.weights.borrow().check_exchange()?;if let Some(error)=self.backend.fatal_error() {return Err(error);}
         if let Some(out)=v.known.borrow().as_ref() {return Ok(out.clone());}
         if let Some(out)=self.selection_seen(v) {*v.known.borrow_mut()=Some(out.clone());return Ok(out);}
-        let stamp=self.cost.start(self.backend);let checked=self.check_selection(Some(v))?;let out=if v.words==0 {Vec::new()} else if let Some(out)=checked {out} else {self.backend.read_vector_values(&v.vector)?};
+        let stamp=self.cost.start(self.backend);let checked=self.check_selection(Some(v))?;let mut out=if v.words==0 {Vec::new()} else if let Some(out)=checked {out} else {self.backend.read_vector_values(&v.vector)?};
+        if out.len()>v.words {out.truncate(v.words);}
         self.weights.borrow().check_exchange()?;*v.known.borrow_mut()=Some(out.clone());self.cost.record(||"readback".into(),stamp,self.backend,0);Ok(out)
     }
     fn read_pair(&self,first:&Value<'b,'d>,second:&Value<'b,'d>)->Result<(Vec<f32>,Vec<f32>)> {Device::read_pair(self,first,second)}
@@ -765,6 +769,7 @@ impl<'b,'d> Compute for Device<'b,'d> {
     fn range(&self,v:&Value<'b,'d>,start:usize,len:usize)->Result<Value<'b,'d>> {
         let stamp=self.cost.start(self.backend);need(start.checked_add(len).is_some_and(|n|n<=v.words),"bounded device range differs")?;
         if start==0 && len==v.words {return Ok(Value {vector:v.vector.clone(),words:len,lineage:v.lineage.clone(),known:RefCell::new(v.known.borrow().clone()),assumed:v.assumed.clone(),pending:v.pending.clone(),held:v.held.clone(),prompt_middle:v.prompt_middle.clone()});}self.ready(v)?;
+        if v.vector.is_segmented() {return self.range_segmented(v,start,len);}
 if start==0 && v.pending.as_ref().and_then(|p|p.borrow().state_prefix)==Some(len) {
     // A recurrent state must not keep all token outputs in its parent.
     // Copy raw words; the ordered stream and deferred owners preserve them.
@@ -1026,7 +1031,7 @@ if start==0 && v.pending.as_ref().and_then(|p|p.borrow().state_prefix)==Some(len
         use spark_gpu_probe::flash_window;
         if rows < flash_window::FW_ROWS_MIN || !self.backend.resident_launches_active()
             || !flash_window::flash_window_shape_admitted(rows, heads, kv_heads, head_dim, rel_dim, view, extent) { return Ok(None); }
-        if [query, keys, values, moved, sink, gate, steps].iter().any(|v| v.vector.is_segmented()) { return Ok(None); }
+        if [query, moved, sink, gate, steps].iter().any(|v| v.vector.is_segmented()) { return Ok(None); }
         if (query.vector.device_address() | keys.vector.device_address() | values.vector.device_address()
             | moved.vector.device_address() | gate.vector.device_address()) & 15 != 0 { return Ok(None); }
         for v in [query, keys, values, moved, sink, gate, steps] { self.ready(v)?; }

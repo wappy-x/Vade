@@ -337,6 +337,15 @@ pub(super) fn loop_text(path: &Path) -> bool {
     crate::text_service::from_dir(path).is_some_and(crate::text_service::TextService::is_alone)
 }
 
+/// Default `--mtp` depth for a local looped block checkpoint (`7` for Inkling 2 Mini,
+/// `0` when the checkpoint declares no draft model).
+pub(super) fn local_default_mtp(path: &Path) -> u32 {
+    match crate::text_service::from_dir(path) {
+        Some(service) if service.is_alone() => service.default_depth,
+        _ => 0,
+    }
+}
+
 /// Greatest `--mtp` depth allowed for a local checkpoint at `path`: its plan's
 /// `max_depth` for a looped block checkpoint, or `3` for FP4-Local.
 pub(super) fn local_max_mtp(path: &Path) -> u32 {
@@ -344,6 +353,91 @@ pub(super) fn local_max_mtp(path: &Path) -> u32 {
         Some(service) if service.is_alone() => service.max_depth,
         _ => 3,
     }
+}
+
+/// Resolve an explicit short-alias repository (such as `thinkingmachines/Inkling-2-Mini`):
+/// check `~/models/<org>/<name>` first, then `~/models/<name>`, then read-only Hugging Face
+/// Hub cache (`$HF_HOME/hub` or `~/.cache/huggingface/hub`). Never writes into the HF cache;
+/// when `vade_root` is `Some` and an HF snapshot uses symlinks into `blobs/`, materializes a
+/// zero-copy hardlink view under `<vade_root>/hf-cache/`.
+pub(super) fn discover_named(home: &Path, repo: &str, vade_root: Option<&Path>) -> Result<Model, String> {
+    let models = home.join("models");
+    let mut direct = vec![models.join(repo)];
+    if let Some((_, short_name)) = repo.split_once('/') {
+        direct.push(models.join(short_name));
+    }
+    for candidate in direct {
+        if candidate.exists() {
+            return inspect(&candidate);
+        }
+    }
+    let preferred_rev = crate::pull::alias::by_repo(repo).map(|a| a.revision);
+    if let Some((snapshot, rev)) = crate::pull::alias::find_in_hf_cache(home, repo, preferred_rev) {
+        if let Ok(model) = inspect(&snapshot) {
+            return Ok(model);
+        }
+        if let Some(bytes) = crate::pull::alias::valid_hf_snapshot_bytes(&snapshot) {
+            return match vade_root {
+                Some(root) => {
+                    let view = crate::pull::alias::materialize_hf_snapshot(&snapshot, root, repo, &rev)?;
+                    inspect(&view)
+                }
+                None => inspect_hf_readonly(&snapshot, bytes),
+            };
+        }
+    }
+    let pull = crate::pull::alias::by_repo(repo).map_or(repo, |a| a.short);
+    Err(format!(
+        "Model {repo} was not found in ~/models/{repo} or the Hugging Face cache. Download it with: vade pull {pull}"
+    ))
+}
+
+/// Read-only candidate path for an explicit alias (used to detect model changes while running).
+pub(super) fn named_alias_path(home: &Path, repo: &str, vade_root: &Path) -> Option<PathBuf> {
+    let models = home.join("models");
+    for candidate in std::iter::once(models.join(repo))
+        .chain(repo.split_once('/').map(|(_, name)| models.join(name)))
+    {
+        if let Ok(canon) = fs::canonicalize(&candidate)
+            && canon.join("config.json").is_file()
+        {
+            return Some(canon);
+        }
+    }
+    let preferred_rev = crate::pull::alias::by_repo(repo).map(|a| a.revision);
+    let (snapshot, rev) = crate::pull::alias::find_in_hf_cache(home, repo, preferred_rev)?;
+    let view = vade_root.join("hf-cache").join(&rev).join(repo);
+    if let Ok(canon) = fs::canonicalize(&view)
+        && canon.join("config.json").is_file()
+    {
+        return Some(canon);
+    }
+    fs::canonicalize(&snapshot).ok()
+}
+
+fn inspect_hf_readonly(snapshot: &Path, bytes: u64) -> Result<Model, String> {
+    let path = fs::canonicalize(snapshot)
+        .map_err(|_| format!("Hugging Face cache snapshot {} is unavailable.", display(snapshot)))?;
+    let config = metadata(&path.join("config.json"), 1024 * 1024)?;
+    let loop_text = matches!(
+        engine_model::plan::ConfigPlan::from_config(config.as_bytes()),
+        Ok(engine_model::plan::ConfigPlan::Loop(_))
+    );
+    let max_draft_depth = if loop_text {
+        crate::text_service::from_config_bytes(config.as_bytes()).max_depth
+    } else {
+        3
+    };
+    let fp4_local = !loop_text
+        && engine_model::flash::Config::parse(config.as_bytes()).is_ok_and(|c| c.mixed.is_some());
+    Ok(Model {
+        path,
+        bytes,
+        context_limit: context_limit(&config)?,
+        fp4_local,
+        loop_text,
+        max_draft_depth,
+    })
 }
 
 pub(crate) fn serving_format(path: &Path) -> Result<bool, String> {
@@ -463,7 +557,9 @@ fn context_limit(config: &str) -> Result<u32, String> {
     let mut limit = 32768.0;
     for keys in [
         &["text_config", "max_position_embeddings"][..],
+        &["text_config", "model_max_length"][..],
         &["max_position_embeddings"][..],
+        &["model_max_length"][..],
     ] {
         if crate::json::path_exists(config, keys) {
             limit = crate::json::path_number(config, keys)

@@ -84,6 +84,12 @@ fn error_hint_static(error: &io::Error) -> &'static str {
     if error.to_string() == "requested output exceeds context budget" {
         return " The reply length you asked for does not fit; lower --max-output-tokens or use /new.";
     }
+    if error.kind() == io::ErrorKind::Unsupported && error.to_string() == "thinking unsupported" {
+        return " This engine/model does not advertise thinking support; omit --thinking on or --effort.";
+    }
+    if error.kind() == io::ErrorKind::Unsupported && error.to_string() == "thinking-off unsupported" {
+        return " This model's chat template cannot turn thinking off; omit --thinking off.";
+    }
     if error.kind() == io::ErrorKind::PermissionDenied
         && error.to_string() == "HTTP 401 Unauthorized: authentication failed"
     {
@@ -146,6 +152,13 @@ pub fn error_category(error: &io::Error) -> &'static str {
     {
         return "HTTP 401 Unauthorized: authentication failed";
     }
+    if error.kind() == io::ErrorKind::Unsupported {
+        match error.to_string().as_str() {
+            "thinking unsupported" => return "thinking not supported by model",
+            "thinking-off unsupported" => return "--thinking off not supported by model",
+            _ => (),
+        }
+    }
     match error.kind() {
         io::ErrorKind::ConnectionRefused => "connection refused",
         io::ErrorKind::AddrInUse => "address already in use",
@@ -195,6 +208,19 @@ mod tests {
         let message = error_hint(&error);
         assert!(message.contains("Name lookup for engine.invalid did not finish"), "{message}");
         assert!(!message.contains("engine did not answer"), "{message}");
+    }
+    #[test]
+    fn thinking_refusals_report_thinking_not_transport() {
+        for (raw, cat, needle) in [
+            ("thinking unsupported", "thinking not supported by model", "--thinking on"),
+            ("thinking-off unsupported", "--thinking off not supported by model", "--thinking off"),
+        ] {
+            let error = io::Error::new(io::ErrorKind::Unsupported, raw);
+            assert_eq!(error_category(&error), cat);
+            let hint = error_hint(&error);
+            assert!(hint.contains(needle), "{hint}");
+            assert!(!hint.contains("SSH tunnel"), "{hint}");
+        }
     }
 }
 

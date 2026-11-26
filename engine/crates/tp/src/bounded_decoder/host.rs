@@ -16,6 +16,26 @@ fn finish_rows(p:Pass,x:&[f32],m:usize)->Vec<f32> {
 impl Compute for Host {
     type Value=Vec<f32>;type Pass=Pass;
     fn state_allocations(&self,v:&Vec<f32>,out:&mut Vec<(usize,usize)>)->bool {out.push((v.as_ptr() as usize,v.capacity()*4));true}
+    fn plane_page_bytes(&self)->usize {256}
+    fn plane_alloc(&self,maximum_words:usize,initial_words:usize)->Result<Vec<f32>> {
+        Ok(vec![0.0;initial_words.min(maximum_words)])
+    }
+    fn plane_grow(&self,plane:&mut Vec<f32>,needed_words:usize,maximum_words:usize)->Result<()> {
+        let target=needed_words.min(maximum_words);
+        if plane.len()<target {plane.resize(target,0.0);}
+        Ok(())
+    }
+    fn plane_fork(&self,source:&Vec<f32>,committed_words:usize,needed_words:usize,maximum_words:usize)->Result<Vec<f32>> {
+        need(committed_words<=source.len(),"host plane fork exceeds source")?;
+        let target=needed_words.max(committed_words).min(maximum_words);
+        let mut out=vec![0.0;target];
+        out[..committed_words].copy_from_slice(&source[..committed_words]);
+        Ok(out)
+    }
+    fn plane_trim(&self,plane:&mut Vec<f32>,keep_words:usize)->Result<()> {
+        if keep_words<plane.len() {plane.truncate(keep_words);plane.shrink_to_fit();}
+        Ok(())
+    }
     /// The host backend has no fused launches.
     fn mhc_row_launches(&self)->u64 {0}
     /// The host reads the logits.
