@@ -1,0 +1,7 @@
+# Qwen's own chat template, copied unchanged from the official checkpoint.
+*.jinja linguist-vendored
+REVISION export-subst
+
+# The reference checkers run the official Hugging Face Transformers model (Python) to produce the
+# outputs Vade is compared against. They are tooling, not Vade, so GitHub's language bar leaves them out.
+tools/truth/*.py linguist-detectable=false

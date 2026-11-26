@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Ledger API limits</title></head>
+<body>
+<h1>Ledger API limits</h1>
+<p>Each client key gets these limits. A request over the limit gets HTTP 429.</p>
+<h2>Live routes</h2>
+<table>
+  <thead><tr><th>Route</th><th>Requests per minute</th><th>Burst</th></tr></thead>
+  <tbody>
+    <tr><td>/v2/transfers</td><td>120</td><td>20</td></tr>
+    <tr><td>/v2/accounts</td><td>600</td><td>50</td></tr>
+    <tr><td>/v2/statements</td><td>30</td><td>5</td></tr>
+    <tr><td>/v2/audit</td><td>60</td><td>10</td></tr>
+  </tbody>
+</table>
+<h2>Retired routes</h2>
+<p>These routes answer HTTP 410 since 2026-09-01.</p>
+<table>
+  <thead><tr><th>Route</th><th>Requests per minute</th><th>Burst</th></tr></thead>
+  <tbody>
+    <tr><td>/v1/transfers</td><td>90</td><td>15</td></tr>
+    <tr><td>/v1/accounts</td><td>300</td><td>40</td></tr>
+  </tbody>
+</table>
+</body>
+</html>

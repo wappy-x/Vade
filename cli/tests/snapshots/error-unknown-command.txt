@@ -1,0 +1,5 @@
+$ vade frobnicate
+--- stderr
+error: Unknown command "frobnicate".
+ hint: Run vade --help to see the commands.
+--- exit 1

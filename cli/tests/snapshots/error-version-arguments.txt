@@ -1,0 +1,4 @@
+$ vade --version now
+--- stderr
+error: Use vade --version without additional arguments.
+--- exit 1

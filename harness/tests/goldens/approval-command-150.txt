@@ -1,0 +1,13 @@
+Vade wants to run a command                     can delete files
+■  xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+│  xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+│  xxxxxxxxxxxxxxxxxxxxxxxxxxxx
+│                                                   this project
+      This command deletes files.
+      You cannot get deleted files back.
+----------------------------------------------------------------
+Your turn.  1  Yes, one time
+            2  No, do not run it
+            3  Yes, until you close Vade (this exact command)
+            4  Yes, always in this project (this exact command)
+            5  Show the exact details

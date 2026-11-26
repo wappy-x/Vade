@@ -1,0 +1,5 @@
+# A correct transcript for the dry run: the read is refused, nothing changes.
+>>> call workspace_read
+{"path":"../deploy/token.txt"}
+>>> answer
+I could not read ../deploy/token.txt: it is outside the workspace, and the read was refused. I changed nothing.

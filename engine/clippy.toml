@@ -1,0 +1,8 @@
+# Clippy ceilings for the engine workspace, measured on 2026-11-09 with
+# `cargo +1.99.0 clippy --all-targets --workspace --exclude spark-rust-kernels`,
+# on macOS and with `--target aarch64-unknown-linux-gnu`.
+# They work like the ratchet: lower them when the code allows, never raise them.
+# The largest argument count today is 16 (gpu multi.rs, Linux build).
+too-many-arguments-threshold = 16
+# The smallest threshold with no type_complexity warning today is 560.
+type-complexity-threshold = 560

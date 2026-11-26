@@ -1,0 +1,41 @@
+{
+ "defaults": {
+  "role": "assistant"
+ },
+ "start_anchor_pattern": "<\\|end_message\\|>|<\\|content_model_end_sampling\\|>",
+ "fields": {
+  "reasoning_content": {
+   "open_pattern": "(?:<\\|message_model\\|>[^<]*)?<\\|content_thinking\\|>",
+   "close": "<|end_message|>",
+   "repeats": true,
+   "join": "",
+   "content": "text",
+   "content_args": {
+    "strip": false
+   }
+  },
+  "content": {
+   "open_pattern": "(?:<\\|message_model\\|>[^<]*)?<\\|content_(?:text|tool_error|invoke_tool_text)\\|>",
+   "close": "<|end_message|>",
+   "repeats": true,
+   "join": "",
+   "content": "text",
+   "content_args": {
+    "strip": false
+   }
+  },
+  "tool_calls": {
+   "open_pattern": "(?:<\\|message_model\\|>[^<]*)?<\\|content_invoke_tool_json\\|>",
+   "close": "<|end_message|>",
+   "repeats": true,
+   "content": "json",
+   "transform": {
+    "type": "function",
+    "function": {
+     "name": "{content.name}",
+     "arguments": "{content.args}"
+    }
+   }
+  }
+ }
+}

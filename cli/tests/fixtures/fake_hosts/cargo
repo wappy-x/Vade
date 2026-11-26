@@ -1,0 +1,3 @@
+#!/bin/sh
+printf "%s\n" "cargo was asked" >> "$FAKE_HOSTS/calls.log"
+exit 127

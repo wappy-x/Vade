@@ -1,0 +1,180 @@
+# Register table of the Inkling image (Ruling R6h). Checked by `cargo kernels --inkling` (and plain `cargo kernels`)
+# wherever ptxas exists, with the rules of kernels-tc/REGISTERS.txt, plus a fifth column: the stack bytes an entry may
+# use (the arms keep the 32 sum parts of a row and their input slices on the stack). Spill bytes are never allowed.
+# entry                        threads  max_registers  max_shared_bytes  max_stack_bytes
+# Measured 2026-11-22 (CUDA 13.0 ptxas): block_arms 82 registers, 128 shared, 576 stack;
+# block_rows 84 registers, 0 shared, 384 stack; no spill. Each row = the measured registers plus 4, the measured bytes.
+# block_arms shared: 128 bytes of sum parts + 4,096 bytes of RowDots tiles (2 x DOT_TILE words), 2026-11-22.
+# block_arms stack 576 -> 608 bytes: the staged SinkSoftmax and WindowValues forms.
+# block_arms registers 86 -> 92 (measured 88, plus 4): read arm 1 (shared_span)
+# and the staged SinkSoftmax and WindowValues in one function; 5 blocks a multiprocessor in place of 6.
+# block_scores (kind 97, 128 threads, a lane a key row): measured 64 registers, 16,512 shared bytes (the key tile, 32 rows
+# of 129 words), 96 stack bytes, no spill.
+# block_scores registers 68 -> 84: measured 80 after merging the read changes (2026-11-23), plus 4.
+# block_softmax (kind 98, 128 threads, a block a (row, head)): measured 54 registers, 4,224 shared bytes (the staged
+# head of block_arms), 96 stack bytes, no spill.
+# block_scores third form: measured 90 registers before merging the read changes and 85 after, 32,896 shared
+# bytes (key tile 8,320 + rounded queries 24,576), 96 stack, no spill, 3 blocks a multiprocessor.
+# Row 84 -> 94, shared 16,512 -> 32,896.
+# block_values (kind 99, 128 threads, a block a value head x 16 channels x 32 query rows): measured 145 registers,
+# 44,128 shared bytes (the tile, 1,055 rows of 9 words, and the 1,536 block sums, each array 16-byte aligned), 96 stack
+# bytes, no spill, 2 blocks a multiprocessor. Row = 145 plus 4.
+# block_scores key parts (split of the key plane for few query rows): measured 95 registers, 96 stack bytes, no
+# spill, 3 blocks a multiprocessor (2026-11-24, build b79776524c). Row = 95 plus 4.
+# After the merge of the cohort attention (2026-11-24, build 3c3d85b8c6): 100 registers,
+# 96 stack bytes, no spill, 3 blocks a multiprocessor (shared-bound). Row = 100 plus 4.
+# block_arms registers 92 -> 100 (measured 96 on 2026-11-24): the warp HeadClip, the grouped
+# RelBias reads and the one-row WindowScores warp form (8 row starts and 8 next words a lane); 0 spill, stack 384,
+# 5 blocks a multiprocessor as before.
+# block_rows registers 88 -> 108 (measured 104, plus 4, 2026-11-25): contiguous multi-row RelBias with grouped reads
+# (`fast_arms::rel_word`, 16 places in flight); 0 spill, 384 stack, 4 blocks a multiprocessor.
+# block_scores registers 104 -> 112 (measured 108, plus 4, 2026-11-25): raw-pointer ring-delta load; 0 spill,
+# 32,896 shared, 96 stack, still 3 blocks a multiprocessor (shared-bound).
+# block_values registers 149 -> 180 (measured 176, plus 4, 2026-11-25): raw-pointer ring-delta virtual plane reads
+# (`RING_DELTA_AT`, eliminates per-verify KV append copies); 0 spill, 96 stack, 44,128 shared, still 2 blocks/SM (shared-bound).
+resident_launch_block_arms     128      100            4224              608
+resident_launch_block_rows     128      108            2560              384
+resident_launch_block_scores   128      112            32896             96
+resident_launch_block_softmax  128      58             4224              96
+resident_launch_block_values   128      180            44128             96
+# The staged BF16 products, measured in the macro form (CUDA 13.0 ptxas): row product
+# 80 registers, 38,912 shared, 0 stack (launched with 32 or 128 threads; the row is for 128); rows tile 62 registers,
+# 36,864 shared, 0 stack. Each row = the measured registers plus 4, the measured bytes. The rows tile with index rows
+# (kind 92, two row tables): 78 registers, 36,864 shared, 0 stack, still 2 blocks a multiprocessor.
+# The grouped form (kind 92, run and block tables): 92 registers, 36,864 shared, 0 stack; 256 x 96
+# = 24,576 of 65,536 registers a multiprocessor, so still 2 blocks a multiprocessor.
+resident_launch_plain_staged   128      84             32768             0
+resident_launch_plain_staged_rows 256   96             36864             0
+# The narrow row product uses one warp and a six-stage ring of 256-column weight/input stages (18,816 shared
+# bytes, 2026-11-25). K runs in ascending order.
+resident_launch_plain_staged_narrow 32   43             18816              0
+# resident_launch_plain_packed: measured in the general image 68 registers, 37,376 shared (static), 0 stack.
+# Tiled units in the combined build: 79, 77 and 101 registers for single, group and picked.
+resident_launch_plain_packed   160      83             37376             0
+# resident_launch_plain_packed_group: the same body as plain_packed; not yet measured, the row of the single entry.
+resident_launch_plain_packed_group 160    81             37376             0
+# Routed weights-as-A BF16 MMA: four warps, 16 stored rows per warp and at most eight input rows.
+# CUDA 13.0 ptxas measured 84 registers, 14,848 shared bytes, zero stack and spills, and six blocks per SM.
+# The register limit is the measurement plus four.
+# 4-bit rows read one scale word and two 16-byte code halves a row a stage (2026-11-25): measured 86 registers,
+# 14,848 shared bytes, zero stack and spills, five blocks per SM by registers. Row = 86 plus 4.
+# 2026-11-25 (W-BOSS-PLAIN-38): the one-row panel path keeps six chunks of loads in flight: measured 87 registers.
+# 2026-11-25 (W-BOSS-EXACT-CROWN): both in one entry: measured 100 registers, 14,848 shared bytes, zero stack and
+# spills. Row = 100 plus 4.
+# 2026-11-25 (W-BOSS-SINGLECHAT-PLAIN-VERIFY): unified DEPTH=4 in-place NVFP4 MMA panel path for all M=1..=8
+# (bank-conflict-free +32B padded X, 10,240 B X area for one-shot M=2 GateUp & M=4 Down, load-balanced M=2/4/8 grids):
+# 18,496 shared bytes (5 blk/SM on SM121a), zero stack and spills.
+resident_launch_plain_packed_picked 128    132           18496             0
+# Staged few-row product: one warp for narrow matrices and four warps for wide matrices.
+# The row uses the wide block size and the maximum shared memory of either form.
+# Three wide stages (30,720 shared bytes) and a 16-stage narrow ring that a pass reads 4 stages at a time, with the
+# input words of the next pass in registers: measured 166 registers, 0 stack, no spill (CUDA 13.0 ptxas), still
+# 3 blocks a multiprocessor (shared-bound). Row = 166 plus 4.
+# 2026-11-25 (W-BOSS-EXACT-CROWN-V2): the one-row forms left this entry for resident_launch_plain_staged_one
+# (W-BOSS-EXACT-CROWN); measured 128 registers since then, 0 stack, no spill, still 3 blocks a multiprocessor.
+# Row = 128 plus 4.
+# 2026-11-25 (W-BOSS-SC-DENSE-VERIFY): the L1 prefetch of the narrow form's input and the attached gate blend of 2 to
+# 8 rows (FEW_GATE_BLEND): measured 134 registers, 0 stack, no spill, still 3 blocks a multiprocessor (the 30,720
+# shared bytes hold it to 3). Row = 134 plus 4.
+# 2026-11-25 (W-PROSE-CROWN-V4): grouped 3-way dual-input narrow launch (FEW_GROUP_PAIR): measured 140 registers,
+# 30,720 shared, 0 stack, 0 spill, still 3 blocks/SM (shared-bound). Row = 140 plus 4.
+resident_launch_plain_staged_few 128     144            30720             0
+# One-row product (2026-11-25, W-BOSS-EXACT-CROWN): the one-row forms of W-BOSS-PLAIN-38 in an entry of their own, with
+# only dynamic shared memory (0 static): the panel form reads the shared lossless BF16 panels in four-warp blocks (one
+# 64-row group a block) with twelve tiles of loads in flight a warp: measured 90 registers, 0 stack, no spill,
+# five blocks a multiprocessor. Row = 90 plus 4.
+# 2026-11-25 (Vade-BF11-BP exact 4-warp coop ascending-K): lossless 3-bit exponent panels for 1 to 8 input rows
+# (mode 1 independent warps, mode 2 4-warp cooperative strictly ascending-K with 12 KB SMEM handoff, 3-way fused
+# Q+K+V via ONE_PAIR_WORD/ONE_TRIPLE_WORD, read_volatile staging & epilogue, raw 4,352 B GateBlend + mode 5 batched
+# GateForgetGain): ptxas measures 80 registers, 0 shared, 0 stack, 0 spill -> 6 blocks/SM (24 warps/SM) at 128t. Row = 80 + 4.
+resident_launch_plain_staged_one 128     84             0                 0
+# SM121a BF16 tensor-core MMA multi-row product (kind 103, 0 static shared, dynamic shared sized per path) and
+# deterministic GPU MoE router grouping (kind 104, 256 threads, 77,824 shared bytes).
+# 2026-11-25 (C32 dense TC): dynamic-SMEM direct-FP32 narrow (1w 8x4x64 8-stage grouped/rn, 4w/8w 32x64/128),
+# short-K (cols==64) with coalesced epilogue, small-M wide BK=64 Weights-as-A (1w/2w/4w evict_first), 4w Cooperative-W
+# (M=17..=128), medium 2w 32x32x32, general 64x64x32, and overlapped 64x128x32 direct-FP32 K/V prefill.
+# Measured (CUDA 13.0 ptxas): plain_tc_rows 96 regs, 0 static shared, 0 stack, 0 spill (5 blk/SM at 4w, 6 blk/SM at 2w);
+# moe_group_route 40 regs, 77,824 shared, 0 stack, 0 spill (each row = measured + 4).
+resident_launch_plain_tc_rows     256    100                0             0
+resident_launch_moe_group_route   256     44            77824             0
+# SM121a BF16 tensor-core MMA big-tile dense product for prefill (kind 115, 256 threads, BM=128 BN=128 BK=32,
+# three cp.async stages of 16,384 bytes = 49,152 shared bytes) and its narrow FP32-input form (16 input rows a block,
+# four stages of 10,752 bytes in the same buffer). Measured 2026-11-25 (CUDA 13.0 ptxas): 120 registers, 0 stack,
+# 0 spill, 2 blocks a multiprocessor. Row = measured plus 4.
+resident_launch_plain_tc_big      256     124           49152             0
+# SM121a BF16 tensor-core fused causal/sliding-window attention (kind 105, 128 threads, BQ=64 BKV=32 D=128).
+# Measured (CUDA 13.0 ptxas): 236 regs, 37,120 shared, 0 stack, 0 spill, 2 blocks/SM (smem-bound).
+# Shared 37,120 -> 44,288 (2026-11-25): the relative table words of a key tile (16 x 96 words) are copied with the
+# keys, and the rows of M are 80 bytes apart. Still 2 blocks a multiprocessor.
+# Shared 44,288 -> 48,640 (2026-11-25): 3:1/2:1/1:1 GQA-packed KV/T sharing
+# (`192` threads for 3-head pack, `BQ_POS = 32`, `u16` BF16 `M` pitch 36 B, LPT + Fast Interior), capped at 168 regs
+# (`.maxnreg`, build-kernels/src/bin/inkling.rs), 0 stack, 0 spill, 2 blocks/SM (12 warps/SM).
+resident_launch_flash_window      192    168            48640             0
+# GQA-packed Split-KV SM121a BF16 tensor-core decode/verify attention (kinds 118..=120, 0 stack, 0 spill).
+# Measured 2026-11-25 (CUDA 13.0 ptxas): split16 168 regs (3 blk/SM), split32 230 regs (2 blk/SM), reduce 28 regs (12 blk/SM).
+resident_launch_flash_window_split16 128 172            26496             0
+resident_launch_flash_window_split32 128 234            33536             0
+resident_launch_flash_window_reduce  128  32                0             0
+# SM121a BF16 tensor-core MMA packed MoE product (kind 106, 256 threads, BM=64 BN=128 BK=32, 2-stage XOR-swizzled
+# smem + 8,192 B weight table = 32,768 shared bytes, 0 stack, 0 spill). Measured: 80 regs, 3 blocks/SM.
+# 84 -> 100 (2026-11-24, measured 96 plus 4, 0 spill): the next chunk's global words are held in registers one step
+# ahead; 2 blocks a multiprocessor in place of 3, and Cold 8K prefill 4.146 s -> 4.046 s (median of 3).
+# 2026-11-25 (W-BOSS-EXACT-PREFILL-GEMM + stage64 NVFP4 panel path): 128 input rows (two route tiles of one expert)
+# x 128 stored rows a block, warps of 64 x 32, BF16 input rows by cp.async one step ahead, two unpacked B stages
+# (40,960 shared bytes = 16,384 A + 16,384 B + 8,192 table), coalesced v4/v2 panel loads with 2x st_shared_v4 and
+# ptx::load4. Capped at 128 registers (`.maxnreg`, build-kernels/src/bin/inkling.rs), 0 stack, 0 spill, 2 blocks/SM.
+resident_launch_plain_packed_tc_rows 256  128           40960             0
+# Bit-exact W4A16/W8A16 BF16 tensor-core prefill MoE GEMM (PAIR_M=128, BN=128, 42,016 B SMEM), vectorized
+# BF16 activation packer, and vectorized BF16 RouteFold (kind 121). Capped at 128 registers (2 blk/SM, 0 stack, 0 spill).
+resident_launch_prefill_packed_tc    256  128           42016             0
+# Fast Inkling block-op kernels (kinds 107..=112, 0 spill; 48 B call frame on tanh kernels, 0 stack elsewhere).
+# Measured (CUDA 13.0 ptxas): mix_blend 40, row_dots 40, norm 38, capped_gate 40, router_pick 38, stream_ops 48.
+# fast_mix_blend (W-SC2-POST, 2026-11-24): the one-row mix (`fast_ops::MIX_ONE`) stages the stream row (10,240 shared
+# bytes) and keeps its dots and weights beside it. 2026-11-25 (W-BOSS-PLAIN-38): one warp a dot, its products in two
+# 32-word slots a warp (2,048 bytes); measured 56 registers, 12,848 shared, 0 stack, 0 spill, 4 blocks a
+# multiprocessor (was 80 registers, 27,440 shared, 3 blocks). 2026-11-25 (W-BOSS-EXACT-CROWN): the same dot warps for
+# every row of the many-row decode mix (grid rows): measured 60. With the prefill list mix that makes its own dots
+# (`MIX_DOTS`, W-BOSS-PREFILL-ELEM): measured 66 registers, 12,848 shared, 0 stack, 0 spill, 3 blocks a multiprocessor
+# (a decode mix launches 9 to 27 blocks, under one a multiprocessor). Row = 66 plus 4.
+# The list mix with the gate norm (`fast_ops::MIX_LIST_NORM`, W-BOSS-EXACT-PREFILL-25S, prefill messages) adds 33 shared
+# words (the norm chunk sums and the scale): 12,980 bytes. Merged image (W-BOSS-CROWN-V3, 2026-11-25): measured 64
+# registers, 12,980 shared, 0 stack, 0 spill, 4 blocks a multiprocessor. Row = 64 plus 4.
+resident_launch_fast_mix_blend    256     68            12980             0
+# fast_row_dots: list-form RowDots plus paired multi-row KV finish (KV_FINISH_TAG, 1 warp per (side, row, head),
+# head_dim=128, register BF16 packing); measured 74 registers, 0 shared, 0 stack, 0 spill, 6 blocks/SM (measured + 4).
+# The prefill KV finish of W-BOSS-COLD-2S-STACK (`KV_FINISH_WORD`, one warp a (row, head), 48 registers alone) shares
+# this entry with the paired decode finish. Merged image (W-BOSS-CROWN-V3, 2026-11-25): measured 76 registers, 0 shared,
+# 0 stack, 0 spill, 6 blocks a multiprocessor. Row = 76 plus 4.
+resident_launch_fast_row_dots     128     80            0                 0
+# fast_norm: a rounded decode row's values and weights stay in registers from the sum to the store.
+# With the prefill vector store, ptxas reports 111 registers (2026-11-24), 0 stack and 0 spill.
+# Four blocks fit per multiprocessor, as with the decode-only image. Row = measured plus 4.
+# fast_norm (2026-11-24): a one-row plain norm stages its row in 16,384 shared bytes (4,096 words) and runs
+# the lane chains from there; measured 116 registers, 16,672 shared, 0 stack, 0 spill, 4 blocks a multiprocessor.
+resident_launch_fast_norm         128     120           16672             0
+resident_launch_fast_capped_gate  256     44            0                 0
+# fast_router_pick (2026-11-25): opt-in single-block (256 threads, 1152 B smem) unique-expert LPT compaction
+# using 64-bit SMEM bitmasks + warp-0 shfl_up prefix sum; measured 47 regs, 0 stack, 0 spill, 5 blk/SM.
+resident_launch_fast_router_pick  256     51            1152              0
+# fast_stream_ops: ShortConv (ring+inputs and kept-rings), RouteFold, GateBlend, fused multi-row
+# RouteFold+AfterExperts ShortConv (hoisted scalar taps, 512 B shared weights), and fused 1..=3
+# GateBlend+RoundedNorm (scalar register-resident chunks, reuses 512 B shared); unrolled tanh/ln + PDL
+# launch_dependents (2026-11-25): 0 stack (was 48), 0 spill, 3 blocks/SM. Ceiling = measured + 4.
+resident_launch_fast_stream_ops   256     78            512               0
+# resident_launch_plain_packed_rows (kind 100): the grouped rows tile with each run read from its packed
+# unit; 256 threads, the two stages of the rows tile (36,864) + the 4-bit weight table (8,192) = 45,056 shared bytes.
+# Measured 2026-11-23 (CUDA 13.0 ptxas): 96 registers, 0 stack, no spill, 2 blocks a
+# multiprocessor. The row = the measured registers plus 4.
+resident_launch_plain_packed_rows 256  100            45056             0
+# resident_launch_embed_rows (kind 102): one block a token row, a copy with no arithmetic. Measured
+# 2026-11-23: 22 registers, 0 shared, 0 stack, no spill. The row = the measured plus 4.
+resident_launch_embed_rows     256      26             0                 0
+inkling_markov_fold             128      44             0                 0
+# Draft lanes (2026-11-25, CUDA 13.0 ptxas): two-stage parallel FoldReduce (64 B shared) + gated FoldFinish +
+# vectorized AddRound + fused MarkovStaticBase/MarkovPrep/MarkovStep + FlashAttn; measured 59 regs, 0 stack, 0 spill (8 blk/SM).
+inkling_draft_lanes             128      64            64                 0
+# Draft panel and head/fold: zero-stack scalar ring, quad-interleaved OMMA.SF scales, hoisted .L2::256B policy +
+# GB10 24 MiB L2 tail-pinning on fold, exact chunks==4 & zero tail over-fetch, gated early stop, and single-pass
+# 2-tile (`inputs = 9..=16`) NVFP4 projection; measured 72 regs (7 blk/SM) / 64 regs capped (8 blk/SM), 0 stack, 0 spill.
+inkling_draft_panel             128      76             0                 0
+inkling_draft_head_fold         128      68             0                 0

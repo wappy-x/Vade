@@ -1,0 +1,4 @@
+# Preserve the exact official downloads and their recorded SHA256 hashes.
+Llama-3.1-COMMUNITY.txt -text
+Llama-3.2-COMMUNITY.txt -text
+Phi-4-MIT.txt -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol

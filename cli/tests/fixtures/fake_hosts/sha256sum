@@ -1,0 +1,4 @@
+#!/bin/sh
+printf 'sha256sum %s\n' "${FAKE_HOST-here}" >> "$FAKE_HOSTS/calls.log"
+if [ -x /usr/bin/sha256sum ]; then exec /usr/bin/sha256sum "$@"; fi
+exec /usr/bin/shasum -a 256 "$@"

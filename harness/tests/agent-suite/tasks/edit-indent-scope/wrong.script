@@ -1,0 +1,15 @@
+# A near miss for the dry run: the agent changes the first copy, in
+# outer_limit. The counts stay one and one, but `run cargo test` must fail.
+>>> call workspace_read
+{"path":"src/lib.rs"}
+>>> patch
+*** Begin Patch
+*** Update File: src/lib.rs
+@@ pub fn outer_limit(scale: u32) -> u32 {
+     let base = 2;
+-    let limit = 10;
++    let limit = 25;
+     base + limit * scale
+*** End Patch
+>>> answer
+The limit is now 25.

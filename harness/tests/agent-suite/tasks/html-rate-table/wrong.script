@@ -1,0 +1,18 @@
+# A near miss for the dry run: the agent also takes the retired routes.
+# `json-equals quotas.json` must fail.
+>>> call workspace_read
+{"path":"endpoints.html"}
+>>> patch
+*** Begin Patch
+*** Add File: quotas.json
++[
++  {"route": "/v2/accounts", "per_minute": 600, "burst": 50},
++  {"route": "/v2/audit", "per_minute": 60, "burst": 10},
++  {"route": "/v2/statements", "per_minute": 30, "burst": 5},
++  {"route": "/v2/transfers", "per_minute": 120, "burst": 20},
++  {"route": "/v1/accounts", "per_minute": 300, "burst": 40},
++  {"route": "/v1/transfers", "per_minute": 90, "burst": 15}
++]
+*** End Patch
+>>> answer
+quotas.json holds the routes, sorted by route.

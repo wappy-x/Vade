@@ -1,0 +1,4 @@
+{"method":"item/started","params":{"threadId":"fixture-thread","turnId":"fixture-turn","item":{"id":"fixture-item","type":"agentMessage","text":""}}}
+{"method":"item/agentMessage/delta","params":{"threadId":"fixture-thread","turnId":"fixture-turn","itemId":"fixture-item","delta":"provisional draft"}}
+{"method":"item/completed","params":{"threadId":"fixture-thread","turnId":"fixture-turn","item":{"id":"fixture-item","type":"agentMessage","text":"authoritative answer","phase":"final_answer"}}}
+{"method":"turn/completed","params":{"threadId":"fixture-thread","turn":{"id":"fixture-turn","status":"completed","items":[],"error":null}}}

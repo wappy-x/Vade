@@ -1,0 +1,57 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+5 0 obj
+<< /Length 1090 >>
+stream
+BT /F1 16 Tf 72 720 Td (Invoice 2026-0412) Tj ET
+BT /F1 10 Tf 72 700 Td (Seller: Harbor Supply Co.) Tj ET
+BT /F1 10 Tf 72 686 Td (Buyer: Lindqvist Tools) Tj ET
+BT /F1 10 Tf 72 650 Td (Item) Tj ET
+BT /F1 10 Tf 260 650 Td (Quantity) Tj ET
+BT /F1 10 Tf 340 650 Td (Unit price) Tj ET
+BT /F1 10 Tf 430 650 Td (Total) Tj ET
+BT /F1 10 Tf 72 632 Td (Copper wire) Tj ET
+BT /F1 10 Tf 260 632 Td (12) Tj ET
+BT /F1 10 Tf 340 632 Td (3.50) Tj ET
+BT /F1 10 Tf 430 632 Td (42.00) Tj ET
+BT /F1 10 Tf 72 616 Td (Brass hinge) Tj ET
+BT /F1 10 Tf 260 616 Td (4) Tj ET
+BT /F1 10 Tf 340 616 Td (7.25) Tj ET
+BT /F1 10 Tf 430 616 Td (29.00) Tj ET
+BT /F1 10 Tf 72 600 Td (Steel bracket) Tj ET
+BT /F1 10 Tf 260 600 Td (30) Tj ET
+BT /F1 10 Tf 340 600 Td (1.10) Tj ET
+BT /F1 10 Tf 430 600 Td (33.00) Tj ET
+BT /F1 10 Tf 72 584 Td (Rubber gasket) Tj ET
+BT /F1 10 Tf 260 584 Td (150) Tj ET
+BT /F1 10 Tf 340 584 Td (0.08) Tj ET
+BT /F1 10 Tf 430 584 Td (12.00) Tj ET
+BT /F1 10 Tf 340 560 Td (Subtotal) Tj ET
+BT /F1 10 Tf 430 560 Td (116.00) Tj ET
+BT /F1 9 Tf 72 528 Td (Payment due in 30 days. Prices in US dollars.) Tj ET
+endstream
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000241 00000 n 
+0000000311 00000 n 
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+1452
+%%EOF

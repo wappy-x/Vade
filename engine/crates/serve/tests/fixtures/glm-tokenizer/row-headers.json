@@ -1,0 +1,5 @@
+{
+"lm_head.weight":{"data_offsets":[1318501368,1952889848],"dtype":"F8_E4M3","file":"model-00003-of-00040.safetensors","shape":[154880,4096]},
+"lm_head.weight_scale":{"data_offsets":[1952889848,1972714488],"dtype":"U8","file":"model-00003-of-00040.safetensors","shape":[154880,128]},
+"model.language_model.embed_tokens.weight":{"data_offsets":[643320,1269420280],"dtype":"BF16","file":"model-00003-of-00040.safetensors","shape":[154880,4096]}
+}

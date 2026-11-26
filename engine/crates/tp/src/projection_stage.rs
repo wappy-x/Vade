@@ -1,0 +1,206 @@
+use crate::Result;
+use engine_model::plan::{layer::{Kind,LayerPlan,Step},storage::WeightStorage};
+use spark_gpu_probe::causal_ops::Shape;
+use std::collections::{BTreeMap,BTreeSet};
+
+pub enum Job<'a,V> {
+    Project {input:Vec<(&'a str,&'a V)>,round:bool},
+    Routed {steps:&'a [Step],ids:&'a V,input:&'a V,middle:Option<Shape>},
+    Gated {name:&'a str,gate:&'a V,up:&'a V,shape:Shape},
+}
+#[derive(Debug,PartialEq,Eq)]
+pub struct Group {pub indices:Vec<usize>,pub middle:Option<usize>}
+#[derive(Debug,PartialEq,Eq)]
+pub struct Frontier {pub groups:Vec<Group>,pub outputs:Vec<usize>,pub skipped:Vec<usize>}
+fn sole_output(step:&Step)->Option<&str> {if step.outputs.len()==1 {Some(&step.outputs[0].name)} else {None}}
+/// The two routed products can stay local only when their sole reader is
+/// the next SwiGLU, in gate/up order, with the same pick and column shape.
+pub(crate) fn routed_middle(plan:&LayerPlan,gate:usize,up:usize,end:usize,available:&BTreeSet<&str>)->Option<usize> {
+    let middle=up+1;
+    if up!=gate+1 || middle>=end {return None;}
+    let [gate,up,step]=plan.steps.get(gate..=middle)? else {return None;};
+    if gate.kind!=Kind::ExpertProject || up.kind!=Kind::ExpertProject || gate.inputs!=up.inputs
+        || step.kind!=Kind::SwiGlu || !step.weights.is_empty() {return None;}
+    let operands=[sole_output(gate)?,sole_output(up)?];
+    let output=sole_output(step)?;
+    if !step.inputs.iter().map(String::as_str).eq(operands) || available.contains(output)
+        || gate.outputs[0].shape!=up.outputs[0].shape || gate.outputs[0].shape!=step.outputs[0].shape
+        || plan.returns.iter().any(|name|operands.contains(&name.as_str()))
+        || plan.steps.iter().filter(|reader|reader.inputs.iter().any(|name|operands.contains(&name.as_str()))).count()!=1 {return None;}
+    Some(middle)
+}
+
+#[cfg(test)]
+mod routed_middle_tests {
+    use super::*;
+    use engine_model::plan::{ConfigPlan,layer::Topology};
+
+    #[test]
+    fn routed_middle_requires_private_ordered_operands_inside_the_span() {
+        let ConfigPlan::Deferred(description)=ConfigPlan::from_config(include_bytes!("../../model/tests/fixtures/glm/config.json")).unwrap() else {panic!()};
+        let mut plan=(0..description.layers.len()).map(|layer|LayerPlan::new(&description,layer,1,Topology {parts:2,rank:0}).unwrap())
+            .find(|plan|plan.steps.iter().any(|step|step.kind==Kind::ExpertProject)).unwrap();
+        let gate=plan.steps.iter().position(|step|step.kind==Kind::ExpertProject).unwrap();
+        let (up,middle)=(gate+1,gate+2);
+        let available=BTreeSet::new();
+        assert_eq!(routed_middle(&plan,gate,up,plan.steps.len(),&available),Some(middle));
+        assert_eq!(routed_middle(&plan,gate,up,middle,&available),None);
+        plan.steps[middle].inputs.swap(0,1);
+        assert_eq!(routed_middle(&plan,gate,up,plan.steps.len(),&available),None);
+        plan.steps[middle].inputs.swap(0,1);
+        plan.returns.push(plan.steps[up].outputs[0].name.clone());
+        assert_eq!(routed_middle(&plan,gate,up,plan.steps.len(),&available),None);
+    }
+
+    #[test]
+    fn routed_middle_and_shared_down_fit_the_joined_put() {
+        use spark_gpu_probe::tp_put_join::{admitted,table};
+        for (picks,expected_bytes,expected_parts) in [(16,73728,17),(8,40960,9)] {
+            let mut parts=vec![(1024,picks==16);picks];
+            parts.push((2048,true));
+            let words=parts.iter().map(|part|part.0).sum::<usize>();
+            assert_eq!((words*4,parts.len()),(expected_bytes,expected_parts));
+            for rank in 0..2 {
+                let mut start=0;
+                let own=parts.iter().map(|&(count,_)| {
+                    let row=[start,2*start+rank*count,count];
+                    start+=count;
+                    row
+                }).collect::<Vec<_>>();
+                let rows=table(&parts,words*2,&own).unwrap();
+                assert!(admitted(parts.len(),rows.len(),words,words*2));
+            }
+        }
+    }
+}
+fn mixed(step:&Step,plan:&LayerPlan)->bool {
+    step.kind==Kind::Project && step.weights.len()==1 && step.weights[0].shape.len()==2 && step.weights[0].shape[1].is_multiple_of(32)
+        && matches!(step.weights[0].storage,WeightStorage::Mxfp8|WeightStorage::Plain)
+        && !plan.steps.iter().any(|route|route.kind==Kind::Route && route.inputs.iter().any(|input|Some(input.as_str())==sole_output(step)))
+}
+fn compatible(first:&Step,next:&Step,plan:&LayerPlan)->bool {
+    if first.inputs!=next.inputs {return false;}
+    if mixed(first,plan) && mixed(next,plan) {return true;}
+    // Block-FP8 matrices of one storage and one shape (the shared MLP's gate and up) are one two-job launch, like the NVFP4 pairs: each job runs the
+    // same kernel on the same bytes, so only the launch count changes.
+    matches!(first.weights[0].storage,WeightStorage::Nvfp4 {..}|WeightStorage::Fp8Block {..}) && first.weights[0].storage==next.weights[0].storage
+        && first.weights[0].shape==next.weights[0].shape
+        && !plan.steps.iter().any(|route|route.kind==Kind::Route && (route.inputs.contains(&first.outputs[0].name) || route.inputs.contains(&next.outputs[0].name)))
+}
+pub fn frontier(index:usize,plan:&LayerPlan,available:&BTreeSet<&str>)->Option<Frontier> {
+    if index>=plan.steps.len() {return None;}
+    let mut writes=BTreeSet::new();
+    if plan.steps.iter().flat_map(|step|&step.outputs).any(|out|!writes.insert(out.name.as_str())) {return None;}
+    let mut groups:Vec<Group>=Vec::new();let mut outputs=Vec::new();let mut skipped=Vec::new();let mut taken=BTreeSet::new();
+    for stage in index..plan.steps.len() {
+        let step=&plan.steps[stage];let Some(output)=sole_output(step) else {continue;};
+        if taken.contains(&stage) || available.contains(output) {continue;}
+        if step.kind==Kind::Project && step.inputs.len()==1 && step.weights.len()==1 {
+            let source=step.inputs[0].as_str();
+            let middle=if available.contains(source) {None} else {
+                let Some((at,producer))=plan.steps.iter().enumerate().find(|(_,producer)|sole_output(producer)==Some(source)) else {continue;};
+                if at<index || producer.kind!=Kind::SwiGlu || producer.inputs.len()!=2 || !producer.weights.is_empty()
+                    || producer.inputs.iter().any(|input|!available.contains(input.as_str())) || plan.returns.iter().any(|name|name==source)
+                    || plan.steps.iter().filter(|consumer|consumer.inputs.iter().any(|input|input==source)).count()!=1 {continue;}
+                Some(at)
+            };
+            if middle.is_none()
+                && let Some(group)=groups.iter_mut().find(|group|group.middle.is_none() && group.indices.len()<9
+                    && plan.steps[group.indices[0]].kind==Kind::Project && compatible(&plan.steps[group.indices[0]],step,plan)) {
+                    group.indices.push(stage);outputs.push(stage);taken.insert(stage);continue;
+                }
+            groups.push(Group {indices:vec![stage],middle});outputs.push(stage);taken.insert(stage);
+            if let Some(middle)=middle {skipped.push(middle);}
+        } else if step.kind==Kind::ExpertProject && step.inputs.len()==2
+            && step.inputs.iter().all(|input|available.contains(input.as_str())) {
+            // A routed down step is never staged: a stage would exchange its unfolded rows and skip LOCAL FOLD.
+            let span=if plan.steps.get(stage+1).is_some_and(|next|next.kind==step.kind
+                && next.inputs==step.inputs && sole_output(next).is_some_and(|name|!available.contains(name))) {2} else {1};
+            let indices=(stage..stage+span).collect::<Vec<_>>();outputs.extend(&indices);taken.extend(&indices);groups.push(Group {indices,middle:None});
+        }
+    }
+    // A compatible multi-matrix group also shares the bounded gather. Count
+    // outputs, since one group can contain several independent projections.
+    if outputs.len()<2 || groups.len()>16 || !outputs.contains(&index) {return None;}
+    outputs=groups.iter().flat_map(|group|group.indices.iter().copied()).collect();skipped.extend(outputs.iter().copied().filter(|&at|at>index));
+    Some(Frontier {groups,outputs,skipped})
+}
+/// Lanes of one projection stage: true puts that job on the forked side lane (`Backend::resident_side`), recorded before
+/// the main jobs; the gather joins them. Every job of a stage reads only values ready before the stage and writes only
+/// its own fresh outputs, which only the gather reads (`frontier`), so a job may run beside any other once the gather
+/// joins. `eligible` says which jobs may also leave the capture stream: a job that touches no backend-wide scratch (a
+/// single plain or packed matrix). When all are eligible, the last job stays on main, so the main lane always has work.
+pub fn side_lanes(eligible:&[bool])->Vec<bool> {
+    let mut side=eligible.to_vec();if side.len()<2 {side.fill(false);return side;}
+    if side.iter().all(|&lane|lane) && let Some(last)=side.last_mut() {*last=false;}side
+}
+#[derive(Clone,Copy,Debug,Default,PartialEq,Eq)]
+/// `folds`: routed folds that ran on this rank's rows before their exchange (LOCAL FOLD).
+/// `refused`: stages offered to a compute with a device exchange that it did not run (its steps then ran one at a time).
+pub struct Counts {pub accepted:u64,pub original_messages:u64,pub words:u64,pub folds:u64,pub refused:u64}
+std::thread_local! {static COUNTS:std::cell::Cell<Counts>=const {std::cell::Cell::new(Counts {accepted:0,original_messages:0,words:0,folds:0,refused:0})};}
+pub fn counts()->Counts {COUNTS.with(std::cell::Cell::get)}
+#[cfg(target_os="linux")]
+pub(crate) fn accepted(messages:usize,words:usize) {COUNTS.with(|counts| {let old=counts.get();counts.set(Counts {accepted:old.accepted+1,original_messages:old.original_messages+messages as u64,words:old.words+words as u64,..old});});}
+#[cfg(target_os="linux")]
+pub(crate) fn refused() {COUNTS.with(|counts| {let old=counts.get();counts.set(Counts {refused:old.refused+1,..old});});}
+#[cfg(target_os="linux")]
+pub(crate) fn folded() {COUNTS.with(|counts| {let old=counts.get();counts.set(Counts {folds:old.folds+1,..old});});spark_serve::route_receipt::folded();}
+pub fn ready_names<V>(values:&BTreeMap<String,V>)->BTreeSet<&str> {values.keys().map(String::as_str).collect()}
+pub fn checked_messages(jobs:usize,words:usize,slot_bytes:usize)->Result<()> {
+    if !(2..=16).contains(&jobs) || words==0 || words.checked_mul(4).is_none_or(|bytes|bytes>slot_bytes) {return Err("projection stage is outside the bounded exchange envelope".into());}Ok(())
+}
+pub fn checked_rows(rows:&[crate::resident_weights::Rows])->Result<usize> {
+    if rows.is_empty() || rows.len()>32 || rows.iter().any(|row|!row.split || row.count==0 || row.total%row.count!=0
+        || row.start%row.count!=0 || row.start.checked_add(row.count).is_none_or(|end|end>row.total)) {return Err("projection stage rows are outside the split envelope".into());}
+    let chunks=rows[0].total/rows[0].count;
+    if chunks<2 || rows.iter().any(|row|row.total/row.count!=chunks || row.start/row.count!=rows[0].start/rows[0].count) {return Err("projection stage row groups differ".into());}
+    let words=rows.iter().try_fold(0usize,|sum,row|sum.checked_add(row.count)).ok_or("projection stage rows overflow")?;
+    words.checked_mul(chunks).ok_or("projection stage gathered extent overflow")?;Ok(words)
+}
+
+/// Source rows per BF16 part. Short groups use the measured gate expansion
+/// shapes. Zero keeps the fold or FP32 entry.
+pub fn plain_rows_part(tokens:usize,rows:usize,cols:usize)->usize {
+    match (tokens,rows,cols) {
+        (2,4096|2048,128)=>2,
+        (3,2048,128)=>3,
+        (4,_,_) | (8,_,_)=>4,
+        (6,_,_)=>3,
+        _=>0,
+    }
+}
+/// FOLD ROWS: whether a plain matrix of a group of `tokens` rows takes the one fold launch for all its rows
+/// (`flash_resident_projection_fold_rows`, `_f32`). By shape alone, so every rank chooses the same: the fold's own
+/// geometry (few rows, long rows) and 2 to 8 rows. One row keeps the plain step's own forms.
+pub fn fold_rows(tokens:usize,rows:usize,cols:usize)->bool {
+    spark_gpu_probe::plain_admission::fold_rows_shape(rows,cols,tokens)
+        && spark_gpu_probe::plain_admission::plain_geometry(rows,cols).1 as usize==spark_gpu_probe::plain_admission::FOLD_THREADS
+}
+#[cfg(test)]
+mod shared_form_tests {
+    use super::plain_rows_part;
+    #[test]
+    fn the_fold_shapes_take_one_fold_launch_at_2_to_8_rows_and_every_other_matrix_keeps_its_form() {
+        // The router gate (FP32) and the narrow BF16 groups, rank-local and logical rows.
+        for (rows,cols) in [(144,4096),(288,4096),(128,4096),(64,4096),(32,4096),(16,4096)] {
+            for m in 0..=20 {assert_eq!(super::fold_rows(m,rows,cols),(2..=16).contains(&m),"{rows}x{cols} m={m}");}
+        }
+        // Latent tables, index tables and wide matrices never take it: their forms are the base's.
+        for (rows,cols) in [(4096,128),(8192,128),(2048,1536),(4096,1536),(16384,512),(32768,512),(4096,4096),(513,4096),(144,512)] {
+            for m in 1..=16 {assert!(!super::fold_rows(m,rows,cols),"{rows}x{cols} m={m}");}
+        }
+    }
+    #[test]
+    fn only_proved_gate_expansions_take_the_two_and_three_row_parts() {
+        assert_eq!(plain_rows_part(2,4096,128),2);assert_eq!(plain_rows_part(2,128,4096),0);
+        for rows in [16,32,64,128,144,256,2047,2048,2049,4096,8192] {for cols in [127,128,129,1536,4096,8192] {
+            for m in [1,2,3,4,5,6,7,8,9,16,32,128,512,1024] {
+                let base=match (m,rows,cols) {
+                    (2,2048|4096,128)=>2,(3,2048,128)=>3,(4|8,_,_)=>4,(6,_,_)=>3,_=>0,
+                };
+                assert_eq!(plain_rows_part(m,rows,cols),base,"{rows}x{cols} m={m}");
+            }
+        }}
+    }
+}

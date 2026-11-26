@@ -1,0 +1,6 @@
+[alias]
+# Build and stamp the GPU kernels: the host tool runs on the pinned stable
+# toolchain and drives the pinned nightly for the NVPTX build.
+kernels = "run -q -p spark-build-kernels --"
+# The Inkling image (crate kernels-inkling), after `cargo kernels`.
+kernels-inkling = "run -q -p spark-build-kernels --bin inkling --"

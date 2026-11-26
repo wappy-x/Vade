@@ -1,0 +1,5 @@
+$ vade up --bogus
+--- stderr
+error: Unknown option "--bogus" for vade up.
+ hint: Run vade up --help.
+--- exit 1

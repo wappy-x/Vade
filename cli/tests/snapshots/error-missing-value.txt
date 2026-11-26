@@ -1,0 +1,5 @@
+$ vade launch --context
+--- stderr
+error: Give --context a value.
+ hint: Run vade launch --help.
+--- exit 1
