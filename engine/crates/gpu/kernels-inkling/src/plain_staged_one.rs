@@ -20,12 +20,12 @@
 use core::arch::asm;
 use crate::bf16_panels::{
     BAND_META_WORDS, CHUNK_E3_HI_OFF, CHUNK_E3_LO_OFF, CHUNK_SM1_OFF, CHUNK_WORDS, ESC_STEP_WORDS,
-    RAW_EXP_CHUNK_WORDS,
+    HEADER_WORDS, RAW_EXP_CHUNK_WORDS,
 };
 use crate::few_product::{
     FEW_INPUT_AT, FEW_MAX, FEW_NARROW_THREADS, FEW_SPLIT_MAX, FEW_SPLIT_OUT, FEW_STAGE_BYTES, FEW_THREADS,
-    ONE_BLOCK_BYTES, ONE_FLAGS_WORD, ONE_PAIR_WORD, ONE_PANEL_INPUTS, ONE_PANEL_WORD, ONE_PART_WORD, ONE_SPLIT_WORD,
-    ONE_STAGES, ONE_TRIPLE_WORD,
+    ONE_BLOCK_BYTES, ONE_FLAGS_WORD, ONE_OFFS_WORD, ONE_PAIR_WORD, ONE_PANEL_INPUTS, ONE_PANEL_WORD, ONE_PART_WORD,
+    ONE_SPLIT_WORD, ONE_STAGES, ONE_TRIPLE_WORD,
 };
 use crate::tc_ptx::{
     cp_async_wait_zero, cvt_bf16x2, ld_global_nc_u32, ld_global_nc_v2_u32, ld_global_nc_v4, ld_global_nc_v4_u32,
@@ -84,9 +84,10 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
         let shared_bytes: u32;
         asm!("mov.u32 {bytes}, %dynamic_smem_size;", bytes = out(reg32) shared_bytes);
         if is_panel {
-            let coop = mode == 2 || mode == 3;
-            let slices_want = if mode == 3 { 8usize } else if mode == 2 { 4usize } else { 1usize };
-            if !(mode == 1 || mode == 2 || mode == 3) { core::arch::nvptx::trap(); }
+            let coop = mode >= 2;
+            let coop8_dbl = mode == 4;
+            let coop8_sgl = mode == 3;
+            let slices_want = if mode >= 3 { 8usize } else if mode == 2 { 4usize } else { 1usize };
             let flags = *words.add(ONE_FLAGS_WORD);
             let split_count = if flags & FEW_SPLIT_OUT != 0 { *words.add(ONE_FLAGS_WORD + 1) as usize } else { 0 };
             let part_chunks = *words.add(ONE_PART_WORD) as usize;
@@ -95,12 +96,13 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
             let bands_ab = *words.add(ONE_TRIPLE_WORD + 5) as usize;
             let use_c = bands_ab != 0 && block_idx >= bands_ab;
             let use_b = !use_c && bands_a != 0 && block_idx >= bands_a;
-            let (rows, panels_base, first_band, bidx) = if use_c {
+            let (rows, panels_base, first_band, bidx, packed_offs) = if use_c {
                 (
                     *words.add(ONE_TRIPLE_WORD + 1) as usize,
                     *words.add(ONE_TRIPLE_WORD + 3) as *const u32,
                     *words.add(ONE_TRIPLE_WORD + 4) as usize,
                     block_idx - bands_ab,
+                    *words.add(ONE_TRIPLE_WORD + 6),
                 )
             } else if use_b {
                 (
@@ -108,9 +110,16 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
                     *words.add(ONE_PAIR_WORD + 3) as *const u32,
                     *words.add(ONE_PAIR_WORD + 4) as usize,
                     block_idx - bands_a,
+                    *words.add(ONE_PAIR_WORD + 7),
                 )
             } else {
-                (rows, *words.add(ONE_PANEL_WORD) as *const u32, *words.add(ONE_PANEL_WORD + 1) as usize, block_idx)
+                (
+                    rows,
+                    *words.add(ONE_PANEL_WORD) as *const u32,
+                    *words.add(ONE_PANEL_WORD + 1) as usize,
+                    block_idx,
+                    *words.add(ONE_OFFS_WORD),
+                )
             };
             let input_check = if use_c {
                 *words.add(ONE_TRIPLE_WORD + 2) as usize
@@ -141,7 +150,9 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
                 || (split_count == 0 && (flags & FEW_SPLIT_OUT != 0 || (bands_a == 0 && output.is_null())))
                 || split_count > FEW_SPLIT_MAX
                 || (mode == 2 && threads != 128)
-                || (mode == 3 && threads != 256)
+                || ((coop8_sgl || coop8_dbl) && threads != 256)
+                || (coop8_dbl && inputs > 4)
+                || (coop8_sgl && inputs <= 4)
                 || (!coop && threads > 128)
                 || (bands_ab != 0 && (bands_a == 0 || bands_ab <= bands_a))
                 || (bands_a != 0 && (split_count != 0 || !(mode == 2 || threads == 32) || bidx >= bands))
@@ -159,49 +170,28 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
             let own_local = local_band.min(bands - 1);
             let abs_band = first_band + own_local;
 
-            // Hoist L2 streaming eviction hint once so dense panel loads never evict hot activations/KV from L2.
-            let l2_evict: u64;
-            asm!("createpolicy.fractional.L2::evict_first.b64 {p}, 1.0;", p = out(reg64) l2_evict, options(pure, nomem, nostack));
-
-            // Load Vade-BF11-BP matrix header and this band's 16-byte prefix metadata (`LDG.E.128`) before `griddepcontrol.wait`.
-            let hdr = ld_global_nc_v4_u32(panels_base);
-            let (meta_off, chunks_off, esc_off, slices_enc) = (hdr[0] as usize, hdr[1] as usize, hdr[2] as usize, (hdr[3] >> 16) as usize);
-            if slices_enc != slices_want {
-                core::arch::nvptx::trap();
-            }
-            let meta_ptr = panels_base.add(meta_off + abs_band * BAND_META_WORDS);
-            let meta0 = ld_global_nc_v4_u32(meta_ptr);
-            let (lut0, lut1, esc_meta) = (meta0[0], meta0[1], meta0[2]);
-            let is_raw_exp = (esc_meta & 1) != 0;
+            // Use host-validated `(chunks_off, esc_off)` from Command payload to eliminate cold DRAM header read;
+            // fire initial weight chunk fetches `r0, r1` in parallel with per-band metadata at cycle 0.
+            let (meta_off, chunks_off, esc_off) = if packed_offs != 0 {
+                (HEADER_WORDS, (packed_offs & 0xFFFF_FFFF) as usize, (packed_offs >> 32) as usize)
+            } else {
+                let hdr = ld_global_nc_v4_u32(panels_base);
+                if (hdr[3] >> 16) as usize != slices_want {
+                    core::arch::nvptx::trap();
+                }
+                (hdr[0] as usize, hdr[1] as usize, hdr[2] as usize)
+            };
 
             let chunks_u32 = chunks as u32;
             let part_chunks_u32 = part_chunks as u32;
             let row_bytes = crate::few_product::one_panel_row_bytes_chunks(inputs, part_chunks) as u32;
             let mut x_cur = smem + ((lane >> 2).min((inputs as u32) - 1) * row_bytes + (lane & 3) * 16);
             let w_smem_base = smem + (inputs as u32) * row_bytes;
-
             let chunk_band = panels_base.add(chunks_off + abs_band * chunks * CHUNK_WORDS);
-            let q_stream = if coop { warp_id } else { 0 };
-            let start_rel = if q_stream == 0 {
-                0usize
-            } else if q_stream == 1 {
-                (meta0[3] & 0xFFFF) as usize
-            } else if q_stream == 2 {
-                (meta0[3] >> 16) as usize
-            } else {
-                let w = ld_global_nc_u32(meta_ptr.add(4 + ((q_stream - 3) >> 1)));
-                ((w >> (((q_stream - 3) & 1) * 16)) & 0xFFFF) as usize
-            };
-            let mut esc_ptr = panels_base.add(esc_off + (((esc_meta >> 1) as usize) + start_rel) * ESC_STEP_WORDS + lane as usize);
-            // Prime 2 x 4-byte escape words (8 escapes = ~400 weights ahead) before `griddepcontrol.wait`.
-            let mut esc_cur = ld_global_nc_u32(esc_ptr);
-            esc_ptr = esc_ptr.add(ESC_STEP_WORDS);
-            let mut esc_nxt = ld_global_nc_u32(esc_ptr);
-            esc_ptr = esc_ptr.add(ESC_STEP_WORDS);
-            let mut esc_rem = 4u32;
+            let w_u32 = warp_id as u32;
+            let s_u32 = slices_want as u32;
 
-            // Prime DEPTH = 2 sequential 64-col chunks per warp (for `coop`: 8 chunks = 512 cols = 11.3 KB/CTA)
-            // using `L2::evict_first` + `L2::256B` while any preceding norm finishes.
+            // Prime DEPTH = 2 sequential 64-col chunks per warp at cycle 0 before waiting on `meta0`.
             const DEPTH: u32 = 2;
             const _: () = assert!(DEPTH == 2);
             macro_rules! fetch_chunk {
@@ -212,21 +202,119 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
                     let (a0, a1, a2, a3): (u32, u32, u32, u32);
                     let (b0, b1, b2, b3): (u32, u32, u32, u32);
                     let (e0, e1, eh): (u32, u32, u32);
-                    asm!("ld.global.nc.L2::cache_hint.L2::256B.v4.u32 {{{a},{b},{c},{d}}}, [{p}], {h};",
+                    asm!("{{ .reg .b64 h; createpolicy.fractional.L2::evict_first.b64 h, 1.0; ld.global.nc.L2::cache_hint.L2::256B.v4.u32 {{{a},{b},{c},{d}}}, [{p}], h; }}",
                          a = out(reg32) a0, b = out(reg32) a1, c = out(reg32) a2, d = out(reg32) a3,
-                         p = in(reg64) base.add(l * 4), h = in(reg64) l2_evict, options(readonly, nostack));
-                    asm!("ld.global.nc.L2::cache_hint.L2::256B.v4.u32 {{{a},{b},{c},{d}}}, [{p}], {h};",
+                         p = in(reg64) base.add(l * 4), options(readonly, nostack));
+                    asm!("{{ .reg .b64 h; createpolicy.fractional.L2::evict_first.b64 h, 1.0; ld.global.nc.L2::cache_hint.L2::256B.v4.u32 {{{a},{b},{c},{d}}}, [{p}], h; }}",
                          a = out(reg32) b0, b = out(reg32) b1, c = out(reg32) b2, d = out(reg32) b3,
-                         p = in(reg64) base.add(CHUNK_SM1_OFF + l * 4), h = in(reg64) l2_evict, options(readonly, nostack));
-                    asm!("ld.global.nc.L2::cache_hint.L2::128B.v2.u32 {{{a},{b}}}, [{p}], {h};",
+                         p = in(reg64) base.add(CHUNK_SM1_OFF + l * 4), options(readonly, nostack));
+                    asm!("{{ .reg .b64 h; createpolicy.fractional.L2::evict_first.b64 h, 1.0; ld.global.nc.L2::cache_hint.L2::128B.v2.u32 {{{a},{b}}}, [{p}], h; }}",
                          a = out(reg32) e0, b = out(reg32) e1,
-                         p = in(reg64) base.add(CHUNK_E3_LO_OFF + l * 2), h = in(reg64) l2_evict, options(readonly, nostack));
-                    asm!("ld.global.nc.L2::cache_hint.L2::128B.u32 {a}, [{p}], {h};",
+                         p = in(reg64) base.add(CHUNK_E3_LO_OFF + l * 2), options(readonly, nostack));
+                    asm!("{{ .reg .b64 h; createpolicy.fractional.L2::evict_first.b64 h, 1.0; ld.global.nc.L2::cache_hint.L2::128B.u32 {a}, [{p}], h; }}",
                          a = out(reg32) eh,
-                         p = in(reg64) base.add(CHUNK_E3_HI_OFF + l), h = in(reg64) l2_evict, options(readonly, nostack));
+                         p = in(reg64) base.add(CHUNK_E3_HI_OFF + l), options(readonly, nostack));
                     ([a0, a1, a2, a3], [b0, b1, b2, b3], [e0, e1], eh)
                 }};
             }
+
+            // Fire initial weight chunk fetches `r0, r1` and per-band metadata in parallel at cycle 0
+            // before any dependent escape-pool lookup (`esc_cur`, `esc_nxt`).
+            let mut r0 = fetch_chunk!(if coop { w_u32 } else { 0u32 });
+            let mut r1 = fetch_chunk!(if coop { w_u32 + s_u32 } else { 1u32 });
+            let meta_ptr = panels_base.add(meta_off + abs_band * BAND_META_WORDS);
+            let meta0 = ld_global_nc_v4_u32(meta_ptr);
+            let q_stream = if coop { warp_id } else { 0 };
+            let meta_rel_w = if q_stream >= 3 {
+                ld_global_nc_u32(meta_ptr.add(4 + ((q_stream - 3) >> 1)))
+            } else {
+                0u32
+            };
+
+            // Stage `part_chunks` chunks of BF16 `X` starting at global chunk `start_ch` packed for 16-byte `load4`
+            // per 2-tile pair: `row_dst + kp * 64 + s * 16` holds `[b0_k0, b1_k0, b0_k1, b1_k1]`.
+            macro_rules! stage_x_body {
+                ($start_ch:expr) => {{
+                    let sx_ch: u32 = $start_ch;
+                    let sx_ba = words.add(ONE_PAIR_WORD + 5).read_volatile() as u32;
+                    let sx_bab = words.add(ONE_TRIPLE_WORD + 5).read_volatile() as u32;
+                    let (sx_bidx, sx_tid, sx_step): (u32, u32, u32);
+                    asm!("mov.u32 {b}, %ctaid.x; mov.u32 {t}, %tid.x; mov.u32 {n}, %ntid.x;",
+                         b = out(reg32) sx_bidx, t = out(reg32) sx_tid, n = out(reg32) sx_step,
+                         options(nomem, nostack));
+                    let sx_input = if sx_bab != 0 && sx_bidx >= sx_bab {
+                        words.add(ONE_TRIPLE_WORD + 2).read_volatile() as *const f32
+                    } else if sx_ba != 0 && sx_bidx >= sx_ba {
+                        words.add(ONE_PAIR_WORD + 2).read_volatile() as *const f32
+                    } else {
+                        words.add(1).read_volatile() as *const f32
+                    };
+                    let sx_cols = words.add(4).read_volatile() as u32;
+                    let sx_inputs = words.add(5).read_volatile() as u32;
+                    let sx_pc = words.add(ONE_PART_WORD).read_volatile() as u32;
+                    let sx_rb = sx_pc * 128 + if sx_inputs > 1 { 64 } else { 0 };
+                    let sx_take = sx_pc.min((sx_cols >> 6) - sx_ch);
+                    let sx_items = sx_take * 16;
+                    let mut t = 0u32;
+                    while t < sx_inputs {
+                        let src_row = sx_input.add((t * sx_cols + sx_ch * 64) as usize);
+                        let dst_row = smem + t * sx_rb;
+                        let mut vec4 = sx_tid;
+                        while vec4 < sx_items {
+                            let v = ld_global_nc_v4(src_row.add((vec4 * 4) as usize));
+                            let p0 = cvt_bf16x2(v[0], v[1]);
+                            let p1 = cvt_bf16x2(v[2], v[3]);
+                            let dst = dst_row
+                                + (vec4 >> 3) * 64
+                                + ((vec4 & 1) << 5)
+                                + (((vec4 >> 2) & 1) << 3)
+                                + (((vec4 >> 1) & 1) << 2);
+                            store_u32(dst, p0);
+                            store_u32(dst + 16, p1);
+                            asm!("", options(nomem, nostack));
+                            vec4 += sx_step;
+                        }
+                        t += 1;
+                    }
+                    (sx_pc, sx_step)
+                }};
+            }
+            macro_rules! stage_x {
+                ($start_ch:expr) => {{
+                    let (sx_pc, sx_step) = stage_x_body!($start_ch);
+                    if sx_step == 32 {
+                        asm!("bar.warp.sync 0xffffffff;");
+                    } else {
+                        core::arch::nvptx::_syncthreads();
+                    }
+                    sx_pc
+                }};
+            }
+
+            if coop8_dbl {
+                // Hide `meta0`/`r0`/`r1` DRAM latency inside initial L2-hot `X` staging before reading `esc_ptr`.
+                asm!("griddepcontrol.wait;", options(nostack));
+                let _ = stage_x_body!(0u32);
+            }
+
+            let (lut0, lut1, esc_meta) = (meta0[0], meta0[1], meta0[2]);
+            let is_raw_exp = (esc_meta & 1) != 0;
+            let start_rel = if q_stream == 0 {
+                0usize
+            } else if q_stream == 1 {
+                (meta0[3] & 0xFFFF) as usize
+            } else if q_stream == 2 {
+                (meta0[3] >> 16) as usize
+            } else {
+                ((meta_rel_w >> (((q_stream - 3) & 1) * 16)) & 0xFFFF) as usize
+            };
+            let mut esc_ptr = panels_base.add(esc_off + (((esc_meta >> 1) as usize) + start_rel) * ESC_STEP_WORDS + lane as usize);
+            // Prime 2 x 4-byte escape words (8 escapes = ~400 weights ahead) before `griddepcontrol.wait`.
+            let mut esc_cur = ld_global_nc_u32(esc_ptr);
+            esc_ptr = esc_ptr.add(ESC_STEP_WORDS);
+            let mut esc_nxt = ld_global_nc_u32(esc_ptr);
+            esc_ptr = esc_ptr.add(ESC_STEP_WORDS);
+            let mut esc_rem = 4u32;
 
             macro_rules! lop3 {
                 ($a:expr, $b:expr, $c:expr, $imm:literal) => {{
@@ -322,76 +410,26 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
                 }};
             }
 
-            let w_u32 = warp_id as u32;
-            let s_u32 = slices_want as u32;
-            let coop8 = mode == 3;
-            let mut r0 = fetch_chunk!(if coop { w_u32 } else { 0u32 });
-            let mut r1 = fetch_chunk!(if coop { w_u32 + s_u32 } else { 1u32 });
-            // In cooperative mode, Warps 1..slices decode chunks 1..slices into SMEM slot 0 and prime next chunks
-            // BEFORE `griddepcontrol.wait`, fully overlapping static weight decode with the preceding norm/mix.
-            if coop && !is_raw_exp && warp_id > 0 {
-                decode_chunk_to_smem!(r0, w_smem_base + (w_u32 - 1) * 2048);
-                r0 = fetch_chunk!(w_u32 + 2 * s_u32);
-            }
-
-            // Wait for any preceding norm/mix/stream-op in a dependent launch before reading coherent `input`.
-            asm!("griddepcontrol.wait;", options(nostack));
-
-            // Stage `part_chunks` chunks of BF16 `X` starting at global chunk `start_ch` packed for 16-byte `load4`
-            // per 2-tile pair: `row_dst + kp * 64 + s * 16` holds `[b0_k0, b1_k0, b0_k1, b1_k1]`.
-            macro_rules! stage_x {
-                ($start_ch:expr) => {{
-                    let sx_ch: u32 = $start_ch;
-                    let sx_ba = words.add(ONE_PAIR_WORD + 5).read_volatile() as u32;
-                    let sx_bab = words.add(ONE_TRIPLE_WORD + 5).read_volatile() as u32;
-                    let (sx_bidx, sx_tid, sx_step): (u32, u32, u32);
-                    asm!("mov.u32 {b}, %ctaid.x; mov.u32 {t}, %tid.x; mov.u32 {n}, %ntid.x;",
-                         b = out(reg32) sx_bidx, t = out(reg32) sx_tid, n = out(reg32) sx_step,
-                         options(nomem, nostack));
-                    let sx_input = if sx_bab != 0 && sx_bidx >= sx_bab {
-                        words.add(ONE_TRIPLE_WORD + 2).read_volatile() as *const f32
-                    } else if sx_ba != 0 && sx_bidx >= sx_ba {
-                        words.add(ONE_PAIR_WORD + 2).read_volatile() as *const f32
-                    } else {
-                        words.add(1).read_volatile() as *const f32
-                    };
-                    let sx_cols = words.add(4).read_volatile() as u32;
-                    let sx_inputs = words.add(5).read_volatile() as u32;
-                    let sx_pc = words.add(ONE_PART_WORD).read_volatile() as u32;
-                    let sx_rb = sx_pc * 128 + if sx_inputs > 1 { 64 } else { 0 };
-                    let sx_take = sx_pc.min((sx_cols >> 6) - sx_ch);
-                    let sx_items = sx_take * 16;
-                    let mut t = 0u32;
-                    while t < sx_inputs {
-                        let src_row = sx_input.add((t * sx_cols + sx_ch * 64) as usize);
-                        let dst_row = smem + t * sx_rb;
-                        let mut vec4 = sx_tid;
-                        while vec4 < sx_items {
-                            let v = ld_global_nc_v4(src_row.add((vec4 * 4) as usize));
-                            let p0 = cvt_bf16x2(v[0], v[1]);
-                            let p1 = cvt_bf16x2(v[2], v[3]);
-                            let dst = dst_row
-                                + (vec4 >> 3) * 64
-                                + ((vec4 & 1) << 5)
-                                + (((vec4 >> 2) & 1) << 3)
-                                + (((vec4 >> 1) & 1) << 2);
-                            store_u32(dst, p0);
-                            store_u32(dst + 16, p1);
-                            asm!("", options(nomem, nostack));
-                            vec4 += sx_step;
-                        }
-                        t += 1;
+            if coop8_dbl {
+                // `X` is already staged above; Warps 1..7 decode slot 0 and sync both `X` and slot 0 in ONE barrier.
+                if !is_raw_exp && warp_id > 0 {
+                    decode_chunk_to_smem!(r0, w_smem_base + (w_u32 - 1) * 2048);
+                    if w_u32 + 2 * s_u32 < chunks_u32 {
+                        r0 = fetch_chunk!(w_u32 + 2 * s_u32);
                     }
-                    if sx_step == 32 {
-                        asm!("bar.warp.sync 0xffffffff;");
-                    } else {
-                        core::arch::nvptx::_syncthreads();
+                }
+                core::arch::nvptx::_syncthreads();
+            } else {
+                // In PDL cooperative modes (`mode == 2`), Warps 1..slices decode slot 0 BEFORE `griddepcontrol.wait`.
+                if coop && !is_raw_exp && warp_id > 0 {
+                    decode_chunk_to_smem!(r0, w_smem_base + (w_u32 - 1) * 2048);
+                    if w_u32 + 2 * s_u32 < chunks_u32 {
+                        r0 = fetch_chunk!(w_u32 + 2 * s_u32);
                     }
-                    sx_pc
-                }};
+                }
+                asm!("griddepcontrol.wait;", options(nostack));
+                let _ = stage_x!(0u32);
             }
-
-            let _ = stage_x!(0u32);
 
             let mut ch = 0u32;
             let mut part_end = part_chunks_u32.min(chunks_u32);
@@ -498,14 +536,62 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
                     } else {
                         ch = part_end;
                     }
-                } else if coop8 {
-                    // 8-warp single-buffered cooperative ascending-K (14 KB W_SMEM -> 3 blk/SM = 24 warps/SM on O_proj
-                    // across all M=1..8): Warp 0 consumes chunk ch + 7 decoded chunks in SMEM, then Warps 1..7 refill.
+                } else if coop8_dbl {
+                    // 8-warp DOUBLE-BUFFERED cooperative ascending-K (`mode == 4`, `28,672 B` W_SMEM, 3 blk/SM =
+                    // 24 warps/SM for `M = 1..=4`): Warps 1..7 decode `nxt_slot` while Warp 0 runs 32 HMMAs on
+                    // `cur_slot` (1 barrier per 8 chunks, zero serialization, zero tail over-fetch, 100% bit-exact!).
+                    macro_rules! coop8_step {
+                        ($cur_slot:literal, $nxt_slot:literal, $w0_reg:ident, $p_reg:ident) => {{
+                            if ch + 8 >= chunks_u32 {
+                                asm!("griddepcontrol.launch_dependents;", options(nostack));
+                            }
+                            if warp_id == 0 {
+                                consume_chunk!($w0_reg, x_cur);
+                                if ch + 16 < chunks_u32 {
+                                    $w0_reg = fetch_chunk!(ch + 16);
+                                }
+                                let sb = w_smem_base + ($cur_slot * 14_336) as u32;
+                                let mut p = 0u32;
+                                while p < 7 {
+                                    consume_smem_chunk!(sb + p * 2048, x_cur + (p + 1) * 128);
+                                    p += 1;
+                                }
+                                x_cur += 1024;
+                            } else if ch + 8 < chunks_u32 {
+                                let db = w_smem_base + ($nxt_slot * 14_336) as u32 + (w_u32 - 1) * 2048;
+                                decode_chunk_to_smem!($p_reg, db);
+                                if ch + 24 + w_u32 < chunks_u32 {
+                                    $p_reg = fetch_chunk!(ch + 24 + w_u32);
+                                }
+                            }
+                            if ch + 8 < chunks_u32 {
+                                core::arch::nvptx::_syncthreads();
+                            }
+                            ch += 8;
+                        }};
+                    }
+                    if (ch & 8) != 0 && ch < part_end {
+                        coop8_step!(1, 0, r1, r0);
+                    }
+                    while ch + 16 <= part_end {
+                        coop8_step!(0, 1, r0, r1);
+                        coop8_step!(1, 0, r1, r0);
+                    }
+                    if ch < part_end {
+                        coop8_step!(0, 1, r0, r1);
+                    }
+                } else if coop8_sgl {
+                    // 8-warp single-buffered cooperative ascending-K (`mode == 3`, `14,336 B` W_SMEM, 3 blk/SM for M=5..8).
                     while ch < part_end {
+                        if ch + 8 >= chunks_u32 {
+                            asm!("griddepcontrol.launch_dependents;", options(nostack));
+                        }
                         if warp_id == 0 {
                             consume_chunk!(r0, x_cur);
                             r0 = r1;
-                            r1 = fetch_chunk!(ch + 16);
+                            if ch + 16 < chunks_u32 {
+                                r1 = fetch_chunk!(ch + 16);
+                            }
                             let mut p = 0u32;
                             while p < 7 {
                                 consume_smem_chunk!(w_smem_base + p * 2048, x_cur + (p + 1) * 128);
@@ -517,7 +603,9 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
                         if warp_id > 0 && ch + 8 < chunks_u32 {
                             decode_chunk_to_smem!(r1, w_smem_base + (w_u32 - 1) * 2048);
                             r1 = r0;
-                            r0 = fetch_chunk!(ch + 24 + w_u32);
+                            if ch + 24 + w_u32 < chunks_u32 {
+                                r0 = fetch_chunk!(ch + 24 + w_u32);
+                            }
                         }
                         ch += 8;
                         if ch < chunks_u32 {
@@ -531,7 +619,9 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
                         ($cur_slot:literal, $nxt_slot:literal, $w0_reg:ident, $p_reg:ident) => {{
                             if warp_id == 0 {
                                 consume_chunk!($w0_reg, x_cur);
-                                $w0_reg = fetch_chunk!(ch + 8);
+                                if ch + 8 < chunks_u32 {
+                                    $w0_reg = fetch_chunk!(ch + 8);
+                                }
                                 let sb = w_smem_base + ($cur_slot * 6144) as u32;
                                 consume_smem_chunk!(sb, x_cur + 128);
                                 consume_smem_chunk!(sb + 2048, x_cur + 256);
@@ -540,9 +630,13 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
                             } else if ch + 4 < chunks_u32 {
                                 let db = w_smem_base + ($nxt_slot * 6144) as u32 + (w_u32 - 1) * 2048;
                                 decode_chunk_to_smem!($p_reg, db);
-                                $p_reg = fetch_chunk!(ch + 12 + w_u32);
+                                if ch + 12 + w_u32 < chunks_u32 {
+                                    $p_reg = fetch_chunk!(ch + 12 + w_u32);
+                                }
                             }
-                            core::arch::nvptx::_syncthreads();
+                            if ch + 4 < chunks_u32 {
+                                core::arch::nvptx::_syncthreads();
+                            }
                             ch += 4;
                         }};
                     }
@@ -707,6 +801,7 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
                 i += 1;
             }
             crate::ptx::commit();
+            asm!("griddepcontrol.wait;", options(nostack));
             if tid < 16 {
                 let v = ld_global_nc_v4(gx.add(tid * 4));
                 let x_dst = smem + 4_096 + (tid * 8) as u32;
@@ -715,6 +810,7 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
             }
             cp_async_wait_zero();
             core::arch::nvptx::_syncthreads();
+            asm!("griddepcontrol.launch_dependents;", options(nostack));
             let off0 = swiz128(lane & 15, lane >> 4);
             let s = lane & 3;
             let mut dots = [0.0f32; 4];
@@ -765,6 +861,7 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
                 i += 1;
             }
             crate::ptx::commit();
+            asm!("griddepcontrol.wait;", options(nostack));
             if tid < 16 {
                 let v = ld_global_nc_v4(input.add(tid * 4));
                 let x_dst = smem + 4_096 + (tid * 8) as u32;

@@ -407,7 +407,7 @@ impl<'a, V> LoadedWeights<'a, V> {
     }
     /// Where `weights` are two or more matrices that one stack holds one after another in this order, with the same
     /// columns: the stack value, the words of all of them, the rows of each and the columns. None otherwise.
-    fn run(&self, weights: &[Weight]) -> Result<Option<(&V, Range<usize>, Vec<usize>, usize)>> {
+    pub(crate) fn run(&self, weights: &[Weight]) -> Result<Option<(&V, Range<usize>, Vec<usize>, usize)>> {
         let mut found = Vec::with_capacity(weights.len());
         for weight in weights {
             let (Some((stack, words)), Some(Entry::Resident { rows, columns, .. })) = (self.stacked.get(weight), self.entries.get(weight)) else { return Ok(None) };

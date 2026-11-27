@@ -242,6 +242,15 @@ impl<'a,C:Compute,W:Weights<C>> Service<'a,C,W> {
     /// What the chats can use: the room less the values of one step.
     pub fn pool(&self)->usize {self.pool}
     pub fn with_prompt_keep(mut self,keep:bool)->Self {self.keep=keep;self}
+    /// Attach a draft model and depth (used by the pair start on rank 0).
+    #[cfg_attr(not(target_os="linux"),allow(dead_code))]
+    pub(super) fn set_draft(&mut self,model:&'a dyn mtp::Model<C,W>,depth:usize) {self.model=Some(model);self.depth=depth;}
+    /// Active MTP draft depth (`0` when plain).
+    #[cfg_attr(not(target_os="linux"),allow(dead_code))]
+    pub(super) fn depth(&self)->usize {self.depth}
+    /// Maximum verify rows per target pass for mirrored `--pair` batching.
+    #[cfg_attr(not(target_os="linux"),allow(dead_code))]
+    pub(super) fn verify_row_cap_value(&self)->usize {self.verify_row_cap()}
     /// Attach a persistent NVMe disk prefix cache for cross-restart prefix reuse.
     pub fn with_disk_cache(mut self,cache:super::disk_cache::DiskPrefixCache)->Self {self.disk_cache=Some(RefCell::new(cache));self}
     /// Retention shares the session pool. The scheduler evicts idle snapshots before it admits more live bytes.
@@ -429,6 +438,230 @@ impl<C:Compute,W:Weights<C>> Chat<'_,'_,C,W> {
         // The chats in decode wait while this chat reads alone.
         service.settle(&mut slots,&[active])?;
         Ok(answer)
+    }
+    /// Pair mirror helper: true when this chat has an active draft window on rank 0.
+    pub(super) fn has_draft(&self)->bool {self.draft.is_some()}
+    /// Pair mirror helper: if `Target::truncate(pos)` commits or discards a provisional verify window, returns
+    /// `(rows, keep, defer)` so rank 1 mirrors the exact same target state transition without running `Drafter`.
+    pub(super) fn pending_verify_action(&self,pos:usize)->Option<(usize,usize,bool)> {
+        let d=self.draft.as_ref()?;
+        if d.pending.is_empty() {return None;}
+        let keep=pos.checked_sub(d.read_to())?;
+        if keep>d.rows {return None;}
+        Some((d.rows,keep,d.batch_round.is_some()))
+    }
+}
+/// One row of a mirrored pair batch call executed on rank 1 (which carries no `Drafter`).
+pub(super) struct FollowBatchRow<'a,'s,'e,C:Compute,W:Weights<C>> {
+    pub(super) session:&'a mut Chat<'s,'e,C,W>,
+    pub(super) tokens:&'a [u32],
+    pub(super) output:BatchOutput,
+    pub(super) greedy:bool,
+    pub(super) drafted:bool,
+}
+impl<'a,C:Compute,W:Weights<C>> Service<'a,C,W> {
+    /// Pair follower (rank 1): execute one solo `Chat::read` / `Chat::tapped` target step matching rank 0's exact
+    /// driver/weights path without running `Drafter`.
+    pub(super) fn follow_read(&self,chat:&mut Chat<'_,'a,C,W>,tokens:&[u32],last:bool,phase:super::experts::Phase,drafted:bool)->Result<()> {
+        if !drafted {return chat.read(tokens,last,phase).map(|_|());}
+        let limit=self.driver.limits().step_rows;
+        let pieces=tokens.len().div_ceil(limit);
+        for (i,part) in tokens.chunks(limit).enumerate() {
+            let end=last && i+1==pieces;
+            self.follow_tapped(chat,part,if end {Wanted::Last} else {Wanted::None},end,phase)?;
+        }
+        Ok(())
+    }
+    /// Pair follower (rank 1): execute one `Chat::tapped` target pass (plain step, row pass, or provisional verify).
+    fn follow_tapped(&self,chat:&mut Chat<'_,'a,C,W>,tokens:&[u32],wanted:Wanted,logits:bool,phase:super::experts::Phase)->Result<()> {
+        let active=chat.active_slot()?;
+        let mut slots=self.slots.borrow_mut();
+        let slot=slots[active].as_mut().ok_or("chat closed")?;
+        let decode=phase==super::experts::Phase::Decode;
+        let verify=decode && tokens.len()>1 && wanted==Wanted::All && !logits;
+        let single=decode && !verify && tokens.len()==1 && wanted!=Wanted::None && !slot.shared;
+        let need_pos=(slot.state.position as usize).saturating_add(slot.pending_accept.map_or(0,|(_,k)|k)).saturating_add(tokens.len());
+        self.driver.ensure_capacity(&mut slot.state,need_pos)?;
+        self.compute.work(|| {
+            self.flush_accept(slot)?;
+            if verify {self.driver.verify(&mut slot.state,tokens,&[])?;Ok(())}
+            else if single {self.driver.step(&mut slot.state,tokens[0])?;Ok(())}
+            else {self.driver.step_rows_phase(&mut [ChatStep {state:&mut slot.state,tokens,wanted,logits}],phase)?;Ok(())}
+        })?;
+        if !verify {slot.shared=false;}
+        Ok(())
+    }
+    /// Pair follower (rank 1): mirror `Target::truncate` target accept/discard without touching any draft state.
+    pub(super) fn follow_accept(&self,chat:&mut Chat<'_,'a,C,W>,rows:usize,keep:usize,defer:bool)->Result<()> {
+        let active=chat.active_slot()?;
+        let mut slots=self.slots.borrow_mut();
+        let slot=slots[active].as_mut().ok_or("chat closed")?;
+        if keep==0 {
+            slot.pending_accept=None;
+            state::discard(&mut [&mut slot.state]);
+        } else if defer {
+            need(slot.pending_accept.is_none(),"previous batch accept still pending")?;
+            slot.pending_accept=Some((rows,keep));
+        } else {
+            self.compute.work(||{self.flush_accept(slot)?;self.driver.accept(&mut slot.state,rows,keep)})?;
+        }
+        Ok(())
+    }
+    /// Pair follower (rank 1): flush deferred target accepts in one unrecorded batch while rank 0 runs `Drafter`.
+    pub(super) fn follow_flush_accepts(&self,chats:&[&Chat<'_,'a,C,W>])->Result<()> {
+        let mut active=Vec::with_capacity(chats.len());
+        for chat in chats {if let Ok(slot)=chat.active_slot() {active.push(slot);}}
+        let mut slots=self.slots.borrow_mut();
+        if !active.iter().any(|&idx|slots.get(idx).and_then(Option::as_ref).is_some_and(|s|s.pending_accept.is_some())) {return Ok(());}
+        self.compute.work(|| {
+            let paused=self.compute.rows_unrecorded(true)?;
+            let run=(||->Result<()> {
+                for &idx in &active {if let Some(slot)=slots.get_mut(idx).and_then(Option::as_mut) {self.flush_accept(slot)?;}}
+                Ok(())
+            })();
+            let resumed=self.compute.rows_unrecorded(paused);
+            run?;resumed?;Ok(())
+        })
+    }
+    /// Pair follower (rank 1): execute a mirrored `prefill_batch` / `step_batch` matching rank 0's exact split of
+    /// plain vs drafted rows, `batch_plain`, `batch_drafted`, `batch_verify_many`, and `tapped` calls.
+    pub(super) fn follow_batch(&self,rows:&mut [FollowBatchRow<'_,'_,'a,C,W>],phase:super::experts::Phase,verify_row_cap:usize)->Result<()> {
+        if rows.iter().all(|r|!r.drafted) {
+            let mut plain:Vec<_>=rows.iter_mut().map(|r|BatchRows {session:&mut *r.session,tokens:r.tokens,output:r.output,greedy:r.greedy,top_k:0}).collect();
+            return self.batch_plain(&mut plain,phase).map(|_|());
+        }
+        if rows.len()>1 && rows.iter().all(|r|r.drafted) {
+            return self.follow_batch_drafted(rows,phase,verify_row_cap);
+        }
+        let (mut plain,mut drafted)=(Vec::new(),Vec::new());
+        for row in rows.iter_mut() {
+            if !row.drafted {
+                plain.push(BatchRows {session:&mut *row.session,tokens:row.tokens,output:row.output,greedy:row.greedy,top_k:0});
+            } else {
+                drafted.push(FollowBatchRow {session:&mut *row.session,tokens:row.tokens,output:row.output,greedy:row.greedy,drafted:true});
+            }
+        }
+        if !plain.is_empty() {self.batch_plain(&mut plain,phase)?;}
+        if drafted.len()>1 {self.follow_batch_drafted(&mut drafted,phase,verify_row_cap)?;}
+        else if let [row]=drafted.as_mut_slice() {
+            let wanted=match row.output {BatchOutput::All=>Wanted::All,BatchOutput::Last=>Wanted::Last,BatchOutput::None=>Wanted::None};
+            self.follow_tapped(row.session,row.tokens,wanted,!row.greedy && wanted!=Wanted::None,phase)?;
+        }
+        Ok(())
+    }
+    fn follow_batch_drafted(&self,rows:&mut [FollowBatchRow<'_,'_,'a,C,W>],phase:super::experts::Phase,verify_row_cap:usize)->Result<()> {
+        let decode=phase==super::experts::Phase::Decode;
+        let any_multi=decode && rows.iter().any(|r|r.tokens.len()>1);
+        let all_greedy_verify=any_multi && rows.iter().all(|r|r.greedy && matches!(r.output,BatchOutput::All));
+        if any_multi && all_greedy_verify {
+            return self.follow_verify_many(rows,verify_row_cap);
+        }
+        if any_multi {
+            for row in rows.iter_mut() {
+                let wanted=match row.output {BatchOutput::All=>Wanted::All,BatchOutput::Last=>Wanted::Last,BatchOutput::None=>Wanted::None};
+                self.follow_tapped(row.session,row.tokens,wanted,!row.greedy && wanted!=Wanted::None,phase)?;
+            }
+            return Ok(());
+        }
+        let limit=self.driver.limits().step_rows;
+        let (mut steps,mut room,mut ends)=(vec![Vec::new()],limit,self.chats);
+        for (row,batch) in rows.iter().enumerate() {
+            let tokens=batch.tokens.len();
+            need(tokens>0 || matches!(batch.output,BatchOutput::None),"a row with no token asks for an answer")?;
+            let mut from=0;
+            while from<tokens {
+                let mut to=tokens.min(from+room);
+                let wanted=match batch.output {BatchOutput::All=>Wanted::All,BatchOutput::Last if to==tokens=>Wanted::Last,_=>Wanted::None};
+                if wanted==Wanted::All {to=to.min(from+ends);}
+                if room==0 || (wanted!=Wanted::None && ends==0) {steps.push(Vec::new());(room,ends)=(limit,self.chats);continue;}
+                ends-=match wanted {Wanted::All=>to-from,Wanted::Last=>1,Wanted::None=>0};
+                steps.last_mut().expect("starts with one step").push(Piece {row,from,to,wanted});
+                room-=to-from;from=to;
+            }
+        }
+        let called=rows.iter().map(|b|b.session.active_slot()).collect::<Result<Vec<_>>>()?;
+        let mut slots=self.slots.borrow_mut();
+        for pieces in steps.iter().filter(|p|!p.is_empty()) {
+            let mut open:Vec<Option<&mut Slot<C::Value>>>=slots.iter_mut().map(Option::as_mut).collect();
+            let mut taken=Vec::with_capacity(pieces.len());
+            for piece in pieces {
+                let slot=open.get_mut(called[piece.row]).and_then(Option::take).ok_or("loop text service: a row names a chat that is not open")?;
+                let count=piece.to-piece.from;
+                let need_pos=(slot.state.position as usize).saturating_add(slot.pending_accept.map_or(0,|(_,k)|k)).saturating_add(count);
+                self.driver.ensure_capacity(&mut slot.state,need_pos)?;
+                taken.push(slot);
+            }
+            self.compute.work(|| {
+                if taken.iter().any(|s|s.pending_accept.is_some()) {
+                    let paused=self.compute.rows_unrecorded(true)?;
+                    let r=(||->Result<()> {for slot in &mut taken {self.flush_accept(slot)?;} Ok(())})();
+                    let resumed=self.compute.rows_unrecorded(paused);
+                    r?;resumed?;
+                }
+                let mut chats:Vec<ChatStep<'_,C::Value>>=taken.iter_mut().zip(pieces).map(|(slot,piece)| {
+                    let batch=&rows[piece.row];
+                    ChatStep {state:&mut slot.state,tokens:&batch.tokens[piece.from..piece.to],wanted:piece.wanted,logits:!batch.greedy && piece.wanted!=Wanted::None}
+                }).collect();
+                self.driver.step_rows_phase(&mut chats,phase)?;
+                Ok(())
+            })?;
+            for slot in taken {slot.shared=pieces.len()>1;}
+        }
+        self.settle(&mut slots,&called)
+    }
+    fn follow_verify_many(&self,rows:&mut [FollowBatchRow<'_,'_,'a,C,W>],cap:usize)->Result<()> {
+        let cap=cap.max(1);
+        let called=rows.iter().map(|b|b.session.active_slot()).collect::<Result<Vec<_>>>()?;
+        let (mut groups,mut cur,mut cur_rows)=(Vec::new(),Vec::new(),0usize);
+        for (i,row) in rows.iter().enumerate() {
+            need(!row.tokens.is_empty(),"a verify row has no token")?;
+            if !cur.is_empty() && cur_rows+row.tokens.len()>cap {groups.push(std::mem::take(&mut cur));cur_rows=0;}
+            cur.push(i);cur_rows+=row.tokens.len();
+        }
+        if !cur.is_empty() {groups.push(cur);}
+        let mut slots=self.slots.borrow_mut();
+        for group in groups {
+            if group.len()==1 {
+                drop(slots);
+                let idx=group[0];
+                let r=&mut rows[idx];
+                self.follow_tapped(r.session,r.tokens,Wanted::All,false,super::experts::Phase::Decode)?;
+                slots=self.slots.borrow_mut();
+                continue;
+            }
+            let has_multi=group.iter().any(|&i|rows[i].tokens.len()>1);
+            let mut open:Vec<Option<&mut Slot<C::Value>>>=slots.iter_mut().map(Option::as_mut).collect();
+            let mut taken=Vec::with_capacity(group.len());
+            for &idx in &group {
+                let slot=open.get_mut(called[idx]).and_then(Option::take).ok_or("loop text service: a row names a chat that is not open")?;
+                let count=rows[idx].tokens.len();
+                let need_pos=(slot.state.position as usize).saturating_add(slot.pending_accept.map_or(0,|(_,k)|k)).saturating_add(count);
+                self.driver.ensure_capacity(&mut slot.state,need_pos)?;
+                taken.push(slot);
+            }
+            self.compute.work(|| {
+                if taken.iter().any(|s|s.pending_accept.is_some()) {
+                    let paused=self.compute.rows_unrecorded(true)?;
+                    let r=(||->Result<()> {for slot in &mut taken {self.flush_accept(slot)?;} Ok(())})();
+                    let resumed=self.compute.rows_unrecorded(paused);
+                    r?;resumed?;
+                }
+                if has_multi {
+                    let mut verify_chats:Vec<(&mut state::State<C::Value>,&[u32])>=taken.iter_mut().zip(&group).map(|(slot,&idx)|(&mut slot.state,rows[idx].tokens)).collect();
+                    self.driver.verify_many(&mut verify_chats,&[])?;
+                    drop(verify_chats);
+                    for (slot,&idx) in taken.iter_mut().zip(&group) {
+                        if rows[idx].tokens.len()==1 {self.driver.accept(&mut slot.state,1,1)?;}
+                    }
+                } else {
+                    let mut step_chats:Vec<ChatStep<'_,C::Value>>=taken.iter_mut().zip(&group).map(|(slot,&idx)|ChatStep {state:&mut slot.state,tokens:rows[idx].tokens,wanted:Wanted::All,logits:false}).collect();
+                    self.driver.step_rows_phase(&mut step_chats,super::experts::Phase::Decode)?;
+                }
+                Ok(())
+            })?;
+            for slot in taken {slot.shared=true;}
+        }
+        self.settle(&mut slots,&called)
     }
 }
 impl<C:Compute,W:Weights<C>> spark_serve::Session for Chat<'_,'_,C,W> {

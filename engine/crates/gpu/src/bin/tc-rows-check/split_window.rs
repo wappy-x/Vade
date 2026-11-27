@@ -208,6 +208,201 @@ pub fn run(b: &Backend<'_>) -> Result<usize, String> {
                     println!("FLASH WINDOW SPLIT C8 == C1 BIT-EXACT PASS words={n}");
                     total_words += n;
                 }
+
+                // Test C: C32 grouped multi-chat verify (32 chats x 1..=4 contiguous rows = 112 rows, both ring wrap & global 2K)
+                // in ONE launch == sequential C1 M=1 BIT-EXACT + guard poisons!
+                for &(is_ring, view, window, label) in &[
+                    (true, 1024usize, 1024usize, "c32_grouped_ring"),
+                    (false, 2080usize, 2080usize, "c32_grouped_global"),
+                ] {
+                    let chats = 32usize;
+                    let counts: Vec<usize> = (0..chats).map(|c| if c < 24 { 4 } else { (c % 4) + 1 }).collect();
+                    let total_rows: usize = counts.iter().sum();
+                    let starts: Vec<u64> = (0..chats).map(|c| {
+                        if is_ring {
+                            match c % 5 { 0 => 15, 1 => 95, 2 => 510, 3 => 1022, _ => 1400 + (c as u64 * 17) }
+                        } else {
+                            match c % 5 { 0 => 0, 1 => 95, 2 => 255, 3 => 1023, _ => 2040 + (c as u64) }
+                        }
+                    }).collect();
+                    let q: Vec<f32> = (0..total_rows * heads * FW_HEAD_DIM).map(|i| input(i + 503) * 3.0).collect();
+                    let m: Vec<f32> = (0..total_rows * heads * FW_REL_DIM).map(|i| input(i + 509) * 4.0).collect();
+                    let sink: Vec<f32> = (0..total_rows * heads).map(|i| input(i + 521) * 1.5).collect();
+                    let gate: Vec<f32> = (0..total_rows * heads * FW_HEAD_DIM).map(|i| input(i + 523) * 1.5).collect();
+                    let k0 = shared(&pack_f32(&pack_u32(&(0..view * kv_heads * FW_HEAD_DIM).map(|i| weight(i + 541)).collect::<Vec<_>>())))?;
+                    let v0 = shared(&pack_f32(&pack_u32(&(0..view * kv_heads * FW_HEAD_DIM).map(|i| weight(i + 547)).collect::<Vec<_>>())))?;
+                    let (q_dev, m_dev, s_dev, g_dev) = (shared(&q)?, shared(&m)?, shared(&sink)?, shared(&gate)?);
+                    let mut c1_out = Vec::with_capacity(total_rows * heads * FW_HEAD_DIM);
+                    let mut rpl = Vec::with_capacity(total_rows);
+                    let mut st = Vec::with_capacity(2 * total_rows);
+                    let mut planes: Vec<(&_, &_)> = Vec::with_capacity(total_rows);
+                    let mut row_off = 0usize;
+                    for c in 0..chats {
+                        let (kp, vp) = if c % 2 == 0 { (&k0, &v0) } else { (&v0, &k0) };
+                        for r in 0..counts[c] {
+                            let p = starts[c] + r as u64;
+                            let live = (p as usize + 1).min(window);
+                            let slot = if is_ring { p as usize % view } else { p as usize };
+                            rpl.push((p, live));
+                            st.extend([live as f32, slot as f32]);
+                            planes.push((kp, vp));
+                            let st1 = shared(&[live as f32, slot as f32])?;
+                            let out1 = poisoned(b, heads * FW_HEAD_DIM)?;
+                            let clips = OneClips { query_scale: Some(&qs_dev), moved_scale: Some(&ms_dev), position: None, query_bound, moved_bound, written_keys: None, written_values: None };
+                            b.flash_window_split_into(
+                                1, heads, kv_heads, view, extent, scale, is_ring, p, &[(p, live)],
+                                &q_dev.resident_range(row_off * heads * FW_HEAD_DIM..(row_off + 1) * heads * FW_HEAD_DIM)?,
+                                kp, vp, None,
+                                &m_dev.resident_range(row_off * heads * FW_REL_DIM..(row_off + 1) * heads * FW_REL_DIM)?,
+                                &t_dev, &s_dev.resident_range(row_off * heads..(row_off + 1) * heads)?,
+                                &g_dev.resident_range(row_off * heads * FW_HEAD_DIM..(row_off + 1) * heads * FW_HEAD_DIM)?,
+                                &st1, clips, &[], &mut out1.resident_range(GUARD..GUARD + heads * FW_HEAD_DIM)?,
+                            )?;
+                            b.synchronize()?;
+                            c1_out.extend_from_slice(&b.read_vector_values(&out1)?[GUARD..GUARD + heads * FW_HEAD_DIM]);
+                            row_off += 1;
+                        }
+                    }
+                    let st_dev = shared(&st)?;
+                    let n = total_rows * heads * FW_HEAD_DIM;
+                    let out = poisoned(b, n)?;
+                    let clips = OneClips { query_scale: Some(&qs_dev), moved_scale: Some(&ms_dev), position: None, query_bound, moved_bound, written_keys: None, written_values: None };
+                    b.flash_window_split_into(
+                        total_rows, heads, kv_heads, view, extent, scale, is_ring, 0, &rpl,
+                        &q_dev, &k0, &v0, None, &m_dev, &t_dev, &s_dev, &g_dev, &st_dev, clips, &planes,
+                        &mut out.resident_range(GUARD..GUARD + n)?,
+                    )?;
+                    b.synchronize()?;
+                    let got = b.read_vector_values(&out)?;
+                    for (side, slice) in [("before", &got[..GUARD]), ("after", &got[GUARD + n..])] {
+                        if let Some((i, &v)) = slice.iter().enumerate().find(|(_, v)| v.to_bits() != POISON) {
+                            return Err(format!("flash_window_split {label}: guard {side}[{i}] overwritten: {:#x}", v.to_bits()));
+                        }
+                    }
+                    if let Some(i) = (0..n).find(|&i| got[GUARD + i].to_bits() != c1_out[i].to_bits()) {
+                        return Err(format!("flash_window_split {label} vs C1 mismatch at {i}: got={:#x} c1={:#x}", got[GUARD + i].to_bits(), c1_out[i].to_bits()));
+                    }
+                    println!("FLASH WINDOW SPLIT {label} rows={total_rows} == C1 BIT-EXACT PASS words={n}");
+                    total_words += n;
+                }
+
+                // Test D: multi-split persistent CTA loop (`num_splits = 66`, `splits_per_cta = 2`) for both SPLIT16 (M=1,4)
+                // and SPLIT32 (M=12): verifies persistent `s_local` loop, next-split prefetch, and guard poisons!
+                {
+                    let (view, first_pos, max_m) = (16_672usize, 16_636usize, 12usize);
+                    let kv_row_words = kv_heads * (FW_HEAD_DIM / 2);
+                    let q: Vec<f32> = (0..max_m * heads * FW_HEAD_DIM).map(|i| input(i + 701) * 3.0).collect();
+                    let m: Vec<f32> = (0..max_m * heads * FW_REL_DIM).map(|i| input(i + 709) * 4.0).collect();
+                    let sink: Vec<f32> = (0..max_m * heads).map(|i| input(i + 719) * 1.5).collect();
+                    let gate: Vec<f32> = (0..max_m * heads * FW_HEAD_DIM).map(|i| input(i + 727) * 1.5).collect();
+                    let k_u32 = pack_u32(&(0..view * kv_heads * FW_HEAD_DIM).map(|i| weight(i + 733)).collect::<Vec<_>>());
+                    let v_u32 = pack_u32(&(0..view * kv_heads * FW_HEAD_DIM).map(|i| weight(i + 739)).collect::<Vec<_>>());
+                    let (q_dev, m_dev, s_dev, g_dev) = (shared(&q)?, shared(&m)?, shared(&sink)?, shared(&gate)?);
+                    let (k_dev, v_dev) = (shared(&pack_f32(&k_u32))?, shared(&pack_f32(&v_u32))?);
+                    let _ = kv_row_words;
+                    let mut seq_out = Vec::with_capacity(max_m * heads * FW_HEAD_DIM);
+                    for r in 0..max_m {
+                        let p = first_pos + r;
+                        let live = p + 1;
+                        let st1 = shared(&[live as f32, p as f32])?;
+                        let out1 = poisoned(b, heads * FW_HEAD_DIM)?;
+                        let clips = OneClips { query_scale: Some(&qs_dev), moved_scale: Some(&ms_dev), position: None, query_bound, moved_bound, written_keys: None, written_values: None };
+                        b.flash_window_split_into(
+                            1, heads, kv_heads, view, extent, scale, false, p as u64, &[(p as u64, live)],
+                            &q_dev.resident_range(r * heads * FW_HEAD_DIM..(r + 1) * heads * FW_HEAD_DIM)?,
+                            &k_dev, &v_dev, None,
+                            &m_dev.resident_range(r * heads * FW_REL_DIM..(r + 1) * heads * FW_REL_DIM)?,
+                            &t_dev, &s_dev.resident_range(r * heads..(r + 1) * heads)?,
+                            &g_dev.resident_range(r * heads * FW_HEAD_DIM..(r + 1) * heads * FW_HEAD_DIM)?,
+                            &st1, clips, &[], &mut out1.resident_range(GUARD..GUARD + heads * FW_HEAD_DIM)?,
+                        )?;
+                        b.synchronize()?;
+                        seq_out.extend_from_slice(&b.read_vector_values(&out1)?[GUARD..GUARD + heads * FW_HEAD_DIM]);
+                    }
+                    for m_rows in [4usize, 12] {
+                        let rpl: Vec<(u64, usize)> = (0..m_rows).map(|r| { let p = first_pos + r; (p as u64, p + 1) }).collect();
+                        let st: Vec<f32> = rpl.iter().flat_map(|&(p, l)| [l as f32, p as f32]).collect();
+                        let st_dev = shared(&st)?;
+                        let n = m_rows * heads * FW_HEAD_DIM;
+                        let out = poisoned(b, n)?;
+                        let clips = OneClips { query_scale: Some(&qs_dev), moved_scale: Some(&ms_dev), position: None, query_bound, moved_bound, written_keys: None, written_values: None };
+                        b.flash_window_split_into(
+                            m_rows, heads, kv_heads, view, extent, scale, false, first_pos as u64, &rpl,
+                            &q_dev.resident_range(0..n)?, &k_dev, &v_dev, None,
+                            &m_dev.resident_range(0..m_rows * heads * FW_REL_DIM)?, &t_dev,
+                            &s_dev.resident_range(0..m_rows * heads)?, &g_dev.resident_range(0..n)?,
+                            &st_dev, clips, &[], &mut out.resident_range(GUARD..GUARD + n)?,
+                        )?;
+                        b.synchronize()?;
+                        let got = b.read_vector_values(&out)?;
+                        for (side, slice) in [("before", &got[..GUARD]), ("after", &got[GUARD + n..])] {
+                            if let Some((i, &v)) = slice.iter().enumerate().find(|(_, v)| v.to_bits() != POISON) {
+                                return Err(format!("flash_window_split global_16640 M={m_rows}: guard {side}[{i}] overwritten: {:#x}", v.to_bits()));
+                            }
+                        }
+                        if let Some(i) = (0..n).find(|&i| got[GUARD + i].to_bits() != seq_out[i].to_bits()) {
+                            return Err(format!("flash_window_split global_16640 M={m_rows} vs M=1 mismatch at {i}: got={:#x} seq={:#x}", got[GUARD + i].to_bits(), seq_out[i].to_bits()));
+                        }
+                        println!("FLASH WINDOW SPLIT global_16640_spc2 M={m_rows} == M=1 BIT-EXACT PASS words={n}");
+                        total_words += n;
+                    }
+                }
+
+                // Test E: L2-resident wave-aligned banded split-reduce (`view = 49_200`, `M = 16`, `num_splits = 192` ->
+                // `36.6 MiB > 16 MiB` -> 3 L2 bands of 72 + 72 + 48 splits, exercising first/middle/last state handoff!):
+                {
+                    let (view, first_pos, max_m) = (49_200usize, 49_136usize, 16usize);
+                    let q: Vec<f32> = (0..max_m * heads * FW_HEAD_DIM).map(|i| input(i + 809) * 3.0).collect();
+                    let m: Vec<f32> = (0..max_m * heads * FW_REL_DIM).map(|i| input(i + 811) * 4.0).collect();
+                    let sink: Vec<f32> = (0..max_m * heads).map(|i| input(i + 821) * 1.5).collect();
+                    let gate: Vec<f32> = (0..max_m * heads * FW_HEAD_DIM).map(|i| input(i + 823) * 1.5).collect();
+                    let k_u32 = pack_u32(&(0..view * kv_heads * FW_HEAD_DIM).map(|i| weight(i + 827)).collect::<Vec<_>>());
+                    let v_u32 = pack_u32(&(0..view * kv_heads * FW_HEAD_DIM).map(|i| weight(i + 829)).collect::<Vec<_>>());
+                    let (q_dev, m_dev, s_dev, g_dev) = (shared(&q)?, shared(&m)?, shared(&sink)?, shared(&gate)?);
+                    let (k_dev, v_dev) = (shared(&pack_f32(&k_u32))?, shared(&pack_f32(&v_u32))?);
+                    let mut seq_out = Vec::with_capacity(max_m * heads * FW_HEAD_DIM);
+                    for r in 0..max_m {
+                        let p = first_pos + r;
+                        let live = p + 1;
+                        let st1 = shared(&[live as f32, p as f32])?;
+                        let out1 = poisoned(b, heads * FW_HEAD_DIM)?;
+                        let clips = OneClips { query_scale: Some(&qs_dev), moved_scale: Some(&ms_dev), position: None, query_bound, moved_bound, written_keys: None, written_values: None };
+                        b.flash_window_split_into(
+                            1, heads, kv_heads, view, extent, scale, false, p as u64, &[(p as u64, live)],
+                            &q_dev.resident_range(r * heads * FW_HEAD_DIM..(r + 1) * heads * FW_HEAD_DIM)?,
+                            &k_dev, &v_dev, None,
+                            &m_dev.resident_range(r * heads * FW_REL_DIM..(r + 1) * heads * FW_REL_DIM)?,
+                            &t_dev, &s_dev.resident_range(r * heads..(r + 1) * heads)?,
+                            &g_dev.resident_range(r * heads * FW_HEAD_DIM..(r + 1) * heads * FW_HEAD_DIM)?,
+                            &st1, clips, &[], &mut out1.resident_range(GUARD..GUARD + heads * FW_HEAD_DIM)?,
+                        )?;
+                        b.synchronize()?;
+                        seq_out.extend_from_slice(&b.read_vector_values(&out1)?[GUARD..GUARD + heads * FW_HEAD_DIM]);
+                    }
+                    let rpl: Vec<(u64, usize)> = (0..max_m).map(|r| { let p = first_pos + r; (p as u64, p + 1) }).collect();
+                    let st: Vec<f32> = rpl.iter().flat_map(|&(p, l)| [l as f32, p as f32]).collect();
+                    let st_dev = shared(&st)?;
+                    let n = max_m * heads * FW_HEAD_DIM;
+                    let out = poisoned(b, n)?;
+                    let clips = OneClips { query_scale: Some(&qs_dev), moved_scale: Some(&ms_dev), position: None, query_bound, moved_bound, written_keys: None, written_values: None };
+                    b.flash_window_split_into(
+                        max_m, heads, kv_heads, view, extent, scale, false, first_pos as u64, &rpl,
+                        &q_dev, &k_dev, &v_dev, None, &m_dev, &t_dev, &s_dev, &g_dev,
+                        &st_dev, clips, &[], &mut out.resident_range(GUARD..GUARD + n)?,
+                    )?;
+                    b.synchronize()?;
+                    let got = b.read_vector_values(&out)?;
+                    for (side, slice) in [("before", &got[..GUARD]), ("after", &got[GUARD + n..])] {
+                        if let Some((i, &v)) = slice.iter().enumerate().find(|(_, v)| v.to_bits() != POISON) {
+                            return Err(format!("flash_window_split global_49152_banded: guard {side}[{i}] overwritten: {:#x}", v.to_bits()));
+                        }
+                    }
+                    if let Some(i) = (0..n).find(|&i| got[GUARD + i].to_bits() != seq_out[i].to_bits()) {
+                        return Err(format!("flash_window_split global_49152_banded M=16 vs M=1 mismatch at {i}: got={:#x} seq={:#x}", got[GUARD + i].to_bits(), seq_out[i].to_bits()));
+                    }
+                    println!("FLASH WINDOW SPLIT global_49152_banded M=16 == M=1 BIT-EXACT PASS words={n}");
+                    total_words += n;
+                }
             }
     Ok(total_words)
 }

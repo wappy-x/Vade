@@ -206,10 +206,16 @@ fn malformed_batch_result_retires_all_affected_rows() {
     server.hold.store(true, Ordering::Relaxed);
     let mut a = server.send("/v1/completions", &request(10, 6, r#","cache":false"#), "");
     let mut b = server.send("/v1/completions", &request(17, 6, r#","cache":false"#), "");
-    server.until(|| server.ledger.lock().unwrap().attempts.get(&17) == Some(&1));
+    server.until(|| { let ledger = server.ledger.lock().unwrap(); ledger.attempts.get(&10) == Some(&2)
+        && ledger.attempts.get(&17) == Some(&1) });
     server.hold.store(false, Ordering::Relaxed);
-    // Prefill is serial; wait until each request has emitted a sampled token.
-    server.until(|| { a.poll(); b.poll(); !content(&a.wire, false).is_empty() && !content(&b.wire, false).is_empty() });
+    // Prefill is serial; wait on fixture state until both live sessions finish prefill and emit
+    // their first sampled token, so loopback socket delivery cannot pump extra passes under load.
+    server.until(|| {
+        let ledger = server.ledger.lock().unwrap();
+        let live: Vec<_> = ledger.modes.keys().filter(|id| !ledger.dropped_ids.contains(id)).copied().collect();
+        live.len() == 2 && live.iter().all(|id| ledger.prefilled.contains(id))
+    });
     let before = server.ledger.lock().unwrap().steps.values().sum::<usize>();
     let affected: Vec<_> = { let ledger = server.ledger.lock().unwrap(); ledger.modes.keys()
         .filter(|id| !ledger.dropped_ids.contains(id)).copied().collect() };
@@ -225,7 +231,9 @@ fn malformed_batch_result_retires_all_affected_rows() {
             && event["line"] == Value::String("request stopped: incomplete batch result".into())
     }).count(), 2, "server event record lost the batch failure detail");
     for wire in [&a, &b] {
-        failure(wire, "generation_error", content(wire, false).len());
+        let emitted = content(wire, false).len();
+        assert!(emitted >= 1, "affected row must have emitted a sampled token before batch failure");
+        failure(wire, "generation_error", emitted);
         let data = frames(wire);
         let error = data.iter().find_map(|value| object(value).get("error")).unwrap();
         assert_eq!(*error, parse(r#"{"type":"generation_error","message":"generation stopped before completion","param":null,"code":null}"#), "client error must keep internal details private");
@@ -309,7 +317,8 @@ fn cancel_capability_targets_only_its_request() {
     server.hold.store(true, Ordering::Relaxed);
     let mut peer = server.send("/v1/completions", &request(10, 100, r#","cache":false"#), "");
     let mut target = server.send("/v1/completions", &request(17, 100, &format!(r#","cache":false,"cancel":"{cancel}""#)), "");
-    server.until(|| server.ledger.lock().unwrap().attempts.get(&17) == Some(&1));
+    server.until(|| { let ledger = server.ledger.lock().unwrap(); ledger.attempts.get(&10) == Some(&2)
+        && ledger.attempts.get(&17) == Some(&1) });
     let unknown = SessionKey::generate().unwrap().expose();
     let ack = server.run("/v1/cancel", &format!(r#"{{"cancel":"{unknown}"}}"#), "");
     assert_eq!(complete_http(&ack, 200), parse(r#"{"cancelled":true}"#));

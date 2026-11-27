@@ -173,7 +173,7 @@ impl Sizing {
         };
         let slots = self.max_active.unwrap_or(2);
         let ceiling = usize::try_from(config.max_positions)
-            .map_err(|_| "position ceiling overflow")?.min(262144);
+            .map_err(|_| "position ceiling overflow")?;
         let tokens = if let Some(tokens) = self.context_tokens { tokens } else {
             let (mut low, mut high) = (1, ceiling);
             plan(low, Some(slots))?;

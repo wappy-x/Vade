@@ -264,9 +264,6 @@ pub fn format(messages: &[Message], options: &Options) -> Result<String> {
     Ok(render(messages, options)?.text)
 }
 pub(super) fn render(messages: &[Message], options: &Options) -> Result<Output> {
-    if messages.len() > 4096 || options.tools.len() > 1024 {
-        return Err(err("chat item count limit exceeded"));
-    }
     let input_bytes = messages
         .iter()
         .try_fold(0usize, |sum, m| {
@@ -323,6 +320,7 @@ pub(super) fn render(messages: &[Message], options: &Options) -> Result<Output> 
                     tool.as_bytes(),
                     json::Limits {
                         bytes: options.max_bytes,
+                        nodes: usize::MAX,
                         string_bytes: options.max_bytes,
                         ..Default::default()
                     },
@@ -366,6 +364,7 @@ pub(super) fn render(messages: &[Message], options: &Options) -> Result<Output> 
                 call.arguments.as_bytes(),
                 json::Limits {
                     bytes: options.max_bytes,
+                    nodes: usize::MAX,
                     string_bytes: options.max_bytes,
                     ..Default::default()
                 },

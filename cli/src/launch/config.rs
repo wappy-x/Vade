@@ -33,6 +33,10 @@ pub(super) struct Config {
     pub context: u32,
     pub output: u32,
     pub port: u16,
+    pub bind: Option<std::net::SocketAddr>,
+    pub disk_cache_dir: Option<PathBuf>,
+    pub disk_cache_bytes: Option<u64>,
+    pub no_disk_cache: bool,
     mtp: Option<u32>,
     chats: Option<usize>,
     memory_bytes: Option<u64>,
@@ -63,6 +67,7 @@ impl Config {
             .map_err(|_| "Cannot reserve a local chat port.")?;
         Ok(Self {
             mtp: None, chats: None, memory_bytes: None, cache_bytes: None, decode_fuse: true,
+            bind: None, disk_cache_dir: None, disk_cache_bytes: None, no_disk_cache: false,
             model: model.path.clone(),
             model_bytes: model.bytes,
             context,
@@ -96,13 +101,10 @@ impl Config {
         let model = PathBuf::from(required(&fields, "model_path")?);
         let stage = PathBuf::from(required(&fields, "stage_dir")?);
         let state = PathBuf::from(required(&fields, "state_dir")?);
-        let is_loop = model::loop_text(&model);
-        let max_context = if is_loop { u64::from(u32::MAX) } else { u64::from(crate::cli::FP4_CONTEXT_LIMIT) };
-        let max_output = if is_loop { context } else { u64::from(crate::cli::FP4_OUTPUT_LIMIT) };
-        if !(4096..=max_context).contains(&context)
+        if !(4096..=u64::from(u32::MAX)).contains(&context)
             || output == 0
-            || output > context || output > max_output
-            || !(1024..=65535).contains(&port)
+            || output > context
+            || !(1..=65535).contains(&port)
             || !model.is_absolute()
             || stage != root.join("stage")
             || state != root.join("state")
@@ -113,9 +115,25 @@ impl Config {
             fields.get(key).map(|value| value.parse::<u64>().ok().filter(|n| *n <= maximum)
                 .ok_or_else(|| format!("Saved config {key} is invalid; run vade doctor."))).transpose()
         };
-        let chats = optional("chats", 32)?;
+        let chats = optional("chats", u64::MAX)?;
         if optional("memory_bytes", u64::MAX)? == Some(0) { return Err("Saved memory budget must be positive; run vade doctor.".into()); }
         if chats == Some(0) { return Err("Saved config chats must be positive; run vade doctor.".into()); }
+        let bind = fields.get("bind").map(|value| {
+            value.parse::<std::net::SocketAddr>().ok().filter(|addr| addr.port() > 0)
+                .ok_or_else(|| "Saved config bind is invalid; run vade doctor.".to_owned())
+        }).transpose()?;
+        let disk_cache_dir = fields.get("disk_cache_dir").map(|value| {
+            let path = PathBuf::from(value);
+            if !path.is_absolute() || path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+                return Err("Saved config disk_cache_dir is invalid; run vade doctor.".to_owned());
+            }
+            Ok(path)
+        }).transpose()?;
+        let disk_cache_bytes = optional("disk_cache_bytes", u64::MAX)?;
+        if disk_cache_bytes == Some(0) {
+            return Err("Saved config disk_cache_bytes must be positive; run vade doctor.".into());
+        }
+        let no_disk_cache = optional("no_disk_cache", 1)?.unwrap_or(0) == 1;
         let max_mtp = u64::from(model::local_max_mtp(&model));
         Ok(Some(Self {
             // FP4-Local allows 0..=3; a looped block checkpoint uses its plan's declared draft max.
@@ -124,11 +142,15 @@ impl Config {
             memory_bytes: optional("memory_bytes", u64::MAX)?,
             cache_bytes: optional("cache_bytes", u64::MAX)?,
             decode_fuse: optional("decode_fuse", 1)?.unwrap_or(1) == 1,
+            bind,
+            disk_cache_dir,
+            disk_cache_bytes,
+            no_disk_cache,
             model,
             model_bytes: number("model_bytes")?,
             context: context as u32,
             output: output as u32,
-            port: port as u16,
+            port: bind.map_or(port as u16, |addr| addr.port()),
             stage,
             state,
         }))
@@ -145,18 +167,17 @@ impl Config {
     }
 
     /// Early option check for local `vade up` before the checkpoint plan is read:
-    /// allows `--diagnostic-unqualified-text` or `inkling` depths up to `MAX_DIAGNOSTIC_DEPTH`;
-    /// the checkpoint-specific limit is then enforced by [`Self::validate_for_model`].
+    /// allows depths up to `MAX_DIAGNOSTIC_DEPTH`; the checkpoint-specific limit is
+    /// then enforced by [`Self::validate_for_model`].
     pub fn validate_up_options(options: &UpOptions) -> Result<(), String> {
-        let deep = options.diagnostic_unqualified_text || options.is_inkling();
-        let limit = if deep {
-            crate::text_service::MAX_DIAGNOSTIC_DEPTH
-        } else {
+        let limit = if options.supplied_options.contains("--fp4-local") {
             3
+        } else {
+            crate::text_service::MAX_DIAGNOSTIC_DEPTH
         };
         Self::validate_common(options)?;
-        if options.mtp > limit {
-            return Err(if deep {
+        if options.mtp_explicit && options.mtp > limit {
+            return Err(if limit > 3 {
                 format!("Set MTP to a whole number from 0 to {limit}.")
             } else {
                 "Local FP4-Local supports drafting depth 0..3; use the controller text service for deeper drafting.".into()
@@ -170,7 +191,7 @@ impl Config {
             return Err("FP8 needs two or four linked Sparks and a controller config. Run vade setup --fp8, or read docs/install-fp8.md.".into());
         }
         if options.sparks.is_some_and(|n| n != 1) || !options.hosts.is_empty() {
-            return Err("Local launch serves FP4-Local on one Spark. More Sparks need a controller config that names them. Run vade setup --hosts spark-a,spark-b, or read docs/INSTALL.md#two-and-more-sparks.".into());
+            return Err("Local launch serves one Spark. More Sparks or --replicas need a controller config that names them. Run vade setup --hosts spark-a,spark-b, or read docs/INSTALL.md#two-and-more-sparks.".into());
         }
         Self::supported_controls(options.chats, options.cache_bytes)
     }
@@ -181,16 +202,8 @@ impl Config {
             if options.mtp_explicit && options.mtp > max_depth {
                 return Err(crate::text_service::TextService::alone_with_max_depth(max_depth).draft_refusal());
             }
-        } else {
-            if options.mtp > 3 {
-                return Err("Local FP4-Local supports drafting depth 0..3; use the controller text service for deeper drafting.".into());
-            }
-            if options.supplied_options.contains("--context") && options.context > crate::cli::FP4_CONTEXT_LIMIT {
-                return Err("FP4-Local context is limited to 262144 tokens. Set --context 4096..262144.".into());
-            }
-            if options.output_explicit && options.output > crate::cli::FP4_OUTPUT_LIMIT {
-                return Err("FP4-Local output is limited to 16384 tokens. Set --output 1024..16384.".into());
-            }
+        } else if options.mtp_explicit && options.mtp > 3 {
+            return Err("Local FP4-Local supports drafting depth 0..3; use the controller text service for deeper drafting.".into());
         }
         Ok(())
     }
@@ -205,7 +218,7 @@ impl Config {
         Ok(())
     }
 
-    fn overrides(&mut self, options: &UpOptions) {
+    fn overrides(&mut self, options: &UpOptions, home: &Path) {
         if options.supplied_options.contains("--context") {
             self.context = options.context;
             if !options.output_explicit { self.output = self.output.min(self.context); }
@@ -215,30 +228,48 @@ impl Config {
         if let Some(bytes) = options.memory_bytes { self.memory_bytes = Some(bytes); }
         if let Some(bytes) = options.cache_bytes { self.cache_bytes = Some(bytes); }
         if let Some(on) = options.decode_fuse { self.decode_fuse = on; }
+        if let Some(bind) = options.bind {
+            self.bind = Some(bind);
+            self.port = bind.port();
+        }
+        if options.no_disk_cache {
+            self.no_disk_cache = true;
+            self.disk_cache_dir = None;
+            self.disk_cache_bytes = None;
+        } else {
+            if let Some(dir) = &options.disk_cache_dir {
+                self.no_disk_cache = false;
+                self.disk_cache_dir = Some(expand_home(home, dir));
+            }
+            if let Some(bytes) = options.disk_cache_bytes {
+                self.no_disk_cache = false;
+                self.disk_cache_bytes = Some(bytes);
+            }
+        }
     }
 
     /// This saved config with `options` applied as a start applies them, before
     /// the checkpoint and resource checks; the dry-run preview reads its limits.
-    pub fn planned(&self, options: &UpOptions) -> Self {
+    pub fn planned(&self, options: &UpOptions, home: &Path) -> Self {
         let mut planned = self.clone();
-        planned.overrides(options);
+        planned.overrides(options, home);
         planned
     }
 
     /// The configuration these options request, if the running engine already
     /// uses exactly those limits.
-    pub fn check_running_options(&self, options: &UpOptions, record: &Fields) -> Result<Self, String> {
+    pub fn check_running_options(&self, options: &UpOptions, record: &Fields, home: &Path) -> Result<Self, String> {
         Self::validate_for_model(options, model::loop_text(&self.model), model::local_max_mtp(&self.model))?;
         Self::supported_controls(self.chats, self.cache_bytes)?;
         let mut requested = self.clone();
-        requested.overrides(options);
+        requested.overrides(options, home);
         requested.check_running_limits(record)?;
         Ok(requested)
     }
 
     /// The limits recorded with an owned engine, compared before reuse.
     pub fn launch_limits(&self) -> Fields {
-        Fields::from([
+        let mut fields = Fields::from([
             ("context_tokens".into(), self.context.to_string()),
             ("output_tokens".into(), self.output.to_string()),
             // Distinguish engine defaults from older ownership records that
@@ -246,24 +277,47 @@ impl Config {
             ("mtp".into(), self.mtp.map(|n| n.to_string()).unwrap_or_else(|| "engine_default".into())),
             ("memory_bytes".into(), self.memory_bytes.map(|n| n.to_string()).unwrap_or_else(|| "engine_default".into())),
             ("decode_fuse".into(), if self.decode_fuse { "on" } else { "off" }.into()),
-        ])
+            ("bind".into(), self.bind_addr()),
+        ]);
+        if self.no_disk_cache {
+            fields.insert("no_disk_cache".into(), "1".into());
+        }
+        if let Some(dir) = &self.disk_cache_dir {
+            fields.insert("disk_cache_dir".into(), dir.to_string_lossy().into_owned());
+        }
+        if let Some(bytes) = self.disk_cache_bytes {
+            fields.insert("disk_cache_bytes".into(), bytes.to_string());
+        }
+        fields
     }
 
     /// Fail unless the owned engine's record has these exact limits.
     pub fn check_running_limits(&self, record: &Fields) -> Result<(), String> {
-        // Records from before decode_fuse ran with it off.
-        let recorded = |key: &str| record.get(key).map(String::as_str).or((key == "decode_fuse").then_some("off"));
+        // Records from before decode_fuse ran with it off; older records bound loopback.
+        let default_bind = format!("127.0.0.1:{}", self.port);
+        let recorded = |key: &str| {
+            record.get(key).map(String::as_str).or(match key {
+                "decode_fuse" => Some("off"),
+                "bind" => Some(default_bind.as_str()),
+                _ => None,
+            })
+        };
         if self.launch_limits().iter().any(|(key, value)| recorded(key) != Some(value.as_str())) {
             return Err("The owned engine has different or unrecorded launch limits; run vade down, then repeat vade up with the requested flags.".into());
+        }
+        for key in ["no_disk_cache", "disk_cache_dir", "disk_cache_bytes"] {
+            if record.contains_key(key) && !self.launch_limits().contains_key(key) {
+                return Err("The owned engine has different or unrecorded launch limits; run vade down, then repeat vade up with the requested flags.".into());
+            }
         }
         Ok(())
     }
 
     /// Apply explicit options for this start, then check them against the
     /// checkpoint and this Spark.
-    pub fn apply(&mut self, options: &UpOptions, model: &model::Model, identity: &detect::Identity) -> Result<(), String> {
+    pub fn apply(&mut self, options: &UpOptions, model: &model::Model, identity: &detect::Identity, home: &Path) -> Result<(), String> {
         Self::validate_for_model(options, model.loop_text, model.max_draft_depth)?;
-        self.overrides(options);
+        self.overrides(options, home);
         self.model_bytes = model.bytes;
         self.check_resources(model, identity)
     }
@@ -272,19 +326,12 @@ impl Config {
     /// against this Spark's memory.
     pub fn check_resources(&self, model: &model::Model, identity: &detect::Identity) -> Result<(), String> {
         Self::supported_controls(self.chats, self.cache_bytes)?;
-        if !model.loop_text && self.context > crate::cli::FP4_CONTEXT_LIMIT {
-            return Err("FP4-Local context is limited to 262144 tokens; run vade up --context 262144 (or a smaller value).".into());
-        }
         if self.context > model.context_limit {
             return Err(format!("Requested context {} exceeds this checkpoint's {} token limit; run vade up --context {}.",
                 self.context, model.context_limit, model.context_limit));
         }
-        if self.output > self.context || (!model.loop_text && self.output > crate::cli::FP4_OUTPUT_LIMIT) {
-            return Err(if model.loop_text {
-                "Output must fit context; set --output no larger than --context.".into()
-            } else {
-                "Output must fit context and the FP4-Local engine's 16384 token limit; run vade up --output 8192 (or a smaller value).".into()
-            });
+        if self.output > self.context {
+            return Err("Output must fit context; set --output no larger than --context.".into());
         }
         if self.memory_bytes == Some(0) || matches!((self.memory_bytes, self.cache_bytes), (Some(memory), Some(cache)) if cache >= memory) {
             return Err("Memory budget must be positive and larger than the KV pool; run vade up with corrected --memory-bytes and --cache-bytes.".into());
@@ -374,19 +421,61 @@ impl Config {
         ]);
         for (key, value) in [("mtp", self.mtp.map(u64::from)), ("chats", self.chats.map(|n| n as u64)),
             ("memory_bytes", self.memory_bytes), ("cache_bytes", self.cache_bytes),
-            ("decode_fuse", Some(u64::from(self.decode_fuse)))] {
+            ("decode_fuse", Some(u64::from(self.decode_fuse))),
+            ("disk_cache_bytes", self.disk_cache_bytes)] {
             if let Some(value) = value { fields.insert(key.into(), value.to_string()); }
+        }
+        if let Some(bind) = self.bind {
+            fields.insert("bind".into(), bind.to_string());
+        }
+        if let Some(dir) = &self.disk_cache_dir {
+            fields.insert("disk_cache_dir".into(), dir.to_string_lossy().into_owned());
+        }
+        if self.no_disk_cache {
+            fields.insert("no_disk_cache".into(), "1".into());
         }
         text::encode(&fields)
     }
-    /// The loopback URL of the local engine.
     /// The saved drafting depth: `None` means the engine chooses.
     pub fn mtp(&self) -> Option<u32> { self.mtp }
     /// Whether the engine runs the decode step as a chain.
     pub fn decode_fuse(&self) -> bool { self.decode_fuse }
     /// Whether drafting is on: off only when the saved setup says `--mtp 0`.
     pub fn drafting(&self) -> bool { self.mtp != Some(0) }
+    /// The socket address passed to `flash-serve` (defaults to `127.0.0.1:<port>`).
+    pub fn bind_addr(&self) -> String {
+        self.bind.map(|addr| addr.to_string()).unwrap_or_else(|| format!("127.0.0.1:{}", self.port))
+    }
+    /// The local HTTP URL used by `vade chat`, health probes, and `vade status`.
+    /// Wildcard binds (`0.0.0.0`, `[::]`) connect locally via loopback.
     pub fn endpoint(&self) -> String {
-        format!("http://127.0.0.1:{}", self.port)
+        match self.bind {
+            Some(addr) if addr.ip().is_unspecified() => {
+                if addr.is_ipv6() { format!("http://[::1]:{}", addr.port()) }
+                else { format!("http://127.0.0.1:{}", addr.port()) }
+            }
+            Some(addr) if addr.is_ipv6() => format!("http://[{}]:{}", addr.ip(), addr.port()),
+            Some(addr) => format!("http://{}:{}", addr.ip(), addr.port()),
+            None => format!("http://127.0.0.1:{}", self.port),
+        }
+    }
+    /// Effective persistent NVMe disk prefix cache directory for a looped checkpoint.
+    /// Defaults to `<VADE_HOME>/cache/prefix` when prompt cache is enabled.
+    pub fn effective_disk_cache_dir(&self, root: &Path) -> Option<PathBuf> {
+        if !model::loop_text(&self.model) || self.no_disk_cache || self.cache_bytes == Some(0) {
+            return None;
+        }
+        if self.prefix_cache().ok().flatten().as_deref() == Some("0") {
+            return None;
+        }
+        Some(self.disk_cache_dir.clone().unwrap_or_else(|| root.join("cache/prefix")))
+    }
+}
+
+fn expand_home(home: &Path, raw: &str) -> PathBuf {
+    if let Some(rest) = raw.strip_prefix("~/") {
+        home.join(rest)
+    } else {
+        PathBuf::from(raw)
     }
 }

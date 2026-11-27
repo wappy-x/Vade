@@ -163,13 +163,14 @@ pub const fn flash_window_prefill_admitted(
 }
 
 /// Split-KV GQA-packed tensor-core decode/verify attention (`FLASH_WINDOW_SPLIT16`, `FLASH_WINDOW_SPLIT32`,
-/// `FLASH_WINDOW_REDUCE`): handles M=1..16 contiguous rows (including zero-copy provisional sliding-window deltas)
-/// and C2..C16 independent per-chat planes with identical per-token floating-point arithmetic across M and C.
+/// `FLASH_WINDOW_REDUCE`): handles single-chat contiguous rows (including zero-copy provisional sliding-window
+/// deltas) and multi-chat packed CTA-groups (`<= FW_SPLIT_GROUPS_MAX` per command payload) with identical
+/// per-token floating-point arithmetic across M and C.
 pub const FW_SPLIT_BKV: usize = 32;
 pub const FW_SPLIT_ROWS_MAX: usize = 16;
 pub const FW_SPLIT_GROUP_MAX: usize = 16;
 pub const FW_SPLIT_PARTIAL_STRIDE: usize = FW_HEAD_DIM + 2;
-/// Fixed per-layer-kind KV split sizes (multiples of `FW_SPLIT_BKV`, independent of M and C so M=1 == M=2..16 == C1..C16).
+/// Fixed per-layer-kind KV split sizes (multiples of `FW_SPLIT_BKV`, independent of M and C so M=1 == M=2..16 == C1..C32).
 /// Ring (`window=1024`): `96` -> `11-12` splits x `8` kv_heads = `88-96` CTAs (~2.0 balanced waves on 48 SMs).
 /// Global (`ctx=4096+`): `256` -> `16-17` splits x `8` kv_heads = `128-136` CTAs.
 pub const FW_SPLIT_KV_RING: usize = 96;
@@ -179,10 +180,18 @@ pub const FW_SP_FLAGS_WORD: usize = 16;
 pub const FW_SP_SPLIT_START_WORD: usize = 22;
 pub const FW_SP_PLANE_COUNT_WORD: usize = 23;
 pub const FW_SP_ROWS_PER_CTA_WORD: usize = 24;
+/// Per-CTA multi-chat group table in `Command::payload`: 3 u64 words per group `(keys_ptr, values_ptr, meta)`,
+/// where `meta = r_base (16b) | m_cta (8b) | first_pos (40b)`. Hardware `Command::payload` (1,024 B = 128 u64 words)
+/// holds `32` groups at words `32..128`; larger cohorts chunk at this hardware command boundary.
 pub const FW_SP_PLANES_AT: usize = 32;
-pub const FW_SP_POS_AT: usize = 64;
-pub const FW_SP_LIVE_AT: usize = 80;
-const _: () = assert!((FW_SP_LIVE_AT + FW_SPLIT_ROWS_MAX) * 8 <= 1024);
+pub const FW_SPLIT_GROUPS_MAX: usize = 32;
+const _: () = assert!((FW_SP_PLANES_AT + 3 * FW_SPLIT_GROUPS_MAX) * 8 <= 1024);
+
+/// Pack `(r_base, m_cta, first_pos)` into the third u64 word of a multi-chat CTA-group descriptor.
+#[inline(always)]
+pub const fn fw_split_pack_group(r_base: usize, m_cta: usize, first_pos: u64) -> u64 {
+    (r_base as u64 & 0xffff) | (((m_cta as u64) & 0xff) << 16) | ((first_pos & 0xff_ffff_ffff) << 24)
+}
 
 /// Pack `(split_kv, num_splits, is_ring)` into `FW_SP_FLAGS_WORD`.
 #[inline(always)]
@@ -196,34 +205,106 @@ pub const fn flash_window_split_kv(is_ring: bool) -> usize {
     if is_ring { FW_SPLIT_KV_RING } else { FW_SPLIT_KV_GLOBAL }
 }
 
+/// Payload word offsets for `FLASH_WINDOW_REDUCE` (kind 120) L2-resident banded split-reduce state.
+/// When `FW_REDUCE_FLAGS_WORD` is 0 (single band), `replay_reduce` initializes from `sink` and writes `output`.
+/// Across multiple bands, intermediate bands load/store exact FP32 `(O[128], m, l)` in `state` (`rows * heads * 130`
+/// words) so every band's `partials` stays `<= FW_SPLIT_BAND_L2_BYTES` inside the 48 MiB L2 cache with 0 bit diffs.
+pub const FW_REDUCE_FLAGS_WORD: usize = 7;
+pub const FW_REDUCE_STATE_WORD: usize = 8;
+pub const FW_REDUCE_LOAD_STATE: u64 = 1;
+pub const FW_REDUCE_STORE_STATE: u64 = 2;
+/// Target L2-resident partial-buffer budget per band (`16 MiB`, leaving `8 MiB` L2 headroom on GB10's 24 MiB L2).
+pub const FW_SPLIT_BAND_L2_BYTES: usize = 16 << 20;
+
 /// Bucketed `grid.y` for `FLASH_WINDOW_SPLIT16` / `FLASH_WINDOW_SPLIT32` so split-count growth and ring-wrap
 /// oscillation (`11 <-> 12`) keep stable CUDA Graph keys. Extra blocks (`block_idx_y >= num_splits`) exit at entry.
 #[inline(always)]
 pub const fn flash_window_split_grid_y(num_splits: usize) -> usize {
-    if num_splits <= 2 { num_splits }
+    if num_splits <= 3 { num_splits }
     else if num_splits <= 4 { 4 }
     else if num_splits <= 8 { 8 }
     else if num_splits <= 12 { 12 }
     else if num_splits <= 16 { 16 }
     else if num_splits <= 24 { 24 }
     else if num_splits <= 32 { 32 }
-    else { num_splits.next_multiple_of(16) }
+    else { num_splits.next_multiple_of(12) }
 }
 
-/// Choose `Q_GROUPS` (`1` for `<= 16` queries/KV-head, `2` for `> 16`) and `rows_per_cta` for a single-chat or multi-chat launch.
+/// Splits per L2-resident band: keeps `rows * heads * band_splits * 520 B <= FW_SPLIT_BAND_L2_BYTES` whenever
+/// `num_splits > 32` and the full partial buffer would spill L2. Rounds to a multiple of `72` (`lcm(18, 24)` so
+/// 8-kv-head launches hit exact integer SM waves at both 3 and 4 blocks/SM on 48 SMs). Never refuses any shape.
+#[inline(always)]
+pub const fn flash_window_split_band_splits(rows: usize, heads: usize, num_splits: usize) -> usize {
+    if num_splits <= 32 {
+        return num_splits;
+    }
+    let Some(rh) = rows.checked_mul(heads) else { return 1; };
+    let Some(per_split) = rh.checked_mul(FW_SPLIT_PARTIAL_STRIDE * 4) else { return 1; };
+    if per_split == 0 || num_splits <= FW_SPLIT_BAND_L2_BYTES / per_split {
+        return num_splits;
+    }
+    let raw = FW_SPLIT_BAND_L2_BYTES / per_split;
+    let band = if raw >= 72 {
+        (raw / 72) * 72
+    } else if raw >= 36 {
+        (raw / 36) * 36
+    } else if raw >= 16 {
+        raw & !15
+    } else if raw == 0 {
+        1
+    } else {
+        raw
+    };
+    if band >= num_splits { num_splits } else { band }
+}
+
+/// Consecutive splits executed sequentially by one CTA for a given `(q_ctas, band_splits)`: amortizes Q/M
+/// HeadClip prologues and aligns CTA count to full SM waves while emitting bit-identical per-split partials.
+#[inline(always)]
+pub const fn flash_window_splits_per_cta_for(q_ctas: usize, num_splits: usize) -> usize {
+    if q_ctas >= 16 {
+        if num_splits >= 12 { 4 }
+        else if num_splits >= 4 { 2 }
+        else { 1 }
+    } else if q_ctas >= 8 {
+        if num_splits >= 4 { 2 } else { 1 }
+    } else if num_splits <= 48 {
+        1
+    } else if num_splits <= 192 {
+        2
+    } else {
+        4
+    }
+}
+
+/// Consecutive splits executed sequentially by one single-chat CTA (`q_ctas == 1`).
+#[inline(always)]
+pub const fn flash_window_splits_per_cta(num_splits: usize) -> usize {
+    flash_window_splits_per_cta_for(1, num_splits)
+}
+
+/// Choose `Q_GROUPS` (`1` for `FLASH_WINDOW_SPLIT16`: `<= 16` queries/KV-head and `<= 9` rows/CTA;
+/// `2` for `FLASH_WINDOW_SPLIT32`: warp-per-16-Q-rows packing up to `48` queries/KV-head and `<= 16` rows/CTA).
+#[inline(always)]
+pub const fn flash_window_split_q_groups_for(max_run_rows: usize, heads: usize, kv_heads: usize) -> (usize, usize) {
+    let group = heads / kv_heads;
+    let total_q = max_run_rows * group;
+    if total_q <= 16 && max_run_rows <= 9 {
+        (1, max_run_rows)
+    } else {
+        let cap_q = 48 / group;
+        let cap = if cap_q < 16 { cap_q } else { 16 };
+        (2, if max_run_rows < cap { max_run_rows } else { cap })
+    }
+}
+
+/// Choose `Q_GROUPS` and `rows_per_cta` for a single-chat or 1-row-per-chat launch.
 #[inline(always)]
 pub const fn flash_window_split_q_groups(rows: usize, heads: usize, kv_heads: usize, multi_chat: bool) -> (usize, usize) {
-    let group = heads / kv_heads;
     if multi_chat {
         return (1, 1);
     }
-    let total_q = rows * group;
-    if total_q <= 16 {
-        (1, rows)
-    } else {
-        let cap = 32 / group;
-        (2, if rows < cap { rows } else { cap })
-    }
+    flash_window_split_q_groups_for(rows, heads, kv_heads)
 }
 
 /// Shape & pointer admission for `FLASH_WINDOW_SPLIT16` / `FLASH_WINDOW_SPLIT32`.
@@ -235,17 +316,19 @@ pub const fn flash_window_split_admitted(
     q: usize, k: usize, v: usize, moved: usize, partials: usize, threads: usize,
 ) -> bool {
     let group = match heads.checked_div(kv_heads) { Some(g) => g, None => return false };
-    rows >= 1 && rows <= FW_SPLIT_ROWS_MAX
+    let q_cap = if q_groups == 1 { 16 } else { 48 };
+    let r_cap = if q_groups == 1 { 9 } else { 16 };
+    rows >= 1 && rows <= FW_ROWS_MAX
         && heads >= 1 && heads <= FW_HEADS_MAX
         && kv_heads >= 1 && kv_heads <= heads && heads % kv_heads == 0
         && group >= 1 && group <= FW_SPLIT_GROUP_MAX
         && view >= 1 && view <= FW_VIEW_MAX
         && extent >= 1 && extent <= FW_EXTENT_MAX
         && split_kv >= FW_SPLIT_BKV && split_kv % FW_SPLIT_BKV == 0
-        && num_splits >= 1 && num_splits <= 8192
+        && num_splits >= 1
         && (q_groups == 1 || q_groups == 2)
-        && rows_per_cta >= 1 && rows_per_cta * group <= 16 * q_groups
-        && (plane_count == 0 || (plane_count == rows && rows_per_cta == 1))
+        && rows_per_cta >= 1 && rows_per_cta <= r_cap && rows_per_cta * group <= q_cap
+        && (plane_count == 0 || (plane_count <= FW_SPLIT_GROUPS_MAX && rows <= plane_count * rows_per_cta))
         && threads == FW_THREADS
         && (q | k | v | moved | partials) & 15 == 0
 }
@@ -407,9 +490,27 @@ mod tests {
         assert!(check_flash_window(16, 24, 8, 128, 16, 64, 1024, 0.0, q, k, v, m, t, s, g, st, o).is_err());
         assert_eq!(flash_window_split_grid_y(1), 1);
         assert_eq!(flash_window_split_grid_y(2), 2);
-        assert_eq!((flash_window_split_grid_y(3), flash_window_split_grid_y(4)), (4, 4));
+        assert_eq!((flash_window_split_grid_y(3), flash_window_split_grid_y(4)), (3, 4));
         assert_eq!((flash_window_split_grid_y(11), flash_window_split_grid_y(12)), (12, 12));
         assert_eq!((flash_window_split_grid_y(17), flash_window_split_grid_y(24)), (24, 24));
-        assert_eq!((flash_window_split_grid_y(25), flash_window_split_grid_y(33)), (32, 48));
+        assert_eq!((flash_window_split_grid_y(25), flash_window_split_grid_y(33), flash_window_split_grid_y(36), flash_window_split_grid_y(72)), (32, 36, 36, 72));
+        // L2-resident wave-aligned banding & splits_per_cta + Rule 17 unbounded split admission.
+        assert_eq!(flash_window_split_band_splits(1, 24, 1200), 1200);
+        assert_eq!(flash_window_split_band_splits(16, 24, 1200), 72);
+        assert_eq!(flash_window_split_band_splits(8, 24, 1200), 144);
+        assert_eq!(flash_window_split_band_splits(128, 24, 12), 12);
+        assert_eq!(flash_window_split_band_splits(128, 24, 64), 10);
+        assert_eq!(flash_window_splits_per_cta_for(32, 12), 4);
+        assert_eq!(flash_window_splits_per_cta_for(32, 8), 2);
+        assert_eq!(flash_window_splits_per_cta_for(32, 4), 2);
+        assert_eq!(flash_window_splits_per_cta_for(1, 12), 1);
+        assert_eq!(flash_window_splits_per_cta_for(1, 72), 2);
+        assert_eq!(flash_window_splits_per_cta_for(1, 144), 2);
+        assert_eq!(flash_window_splits_per_cta_for(1, 216), 4);
+        assert_eq!(flash_window_splits_per_cta_for(1, 1200), 4);
+        assert_eq!(flash_window_split_q_groups_for(5, 24, 8), (1, 5));
+        assert_eq!(flash_window_split_q_groups_for(6, 24, 8), (2, 6));
+        assert_eq!(flash_window_split_q_groups_for(16, 24, 8), (2, 16));
+        assert!(flash_window_split_admitted(16, 24, 8, 1 << 23, 1024, 256, 32_768, 2, 16, 0, 16, 16, 16, 16, 16, 128));
     }
 }

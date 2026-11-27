@@ -99,7 +99,6 @@ fn tools(source: &str, namespace: Option<&str>, limits: &Limits, output: &mut Ou
                 tools(raw_member(&raw, "tools")?.ok_or("missing namespace tools")?, Some(ns), limits, output, result)?;
             }
             kind @ ("function" | "custom") => {
-                if result.len() >= 64 { return Err("too many tools".into()); }
                 let name = string(object, "name")?;
                 let full = namespace.map_or_else(|| name.to_owned(), |ns| format!("{ns}.{name}"));
                 if let Some(ns) = namespace { output.namespaces.insert(full.clone(), (ns.to_owned(), name.to_owned())); }
@@ -161,7 +160,6 @@ pub(crate) fn parse(body: &[u8], limits: &Limits, model: &str,
     match field(object, "input")? {
         Value::String(s) => messages.push(message("user", s)),
         Value::Array(items) => {
-            if items.len() > 4096 { return Err("too many Responses input items".into()); }
             let mut assistant = Assistant::default();
             for item in items {
                 let item = item.object().map_err(|e| e.to_string())?;

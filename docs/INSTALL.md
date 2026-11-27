@@ -1006,9 +1006,9 @@ that tells you:
 
 If no size starts, Vade does not change your saved config.
 
-If you set the output yourself, the cap is **16384**, and the output must fit
-in the context. If the engine refuses a `--context` that you set yourself, you
-get an error with the engine's message. Vade never lowers it silently.
+If you set the output yourself, it must fit in the context. If the engine
+refuses a `--context` that you set yourself, you get an error with the
+engine's message. Vade never lowers it silently.
 
 There are two other defaults. Drafting is on, and the engine chooses how far
 ahead it drafts. The prefix cache is on: the engine reuses the start of an
@@ -1600,11 +1600,15 @@ engine refuses it, Vade reports the refusal and does not lower the context.
 | Flag | What it does |
 | --- | --- |
 | `--context` | How many tokens the prompt and reply can use together. On the Spark, the value must fit the checkpoint's limit and pass the engine's memory check. If the engine refuses a value you set, you get an error. Vade does not lower it. The defaults are in the list above. |
-| `--output` | The most tokens a reply can use. It cannot be larger than the context or the FP4-Local limit of 16384. |
+| `--output` | The most tokens a reply can use. It cannot be larger than the context. |
 | `--mtp` | Asks for a specific drafting depth. `0` turns drafting off. It overrides the `MTP` variable. A local launch saves the selected drafting depth for later starts. To restore engine-selected drafting, stop the engine, remove the `mtp=` line from `${VADE_HOME:-$HOME/.vade}/config`, unset `MTP`, and restart without `--mtp`. The GLM text service loads depth 3 when neither the flag nor `MTP` is set. One FP4 Spark and other FP4 sizes use the engine default. Controller FP8 passes depth 2, including four Sparks. |
 | `--chats` | It works only from a controller. On the Spark itself, Vade refuses it. Vade records it and passes it on, but FP4-Local sets the chat count from context and memory. So `--chats` changes neither the context nor how many chats run at once. With FP8, `--chats N` reserves room for N chats. |
 | `--memory-bytes` | Sets a memory budget. The engine's memory check and the memory actually free still apply. |
-| `--cache-bytes 0` | Turns the prefix cache off for a local install (FP4-Local and Inkling 2 Mini). Any local size above zero is refused. With `--diagnostic-unqualified-text` it also turns off the prompt cache for the GLM and Inkling text services from a controller. |
+| `--cache-bytes 0` | Turns the prefix cache off for a local install (FP4-Local and Inkling 2 Mini) and for the GLM and Inkling text services from a controller. Any size above zero is refused for local FP4-Local and text services. |
+| `--bind` | Listen address (`HOST:PORT`, e.g. `0.0.0.0:18080`). Defaults to loopback `127.0.0.1:18080`. |
+| `--disk-cache-dir` | Persistent NVMe disk prefix cache directory (Inkling 2 Mini defaults to `${VADE_HOME:-$HOME/.vade}/cache/prefix` when prompt cache is on). |
+| `--disk-cache-bytes` | Byte budget for the NVMe disk prefix cache. When omitted, the engine derives the budget from free disk space. |
+| `--no-disk-cache` | Disables the persistent NVMe disk prefix cache while keeping the in-memory prompt cache on. |
 
 ### The prefix cache
 
@@ -1739,26 +1743,25 @@ checkpoints, such as `~/models`, does not replace a saved checkpoint. The other
 commands, such as `vade install`, `vade detect` and `vade doctor`, keep the
 saved checkpoint.
 
-The Inkling 2 Mini checkpoint runs as a text-only preview on one Spark. For
-example, with it in `~/models/thinkingmachines/Inkling-2-Mini`:
+The Inkling 2 Mini checkpoint runs on one Spark (or N one-Spark copies with
+`--replicas N`). For example, with it in `~/models/thinkingmachines/Inkling-2-Mini`:
 
 ```sh
 VADE_MODELS=~/models/thinkingmachines/Inkling-2-Mini vade up
 ```
 
-The start prints one line that says it is a preview that has not been through
-qualification. To serve the FP4-Local checkpoint again, run `vade down`, then
+To serve the FP4-Local checkpoint again, run `vade down`, then
 `VADE_MODELS=~/models/nvidia/Qwen3.8-Flash-Next-FP4-Local vade up`.
 
 ## GLM and Inkling 2 Mini
 
-Vade also serves two other model families as text services. Neither is
-qualified yet: their speed, limits and token IDs can change between releases.
+Vade also serves Inkling 2 Mini (qualified on one Spark, or N copies via
+`--replicas N`) and GLM 5.3 Flash FP4-Local (two-Spark text service).
 
 | Model | Sparks | Pinned revision | Start |
 | --- | --- | --- | --- |
 | GLM 5.3 Flash FP4-Local | exactly 2 | `76348ddb2be2e35e39ecfc00e75dc07703f4f3d5` | From a controller |
-| Inkling 2 Mini | exactly 1 | `b85c3cfa615fc413cc9af3379f491b963f3b586a` | On the Spark |
+| Inkling 2 Mini | 1 per replica | `b85c3cfa615fc413cc9af3379f491b963f3b586a` | On the Spark or from a controller |
 
 Both kernel images ship in the prebuilt package. A `--source` install builds
 every model family, so one `VADE_HOME` serves any of them.
@@ -1778,26 +1781,27 @@ every model family, so one `VADE_HOME` serves any of them.
    VADE_MODELS=~/models/thinkingmachines/Inkling-2-Mini vade up
    ```
 
-The start prints one line saying it is a text-only preview that has not been
-through qualification. Vade saves the folder, so a later `vade up` serves it
-too. From a controller, the same service starts with
-`vade up --sparks 1 --diagnostic-unqualified-text`.
+Vade saves the folder, so a later `vade up` serves it too. From a controller,
+the same service starts with `vade up --sparks 1` (or `vade up --replicas N`
+for N one-Spark copies behind a stable-prefix gateway). `--bind 0.0.0.0:18080`
+exposes the HTTP server on a non-loopback address.
 
-On current `main`, Inkling 2 Mini keeps 20.69 GB of resident weights on GPU,
-admits 36–38 concurrent chats with `--mtp 7` (42–44 plain) at a 32,768-token
-context (the count follows the Spark's free memory at start), accepts
-configured contexts up to 1,048,576 tokens, and keeps the prompt cache on by
-default (`--cache-bytes 0` turns it off).
+Inkling 2 Mini keeps 20.69 GB of resident weights on GPU, admits 36–38
+concurrent chats with `--mtp 7` (42–44 plain) at a 32,768-token context (the
+count follows the Spark's free memory at start), accepts configured contexts up
+to 1,048,576 tokens, keeps the in-memory prompt cache on by default
+(`--cache-bytes 0` turns it off), and enables the persistent NVMe disk prefix
+cache under `${VADE_HOME:-$HOME/.vade}/cache/prefix` by default
+(`--disk-cache-dir`, `--disk-cache-bytes`, `--no-disk-cache`).
 
-Current limits through `vade up`:
+Current notes through `vade up`:
 
-- **Drafting through `vade up`.** `vade up` defaults to plain decode (`--mtp 0`)
-  on Inkling 2 Mini and accepts explicit `--mtp 0..=7` up to the checkpoint's
-  declared draft depth (both locally and from a controller with
-  `--sparks 1 --diagnostic-unqualified-text --mtp <depth>`). Any depth above the
-  checkpoint's declared gamma is refused.
-- **One Spark per copy.** Inkling runs on one Spark only. `--replicas N` runs
-  N one-Spark copies behind one local gateway.
+- **Drafting through `vade up`.** `vade up` accepts explicit `--mtp 0..=7` up
+  to the checkpoint's declared draft depth (both locally and from a controller).
+  Any depth above the checkpoint's declared gamma is refused.
+- **One Spark per copy.** Inkling runs on one Spark per replica. `--replicas N`
+  runs N one-Spark copies behind one local gateway with `--stable-prefix`
+  routing.
 
 ### GLM 5.3 Flash on two Sparks
 

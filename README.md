@@ -30,11 +30,11 @@ Next, pull the model with `vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a
 | Qwen3.8 Flash-Next FP4-Local | 1, 2 or 4 | Supported, exact | `vade up` |
 | Qwen3.8 Flash-Next FP8 | 2 or 4 | Supported, exact | `vade up --fp8` (controller) |
 | GLM 5.3 Flash FP4-Local | 2 | Diagnostic text service, not qualified | `vade up --sparks 2 --diagnostic-unqualified-text` (controller) |
-| Inkling 2 Mini | 1 | Text-only preview, not qualified | `vade up inkling` |
+| Inkling 2 Mini | 1 or 2 | Qualified text service, exact | `vade up inkling` |
 
 </div>
 
-Qwen3.8 Flash-Next is the supported product. GLM 5.3 Flash and Inkling 2 Mini run text only, are not qualified yet, and their speed and limits can still change. [Other models](#other-models) shows how to pull and start them.
+Qwen3.8 Flash-Next and Inkling 2 Mini are qualified and exact. GLM 5.3 Flash runs text only as a diagnostic preview and is not qualified yet. [Other models](#other-models) shows how to pull and start them.
 
 <a id="what-it-is"></a>
 
@@ -82,7 +82,7 @@ Next steps:
 
 ### Other models
 
-Both models below run text only and are not qualified yet. [GLM and Inkling](docs/INSTALL.md#glm-and-inkling-2-mini) gives every step and limit.
+Inkling 2 Mini is qualified and exact on one Spark (and supports a cabled two-Spark pair over RDMA with `--pair`); GLM 5.3 Flash runs text only and is not qualified yet. [GLM and Inkling](docs/INSTALL.md#glm-and-inkling-2-mini) gives every step and limit.
 
 **Inkling 2 Mini on one Spark:**
 
@@ -93,7 +93,7 @@ vade up inkling
 
 `vade pull inkling` downloads the pinned revision `thinkingmachines/Inkling-2-Mini@b85c3cfa615fc413cc9af3379f491b963f3b586a` (20.19 GB). `vade up inkling` checks `~/models/thinkingmachines/Inkling-2-Mini` first and also detects existing read-only Hugging Face Hub cache snapshots automatically.
 
-By default, `vade up inkling` starts with `--context 524288` (512K, configurable up to 1,048,576), `--output 16384`, `--mtp 7` bit-exact drafting on (`--mtp 0` disables drafting), and the prompt cache on (`--cache-bytes 0` disables it). A 2 MiB CUDA VMM paged KV cache keeps resident weights at 20.69 GB with an 883 MB entry reservation and about 79 GB of session and cache pool, admitting up to 89-90 concurrent chats at 512K or 1M context with zero token-ID differences across solo, batched, cached, and drafted runs; pass `--disk-cache-dir PATH` (and optional `--disk-cache-bytes BYTES`) to `flash-serve` for bit-exact NVMe prefix persistence across restarts.
+By default, `vade up inkling` starts as a qualified service (`qualification=qualified`) with `--context 524288` (512K, configurable up to 1,048,576), `--output 16384`, `--mtp 7` bit-exact drafting on (`--mtp 0` disables drafting), RAM prompt caching on (`--cache-bytes 0` disables it), and persistent multi-worker `O_DIRECT` NVMe disk prefix caching on under `~/.vade/cache/prefix` (`--disk-cache-dir PATH`, `--disk-cache-bytes BYTES`, or `--no-disk-cache` to disable; shown in `vade status` and `vade doctor`). Pass `--bind <IP:PORT>` for explicit loopback or LAN binding, or `--replicas N` for multi-replica serving behind `vade-gateway`. A 2 MiB CUDA VMM paged KV cache keeps resident weights at 20.69 GB with an 883 MB entry reservation and about 79 GB of session and cache pool, admitting up to 89-90 concurrent chats at 512K or 1M context with zero token-ID differences across solo, batched, cached, drafted, 1-Spark, and 2-Spark RDMA runs.
 
 Connect external coding agents with one command via `vade connect <claude|codex|opencode|hermes|pi>`, or run `vade chat` (defaults to 300K auto-compact on 512K contexts and 8 concurrent 128K subagents; all limits are user-adjustable).
 

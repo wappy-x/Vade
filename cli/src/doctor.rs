@@ -54,6 +54,80 @@ pub(crate) fn prefix_cache() -> Result<Option<bool>, String> {
     }
 }
 
+/// Persistent NVMe disk prefix cache usage snapshot from scanning `.vdpc` files in a directory.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct DiskCacheStats {
+    pub entries: usize,
+    pub used_bytes: u64,
+}
+
+/// Scan `dir` for `.vdpc` disk prefix cache files and return `(entries, used_bytes)`.
+/// Returns `None` if `dir` does not exist yet or cannot be read.
+pub(crate) fn scan_disk_cache(dir: &Path) -> Option<DiskCacheStats> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    let mut stats = DiskCacheStats::default();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|ext| ext == "vdpc")
+            && let Ok(meta) = entry.metadata()
+            && meta.is_file()
+        {
+            stats.entries += 1;
+            stats.used_bytes = stats.used_bytes.saturating_add(meta.len());
+        }
+    }
+    Some(stats)
+}
+
+/// Format a byte count for human-readable status and doctor rows.
+pub(crate) fn format_bytes(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = 1024.0 * 1024.0;
+    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+    let value = bytes as f64;
+    if value >= GIB {
+        format!("{:.2} GiB", value / GIB)
+    } else if value >= MIB {
+        format!("{:.1} MiB", value / MIB)
+    } else if value >= KIB {
+        format!("{:.1} KiB", value / KIB)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+/// Human-readable summary of persistent NVMe disk prefix cache state.
+pub(crate) fn disk_cache_summary(
+    dir: Option<&Path>,
+    budget_bytes: Option<u64>,
+    no_disk_cache: bool,
+    prompt_cache_off: bool,
+) -> String {
+    if prompt_cache_off {
+        return "off (--cache-bytes 0)".into();
+    }
+    if no_disk_cache {
+        return "off (--no-disk-cache)".into();
+    }
+    let Some(dir) = dir else {
+        return "off".into();
+    };
+    let budget = match budget_bytes {
+        Some(bytes) => format!("budget {}", format_bytes(bytes)),
+        None => "auto NVMe budget".into(),
+    };
+    let usage = match scan_disk_cache(dir) {
+        Some(stats) => format!(
+            "{} {}, {}",
+            stats.entries,
+            if stats.entries == 1 { "entry" } else { "entries" },
+            format_bytes(stats.used_bytes)
+        ),
+        None => "0 entries, 0 B (created on first start)".into(),
+    };
+    format!("{} ({usage}; {budget})", text::terminal_text(&dir.to_string_lossy()))
+}
+
 pub(crate) fn local_model(report: &mut Report, folder: &Path) -> Result<(), String> { model::local(report, folder) }
 
 /// The prerequisite sample and ownership state already read by the controller.

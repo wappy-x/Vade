@@ -125,13 +125,13 @@ pub(crate) fn parse(body: &[u8], limits: &Limits, model: &str,
     let mut messages = Vec::new();
     if let Some(system) = present(object, "system") { messages.push(message("system", &text(system)?)); }
     let input = field(object, "messages")?.array().map_err(|e| e.to_string())?;
-    if input.is_empty() || input.len() > 4096 { return Err("messages count outside 1..4096".into()); }
+    if input.is_empty() { return Err("messages must not be empty".into()); }
     for raw in raw_array(raw_member(source, "messages")?.ok_or("missing messages")?)? {
         translate_message(&raw, limits, &mut messages)?;
     }
     let mut tools = Vec::new();
     if let Some(value) = present(object, "tools") {
-        if value.array().map_err(|e| e.to_string())?.len() > 64 { return Err("too many tools".into()); }
+        let _ = value.array().map_err(|e| e.to_string())?;
         for raw in raw_array(raw_member(source, "tools")?.ok_or("missing tools")?)? {
             let value = parse_json(raw.as_bytes(), limits)?;
             let tool = value.object().map_err(|e| e.to_string())?;

@@ -1303,7 +1303,8 @@ fn local_up_passes_explicit_mtp_for_loop_checkpoint_and_still_refuses_deep_fp4()
     let fields = text::parse(std::str::from_utf8(&start.stdin).unwrap()).unwrap();
     let engine_args: Vec<String> = (0..).map(|i| fields.get(&format!("arg.{i}")).cloned()).take_while(Option::is_some).flatten().collect();
     assert!(engine_args.windows(2).any(|pair| pair == ["--mtp", "7"]), "{engine_args:?}");
-    assert!(engine_args.iter().any(|arg| arg == "--diagnostic-unqualified-text"), "{engine_args:?}");
+    assert!(!engine_args.iter().any(|arg| arg == "--diagnostic-unqualified-text"), "{engine_args:?}");
+    assert!(engine_args.windows(2).any(|pair| pair[0] == "--disk-cache-dir" && pair[1].ends_with("/cache/prefix")), "{engine_args:?}");
     // Reloading saved local config preserves mtp=7 for the looped checkpoint.
     let reloaded = Config::load(&f.root).unwrap().unwrap();
     assert_eq!(reloaded.mtp(), Some(7));

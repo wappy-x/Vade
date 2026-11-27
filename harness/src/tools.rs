@@ -811,16 +811,6 @@ pub(crate) mod anchored {
         pub(crate) fn file_copy(&self) -> io::Result<File> {
             self.0.try_clone()
         }
-        /// The device and inode of this folder, from the open handle.
-        pub(crate) fn identity(&self) -> io::Result<(u64, u64)> {
-            let meta = self.0.metadata()?;
-            Ok((meta.dev(), meta.ino()))
-        }
-        /// The physical parent of this folder (`..` opened relative to the
-        /// handle), whatever name the folder was opened by.
-        pub(crate) fn parent(&self) -> io::Result<Self> {
-            self.open("..", DIRECTORY).map(Self)
-        }
         pub fn duplicate(&self) -> io::Result<Self> {
             self.0.try_clone().map(Self)
         }

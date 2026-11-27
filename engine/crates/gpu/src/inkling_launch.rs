@@ -78,6 +78,8 @@ pub const PREFILL_PACKED_TC:u32=121;
 pub const PREFILL_FLASH_WINDOW:u32=122;
 /// `resident_launch_prefill_gate_fuse`: fused prefill lazy message-meta and message-gate kernel (`prefill_gate`).
 pub const PREFILL_GATE_FUSE:u32=123;
+/// `resident_launch_plain_tc_panel64`: tensor-core BF16 product over `bf16_panels` for 33..=128 input rows (`tc_rows`).
+pub const PLAIN_TC_PANEL64:u32=124;
 /// One recorded command: the layout of the host's `resident_launch::Command` (host test).
 #[repr(C,align(16))]
 #[derive(Clone,Copy)]

@@ -10,15 +10,23 @@ Examples:
 Usage: vade launch [MODEL] [OPTIONS]
 
 Options:
-  --context N       Context window in tokens, 4096 or more (Inkling default
-                    524288; FP4-Local 4096..262144, default 32768)
-  --output N        Output limit in tokens (Inkling default 16384 up to context;
-                    FP4-Local 1024..16384, default 8192)
-  --mtp N           Drafting depth (Inkling 0..7, default 7; FP4-Local 0..3,
-                    engine chooses; 0 turns drafting off)
-  --memory-bytes N  Memory budget for this Spark, in bytes
-  --cache-bytes 0   Turn the retained prompt cache off
-  --dry-run         Show what would happen; change nothing
+  --context N            Context window in tokens, 4096 or more (Inkling default
+                         524288; FP4-Local default 32768; hardware admission
+                         decides ceiling)
+  --output N             Output limit in tokens, up to context (Inkling default
+                         16384; FP4-Local default 8192)
+  --mtp N                Drafting depth (Inkling 0..7, default 7; FP4-Local
+                         0..3, engine chooses; 0 turns drafting off)
+  --bind ADDR            HTTP listen socket address (for example 0.0.0.0:18080;
+                         default 127.0.0.1:<port>)
+  --disk-cache-dir PATH  Persistent NVMe disk prefix cache directory (Inkling
+                         default $VADE_HOME/cache/prefix)
+  --disk-cache-bytes N   Disk prefix cache budget in bytes (default
+                         hardware-derived NVMe budget)
+  --no-disk-cache        Disable persistent NVMe disk prefix cache
+  --memory-bytes N       Memory budget for this Spark, in bytes
+  --cache-bytes 0        Turn the retained prompt cache off
+  --dry-run              Show what would happen; change nothing
 
 Notes:
   - With inkling (or inkling-2-mini), starts Inkling 2 Mini on this Spark with

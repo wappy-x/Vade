@@ -82,6 +82,7 @@ mod prefill_flash_window;
 #[path = "prefill_gate.rs"]
 mod prefill_gate_kern;
 mod plain_tc_big;
+mod plain_tc_panel64;
 mod moe_group_route;
 mod flash_window;
 mod flash_window_split;
@@ -1204,6 +1205,11 @@ pub unsafe extern "ptx-kernel" fn resident_launch_prefill_gate_fuse(table: *cons
 /// contract holds).
 #[no_mangle]
 pub unsafe extern "ptx-kernel" fn resident_launch_plain_tc_big(table: *const Command, index: u64) { plain_tc_big::replay(table, index) }
+/// SM121a BF16 tensor-core MMA product over `bf16_panels` for 33..=128 input rows (`plain_tc_panel64.rs`).
+/// SAFETY: launched only by the host with a table of commands of kind PLAIN_TC_PANEL64 (`plain_tc_panel64::replay`,
+/// whose contract holds).
+#[no_mangle]
+pub unsafe extern "ptx-kernel" fn resident_launch_plain_tc_panel64(table: *const Command, index: u64) { plain_tc_panel64::replay(table, index) }
 /// Zero-stack fast Inkling mix blend (`fast_mix.rs`).
 /// SAFETY: launched only by the host with a table of commands of kind FAST_MIX_BLEND (`fast_mix::replay_mix_blend`).
 #[no_mangle]

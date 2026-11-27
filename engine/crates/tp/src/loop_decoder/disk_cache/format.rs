@@ -193,11 +193,33 @@ impl Read for U32LeReader<'_> {
             return Ok(0);
         }
         let mut written = 0;
-        while written < buf.len() && self.byte_pos < total {
+        // Align byte_pos to a 4-byte boundary first if needed.
+        if !self.byte_pos.is_multiple_of(4) {
             let word = self.tokens[self.byte_pos / 4].to_le_bytes();
             let sub = self.byte_pos % 4;
-            let take = (4 - sub).min(buf.len() - written);
-            buf[written..written + take].copy_from_slice(&word[sub..sub + take]);
+            let take = (4 - sub).min(buf.len());
+            buf[..take].copy_from_slice(&word[sub..sub + take]);
+            written += take;
+            self.byte_pos += take;
+        }
+        // Fast bulk path: write whole 4-byte words so LLVM vectorizes on little-endian hosts.
+        let avail_words = (total - self.byte_pos) / 4;
+        let fit_words = (buf.len() - written) / 4;
+        let bulk_words = avail_words.min(fit_words);
+        if bulk_words > 0 {
+            let start_word = self.byte_pos / 4;
+            let dst = &mut buf[written..written + bulk_words * 4];
+            for (slot, &tok) in dst.as_chunks_mut::<4>().0.iter_mut().zip(&self.tokens[start_word..start_word + bulk_words]) {
+                *slot = tok.to_le_bytes();
+            }
+            written += bulk_words * 4;
+            self.byte_pos += bulk_words * 4;
+        }
+        // Optional trailing 1..3 bytes when caller supplied a non-multiple-of-4 buffer.
+        if written < buf.len() && self.byte_pos < total {
+            let word = self.tokens[self.byte_pos / 4].to_le_bytes();
+            let take = (buf.len() - written).min(total - self.byte_pos);
+            buf[written..written + take].copy_from_slice(&word[..take]);
             written += take;
             self.byte_pos += take;
         }
@@ -354,11 +376,14 @@ pub(super) fn encode_header(
     }
     let logits_len = u32::try_from(next_logits.len()).map_err(|_| "logits length overflow")?;
     out.extend_from_slice(&logits_len.to_le_bytes());
-    for &t in tokens {
-        out.extend_from_slice(&t.to_le_bytes());
+    let tok_start = out.len();
+    out.resize(tok_start + tokens.len() * 4 + next_logits.len() * 4, 0);
+    let (tok_dst, logit_dst) = out[tok_start..].split_at_mut(tokens.len() * 4);
+    for (dst, &t) in tok_dst.as_chunks_mut::<4>().0.iter_mut().zip(tokens) {
+        *dst = t.to_le_bytes();
     }
-    for &v in next_logits {
-        out.extend_from_slice(&v.to_bits().to_le_bytes());
+    for (dst, &v) in logit_dst.as_chunks_mut::<4>().0.iter_mut().zip(next_logits) {
+        *dst = v.to_bits().to_le_bytes();
     }
     Ok(out)
 }
@@ -542,4 +567,28 @@ pub(super) fn read_and_verify_envelope(
         return Err("prelude has_draft flag disagrees with header".into());
     }
     Ok((prelude, header, chunk_crcs))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn u32_le_reader_matches_exact_bytes_across_unaligned_buffers() {
+        let tokens: Vec<u32> = (0u32..513).map(|i| i.wrapping_mul(0x9E37_79B9) ^ 0xA55A_1234).collect();
+        let expected: Vec<u8> = tokens.iter().flat_map(|t| t.to_le_bytes()).collect();
+        for buf_len in [1usize, 2, 3, 4, 5, 7, 15, 64, 4096] {
+            let mut reader = U32LeReader { tokens: &tokens, byte_pos: 0 };
+            let mut out = Vec::new();
+            let mut buf = vec![0u8; buf_len];
+            loop {
+                let n = reader.read(&mut buf).unwrap();
+                if n == 0 {
+                    break;
+                }
+                out.extend_from_slice(&buf[..n]);
+            }
+            assert_eq!(out, expected, "U32LeReader mismatch for buf_len={buf_len}");
+        }
+    }
 }

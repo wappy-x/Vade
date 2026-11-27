@@ -85,7 +85,7 @@ impl<S: crate::Session> CachedSession<S> {
         self.fork_prefix_limit(prompt, self.tokens.len())
     }
     /// Logical retained rows and rows restored without recurrent replay.
-    fn restorable_prefix(&self, prompt: &[u32], limit: usize) -> Option<(usize, usize)> {
+    pub(crate) fn restorable_prefix(&self, prompt: &[u32], limit: usize) -> Option<(usize, usize)> {
         let shared = shared_prefix(&self.tokens, prompt).min(limit);
         let exact = shared == self.tokens.len() && !self.next_logits.is_empty();
         let retain = if shared == prompt.len() && !exact { shared.saturating_sub(1) } else { shared };

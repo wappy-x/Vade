@@ -174,7 +174,10 @@ impl<R: Runner> App<R> {
         // Only a group of one Spark reads the plan here. Two Sparks take main's steps (no plan read and no extra SSH
         // before same_launch); any other group is refused with main's text in Session::new, also in a dry run.
         let mut hashed = Vec::new();
-        if owned.diagnostic_unqualified_text && owned.checkpoint_service.is_none() {
+        let probe_service = owned.diagnostic_unqualified_text
+            || owned.is_inkling()
+            || self.config.model.to_ascii_lowercase().contains("inkling");
+        if probe_service && owned.checkpoint_service.is_none() {
             let machines = self.config.selected(&owned)?;
             let group = if owned.replicas { owned.replica_sparks.max(1) } else { machines.len() };
             if group == 1 && crate::text_service::from_local(&machines)?.is_none() {
@@ -759,6 +762,22 @@ impl<R: Runner> App<R> {
         }
         let reported = if health { self.engine_prefix_cache(&session)? } else { None };
         row("Retained prompt cache", &retention_label(&session, reported))?;
+        if session.loop_service {
+            let detail = if session.cache_bytes == Some(0) {
+                "off (--cache-bytes 0)".into()
+            } else if session.no_disk_cache {
+                "off (--no-disk-cache)".into()
+            } else if let Some(dir) = &session.disk_cache_dir {
+                let budget = session.disk_cache_bytes.map_or_else(
+                    || "auto NVMe budget".to_owned(),
+                    |b| format!("budget {}", crate::doctor::format_bytes(b)),
+                );
+                format!("{} ({budget})", text::terminal_text(dir))
+            } else {
+                "off".into()
+            };
+            row("Disk prefix cache", &detail)?;
+        }
         if health {
             for line in self.engine_events(&session, &health_response.stdout)? { crate::output::line(format_args!("  {line}"))?; }
         }

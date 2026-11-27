@@ -4,7 +4,7 @@ use super::*;
 /// The row launches of 2 to 8 token rows (ROW SHADOW, `bus_shadow::rows`) read weights at the bus rate too; no one-row step
 /// records them, so the one-row list above is unchanged.
 fn boundary(kind:Kind)->bool {
-    matches!(kind,Kind::Expert|Kind::Fp8Tile|Kind::Plain|Kind::PlainBf16|Kind::PlainPacked|Kind::PlainPackedGroup|Kind::PlainPackedPicked|Kind::PlainStaged|Kind::PlainStagedRows|Kind::PlainStagedFew|Kind::PlainStagedOne|Kind::PlainStagedNarrow|Kind::PlainPackedRows|Kind::PlainTcRows|Kind::PlainTcBig|Kind::PlainPackedTcRows|Kind::PrefillPackedTc|Kind::FlashWindowAttn|Kind::Mx|Kind::Mixed|Kind::NvStream|Kind::NvTile|Kind::NvQuarters|Kind::DeviceRoute|Kind::Prepare|Kind::Collapse|Kind::Combine)
+    matches!(kind,Kind::Expert|Kind::Fp8Tile|Kind::Plain|Kind::PlainBf16|Kind::PlainPacked|Kind::PlainPackedGroup|Kind::PlainPackedPicked|Kind::PlainStaged|Kind::PlainStagedRows|Kind::PlainStagedFew|Kind::PlainStagedOne|Kind::PlainStagedNarrow|Kind::PlainPackedRows|Kind::PlainTcRows|Kind::PlainTcBig|Kind::PlainTcPanel64|Kind::PlainPackedTcRows|Kind::PrefillPackedTc|Kind::FlashWindowAttn|Kind::Mx|Kind::Mixed|Kind::NvStream|Kind::NvTile|Kind::NvQuarters|Kind::DeviceRoute|Kind::Prepare|Kind::Collapse|Kind::Combine)
         || matches!(kind,Kind::MxRows2|Kind::MxRows4|Kind::MxRows8|Kind::MxRows8w|Kind::MxRowsTile|Kind::MixedRows|Kind::FoldRows|Kind::FoldRowsF32
             |Kind::Fp8RowsSmall|Kind::Fp8RowsMulti|Kind::Fp8RowsFew|Kind::Fp8RowsShare|Kind::PlainRowsSmall)
         // LATENT ROWS: they replace latent_absorption_tile in a check pass, which ended the recorded piece, so no prefetch

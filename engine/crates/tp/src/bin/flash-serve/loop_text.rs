@@ -1,4 +1,4 @@
-//! The start of the text service of the looped block family on one Spark, behind `--diagnostic-unqualified-text`.
+//! The start of the text service of the looped block family on one Spark.
 //!
 //! The library holds the service and its start for any backend (`spark_tp::loop_decoder::service::start`). This
 //! file is the Linux half of a start: the memory rule, and for the device run the GPU context, the load of the
@@ -8,6 +8,7 @@
 use engine_model::plan::{description::LoopTextDescription,loop_load::{self,ExpertCodes}};
 use spark_gpu_probe::{packed_product,staged_product};
 use spark_tp::{Result,bounded_decoder::Device,loop_decoder::{operands::{device::{DeviceStore,PanelPlan},load,weights::LoadedWeights},service::{STEP_LIMITS,admit,start}},startup};
+use spark_tp::loop_decoder::tp2::serve as tp2;
 use std::{net::TcpListener,path::Path,sync::atomic::AtomicBool,time::Instant};
 
 /// The memory margin of the vector pool: the pool keeps no spare that would leave less than this free.
@@ -15,11 +16,10 @@ const VECTOR_POOL_MARGIN:usize=1<<30;
 /// The rule of the grid of a launch whose extent follows the context: a straight plane holds whole buckets.
 const BUCKET:u64=spark_gpu_probe::causal_ops::BUCKET_ROWS as u64;
 
-/// Start the service when `root` holds a model of this family and the start gives the diagnostic option.
-/// `None`: another model, or no diagnostic option; the caller goes on as it did before this file.
+/// Start the service when `root` holds a model of this family.
+/// `None`: another model family; the caller goes on as it did before this file.
 /// `output` and `memory` are the caller's settings of the output cap and of the memory ceiling, as text.
 pub fn run(args:&[String],root:&Path,output:Option<String>,memory:Option<String>,started:Instant)->Option<Result<()>> {
-    if !args.get(9..).unwrap_or_default().iter().any(|option|option==start::DIAGNOSTIC) {return None;}
     let config=engine_model::safetensors::read_bounded(&root.join("config.json"),engine_model::shapes::CONFIG_BYTES).ok()?;
     LoopTextDescription::from_config(&config).ok()?;
     Some(serve(args,root,output,memory,started))
@@ -54,11 +54,20 @@ fn serve(args:&[String],root:&Path,output:Option<String>,memory:Option<String>,s
     // The kernel image of the block arms, which every step runs: a build without it stops here, before the GPU opens.
     startup::step("kernel_image");
     start::need_kernel_image(spark_gpu_probe::inkling_ptx().is_some())?;
+    // A pair start connects the two Sparks before the load (`spark_tp::loop_decoder::tp2::serve`).
+    let mut pair=if settings.options.pair {
+        tp2::check(settings.options.depth,settings.options.disk_cache_dir.is_some())?;
+        startup::step("pair");
+        let address=|at:usize|args[at].parse::<std::net::SocketAddr>().map_err(|e|format!("--pair needs the addresses LISTEN and NEXT: {e}"));
+        Some(tp2::Link::connect(settings.rank,address(2)?,address(3)?)?)
+    } else {None};
     startup::step("memory");
     let (_,total)=spark_gpu_probe::driver::device_memory_info(0)?;
     let free=spark_gpu_probe::driver::unified_available_bytes(total)?;
     // The memory rule of the text service: the free bytes less the larger of one tenth and 2 GiB.
     let budget=ceiling(free.saturating_sub((free/10).max(2<<30)),memory)?;
+    // Both Sparks of a pair admit the same chats: each takes the smaller budget.
+    let budget=match &pair {Some(link)=>usize::try_from(link.agree(budget as u64)?).map_err(|_|"the budget exceeds this host")?,None=>budget};
     startup::step("memory_admission");
     admit(d,&checkpoint.load.bytes,settings.context,budget as u64,BUCKET,STEP_LIMITS)?;
     let panels=PanelPlan::new(&checkpoint.load)?;
@@ -69,10 +78,13 @@ fn serve(args:&[String],root:&Path,output:Option<String>,memory:Option<String>,s
         // The kernel image of the block arms, loaded before the weights, so the first chat does not pay for it.
         startup::step("kernel_image_load");
         backend.inkling_preload()?;
-        let model=(settings.options.depth>0).then(||engine_model::mtp_draft::MtpModel::open_with_fold(root,|a,b,c,v,h,r|backend.fold_markov(a,b,c,v,h,r))).transpose().map_err(|e|e.to_string())?;
+        // In `--pair` mode, only the leader half loads and runs `Drafter`; the follower mirrors target verify/accept calls only.
+        let load_draft=settings.options.depth>0 && pair.as_ref().is_none_or(tp2::Link::is_leader);
+        let model=load_draft.then(||engine_model::mtp_draft::MtpModel::open_with_fold(root,|a,b,c,v,h,r|backend.fold_markov(a,b,c,v,h,r))).transpose().map_err(|e|e.to_string())?;
         let format=Some(engine_model::plan::loop_load::ExpertCodes::Nvfp4);
         let raw_draft=model.as_ref().map(|m|spark_tp::loop_decoder::draft::packed_weight_bytes(m,format,format)).transpose()?.unwrap_or(0);
         let main_budget=budget.saturating_sub(raw_draft) as u64;
+        let main_budget=match &pair {Some(link)=>link.agree(main_budget)?,None=>main_budget};
         let baseline=admit(d,&checkpoint.load.bytes,settings.context,main_budget,BUCKET,STEP_LIMITS)?;
         let panel_load=panels.charge(checkpoint.load.bytes)?;
         let with_panels=admit(d,&panel_load,settings.context,main_budget,BUCKET,STEP_LIMITS).ok();
@@ -114,7 +126,19 @@ fn serve(args:&[String],root:&Path,output:Option<String>,memory:Option<String>,s
             store.set_panel_room(admitted.room()?.saturating_sub(admitted.chat_bytes()?));
         }
         let draft=model.as_ref().map(|m|spark_tp::loop_decoder::draft::Drafter::with_packed(m,&mut store,&compute,format,format)).transpose()?;
-        let admitted=if draft.is_some() {
+        let admitted=if let Some(link)=&pair {
+            let available=spark_gpu_probe::driver::unified_available_bytes(total)?;
+            let draft_bytes=if draft.is_some() {
+                let db=backend.allocated_bytes().saturating_sub(before_draft);
+                let (tiles,outliers)=backend.bf16_panel_tiles();
+                eprintln!("LOOP TEXT DRAFT WEIGHTS bytes={db} panel_bytes={} panel_tiles={} panel_outliers={}",
+                    db.saturating_sub(raw_draft),tiles-main_tiles,outliers-main_outliers);
+                db
+            } else {0};
+            let remaining=budget.saturating_sub(draft_bytes).min(resident+available.saturating_sub((free/10).max(2<<30)));
+            let agreed=link.agree(remaining as u64)?;
+            admit(d,&main_load,settings.context,agreed,BUCKET,STEP_LIMITS)?
+        } else if draft.is_some() {
             let available=spark_gpu_probe::driver::unified_available_bytes(total)?;
             let draft_bytes=backend.allocated_bytes().saturating_sub(before_draft);
             let (tiles,outliers)=backend.bf16_panel_tiles();
@@ -128,7 +152,10 @@ fn serve(args:&[String],root:&Path,output:Option<String>,memory:Option<String>,s
         // Retain freed working vectors and VMM KV pages only after measuring the loaded weight bytes.
         backend.configure_vector_pool(VECTOR_POOL_MARGIN);
         backend.configure_kv_reserve(VECTOR_POOL_MARGIN);
-        let served=start::serve_with_draft(&compute,&weights,d,text,&admitted,&settings,listener,root,"device",&stop,draft.as_ref().map(|m|m as &_));
+        let served=match pair.take() {
+            Some(link)=>tp2::serve(link,backend,&compute,&weights,d,text,&admitted,&settings,listener,root,&stop,draft.as_ref()),
+            None=>start::serve_with_draft(&compute,&weights,d,text,&admitted,&settings,listener,root,"device",&stop,draft.as_ref().map(|m|m as &_)),
+        };
         let drained=backend.synchronize();
         served.and(drained)
     })

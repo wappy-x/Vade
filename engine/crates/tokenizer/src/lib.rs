@@ -41,8 +41,8 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            max_input_bytes: 1024 * 1024,
-            max_tokens: 1024 * 1024,
+            max_input_bytes: usize::MAX,
+            max_tokens: usize::MAX,
         }
     }
 }
@@ -574,9 +574,6 @@ impl Tokenizer {
         if text.len() > self.limits.max_input_bytes {
             return Err(err("input byte limit exceeded"));
         }
-        if recognize && text.len().saturating_mul(self.added.len()) > 1024usize * 1024 * 4096 {
-            return Err(err("added token scan limit exceeded"));
-        }
         let mut out = Vec::new();
         let mut cursor = 0;
         // Rendered chat ranges are ordered and disjoint. Detect that invariant
@@ -641,15 +638,9 @@ impl Tokenizer {
         Ok(out)
     }
     fn ordinary(&self, text: &str, out: &mut Vec<u32>) -> Result<()> {
-        // Preserve the legacy 1 MiB input's fourfold normalization allowance and the 4 MiB split cap;
-        // long-context callers that opt into > 4 MiB inputs scale split/NFC bounds directly with
-        // `max_input_bytes` while keeping each individual BPE piece bounded to 2 MiB.
-        let (work, bpe_work, nfc_limit) = if self.limits.max_input_bytes > 4 * 1024 * 1024 {
-            (self.limits.max_input_bytes, 2 * 1024 * 1024, self.limits.max_input_bytes.saturating_mul(4))
-        } else {
-            let legacy = if text.len() > Limits::default().max_input_bytes { 2 * 1024 * 1024 } else { 4 * 1024 * 1024 };
-            (legacy, legacy, self.limits.max_input_bytes.saturating_mul(4).min(4 * 1024 * 1024))
-        };
+        let work = self.limits.max_input_bytes;
+        let bpe_work = self.limits.max_input_bytes;
+        let nfc_limit = self.limits.max_input_bytes.saturating_mul(4);
         if self.is_gemma4() {
             // The artifact replaces only ASCII spaces; it does not add a
             // prefix space, split on words, or perform Unicode normalization.
@@ -1167,9 +1158,17 @@ mod tests {
         d.push(65).unwrap();
         d.push(65).unwrap();
         assert!(d.push(65).is_err());
-        let mut t = byte_fixture(); for (i, pair) in [(32, 97), (256, 98), (257, 99), (258, 100), (259, 101)].into_iter().enumerate() { t.pairs.insert(pair, (i as u32, 256 + i as u32)); } let large = " abcde".repeat(262144); let Error(message) = t.encode(&large).unwrap_err(); assert_eq!(message, "input byte limit exceeded");
-        t.set_limits(Limits { max_input_bytes: large.len(), max_tokens: 262144 }).unwrap(); assert_eq!(t.encode(&large).unwrap(), vec![260; 262144]);
-        t.set_limits(Limits { max_input_bytes: 4 * 1024 * 1024, ..Default::default() }).unwrap(); assert_eq!(t.encode_ordinary(&"a".repeat(4 * 1024 * 1024)).unwrap_err().0, "split work limit exceeded");
+        let mut t = byte_fixture();
+        for (i, pair) in [(32, 97), (256, 98), (257, 99), (258, 100), (259, 101)].into_iter().enumerate() { t.pairs.insert(pair, (i as u32, 256 + i as u32)); }
+        let large = " abcde".repeat(262144);
+        // Default limits allow >1.5 MiB inputs without hitting an arbitrary 1 MiB cap.
+        assert_eq!(t.encode(&large).unwrap(), vec![260; 262144]);
+        // Explicit limits are still honored strictly.
+        t.set_limits(Limits { max_input_bytes: 1024 * 1024, max_tokens: 1024 * 1024 }).unwrap();
+        let Error(message) = t.encode(&large).unwrap_err();
+        assert_eq!(message, "input byte limit exceeded");
+        t.set_limits(Limits { max_input_bytes: large.len(), max_tokens: 262144 }).unwrap();
+        assert_eq!(t.encode(&large).unwrap(), vec![260; 262144]);
     }
     #[test]
     fn normalization() {

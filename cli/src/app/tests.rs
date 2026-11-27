@@ -277,20 +277,19 @@ fn fp4_pair_reaches_user_at_host_ranks_without_ssh_aliases() {
 #[test]
 fn unsupported_fp4_rank_counts_fail_before_any_remote_command() {
     let mut f = Fixture::fp4(4, false);
-    // The parser stops these counts; a list of that many Sparks reaches the config check.
+    // Rule 17: no arbitrary 24-Spark cap in parser or config; --sparks 0 is still refused,
+    // and asking for more Sparks than configured fails before any remote command.
+    assert!(crate::cli::parse(&["up".to_owned(), "--sparks".to_owned(), "0".to_owned()]).unwrap_err().contains("positive whole number"));
     for count in ["25", "48", "64"] {
-        assert!(crate::cli::parse(&["up".to_owned(), "--sparks".to_owned(), count.to_owned()]).unwrap_err().contains("from 1 to 24,"));
-        let hosts = (0..count.parse().unwrap()).map(|index: usize| format!("spark-{index}")).collect::<Vec<_>>().join(",");
-        let error = f.app.up(&fp4_options(&["--hosts", &hosts])).unwrap_err();
-        assert!(error.starts_with(crate::config::FP4_SPARKS), "{error}");
-        assert!(f.app.runner.calls.is_empty());
-        assert!(!f.recorded());
+        assert!(crate::cli::parse(&["up".to_owned(), "--sparks".to_owned(), count.to_owned()]).is_ok());
     }
+    assert!(f.app.up(&fp4_options(&["--sparks", "5"])).is_err());
+    assert!(f.app.runner.calls.is_empty());
 }
 
 #[test]
 fn fp4_chains_cover_every_supported_size_and_preserve_owned_recovery() {
-    for count in 1..=crate::config::MAX_FP4_SPARKS {
+    for count in 1..=24 {
         let f = Fixture::fp4(count, false);
         let options = fp4_options(&["--sparks", &count.to_string()]);
         let session = Session::new(&f.app.config, &options, &f.app.manifest().unwrap(), "a".repeat(64)).unwrap();

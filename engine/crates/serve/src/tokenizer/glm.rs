@@ -30,7 +30,7 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self { reasoning_effort: "max".into(), clear_thinking: false,
-            add_generation_prompt: true, tools: Vec::new(), max_bytes: 1024 * 1024 }
+            add_generation_prompt: true, tools: Vec::new(), max_bytes: usize::MAX }
     }
 }
 struct Output { text: String, controls: Vec<Range<usize>>, limit: usize }
@@ -67,7 +67,7 @@ pub fn encode(tokenizer: &engine_tokenizer::Tokenizer, messages: &[Message], opt
     Ok(tokens)
 }
 fn parse(source: &str, max_bytes: usize) -> Result<Value, String> {
-    json::parse(source.as_bytes(), json::Limits { bytes: max_bytes, depth: 24, nodes: 65536,
+    json::parse(source.as_bytes(), json::Limits { bytes: max_bytes, depth: 24, nodes: max_bytes.max(65536),
         string_bytes: max_bytes }).map_err(|e| e.to_string())
 }
 // The shared parser checks types and duplicate keys. Raw slices keep key order.

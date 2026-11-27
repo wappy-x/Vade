@@ -471,8 +471,9 @@ fn multi_chat_auto_and_strict_drafting_matches_direct_decode() {
             self.proposals.fetch_add(1,Ordering::Relaxed);
             Ok((0..depth).map(|k|(anchor+1+k as u32)%20).collect())
         }
-        fn propose_confident_batch(&self,_:&Host,_:&Fixture,items:&mut [(&mut DraftChat<Vec<f32>>,u32,&Vec<f32>,usize)])->Result<Vec<(Vec<u32>,Vec<f32>)>> {
+        fn propose_confident_batch(&self,_:&Host,_:&Fixture,items:&mut [(&mut DraftChat<Vec<f32>>,u32,&Vec<f32>,usize)],before_read:&mut dyn FnMut()->Result<()>)->Result<Vec<(Vec<u32>,Vec<f32>)>> {
             self.proposals.fetch_add(items.len(),Ordering::Relaxed);
+            before_read()?;
             Ok(items.iter().map(|(_,anchor,_,depth)| {
                 let ids=(0..*depth).map(|k|(anchor+1+k as u32)%20).collect();
                 let probs=vec![0.96;*depth];
@@ -929,7 +930,7 @@ fn long_context_limits_tokenizer_and_cache_caps_scale_past_256k() {
     let mut tokenizer=spark_serve::tokenizer::ModelTokenizer::from_directory(&folder.root).unwrap();
     let big_text="ab ".repeat(400_000);
     assert!(big_text.len()>1_048_576);
-    assert!(spark_serve::Tokenizer::encode(&tokenizer,&big_text).is_err(),"default 1 MiB limit refuses >1 MiB text");
+    assert!(!spark_serve::Tokenizer::encode(&tokenizer,&big_text).unwrap().is_empty(),"Rule 17: default tokenizer accepts >1 MiB text without arbitrary cap");
     let lim=limits(524_288,8192).unwrap();
     assert_eq!(lim.body_bytes,8*1024*1024);
     tokenizer.set_limits(lim.tokenizer_limits()).unwrap();

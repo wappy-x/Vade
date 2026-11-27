@@ -28,23 +28,23 @@ pub fn serve(b: &Backend<'_>, checkpoint: &Path, listener: &TcpListener, tokeniz
         if tokens == 0 || tokens as u64 > c.max_positions { return Err(spark_gpu_probe::admission::token_refusal(tokens as u128, c.max_positions as usize, &format!("CONTEXT={tokens}; OUTPUT={}; context must be positive", limits.output_tokens), "the checkpoint position ceiling", SERVE)); }
         plan(tokens)?; tokens
     } else {
-        let (mut low, mut high) = (1usize, (c.max_positions as usize).min(32768));
+        let (mut low, mut high) = (1usize, c.max_positions as usize);
         plan(low)?;
         while low < high { let mid = low+(high-low).div_ceil(2); if plan(mid).is_ok() {low=mid} else {high=mid-1} }
         low
     };
     let budget = plan(tokens)?;
     let active = sizing.max_active.unwrap_or(32);
-    if !(2..=32).contains(&active) { return Err("--max-active must be in 2..32".into()); }
+    if active < 2 { return Err("--max-active must be at least 2".into()); }
     b.set_allocation_budget(gpu)?;
     b.configure_kv_reserve(available.saturating_sub(gpu).max(1024*1024*1024));
     limits.context_tokens = tokens;
     limits.input_tokens = limits.input_tokens.min(tokens.saturating_sub(1).max(1));
     limits.output_tokens = limits.output_tokens.min(tokens.saturating_sub(1).max(1));
-    limits.body_bytes = limits.body_bytes.max(limits.input_tokens.saturating_mul(16)).min(4 * 1024 * 1024);
+    limits.body_bytes = limits.body_bytes.max(limits.input_tokens.saturating_mul(16)).min(Limits::MAX_BODY_BYTES);
     if !output_bytes_explicit {
         limits.output_bytes = limits.output_bytes.max(limits.output_tokens.saturating_mul(256)
-            .saturating_add(4096)).min(16 * 1024 * 1024);
+            .saturating_add(4096)).min(Limits::MAX_CONTEXT_TOKENS * 256);
     }
     limits.validate()?;
     tokenizer.set_limits(limits.tokenizer_limits()).map_err(|e| e.to_string())?;

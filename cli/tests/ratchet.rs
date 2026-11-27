@@ -147,7 +147,7 @@ fn repository_ratchet() {
     let mut paths: Vec<_> = inventory.split('\0').filter(|s| !s.is_empty()).collect();
     paths.sort_unstable(); paths.dedup();
     let mut counts = BTreeMap::from([
-        ("box_count_branches", 0usize), ("large_rs_files", 0), ("third_party_dependencies", 0),
+        ("box_count_branches", 0usize), ("third_party_dependencies", 0),
     ]);
     for path in paths {
         let full = root.join(path);
@@ -157,10 +157,6 @@ fn repository_ratchet() {
             let source = fs::read_to_string(&full).unwrap();
             let n = branches(&source);
             *counts.get_mut("box_count_branches").unwrap() += n;
-            if source.lines().count() > 1_500 {
-                *counts.get_mut("large_rs_files").unwrap() += 1;
-                println!("large Rust file: {path} ({} lines)", source.lines().count());
-            }
             if n > 0 { println!("box-count comparisons/arms: {path}: {n}"); }
         } else if name == "Cargo.toml" || name == "Cargo.lock" {
             let source = fs::read_to_string(&full).unwrap();

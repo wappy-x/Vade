@@ -395,26 +395,18 @@ impl<'a,C:Compute,W:Weights<C>> Service<'a,C,W> {
                     d.chat.ensure_global_capacity(self.compute,cfg,need).map_err(err)?;
                 }
             }
-            // Flush deferred accepts and variable-row `push_batch` unrecorded BEFORE `propose_confident_batch` so
-            // variable accepted counts never instantiate unique CUDA graphs or evict warm verify/draft graphs.
+            // Flush the variable-row `push_batch` unrecorded BEFORE `propose_confident_batch` so variable accepted
+            // counts never instantiate unique CUDA graphs or evict warm verify/draft graphs. The deferred target
+            // accepts of the last verify are not read by the draft: they run unrecorded inside the propose scope after
+            // every draft launch is queued, so their host launch time overlaps the draft kernels on the one stream
+            // (the verify that reads them runs later on that stream).
+            let accept_slots:Vec<usize>=rows.iter().filter_map(|row|row.session.active_slot().ok()).collect();
             let p0=Instant::now();
             let flushed=self.compute.work(|| {
                 let paused=self.compute.rows_unrecorded(true)?;
-                let run=(|| -> Result<bool> {
-                    {
-                        let mut slots=self.slots.borrow_mut();
-                        for row in rows.iter() {
-                            if let Ok(active)=row.session.active_slot()
-                                && let Some(slot)=slots.get_mut(active).and_then(Option::as_mut)
-                            {
-                                self.flush_accept(slot)?;
-                            }
-                        }
-                    }
-                    let mut all_ctxs:Vec<&mut Context<C::Value>>=rows.iter_mut()
-                        .filter_map(|r|r.session.draft.as_mut()).collect();
-                    flush_batch(self.compute,m,&mut all_ctxs)
-                })();
+                let mut all_ctxs:Vec<&mut Context<C::Value>>=rows.iter_mut()
+                    .filter_map(|r|r.session.draft.as_mut()).collect();
+                let run=flush_batch(self.compute,m,&mut all_ctxs);
                 let resumed=self.compute.rows_unrecorded(paused);
                 let flushed=run?;
                 resumed?;
@@ -435,7 +427,19 @@ impl<'a,C:Compute,W:Weights<C>> Service<'a,C,W> {
                     let chat=chats[idx].take().ok_or("loop text service: missing draft chat")?;
                     items.push((chat,anchor,embed,depth));
                 }
-                m.propose_confident_batch(self.compute,self.driver.run.weights,&mut items)
+                let mut accept_deferred=|| -> Result<()> {
+                    let paused=self.compute.rows_unrecorded(true)?;
+                    let run=(|| -> Result<()> {
+                        let mut slots=self.slots.borrow_mut();
+                        for &active in &accept_slots {
+                            if let Some(slot)=slots.get_mut(active).and_then(Option::as_mut) {self.flush_accept(slot)?;}
+                        }
+                        Ok(())
+                    })();
+                    let resumed=self.compute.rows_unrecorded(paused);
+                    run?;resumed.map(|_|())
+                };
+                m.propose_confident_batch(self.compute,self.driver.run.weights,&mut items,&mut accept_deferred)
             }).map_err(err)?;
             let draft_ms=draft_started.elapsed().as_secs_f64()*1000.0;
             let mut cohort=self.cohort.borrow_mut();

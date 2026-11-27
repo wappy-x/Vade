@@ -3,74 +3,82 @@ Start the engine without opening chat.
 
 Examples:
   vade up inkling
+  vade up inkling --bind 0.0.0.0:18080
   vade up inkling --context 1048576
   vade up
   vade up --sparks spark-a,spark-b,spark-c,spark-d
-  VADE_CONFIG=cluster.conf vade up --sparks 2
+  VADE_CONFIG=cluster.conf vade up inkling --replicas 2
 
 Usage: vade up [MODEL] [OPTIONS]
 
 Options:
-  MODEL                Optional short alias: inkling (Inkling 2 Mini) or qwen
-                       (Qwen3.8 FP4-Local)
-  --fp4-local          Qwen3.8 Flash-Next FP4-Local (the default without MODEL;
-                       optional)
-  --fp8                Qwen3.8 Flash-Next FP8 on 2 or 4 Sparks; 6 Sparks start
-                       but are not covered (older spelling: --fp8-legacy):
-                       context 131072, output 65536 (or the context if smaller),
-                       drafting depth 2; output limit up to 262144
-  --sparks a,b         The Sparks as you type them after ssh, in any order. Vade
-                       reads the cables and sets them up
-  --sparks N           How many Sparks of your setup to start, from 1 to 24
-  --link FROM:TO=ADDR  With --sparks a,b: FROM's own address on its cable to TO,
-                       to override what Vade reads
-  --hosts a,b          Machines of your config, in cable order; this never
-                       changes the setup
-  --replicas N         2..16 independent one-Spark servers (FP4-Local, or a
-                       diagnostic text plan that declares one Spark) behind a
-                       local gateway
-  --pairs              With --replicas 2..12: N two-Spark tensor-split servers
-                       on 2N Sparks instead
-  --mtp N              Drafting depth (Inkling 0..7, default 7; FP4-Local 0..3,
-                       engine chooses; controller FP8 passes 2; 0 turns drafting
-                       off). From a controller with
-                       --diagnostic-unqualified-text, a two-Spark text service
-                       takes 0..7 and loads 3 when this and MTP are unset; a
-                       one-Spark plan uses its checkpoint default
-  --context N          Context window in tokens, 4096 or more (Inkling default
-                       524288; FP4-Local 4096..262144, default 32768)
-  --output N           Output limit in tokens (Inkling default 16384 up to
-                       context; FP4-Local 1024..16384, default 8192)
-  --chats N            Concurrent FP8 chats, 1..32 (controller)
-  --memory-bytes N     Memory budget per rank, in bytes
-  --cache-bytes N      FP8 retained prompt cache, in bytes; 0 disables it. Local
-                       FP4, Inkling and --diagnostic-unqualified-text accept
-                       only 0 (prompt cache is on by default)
-  --decode-fuse MODE   on for one Spark by default; off disables the decode
-                       kernel chain
+  MODEL                  Optional short alias: inkling (Inkling 2 Mini) or qwen
+                         (Qwen3.8 FP4-Local)
+  --fp4-local            Qwen3.8 Flash-Next FP4-Local (the default without
+                         MODEL; optional)
+  --fp8                  Qwen3.8 Flash-Next FP8 on 2 or 4 Sparks; 6 Sparks start
+                         but are not covered (older spelling: --fp8-legacy):
+                         context 131072, output 65536 (or the context if
+                         smaller), drafting depth 2
+  --sparks a,b           The Sparks as you type them after ssh, in any order.
+                         Vade reads the cables and sets them up
+  --sparks N             How many Sparks of your setup to start (1 or more)
+  --link FROM:TO=ADDR    With --sparks a,b: FROM's own address on its cable to
+                         TO, to override what Vade reads
+  --hosts a,b            Machines of your config, in cable order; this never
+                         changes the setup
+  --replicas N           2 or more independent servers (Inkling, FP4-Local, or
+                         paired FP8) behind a local gateway
+  --pairs                With --replicas N: N two-Spark tensor-split servers on
+                         2N Sparks instead
+  --mtp N                Drafting depth (Inkling 0..7, default 7; FP4-Local
+                         0..3, engine chooses; controller FP8 passes 2; 0 turns
+                         drafting off). From a controller with
+                         --diagnostic-unqualified-text, a two-Spark text service
+                         takes 0..7 and loads 3 when this and MTP are unset; a
+                         one-Spark plan uses its checkpoint default
+  --context N            Context window in tokens, 4096 or more (Inkling default
+                         524288; FP4-Local default 32768; hardware admission
+                         decides ceiling)
+  --output N             Output limit in tokens, up to context (Inkling default
+                         16384; FP4-Local default 8192)
+  --bind ADDR            HTTP listen socket address (for example 0.0.0.0:18080;
+                         default 127.0.0.1:<port>)
+  --disk-cache-dir PATH  Persistent NVMe disk prefix cache directory (Inkling
+                         default $VADE_HOME/cache/prefix)
+  --disk-cache-bytes N   Disk prefix cache budget in bytes (default
+                         hardware-derived NVMe budget)
+  --no-disk-cache        Disable persistent NVMe disk prefix cache
+  --chats N              Concurrent FP8 chats, 1 or more (controller)
+  --memory-bytes N       Memory budget per rank, in bytes
+  --cache-bytes N        FP8 retained prompt cache, in bytes; 0 disables it.
+                         Local FP4 and Inkling accept only 0 (prompt cache is on
+                         by default)
+  --decode-fuse MODE     on for one Spark by default; off disables the decode
+                         kernel chain
   --diagnostic-unqualified-text
-                       Unqualified text diagnostics on loopback only; default
-                       off
-  --fast-prompts       Older option, kept for scripts; it has no effect
-  --dry-run            Show what would happen; change nothing
+                         Legacy no-op for Inkling; enables two-Spark unqualified
+                         text diagnostics
+  --fast-prompts         Older option, kept for scripts; it has no effect
+  --dry-run              Show what would happen; change nothing
 
 Notes:
   - vade up inkling starts Inkling 2 Mini on one Spark with context 524288 (up
     to the checkpoint limit with --context), output 16384 (up to context),
-    drafting depth 7 (--mtp 0 disables drafting) and prompt cache on
-    (--cache-bytes 0 disables it). Checks
+    drafting depth 7 (--mtp 0 disables drafting), RAM prompt cache on
+    (--cache-bytes 0 disables it), and persistent NVMe disk prefix cache on
+    under $VADE_HOME/cache/prefix (--no-disk-cache disables it). Checks
     ~/models/thinkingmachines/Inkling-2-Mini first, then the read-only Hugging
     Face Hub cache.
   - Default: Qwen3.8 Flash-Next FP4-Local on one Spark.
-  - FP4-Local runs on 1, 2 or 4 Sparks over RDMA, or as a layer chain of 3 to 24
-    Sparks over TCP. We have measured chains up to four Sparks.
+  - FP4-Local runs on 1, 2 or 4 Sparks over RDMA, or as a layer chain of 3 or
+    more Sparks over TCP. We have measured chains up to four Sparks.
   - FP8 runs on 2 or 4 Sparks, and the same request with the same settings gives
     the same token IDs on both. FP8 also starts on 6 Sparks, but its token IDs
     differ there, so 6 Sparks are not covered yet.
-  - --sparks a,b is all you need for 1 to 24 Sparks. Vade checks each Spark over
-    SSH, reads the cables, prints the chain, copies itself to each Spark and
-    starts them. Type the Sparks in any order. Each name is what you type after
-    ssh, or user@address.
+  - --sparks a,b checks each Spark over SSH, reads the cables, prints the chain,
+    copies itself to each Spark and starts them. Type the Sparks in any order.
+    Each name is what you type after ssh, or user@address.
   - A new list replaces the last setup: one line says so, the old file moves
     aside, and a running engine stops first. The same Sparks in the same order
     start with no new setup. After that, vade up alone starts the same Sparks,

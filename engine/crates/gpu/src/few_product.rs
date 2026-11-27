@@ -95,9 +95,13 @@ pub const ONE_PANEL_INPUTS: usize = 8;
 /// bands_a, total_blocks`) at `ONE_PAIR_WORD..+7`.
 pub const ONE_FLAGS_WORD: usize = 8;
 pub const ONE_PART_WORD: usize = 12;
+/// Packed Vade-BF11-BP header offsets (`chunks_off | (esc_off << 32)`) for item A (`ONE_PAIR_WORD + 7` for B,
+/// `ONE_TRIPLE_WORD + 6` for C) so `plain_staged_one` fires initial chunk + metadata DRAM loads at cycle 0 without a
+/// serialized header read.
+pub const ONE_OFFS_WORD: usize = 13;
 pub const ONE_SPLIT_WORD: usize = 16;
 pub const ONE_PAIR_WORD: usize = 32;
-/// Third fused independent panel item (`c_y, c_r, c_x, c_panels, c_first_band, bands_ab`) for 3-way `Q+K+V` fusion.
+/// Third fused independent panel item (`c_y, c_r, c_x, c_panels, c_first_band, bands_ab, c_offs`) for 3-way `Q+K+V` fusion.
 pub const ONE_TRIPLE_WORD: usize = 40;
 /// Tiles of one turn of the legacy panel load ring (kept for host unit tests).
 pub const ONE_RING: usize = 12;
@@ -107,8 +111,8 @@ pub const BLOCK_RESERVED_BYTES: usize = 1_024;
 /// Most dynamic shared bytes of a panel launch: a larger size needs the opt-in attribute of the function, which a
 /// retained graph could meet at a smaller setting.
 pub const ONE_SHARED_MAX: usize = 49_152;
-const _: () = assert!(ONE_FLAGS_WORD + 1 < ONE_PANEL_WORD && ONE_PART_WORD == ONE_PANEL_WORD + 2 && ONE_SPLIT_WORD > ONE_PART_WORD
-    && ONE_PAIR_WORD >= ONE_SPLIT_WORD + 2 * FEW_SPLIT_MAX && ONE_TRIPLE_WORD >= ONE_PAIR_WORD + 7 && ONE_TRIPLE_WORD + 6 <= 128 && ONE_PANEL_INPUTS == 8);
+const _: () = assert!(ONE_FLAGS_WORD + 1 < ONE_PANEL_WORD && ONE_PART_WORD == ONE_PANEL_WORD + 2 && ONE_OFFS_WORD == 13 && ONE_OFFS_WORD < ONE_SPLIT_WORD
+    && ONE_PAIR_WORD >= ONE_SPLIT_WORD + 2 * FEW_SPLIT_MAX && ONE_TRIPLE_WORD >= ONE_PAIR_WORD + 8 && ONE_TRIPLE_WORD + 7 <= 128 && ONE_PANEL_INPUTS == 8);
 /// Shared bytes of one staged BF16 input row for `part_chunks` 64-column chunks (`128 B/chunk`).
 /// Multi-row launches (`inputs > 1`) add 64 bytes so adjacent `g` rows map to opposite 64-byte bank halves
 /// (zero bank conflicts on `LDS.128`). Single-row launches (`inputs == 1`) have zero padding (`cols * 2` B).
@@ -118,20 +122,32 @@ pub const fn one_panel_row_bytes_chunks(inputs: usize, part_chunks: usize) -> us
 /// Double-buffered SMEM handoff bytes for Warps `1..4` -> Warp `0` in 4-warp cooperative ascending-K `Vade-BF11-BP`:
 /// `2 slots * 3 producer warps * 4 tiles * 32 lanes * 16 B = 12,288 B`.
 pub const COOP_W_BYTES: usize = 12_288;
-/// SMEM handoff bytes for `slices`-warp cooperative ascending-K `Vade-BF11-BP`:
+/// SMEM handoff bytes for `slices`-warp cooperative ascending-K `Vade-BF11-BP` at batch size `inputs`:
 /// - `slices == 4` (2 slots x 3 producer warps x 2,048 B = 12,288 B, double-buffered)
-/// - `slices == 8` (1 slot x 7 producer warps x 2,048 B = 14,336 B, single-buffered so 3 blk/SM = 24 warps/SM holds for all M=1..8)
+/// - `slices == 8`, `inputs <= 4` (2 slots x 7 producer warps x 2,048 B = 28,672 B, double-buffered, 3 blk/SM = 24 warps/SM)
+/// - `slices == 8`, `inputs >= 5` (1 slot x 7 producer warps x 2,048 B = 14,336 B, single-buffered, 3 blk/SM = 24 warps/SM)
+#[inline(always)]
+pub const fn coop_w_bytes_for(inputs: usize, slices: usize) -> usize {
+    if slices == 8 {
+        if inputs <= 4 { 7 * 4_096 } else { 7 * 2_048 }
+    } else if slices > 1 {
+        (slices - 1) * 4_096
+    } else {
+        0
+    }
+}
+/// SMEM handoff bytes for `slices`-warp cooperative ascending-K `Vade-BF11-BP` (legacy helper).
 #[inline(always)]
 pub const fn coop_w_bytes(slices: usize) -> usize {
-    if slices == 8 { 7 * 2_048 } else if slices > 1 { (slices - 1) * 4_096 } else { 0 }
+    coop_w_bytes_for(8, slices)
 }
 /// Shared bytes of a Vade-BF11-BP panel launch with `slices` streams (`1` = independent warps, `4`/`6`/`8` =
-/// cooperative ascending-K with `coop_w_bytes(slices)` double-buffered weight handoff). Avoids `ONE_BLOCK_BYTES`
+/// cooperative ascending-K with `coop_w_bytes_for(inputs, slices)` weight handoff). Avoids `ONE_BLOCK_BYTES`
 /// (20,480) so PDL `dependent_launch` stays enabled on `cols = 4096, inputs = 1`.
 pub const fn one_panel_shared_slices(inputs: usize, part_chunks: usize, slices: usize) -> usize {
     let x_bytes = inputs * one_panel_row_bytes_chunks(inputs, part_chunks);
     if slices > 1 {
-        let total = x_bytes + coop_w_bytes(slices);
+        let total = x_bytes + coop_w_bytes_for(inputs, slices);
         if total == ONE_BLOCK_BYTES { total + 128 } else { total }
     } else {
         x_bytes

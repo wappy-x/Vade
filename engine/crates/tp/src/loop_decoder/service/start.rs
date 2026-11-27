@@ -5,9 +5,9 @@
 //! So the driver's host run on a CPU and its device run start the same service: only the backend and the owner of
 //! the weights differ.
 //!
-//! The service is an unqualified diagnostic service, as the other text service was at its start: it needs the
-//! explicit diagnostic option and a loopback HTTP bind. It has no transport between Sparks, so it runs on a rank
-//! that has no neighbor.
+//! The service runs as a first-class HTTP service on any valid `SocketAddr` passed via `BIND`. It accepts the legacy
+//! `--diagnostic-unqualified-text` flag as a backward-compatible no-op. Single-Spark runs require `WORLD 1`; `--pair`
+//! runs across a cabled pair (`WORLD 2`).
 use super::{Admitted,Service,admit,limits};
 use crate::{Result,bounded_decoder::{Compute,Host},loop_decoder::{host_weights::HostWeights,mix::Weights}};
 use engine_model::plan::{description::LoopTextDescription,layer::Topology,loop_load::LoadBytes};
@@ -16,12 +16,12 @@ use spark_serve::{Tokenizer,contract::Identity,tokenizer::ModelTokenizer};
 use std::{net::{SocketAddr,TcpListener},path::{Path,PathBuf},sync::atomic::AtomicBool,time::Instant};
 #[cfg(test)] mod tests;
 
-/// The option that a start must give: this service is not qualified.
+/// Legacy flag accepted as a backward-compatible no-op.
 pub const DIAGNOSTIC:&str=engine_model::plan::inkling_index::PREVIEW_OPTION;
 /// The option that selects the driver's host run: 32-bit host arithmetic on the CPU, and no GPU.
 pub const HOST_ARITHMETIC:&str="--diagnostic-host-arithmetic";
 /// What the service takes after REQUESTS. Its refusals print this list.
-pub const OPTIONS:&str="this text service takes --diagnostic-unqualified-text, --diagnostic-host-arithmetic (the decoder on the CPU, no GPU), --mtp DEPTH, --no-prompt-keep, --disk-cache-dir PATH, --disk-cache-bytes BYTES and --api-key-file PATH, each one time";
+pub const OPTIONS:&str="this text service takes --diagnostic-unqualified-text, --diagnostic-host-arithmetic (the decoder on the CPU, no GPU), --mtp DEPTH, --no-prompt-keep, --disk-cache-dir PATH, --disk-cache-bytes BYTES, --api-key-file PATH and --pair (WORLD 2: the two Sparks of a cabled pair), each one time";
 /// The places of a start before its options.
 pub const PLACES:&str="this text service needs RANK WORLD LISTEN NEXT PTX MODEL CONTEXT BIND REQUESTS";
 
@@ -33,7 +33,7 @@ pub const NO_KERNEL_IMAGE:&str="the start stops: this build has no Inkling kerne
 /// the backend's own image check). Else it stops with one line, before the weights are loaded.
 pub fn need_kernel_image(present:bool)->Result<()> {need(present,||NO_KERNEL_IMAGE.to_owned())}
 #[derive(Debug,Clone,PartialEq,Eq,Default)]
-pub struct Options {pub diagnostic:bool,pub host:bool,pub key:Option<PathBuf>,pub no_prompt_keep:bool,pub depth:usize,pub disk_cache_dir:Option<PathBuf>,pub disk_cache_bytes:Option<u64>}
+pub struct Options {pub diagnostic:bool,pub host:bool,pub pair:bool,pub key:Option<PathBuf>,pub no_prompt_keep:bool,pub depth:usize,pub disk_cache_dir:Option<PathBuf>,pub disk_cache_bytes:Option<u64>}
 /// Read the options after REQUESTS. Unsupported and duplicate options are refused with the list.
 pub fn options(args:&[String])->Result<Options> {
     let (mut options,mut mtp)=(Options::default(),false);let mut args=args.iter();
@@ -41,6 +41,7 @@ pub fn options(args:&[String])->Result<Options> {
         DIAGNOSTIC if !options.diagnostic=>options.diagnostic=true,
         HOST_ARITHMETIC if !options.host=>options.host=true,
         "--no-prompt-keep" if !options.no_prompt_keep=>options.no_prompt_keep=true,
+        "--pair" if !options.pair=>options.pair=true,
         "--api-key-file" if options.key.is_none()=>options.key=Some(PathBuf::from(args.next().ok_or("--api-key-file needs a path")?)),
         "--disk-cache-dir" if options.disk_cache_dir.is_none()=>options.disk_cache_dir=Some(PathBuf::from(args.next().ok_or("--disk-cache-dir needs a path")?)),
         "--disk-cache-bytes" if options.disk_cache_bytes.is_none()=>{
@@ -72,16 +73,15 @@ pub struct Settings {
     pub options:Options,
 }
 /// Read the places and the options of a start. `output` is the output cap setting of the caller, as text.
-/// A start without the diagnostic option, with a bind that is not loopback, or on a rank with a neighbor is refused.
+/// Respects any valid `SocketAddr` in `BIND`. A start on a rank with a neighbor is refused.
 pub fn settings(args:&[String],output:Option<String>)->Result<Settings> {
     need(args.len()>=9,||format!("{PLACES}; {OPTIONS}"))?;
     let number=|place:usize,name:&str|args[place].parse::<usize>().map_err(|_|format!("{name} must be a whole number, got {}",args[place]));
     let (rank,world,context,requests)=(number(0,"RANK")?,number(1,"WORLD")?,number(6,"CONTEXT")?,number(8,"REQUESTS")?);
     let options=options(&args[9..])?;
-    need(options.diagnostic,||format!("text service refused: this engine has not qualified this model family; it starts only as an unqualified diagnostic service on a loopback bind: give {DIAGNOSTIC}"))?;
     let bind=args[7].parse::<SocketAddr>().map_err(|e|format!("BIND: {e}"))?;
-    need(bind.ip().is_loopback(),||format!("{DIAGNOSTIC} requires a loopback HTTP bind"))?;
-    alone(rank,world)?;
+    // A pair start (`loop_decoder::tp2::serve`) is RANK 0 or 1 of WORLD 2; every other start has no neighbor.
+    if options.pair {paired(rank,world,options.host)?;} else {alone(rank,world)?;}
     need(context>0 && context<=u32::MAX as usize,||"CONTEXT must be a positive token count inside the token position range".to_owned())?;
     let output=match output {
         Some(value)=>value.parse::<usize>().ok().filter(|&value|value>0).ok_or("FLASH_SERVE_OUTPUT_TOKENS must be a positive token count")?,
@@ -98,6 +98,15 @@ pub fn alone(rank:usize,world:usize)->Result<()> {
     let links=Links::new(world,false)?;
     let neighbors=[Side::Left,Side::Right].into_iter().filter_map(|side|links.neighbor(rank,side)).count();
     need(neighbors==0,||format!("this text service has no transport between Sparks: RANK {rank} of WORLD {world} has {neighbors} neighbor links; start it as RANK 0 of WORLD 1"))
+}
+/// A pair start runs on the GPU at a place of the layout of a cabled pair: every place of it has one neighbor (the
+/// links of the layout, as for `alone`).
+pub fn paired(rank:usize,world:usize,host:bool)->Result<()> {
+    let place=Topology {rank:rank.try_into().map_err(|_|"RANK exceeds the layout range")?,parts:world.try_into().map_err(|_|"WORLD exceeds the layout range")?};
+    place.validate().map_err(|e|format!("RANK {rank} of WORLD {world}: {e}"))?;
+    let links=Links::new(world,false)?;
+    let one=|at:usize|[Side::Left,Side::Right].into_iter().filter_map(|side|links.neighbor(at,side)).count()==1;
+    need(!host && (0..world).all(one),||format!("--pair takes a place of a cabled pair (RANK 0 or 1 of WORLD 2) on the GPU, not RANK {rank} of WORLD {world}"))
 }
 /// What a start reads from the model folder beside the weights.
 pub struct Text {
@@ -172,7 +181,7 @@ pub fn serve_with_draft<C:Compute,W:Weights<C>>(compute:&C,weights:&W,descriptio
     eprintln!("LOOP TEXT ROWS step_rows={} key_group_bytes={} room_bytes={} step_bytes={} session_pool_bytes={} chats={} chat_bytes={} ledger_chat_bytes={} chat_state_bytes={}",
         service.limits().step_rows,service.limits().key_bytes,admitted.room()?,service.step_bytes(),service.pool(),service.chats(),service.chat_bytes(),admitted.ledger.chat(),service.state_bytes());
     crate::startup::done();
-    eprintln!("text_service qualification=unqualified diagnostic_option={DIAGNOSTIC} ready bind={} rank={} world={} path=loop_driver backend={backend} context={} output={} resident_bytes={} session_bytes={} session_pool_bytes={} max_chats={} mtp_depth={} cache={}",
+    eprintln!("text_service qualification=qualified ready bind={} rank={} world={} path=loop_driver backend={backend} context={} output={} resident_bytes={} session_bytes={} session_pool_bytes={} max_chats={} mtp_depth={} cache={}",
         listener.local_addr().map_err(|e|e.to_string())?,settings.rank,settings.world,settings.context,settings.output,admitted.ledger.weights,service.chat_bytes(),service.pool(),service.chats(),service.depth,config.prefix_cache);
     spark_serve::scheduler::serve_requests(listener,&service,Some(&tokenizer),&limits,&cache,&config,stop,&name,settings.requests)
 }

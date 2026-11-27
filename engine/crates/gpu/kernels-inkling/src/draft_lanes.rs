@@ -5,6 +5,13 @@ use crate::tc_ptx::{shfl_xor_f32,shfl_xor_u32};
 /// Keys of the draft attention walk (operation 20) whose K and V rows a warp prefetches into L1 ahead of the key it
 /// reads: 8 keys of ~150-300 cycles each cover one DRAM read; 8 keys x 1 KB a warp group stays well inside L1.
 const ATTN_PREFETCH_KEYS:usize=8;
+/// Splits ahead to prefetch into L1 during ascending Split-KV merges (`kind == 21` and `kind == 28`).
+const MERGE_PREFETCH_SPLITS:usize=4;
+/// Dynamic shared memory bytes for GQA-packed BF16 tensor-core Split-KV draft attention (`Q 8K + K 8K + V 8K + P 2K + RED 1K + META 128B`).
+const DRAFT_TC_SMEM:u32=27_776;
+
+#[inline(always)]
+fn fmax(a:f32,b:f32)->f32 {if b>a {b} else {a}}
 
 /// Pure FP32 rounding helper; non-finite sums or BF16 overflows become NaN.
 #[inline(always)]
@@ -33,6 +40,400 @@ pub unsafe extern "ptx-kernel" fn inkling_draft_lanes(table:*const crate::Comman
     // words of the pick in y, and lane 0 writes word p of the output (`a.div_ceil(b)` words, one a warp).
     unsafe {
         let cmd=(*table.add(index as usize)).payload.as_ptr().cast::<u64>();
+        let kind=*cmd;
+        let a_raw=*cmd.add(6);
+        // SAFETY: operation 27 TC mode (`(a >> 50) & 1 != 0`) runs 256-thread (8-warp) CTAs with `DRAFT_TC_SMEM`
+        // (27,776 B) dynamic shared memory, packing 32 GQA queries per CTA so every committed BF16 KV row is read from
+        // DRAM once across all query heads and draft rows sharing a KV head. All bounds, alignments, and
+        // `%dynamic_smem_size` are checked before any memory access; all 256 threads participate in every barrier.
+        if kind==27 && ((a_raw>>50)&1)!=0 {
+            const Q_BASE:u32=0;
+            const K_BASE:u32=8_192;
+            const V_BASE:u32=16_384;
+            const P_BASE:u32=24_576;
+            const RED_M:u32=26_624;
+            const RED_L:u32=27_136;
+            const META:u32=27_648;
+            let shared_bytes:u32;
+            core::arch::asm!("mov.u32 {s}, %dynamic_smem_size;",s=out(reg32) shared_bytes,options(pure,nomem,nostack));
+            if shared_bytes<DRAFT_TC_SMEM || core::arch::nvptx::_block_dim_x()!=256 || core::arch::nvptx::_block_dim_y()!=1 {core::arch::nvptx::trap();}
+            macro_rules! meta_u32 {($idx:literal) => {crate::tc_ptx::load_u32(META+($idx)*4)};}
+            macro_rules! meta_u64 {($idx:literal) => {(crate::tc_ptx::load_u32(META+($idx)*4) as u64)|((crate::tc_ptx::load_u32(META+(($idx)+1)*4) as u64)<<32)};}
+            let (split_start,cta_end,lim0,lim1)={
+                let b_raw=*cmd.add(7);
+                let c_raw=*cmd.add(8);
+                let heads=(b_raw&0xffff) as u32;
+                let kv=((b_raw>>16)&0xffff) as u32;
+                let q_rows=((b_raw>>32)&0xffff) as u32;
+                let new_rows=((b_raw>>48)&0xffff) as u32;
+                let causal_base=c_raw as u32;
+                let row_off=(c_raw>>32) as u32;
+                let max_splits=*cmd.add(9) as u32;
+                if kv==0 || heads==0 || max_splits==0 || q_rows==0 {core::arch::nvptx::trap();}
+                let group=heads/kv;
+                if group==0 {core::arch::nvptx::trap();}
+                let q_cnt_total=q_rows*group;
+                let q_tiles=q_cnt_total.div_ceil(32);
+                let bx=core::arch::nvptx::_block_idx_x() as u32;
+                let q_tile=bx%q_tiles;let rem0=bx/q_tiles;
+                let kh=rem0%kv;let rem1=rem0/kv;
+                let split=rem1%max_splits;let bi=rem1/max_splits;
+                let cmeta=*cmd.add(12+(bi as usize)*3+2);
+                let hist_keys=cmeta as u32;
+                let splits_b=(cmeta>>32) as u32;
+                if splits_b==0 {core::arch::nvptx::trap();}
+                if split>=splits_b {return;}
+                let keys=hist_keys+new_rows;
+                let q_base_idx=q_tile*32;
+                let q_cnt=(q_cnt_total-q_base_idx).min(32);
+                let tid=core::arch::nvptx::_thread_idx_x() as u32;
+                let r0=((tid>>7)<<4)+((tid&31)>>2);
+                let row_lim=|qi:u32|->u32 {
+                    if qi>=q_cnt {0}
+                    else if causal_base==0 {keys}
+                    else {
+                        let r_abs=(q_base_idx+qi)/group+row_off;
+                        if r_abs<8 {causal_base} else if r_abs<12 {(causal_base+4).min(keys)} else {keys}
+                    }
+                };
+                let chunk=keys.div_ceil(splits_b);
+                let split_start=split*chunk;
+                let split_end_max=(split_start+chunk).min(keys);
+                let cta_end=split_end_max.min(row_lim(q_cnt-1));
+                let lim0=split_end_max.min(row_lim(r0));
+                let lim1=split_end_max.min(row_lim(r0+8));
+                if tid==0 {
+                    let ck=*cmd.add(12+(bi as usize)*3);
+                    let cv=*cmd.add(12+(bi as usize)*3+1);
+                    let yn=*cmd.add(2);
+                    let zn=*cmd.add(3);
+                    let out_a=*cmd.add(4);
+                    crate::tc_ptx::store_u32(META,ck as u32);
+                    crate::tc_ptx::store_u32(META+4,(ck>>32) as u32);
+                    crate::tc_ptx::store_u32(META+8,cv as u32);
+                    crate::tc_ptx::store_u32(META+12,(cv>>32) as u32);
+                    crate::tc_ptx::store_u32(META+16,yn as u32);
+                    crate::tc_ptx::store_u32(META+20,(yn>>32) as u32);
+                    crate::tc_ptx::store_u32(META+24,zn as u32);
+                    crate::tc_ptx::store_u32(META+28,(zn>>32) as u32);
+                    crate::tc_ptx::store_u32(META+32,out_a as u32);
+                    crate::tc_ptx::store_u32(META+36,(out_a>>32) as u32);
+                    crate::tc_ptx::store_u32(META+40,hist_keys);
+                    crate::tc_ptx::store_u32(META+44,cta_end);
+                    crate::tc_ptx::store_u32(META+48,kv);
+                    crate::tc_ptx::store_u32(META+52,kh);
+                    crate::tc_ptx::store_u32(META+56,bi);
+                    crate::tc_ptx::store_u32(META+60,new_rows);
+                    crate::tc_ptx::store_u32(META+64,a_raw as u32);
+                    crate::tc_ptx::store_u32(META+68,((a_raw>>49)&1) as u32);
+                    crate::tc_ptx::store_u32(META+72,q_rows);
+                    crate::tc_ptx::store_u32(META+76,heads);
+                    crate::tc_ptx::store_u32(META+80,group);
+                    crate::tc_ptx::store_u32(META+84,max_splits);
+                    crate::tc_ptx::store_u32(META+88,split);
+                    crate::tc_ptx::store_u32(META+92,q_base_idx);
+                    crate::tc_ptx::store_u32(META+96,q_cnt);
+                }
+                if split_start<cta_end {
+                    let qr=tid>>3;let qc=tid&7;
+                    let q_ptr=*cmd.add(1) as *const f32;
+                    let q_row_ptr=if qr<q_cnt {
+                        let qa=q_base_idx+qr;
+                        let q_id=((bi*q_rows+qa/group)*heads+kh*group+qa%group) as usize;
+                        q_ptr.add(q_id*128)
+                    } else {q_ptr};
+                    let mut step=0u32;
+                    while step<2 {
+                        let ch=step*8+qc;
+                        let dst=Q_BASE+((qr<<8)+((ch^(qr&7))<<4));
+                        if qr<q_cnt {
+                            let v0=crate::tc_ptx::ld_global_nc_v4(q_row_ptr.add((ch*8) as usize));
+                            let v1=crate::tc_ptx::ld_global_nc_v4(q_row_ptr.add((ch*8+4) as usize));
+                            crate::tc_ptx::st_shared_v4(dst,[
+                                crate::tc_ptx::cvt_bf16x2(v0[0],v0[1]),crate::tc_ptx::cvt_bf16x2(v0[2],v0[3]),
+                                crate::tc_ptx::cvt_bf16x2(v1[0],v1[1]),crate::tc_ptx::cvt_bf16x2(v1[2],v1[3]),
+                            ]);
+                        } else {
+                            crate::tc_ptx::st_shared_zero16(dst);
+                        }
+                        step+=1;
+                    }
+                }
+                core::arch::nvptx::_syncthreads();
+                (split_start,cta_end,lim0,lim1)
+            };
+            let (mut m0,mut l0)=(f32::NEG_INFINITY,0.0f32);
+            let (mut m1,mut l1)=(f32::NEG_INFINITY,0.0f32);
+            let (mut o0,mut o1,mut o2,mut o3)=([0.0f32;4],[0.0f32;4],[0.0f32;4],[0.0f32;4]);
+            if split_start<cta_end {
+                macro_rules! live_zero {
+                    () => {{
+                        let z:u32;
+                        core::arch::asm!("mov.u32 {z}, %tid.y;",z=out(reg32) z,options(nomem,nostack));
+                        z
+                    }};
+                }
+                macro_rules! live_tid {
+                    () => {{
+                        let t:u32;
+                        core::arch::asm!("mov.u32 {t}, %tid.x;",t=out(reg32) t,options(nomem,nostack));
+                        t
+                    }};
+                }
+                macro_rules! issue_kv {
+                    ($base_smem:expr,$plane_idx:literal,$new_idx:literal,$is_v:expr,$tb:expr) => {{
+                        let tb:u32=$tb;
+                        let tid=live_tid!();
+                        let cp_r=tid>>4;let cp_c=tid&15;
+                        let dst0=$base_smem+((cp_r<<8)+((cp_c^(cp_r&7))<<4));
+                        let hist_k=meta_u32!(10);
+                        let end_k=meta_u32!(11);
+                        let kv_t=meta_u32!(12);
+                        let kh_t=meta_u32!(13);
+                        let kv_row_b=kv_t<<8;
+                        let head_ch_b=(kh_t<<8)+(cp_c<<4);
+                        if tb+32<=hist_k && tb+32<=end_k {
+                            let p0=meta_u64!($plane_idx).wrapping_add(((tb+cp_r) as u64)*(kv_row_b as u64)+(head_ch_b as u64));
+                            crate::ptx::copy16_stream(dst0,p0 as *const u32);
+                            crate::ptx::copy16_stream(dst0+4096,p0.wrapping_add(16u64*(kv_row_b as u64)) as *const u32);
+                        } else {
+                            let mut ci=live_zero!();
+                            while ci<2 {
+                                let col=tb+cp_r+(ci<<4);
+                                let dst=dst0+(ci<<12);
+                                if col<end_k {
+                                    if col<hist_k {
+                                        let p=meta_u64!($plane_idx).wrapping_add((col as u64)*(kv_row_b as u64)+(head_ch_b as u64)) as *const u32;
+                                        crate::ptx::copy16_stream(dst,p);
+                                    } else {
+                                        let r=(meta_u32!(14)*meta_u32!(15)+(col-hist_k)) as usize;
+                                        if !$is_v && meta_u32!(17)!=0 {
+                                            let p=(meta_u64!($new_idx) as *const u32).add((r*(kv_t as usize)+(kh_t as usize))*64+(cp_c as usize)*4);
+                                            crate::ptx::copy16_stream(dst,p);
+                                        } else {
+                                            let p=(meta_u64!($new_idx) as *const f32).add((r*(kv_t as usize)+(kh_t as usize))*128+(cp_c as usize)*8);
+                                            let mut j=live_zero!();
+                                            while j<4 {
+                                                let lo=*p.add((j<<1) as usize);
+                                                let hi=*p.add(((j<<1)+1) as usize);
+                                                crate::tc_ptx::store_u32(dst+(j<<2),crate::tc_ptx::cvt_bf16x2(lo,hi));
+                                                j+=1;
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    crate::tc_ptx::st_shared_zero16(dst);
+                                }
+                                ci+=1;
+                            }
+                        }
+                    }};
+                }
+                issue_kv!(K_BASE,0,4,false,split_start);
+                crate::ptx::commit();
+                issue_kv!(V_BASE,2,6,true,split_start);
+                crate::ptx::commit();
+                crate::tc_ptx::cp_async_wait_one();
+                core::arch::nvptx::_syncthreads();
+                let mut t_base=split_start;
+                while t_base<cta_end {
+                    let next_t=t_base+32;
+                    let mut s=[0.0f32;4];
+                    {
+                        let tid=live_tid!();
+                        let lane=tid&31;
+                        let q_ld_r=((tid>>7)<<4)+(lane&15);
+                        let q_ld_c=lane>>4;
+                        let k_ld_r=(((tid>>5)&3)<<3)+(lane&7);
+                        let k_ld_c=(lane>>3)&1;
+                        let mut ks=live_zero!();
+                        while ks<8 {
+                            let ch_q=(ks<<1)+q_ld_c;
+                            let ch_k=(ks<<1)+k_ld_c;
+                            let qa=crate::tc_ptx::ldmatrix_x4(Q_BASE+((q_ld_r<<8)+((ch_q^(q_ld_r&7))<<4)));
+                            let kb=crate::tc_ptx::ldmatrix_x2(K_BASE+((k_ld_r<<8)+((ch_k^(k_ld_r&7))<<4)));
+                            s=crate::tc_ptx::mma_m16n8k16_bf16(qa,kb,s);
+                            ks+=1;
+                        }
+                    }
+                    {
+                        let tid=live_tid!();
+                        let w=(tid>>5)&3;
+                        let t=tid&3;
+                        let r0=((tid>>7)<<4)+((tid&31)>>2);
+                        let scale=f32::from_bits(meta_u32!(16));
+                        let c0=t_base+(w<<3)+(t<<1);let c1=c0+1;
+                        s[0]=if c0<lim0 {s[0]*scale} else {f32::NEG_INFINITY};
+                        s[1]=if c1<lim0 {s[1]*scale} else {f32::NEG_INFINITY};
+                        s[2]=if c0<lim1 {s[2]*scale} else {f32::NEG_INFINITY};
+                        s[3]=if c1<lim1 {s[3]*scale} else {f32::NEG_INFINITY};
+                        let mut mw0=fmax(s[0],s[1]);
+                        mw0=fmax(mw0,shfl_xor_f32(mw0,1));mw0=fmax(mw0,shfl_xor_f32(mw0,2));
+                        let mut mw1=fmax(s[2],s[3]);
+                        mw1=fmax(mw1,shfl_xor_f32(mw1,1));mw1=fmax(mw1,shfl_xor_f32(mw1,2));
+                        if t==0 {
+                            crate::tc_ptx::store_u32(RED_M+(((w<<5)+r0)<<2),mw0.to_bits());
+                            crate::tc_ptx::store_u32(RED_M+(((w<<5)+r0+8)<<2),mw1.to_bits());
+                        }
+                    }
+                    core::arch::nvptx::_syncthreads();
+                    if next_t<cta_end {
+                        issue_kv!(K_BASE,0,4,false,next_t);
+                        crate::ptx::commit();
+                    }
+                    let (mn0,mn1)={
+                        let tid=live_tid!();
+                        let w=(tid>>5)&3;
+                        let t=tid&3;
+                        let r0=((tid>>7)<<4)+((tid&31)>>2);
+                        let r1=r0+8;
+                        let p_rm0=RED_M+(r0<<2);
+                        let mt0={
+                            let (a0,a1,a2,a3):(f32,f32,f32,f32);
+                            core::arch::asm!(
+                                "ld.shared.f32 {a0}, [{p}]; ld.shared.f32 {a1}, [{p}+128]; ld.shared.f32 {a2}, [{p}+256]; ld.shared.f32 {a3}, [{p}+384];",
+                                a0=out(reg32) a0,a1=out(reg32) a1,a2=out(reg32) a2,a3=out(reg32) a3,p=in(reg32) p_rm0,options(readonly,nostack)
+                            );
+                            fmax(fmax(a0,a1),fmax(a2,a3))
+                        };
+                        let mn0=if mt0==f32::NEG_INFINITY {m0} else {fmax(m0,mt0)};
+                        let p00=if s[0]==f32::NEG_INFINITY {0.0f32} else {exp(s[0]-mn0)};
+                        let p01=if s[1]==f32::NEG_INFINITY {0.0f32} else {exp(s[1]-mn0)};
+                        crate::tc_ptx::store_u32(P_BASE+(r0<<6)+((w^((r0>>1)&3))<<4)+(t<<2),crate::tc_ptx::cvt_bf16x2(p00,p01));
+                        let mut lw0=p00+p01;lw0+=shfl_xor_f32(lw0,1);lw0+=shfl_xor_f32(lw0,2);
+                        if t==0 {crate::tc_ptx::store_u32(RED_L+(((w<<5)+r0)<<2),lw0.to_bits());}
+                        let p_rm1=RED_M+(r1<<2);
+                        let mt1={
+                            let (a0,a1,a2,a3):(f32,f32,f32,f32);
+                            core::arch::asm!(
+                                "ld.shared.f32 {a0}, [{p}]; ld.shared.f32 {a1}, [{p}+128]; ld.shared.f32 {a2}, [{p}+256]; ld.shared.f32 {a3}, [{p}+384];",
+                                a0=out(reg32) a0,a1=out(reg32) a1,a2=out(reg32) a2,a3=out(reg32) a3,p=in(reg32) p_rm1,options(readonly,nostack)
+                            );
+                            fmax(fmax(a0,a1),fmax(a2,a3))
+                        };
+                        let mn1=if mt1==f32::NEG_INFINITY {m1} else {fmax(m1,mt1)};
+                        let p10=if s[2]==f32::NEG_INFINITY {0.0f32} else {exp(s[2]-mn1)};
+                        let p11=if s[3]==f32::NEG_INFINITY {0.0f32} else {exp(s[3]-mn1)};
+                        crate::tc_ptx::store_u32(P_BASE+(r1<<6)+((w^((r1>>1)&3))<<4)+(t<<2),crate::tc_ptx::cvt_bf16x2(p10,p11));
+                        let mut lw1=p10+p11;lw1+=shfl_xor_f32(lw1,1);lw1+=shfl_xor_f32(lw1,2);
+                        if t==0 {crate::tc_ptx::store_u32(RED_L+(((w<<5)+r1)<<2),lw1.to_bits());}
+                        (mn0,mn1)
+                    };
+                    if next_t<cta_end {crate::tc_ptx::cp_async_wait_one();} else {crate::tc_ptx::cp_async_wait_zero();}
+                    core::arch::nvptx::_syncthreads();
+                    {
+                        let tid=live_tid!();
+                        let r0=((tid>>7)<<4)+((tid&31)>>2);
+                        let r1=r0+8;
+                        let p_rl0=RED_L+(r0<<2);
+                        let lt0={
+                            let (a0,a1,a2,a3):(f32,f32,f32,f32);
+                            core::arch::asm!(
+                                "ld.shared.f32 {a0}, [{p}]; ld.shared.f32 {a1}, [{p}+128]; ld.shared.f32 {a2}, [{p}+256]; ld.shared.f32 {a3}, [{p}+384];",
+                                a0=out(reg32) a0,a1=out(reg32) a1,a2=out(reg32) a2,a3=out(reg32) a3,p=in(reg32) p_rl0,options(readonly,nostack)
+                            );
+                            (a0+a1)+(a2+a3)
+                        };
+                        if lt0!=0.0f32 {
+                            if l0==0.0f32 {
+                                l0=lt0;o0[0]=0.0;o0[1]=0.0;o1[0]=0.0;o1[1]=0.0;o2[0]=0.0;o2[1]=0.0;o3[0]=0.0;o3[1]=0.0;
+                            } else if mn0>m0 {
+                                let al=exp(m0-mn0);l0=l0*al+lt0;
+                                o0[0]*=al;o0[1]*=al;o1[0]*=al;o1[1]*=al;o2[0]*=al;o2[1]*=al;o3[0]*=al;o3[1]*=al;
+                            } else {l0+=lt0;}
+                            m0=mn0;
+                        }
+                        let p_rl1=RED_L+(r1<<2);
+                        let lt1={
+                            let (a0,a1,a2,a3):(f32,f32,f32,f32);
+                            core::arch::asm!(
+                                "ld.shared.f32 {a0}, [{p}]; ld.shared.f32 {a1}, [{p}+128]; ld.shared.f32 {a2}, [{p}+256]; ld.shared.f32 {a3}, [{p}+384];",
+                                a0=out(reg32) a0,a1=out(reg32) a1,a2=out(reg32) a2,a3=out(reg32) a3,p=in(reg32) p_rl1,options(readonly,nostack)
+                            );
+                            (a0+a1)+(a2+a3)
+                        };
+                        if lt1!=0.0f32 {
+                            if l1==0.0f32 {
+                                l1=lt1;o0[2]=0.0;o0[3]=0.0;o1[2]=0.0;o1[3]=0.0;o2[2]=0.0;o2[3]=0.0;o3[2]=0.0;o3[3]=0.0;
+                            } else if mn1>m1 {
+                                let al=exp(m1-mn1);l1=l1*al+lt1;
+                                o0[2]*=al;o0[3]*=al;o1[2]*=al;o1[3]*=al;o2[2]*=al;o2[3]*=al;o3[2]*=al;o3[3]*=al;
+                            } else {l1+=lt1;}
+                            m1=mn1;
+                        }
+                    }
+                    {
+                        let tid=live_tid!();
+                        let lane=tid&31;
+                        let w=(tid>>5)&3;
+                        let q_ld_r=((tid>>7)<<4)+(lane&15);
+                        let q_ld_c=lane>>4;
+                        let vc0=(w<<2)+q_ld_c;
+                        let mut kt=live_zero!();
+                        while kt<2 {
+                            let pa=crate::tc_ptx::ldmatrix_x4(P_BASE+(q_ld_r<<6)+((((kt<<1)+q_ld_c)^((q_ld_r>>1)&3))<<4));
+                            let vr=(kt<<4)+(lane&15);
+                            let vba=crate::tc_ptx::ldmatrix_x4_trans(V_BASE+((vr<<8)+((vc0^(vr&7))<<4)));
+                            o0=crate::tc_ptx::mma_m16n8k16_bf16(pa,[vba[0],vba[1]],o0);
+                            o1=crate::tc_ptx::mma_m16n8k16_bf16(pa,[vba[2],vba[3]],o1);
+                            let vbb=crate::tc_ptx::ldmatrix_x4_trans(V_BASE+((vr<<8)+(((vc0+2)^(vr&7))<<4)));
+                            o2=crate::tc_ptx::mma_m16n8k16_bf16(pa,[vbb[0],vbb[1]],o2);
+                            o3=crate::tc_ptx::mma_m16n8k16_bf16(pa,[vbb[2],vbb[3]],o3);
+                            kt+=1;
+                        }
+                    }
+                    if next_t<cta_end {
+                        core::arch::nvptx::_syncthreads();
+                        issue_kv!(V_BASE,2,6,true,next_t);
+                        crate::ptx::commit();
+                        crate::tc_ptx::cp_async_wait_one();
+                        core::arch::nvptx::_syncthreads();
+                    }
+                    t_base=next_t;
+                }
+            }
+            let tid=core::arch::nvptx::_thread_idx_x() as u32;
+            let w=(tid>>5)&3;let t=tid&3;
+            let r0=((tid>>7)<<4)+((tid&31)>>2);let r1=r0+8;
+            let kh_re=meta_u32!(13);
+            let bi_re=meta_u32!(14);
+            let q_rows=meta_u32!(18);
+            let heads=meta_u32!(19);
+            let group=meta_u32!(20);
+            let max_splits=meta_u32!(21);
+            let split=meta_u32!(22);
+            let q_base_re=meta_u32!(23);
+            let q_cnt_re=meta_u32!(24);
+            let out_p=meta_u64!(8) as *mut f32;
+            let col_base=(32*w+2*t) as usize;
+            macro_rules! store_row {
+                ($ri:expr,$mr:expr,$lr:expr,$i0:literal,$i1:literal) => {
+                    if $ri<q_cnt_re {
+                        let qa=q_base_re+$ri;
+                        let q_id=((bi_re*q_rows+qa/group)*heads+kh_re*group+qa%group) as usize;
+                        if max_splits==1 {
+                            let inv=1.0f32/$lr;
+                            let dst=out_p.add(q_id*128+col_base);
+                            *dst=rn(o0[$i0]*inv);*dst.add(1)=rn(o0[$i1]*inv);
+                            *dst.add(8)=rn(o1[$i0]*inv);*dst.add(9)=rn(o1[$i1]*inv);
+                            *dst.add(16)=rn(o2[$i0]*inv);*dst.add(17)=rn(o2[$i1]*inv);
+                            *dst.add(24)=rn(o3[$i0]*inv);*dst.add(25)=rn(o3[$i1]*inv);
+                        } else {
+                            let ob=(q_id*(max_splits as usize)+(split as usize))*132;
+                            let dst=out_p.add(ob+col_base);
+                            *dst=o0[$i0];*dst.add(1)=o0[$i1];
+                            *dst.add(8)=o1[$i0];*dst.add(9)=o1[$i1];
+                            *dst.add(16)=o2[$i0];*dst.add(17)=o2[$i1];
+                            *dst.add(24)=o3[$i0];*dst.add(25)=o3[$i1];
+                            if w==0 && t==0 {*out_p.add(ob+128)=$mr;*out_p.add(ob+129)=$lr;}
+                        }
+                    }
+                };
+            }
+            store_row!(r0,m0,l0,0,1);
+            store_row!(r1,m1,l1,2,3);
+            return;
+        }
         let [kind,x,y,z,out,n,a,b,c,d,e,_]=cmd.cast::<[u64;12]>().read();
         let (a,b,c,d,e)=(a as usize,b as usize,c as usize,d as usize,e as usize);
         let i=core::arch::nvptx::_block_idx_x() as usize*128+core::arch::nvptx::_thread_idx_x() as usize;
@@ -162,7 +563,7 @@ pub unsafe extern "ptx-kernel" fn inkling_draft_lanes(table:*const crate::Comman
             let i32=i as u32;
             let lane=i32&31;
             let (q0,hist_n,new_packed,k_h_ptr0,v_h_ptr0,hist_stride,lead,kv_bf16)={
-                let max_splits=((a>>40)&0xff) as u32;
+                let max_splits=d as u32;
                 let kv_bf16=((a>>48)&1)!=0;
                 let heads=(b&0xffff) as u32;
                 let kv=((b>>16)&0xffff) as u32;
@@ -255,7 +656,7 @@ pub unsafe extern "ptx-kernel" fn inkling_draft_lanes(table:*const crate::Comman
             }
             let a_re=*cmd.add(6);
             let b_re=*cmd.add(7);
-            let max_splits=((a_re>>40)&0xff) as u32;
+            let max_splits=*cmd.add(9) as u32;
             let k_new_bf16=((a_re>>49)&1)!=0;
             let heads=(b_re&0xffff) as u32;
             let kv=((b_re>>16)&0xffff) as u32;
@@ -311,16 +712,29 @@ pub unsafe extern "ptx-kernel" fn inkling_draft_lanes(table:*const crate::Comman
             }
             return;
         }
-        // SAFETY: operation 28 (`FlashAttnMergeBatch`) merges each chat's `splits_b` partials (packed as `u8` bytes at
-        // payload offset 96..96+batch) across `max_splits = c` stride into contiguous `[batch, q_rows, heads, 128]`.
+        // SAFETY: operation 28 (`FlashAttnMergeBatch`) merges each chat's `splits_b` partials (packed as `[u32; 32]` at
+        // payload offset 96..224) across `max_splits = c` stride into contiguous `[batch, q_rows, heads, 128]`.
         if kind==28 {
             let (warp,lane)=(i/32,i%32);
             let (heads,q_rows,max_splits)=(a,b,c);
             let bi=warp/(q_rows*heads);
-            let splits_b=*(cmd.cast::<u8>().add(96+bi)) as usize;
+            let splits_b=*(cmd.cast::<u32>().add(24+bi)) as usize;
             let mut m=f32::NEG_INFINITY;let mut l=0.0f32;let mut o=[0.0f32;4];
+            let mut warm=0usize;
+            let warm_end=splits_b.min(MERGE_PREFETCH_SPLITS);
+            while warm<warm_end {
+                let pb=(warp*max_splits+warm)*132;
+                core::arch::asm!("prefetch.global.L1 [{o}];",o=in(reg64) x.add(pb+lane*4),options(readonly,nostack));
+                if lane==0 {core::arch::asm!("prefetch.global.L1 [{ml}];",ml=in(reg64) x.add(pb+128),options(readonly,nostack));}
+                warm+=1;
+            }
             let mut s=0usize;
             while s<splits_b {
+                if s+MERGE_PREFETCH_SPLITS<splits_b {
+                    let pb=(warp*max_splits+s+MERGE_PREFETCH_SPLITS)*132;
+                    core::arch::asm!("prefetch.global.L1 [{o}];",o=in(reg64) x.add(pb+lane*4),options(readonly,nostack));
+                    if lane==0 {core::arch::asm!("prefetch.global.L1 [{ml}];",ml=in(reg64) x.add(pb+128),options(readonly,nostack));}
+                }
                 let base=(warp*max_splits+s)*132;
                 let ls=*x.add(base+129);
                 if ls!=0.0 {
@@ -630,8 +1044,21 @@ pub unsafe extern "ptx-kernel" fn inkling_draft_lanes(table:*const crate::Comman
             let mut m=f32::NEG_INFINITY;
             let mut l=0.0f32;
             let mut o=[0.0f32;4];
+            let mut warm=0usize;
+            let warm_end=splits.min(MERGE_PREFETCH_SPLITS);
+            while warm<warm_end {
+                let pb=(warp*splits+warm)*132;
+                core::arch::asm!("prefetch.global.L1 [{o}];",o=in(reg64) x.add(pb+lane*4),options(readonly,nostack));
+                if lane==0 {core::arch::asm!("prefetch.global.L1 [{ml}];",ml=in(reg64) x.add(pb+128),options(readonly,nostack));}
+                warm+=1;
+            }
             let mut s=0usize;
             while s<splits {
+                if s+MERGE_PREFETCH_SPLITS<splits {
+                    let pb=(warp*splits+s+MERGE_PREFETCH_SPLITS)*132;
+                    core::arch::asm!("prefetch.global.L1 [{o}];",o=in(reg64) x.add(pb+lane*4),options(readonly,nostack));
+                    if lane==0 {core::arch::asm!("prefetch.global.L1 [{ml}];",ml=in(reg64) x.add(pb+128),options(readonly,nostack));}
+                }
                 let base=(warp*splits+s)*132;
                 let ls=*x.add(base+129);
                 if ls!=0.0 {
@@ -660,16 +1087,19 @@ pub unsafe extern "ptx-kernel" fn inkling_draft_lanes(table:*const crate::Comman
         }
         // SAFETY: operation 22 runs `e.max(1) * b` blocks of 128 lanes (`1 <= b <= 128`, `b <= a`). Each block
         // reduces its contiguous slice of its chat's `a` four-word tile records `[best, id, valid, sum]` using 64 bytes
-        // of static shared memory (`4` warps x `4` words); all 128 lanes of each block reach every `_syncthreads()`
-        // and warp shuffle. Thread 0 writes the block's four-word record to `out[(bi * b + block) * 4 .. +4]`.
+        // of dynamic shared memory (`%dynamic_smem_size >= 64`, `4` warps x `4` words); all 128 lanes of each block
+        // reach every `_syncthreads()` and warp shuffle. Thread 0 writes the block's four-word record to `out[(bi * b + block) * 4 .. +4]`.
         if kind==22 {
+            let shared_bytes:u32;
+            core::arch::asm!("mov.u32 {s}, %dynamic_smem_size;",s=out(reg32) shared_bytes,options(pure,nomem,nostack));
+            if shared_bytes<64 {core::arch::nvptx::trap();}
             if d!=0 && *y!=0.0 {return;}
             let blk=core::arch::nvptx::_block_idx_x() as usize;
             let (bi,block)=if e>1 {(blk/b,blk%b)} else {(0,blk)};
             let x=x.add(bi*a*4);
             let tid=core::arch::nvptx::_thread_idx_x() as usize;
             let (warp,lane)=(tid>>5,tid&31);
-            let smem=crate::ptx::shared::<64>();
+            let smem=0u32;
             let per=a.div_ceil(b);
             let start=block*per;
             let end=(start+per).min(a);

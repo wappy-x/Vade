@@ -133,6 +133,15 @@ const PANEL_DENSE_SHAPES: &[(usize, usize, usize)] = &[
     (2304, 192, 70),
     (16_400, 128, 16),
     (16_400, 128, 32),
+    // PLAIN_TC_PANEL64 (`33..=128` inputs, `rows > 2560`): 1 and 8 slices, one and two 64-input halves, 4 and 8
+    // warps, partial last band (2600 = 162 x 16 + 8), partial last n8 tile (33, 65, 100).
+    (6552, 512, 33),
+    (6552, 512, 64),
+    (6552, 192, 65),
+    (8600, 192, 128),
+    (2600, 192, 64),
+    (16_400, 128, 100),
+    (16_400, 128, 64),
     // PLAIN_TC_BIG M-strip serpentine (`k <= 2304` height 16 / `k > 2304` height 8), partial bands & tail M=388.
     (2304, 192, 520),
     (645, 192, 388),
@@ -377,7 +386,7 @@ pub fn run(b: &Backend<'_>, panels: &PanelFixtures<'_>) -> Result<usize, String>
             total_words += check_buf(b, &out1, &want1, &format!("panel_split1 {rows}x{cols}x{inputs}"))?;
         }
         // Dual-input pair with panels.
-        for &inputs in &[16usize, 32] {
+        for &inputs in &[16usize, 32, 64, 100] {
             let half = cols / 2;
             let x1: Vec<f32> = (0..inputs * half).map(|k| input_val(k + 101)).collect();
             let x2: Vec<f32> = (0..inputs * half).map(|k| input_val(k + 202)).collect();
@@ -391,7 +400,7 @@ pub fn run(b: &Backend<'_>, panels: &PanelFixtures<'_>) -> Result<usize, String>
             total_words += check_buf(b, &whole, &want, &format!("panel_pair {rows}x{cols}x{inputs}"))?;
         }
         // 16-row-aligned sub-view (hits `panel_at`) + non-16-aligned sub-view (clean fallback).
-        for &(row_off, sub_rows, inputs) in &[(32usize, 1056usize, 32usize), (32, 1056, 16), (8, 1024, 32)] {
+        for &(row_off, sub_rows, inputs) in &[(32usize, 1056usize, 32usize), (32, 1056, 16), (8, 1024, 32), (32, 2592, 64), (16, 2608, 128)] {
             let sub_w = w_dev.resident_range(row_off * cols / 2..(row_off + sub_rows) * cols / 2)?;
             let x_vals: Vec<f32> = (0..inputs * cols).map(|k| input_val(k + row_off * 19 + inputs)).collect();
             let x_dev = b.upload_vector(&x_vals)?.into_resident_shared()?;

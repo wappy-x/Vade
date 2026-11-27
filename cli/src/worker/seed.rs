@@ -171,17 +171,23 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn a_group_writable_record_seeds_nothing() {
-        // Regression: a record with mode 0664 was trusted, so a group member could supply the hashes.
+    fn a_group_writable_record_seeds_and_a_world_writable_record_seeds_nothing() {
         use std::os::unix::fs::PermissionsExt;
         let root = fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("vade-seed-{}", crate::text::random_hex(8).unwrap()));
         crate::text::private_dir(&root).unwrap();
         let model = checkpoint(&root, &crate::launch::test_config(32768));
         let base = root.join("cache");
         crate::text::private_dir(&base).unwrap();
+        // Standard umask 0002 group-writable records (0664) must work cleanly.
         fs::set_permissions(model.join(crate::pull::RECORD), fs::Permissions::from_mode(0o664)).unwrap();
-        assert_eq!(seed(&model, &base).unwrap(), 0);
-        assert!(!model.join("manifest.sha256").exists() && !base.join(STAMPS).exists());
+        assert_eq!(seed(&model, &base).unwrap(), 4);
+        // World-writable records (0666) are still untrusted and seed nothing.
+        let world_base = root.join("cache-world");
+        crate::text::private_dir(&world_base).unwrap();
+        let world_model = checkpoint(&root.join("world"), &crate::launch::test_config(32768));
+        fs::set_permissions(world_model.join(crate::pull::RECORD), fs::Permissions::from_mode(0o666)).unwrap();
+        assert_eq!(seed(&world_model, &world_base).unwrap(), 0);
+        assert!(!world_model.join("manifest.sha256").exists() && !world_base.join(STAMPS).exists());
         fs::remove_dir_all(root).unwrap();
     }
 

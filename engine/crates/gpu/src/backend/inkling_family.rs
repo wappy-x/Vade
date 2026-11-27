@@ -25,9 +25,11 @@ impl<'d> Backend<'d> {
         let words=[op,ptr[0],ptr[1],ptr[2],result.device_address(),lanes as u64,a,b,c,d,e,0];
         let mut command=Command::new(kind);
         for (i,word) in words.into_iter().enumerate() {command.word(i,word);}
-        let blocks=u32::try_from(lanes.div_ceil(128)).map_err(|_|"draft lane grid overflow")?;
-        if !self.record_resident_block(kind,command,[blocks,1,1,128,0])? {
-            let table=self.launch_inkling_command(kind,command,blocks,128,0)?;
+        let threads=if matches!(op,13|19) && (((c>>16)&7)==0) && lanes<=128*128 {32u32} else {128u32};
+        let blocks=u32::try_from(lanes.div_ceil(threads as usize)).map_err(|_|"draft lane grid overflow")?;
+        let shared=if op==22 {64u32} else {0u32};
+        if !self.record_resident_block(kind,command,[blocks,1,1,threads,shared])? {
+            let table=self.launch_inkling_command(kind,command,blocks,threads,shared,0)?;
             self.resident_completion()?;
             drop(table);
         }
@@ -63,7 +65,7 @@ impl<'d> Backend<'d> {
         let blocks=fast_ops::norm_blocks(rows,dim,true);
         let threads=fast_ops::NORM_THREADS as u32;
         if !self.record_resident_block(Kind::FastNorm,command,[blocks,1,1,threads,0])? {
-            let table=self.launch_inkling_command(Kind::FastNorm,command,blocks,threads,4)?;
+            let table=self.launch_inkling_command(Kind::FastNorm,command,blocks,threads,0,4)?;
             self.resident_completion()?;
             drop(table);
         } else {
@@ -103,10 +105,11 @@ impl<'d> Backend<'d> {
         self.check_vector(v_new,v_new_len)?;
         if !(q.device_address()|k_new.device_address()|v_new.device_address()).is_multiple_of(16) {return Err("unaligned draft flash attention batch operand".into());}
         let mut max_splits=1usize;
+        let mut all_kv_16_aligned=kv_bf16;
         let mut chat_words=[(0u64,0u64,0u64);32];
         let align_mask=if kv_bf16 {7u64} else {15u64};
         for (bi,&(ck,cv,rel_start,hist_keys,splits_b)) in chats.iter().enumerate() {
-            if !(1..=32).contains(&splits_b) || hist_keys>u32::MAX as usize || causal_base>hist_keys.saturating_add(new_rows) {
+            if splits_b==0 || splits_b>u32::MAX as usize || hist_keys>u32::MAX as usize || causal_base>hist_keys.saturating_add(new_rows) {
                 return Err("invalid draft flash attention batch chat entry".into());
             }
             max_splits=max_splits.max(splits_b);
@@ -118,6 +121,7 @@ impl<'d> Backend<'d> {
                 let ka=ck.device_address().checked_add(byte_off).ok_or("draft ck address overflow")?;
                 let va=cv.device_address().checked_add(byte_off).ok_or("draft cv address overflow")?;
                 if ((ka|va)&align_mask)!=0 {return Err("unaligned draft kv plane".into());}
+                if ((ka|va)&15)!=0 {all_kv_16_aligned=false;}
                 (ka,va)
             } else {(0,0)};
             chat_words[bi]=(ck_addr,cv_addr,(hist_keys as u64)|((splits_b as u64)<<32));
@@ -125,24 +129,35 @@ impl<'d> Backend<'d> {
         let out=if max_splits==1 {q_len} else {queries.checked_mul(max_splits).and_then(|v|v.checked_mul(132)).ok_or("draft attn out overflow")?};
         let result=self.vector(out)?;
         if result.is_segmented() || !result.device_address().is_multiple_of(16) {return Err("draft flash attention batch output must be contiguous and aligned".into());}
-        let lanes=batch.checked_mul(q_rows).and_then(|v|v.checked_mul(heads)).and_then(|v|v.checked_mul(max_splits)).and_then(|v|v.checked_mul(32)).ok_or("draft attn lanes overflow")?;
+        let tc_mode=all_kv_16_aligned;
+        let (blocks,threads,shared,lanes)=if tc_mode {
+            let group=heads/kv;
+            let q_tiles=q_rows.checked_mul(group).ok_or("draft tc q_tiles overflow")?.div_ceil(32);
+            let total_blocks=batch.checked_mul(max_splits).and_then(|v|v.checked_mul(kv)).and_then(|v|v.checked_mul(q_tiles)).ok_or("draft tc grid overflow")?;
+            let blocks=u32::try_from(total_blocks).map_err(|_|"draft flash attention batch grid overflow")?;
+            let lanes=total_blocks.checked_mul(256).ok_or("draft tc lanes overflow")?;
+            (blocks,256u32,27_776u32,lanes)
+        } else {
+            let lanes=batch.checked_mul(q_rows).and_then(|v|v.checked_mul(heads)).and_then(|v|v.checked_mul(max_splits)).and_then(|v|v.checked_mul(32)).ok_or("draft attn lanes overflow")?;
+            let blocks=u32::try_from(lanes.div_ceil(128)).map_err(|_|"draft flash attention batch grid overflow")?;
+            (blocks,128u32,0u32,lanes)
+        };
         use crate::resident_launch::{Command,Kind};
         self.require_arm_kernels(&[Kind::DraftLanes.kernel()])?;
         let mut command=Command::new(Kind::DraftLanes);
         let scale_bits=(1.0f32/(width as f32).sqrt()).to_bits() as u64;
-        let meta6=scale_bits|((batch as u64)<<32)|((max_splits as u64)<<40)|(u64::from(kv_bf16)<<48)|(u64::from(k_new_bf16)<<49);
+        let meta6=scale_bits|((batch as u64)<<32)|(u64::from(kv_bf16)<<48)|(u64::from(k_new_bf16)<<49)|(u64::from(tc_mode)<<50);
         let meta7=(heads as u64)|((kv as u64)<<16)|((q_rows as u64)<<32)|((new_rows as u64)<<48);
         let meta8=(causal_base as u64)|((row_off as u64)<<32);
-        let header=[27u64,q.device_address(),k_new.device_address(),v_new.device_address(),result.device_address(),lanes as u64,meta6,meta7,meta8,0,0,0];
+        let header=[27u64,q.device_address(),k_new.device_address(),v_new.device_address(),result.device_address(),lanes as u64,meta6,meta7,meta8,max_splits as u64,0,0];
         for (i,w) in header.into_iter().enumerate() {command.word(i,w);}
         for (bi,&(ka,va,m)) in chat_words.iter().take(batch).enumerate() {
             command.word(12+bi*3,ka);
             command.word(12+bi*3+1,va);
             command.word(12+bi*3+2,m);
         }
-        let blocks=u32::try_from(lanes.div_ceil(128)).map_err(|_|"draft flash attention batch grid overflow")?;
-        if !self.record_resident_block(Kind::DraftLanes,command,[blocks,1,1,128,0])? {
-            let table=self.launch_inkling_command(Kind::DraftLanes,command,blocks,128,0)?;
+        if !self.record_resident_block(Kind::DraftLanes,command,[blocks,1,1,threads,shared])? {
+            let table=self.launch_inkling_command(Kind::DraftLanes,command,blocks,threads,shared,0)?;
             self.resident_completion()?;
             drop(table);
         }
@@ -154,7 +169,7 @@ impl<'d> Backend<'d> {
     )->Result<DeviceVector<'d>,String> {
         if self.arm_capture() {return Err("draft flash attention merge batch inside a stream capture".into());}
         let batch=splits.len();
-        if !(1..=32).contains(&batch) || heads==0 || q_rows==0 || !(2..=32).contains(&max_splits)
+        if !(1..=32).contains(&batch) || heads==0 || q_rows==0 || max_splits<2 || max_splits>u32::MAX as usize
             || splits.iter().any(|&s|s==0 || s>max_splits)
         {
             return Err("invalid draft flash attention merge batch dimensions".into());
@@ -172,12 +187,12 @@ impl<'d> Backend<'d> {
         let mut command=Command::new(Kind::DraftLanes);
         let header=[28u64,part.device_address(),0,0,result.device_address(),lanes as u64,heads as u64,q_rows as u64,max_splits as u64,batch as u64,0,0];
         for (i,w) in header.into_iter().enumerate() {command.word(i,w);}
-        let mut split_bytes=[0u8;32];
-        for (bi,&s) in splits.iter().enumerate() {split_bytes[bi]=s as u8;}
+        let mut split_bytes=[0u8;128];
+        for (bi,&s) in splits.iter().enumerate() {split_bytes[bi*4..bi*4+4].copy_from_slice(&(s as u32).to_ne_bytes());}
         command.put(96,&split_bytes);
         let blocks=u32::try_from(lanes.div_ceil(128)).map_err(|_|"draft merge batch grid overflow")?;
         if !self.record_resident_block(Kind::DraftLanes,command,[blocks,1,1,128,0])? {
-            let table=self.launch_inkling_command(Kind::DraftLanes,command,blocks,128,0)?;
+            let table=self.launch_inkling_command(Kind::DraftLanes,command,blocks,128,0,0)?;
             self.resident_completion()?;
             drop(table);
         }
@@ -234,7 +249,7 @@ impl<'d> Backend<'d> {
         }
         let blocks=u32::try_from(lanes.div_ceil(128)).map_err(|_|"draft scatter grid overflow")?;
         if !self.record_resident_block(Kind::DraftLanes,command,[blocks,1,1,128,0])? {
-            let table=self.launch_inkling_command(Kind::DraftLanes,command,blocks,128,0)?;
+            let table=self.launch_inkling_command(Kind::DraftLanes,command,blocks,128,0,0)?;
             self.resident_completion()?;
             drop(table);
         }
@@ -272,7 +287,7 @@ impl<'d> Backend<'d> {
 }
 
 /// Entries that live in the Inkling image: the kernel names of its kinds (host test).
-pub(crate) fn in_inkling_image(name:&str)->bool {matches!(name,"inkling_draft_lanes"|"inkling_draft_panel"|"inkling_draft_head_fold"|"inkling_markov_fold"|"resident_launch_block_arms"|"resident_launch_block_rows"|"resident_launch_plain_staged"|"resident_launch_plain_staged_rows"|"resident_launch_plain_staged_few"|"resident_launch_plain_staged_one"|"resident_launch_plain_staged_narrow"|"resident_launch_plain_packed"|"resident_launch_plain_packed_group"|"resident_launch_plain_packed_picked"|"resident_launch_block_scores"|"resident_launch_block_values"|"resident_launch_block_softmax"|"resident_launch_plain_tc_rows"|"resident_launch_plain_tc_big"|"resident_launch_plain_packed_tc_rows"|"resident_launch_prefill_packed_tc"|"resident_launch_prefill_flash_window"|"resident_launch_prefill_gate_fuse"|"resident_launch_moe_group_route"|"resident_launch_flash_window"|"resident_launch_flash_window_split16"|"resident_launch_flash_window_split32"|"resident_launch_flash_window_reduce"|"resident_launch_fast_mix_blend"|"resident_launch_fast_row_dots"|"resident_launch_fast_norm"|"resident_launch_fast_capped_gate"|"resident_launch_fast_router_pick"|"resident_launch_fast_stream_ops"|"resident_launch_plain_packed_rows"|"resident_launch_embed_rows")}
+pub(crate) fn in_inkling_image(name:&str)->bool {matches!(name,"inkling_draft_lanes"|"inkling_draft_panel"|"inkling_draft_head_fold"|"inkling_markov_fold"|"resident_launch_block_arms"|"resident_launch_block_rows"|"resident_launch_plain_staged"|"resident_launch_plain_staged_rows"|"resident_launch_plain_staged_few"|"resident_launch_plain_staged_one"|"resident_launch_plain_staged_narrow"|"resident_launch_plain_packed"|"resident_launch_plain_packed_group"|"resident_launch_plain_packed_picked"|"resident_launch_block_scores"|"resident_launch_block_values"|"resident_launch_block_softmax"|"resident_launch_plain_tc_rows"|"resident_launch_plain_tc_big"|"resident_launch_plain_tc_panel64"|"resident_launch_plain_packed_tc_rows"|"resident_launch_prefill_packed_tc"|"resident_launch_prefill_flash_window"|"resident_launch_prefill_gate_fuse"|"resident_launch_moe_group_route"|"resident_launch_flash_window"|"resident_launch_flash_window_split16"|"resident_launch_flash_window_split32"|"resident_launch_flash_window_reduce"|"resident_launch_fast_mix_blend"|"resident_launch_fast_row_dots"|"resident_launch_fast_norm"|"resident_launch_fast_capped_gate"|"resident_launch_fast_router_pick"|"resident_launch_fast_stream_ops"|"resident_launch_plain_packed_rows"|"resident_launch_embed_rows")}
 
 /// The entry of a rows launch of a block arm: `WindowScores` with its key plane shared takes its own entry
 /// (`block_scores::stage`), `SinkSoftmax` with its scores per row its own (`block_attention::softmax_rows_stage`),
@@ -482,12 +497,12 @@ impl<'a> Backend<'a> {
         };
         command.kind=kind as u32;
         if self.record_resident_block(kind,command,[blocks,1,1,threads,0])? {return Ok(None);}
-        self.launch_inkling_command(kind,command,blocks,threads,0).map(Some)
+        self.launch_inkling_command(kind,command,blocks,threads,0,0).map(Some)
     }
     /// Upload and launch one checked Inkling command, optionally followed by `pad_commands` zero-padded commands so
     /// kernels that issue `warm_command!` prefetches stay strictly inside the allocation. The caller holds its
     /// operands and the returned table through completion, or leaves their drops to the queue.
-    fn launch_inkling_command(&self,kind:crate::resident_launch::Kind,command:crate::resident_launch::Command,blocks:u32,threads:u32,pad_commands:usize)->Result<DeviceVector<'a>,String> {
+    fn launch_inkling_command(&self,kind:crate::resident_launch::Kind,command:crate::resident_launch::Command,blocks:u32,threads:u32,shared:u32,pad_commands:usize)->Result<DeviceVector<'a>,String> {
         let total_words=crate::inkling_launch::COMMAND_WORDS.checked_mul(1+pad_commands).ok_or("command table overflow")?;
         let mut words=Vec::with_capacity(total_words);
         words.extend_from_slice(&[f32::from_bits(command.kind),0.0,0.0,0.0]);
@@ -501,7 +516,7 @@ impl<'a> Backend<'a> {
         // The table above is one aligned, initialized command plus `pad_commands` zero-padded trailing commands in this
         // context. The caller keeps the table and operands alive through completion. Inside the resident queue,
         // dropped allocations wait for a real stream drain.
-        unsafe {self.launch_flash(name,blocks,threads,&mut [parameter(&mut address),parameter(&mut index)])}?;
+        unsafe {self.launch_flash_shared(name,blocks,threads,shared,&mut [parameter(&mut address),parameter(&mut index)])}?;
         Ok(table)
     }
     /// The module that holds the entry `name`: the tensor-core image, the Inkling image, or the general image.
@@ -510,10 +525,10 @@ impl<'a> Backend<'a> {
     }
 }
 #[cfg(test)] mod tests {
-    use crate::{inkling_launch::{BLOCK_ARMS,BLOCK_ROWS,PLAIN_STAGED,PLAIN_STAGED_ROWS,PLAIN_STAGED_FEW,PLAIN_STAGED_ONE,PLAIN_STAGED_NARROW,PLAIN_PACKED,PLAIN_PACKED_GROUP,PLAIN_PACKED_PICKED,BLOCK_SCORES,BLOCK_VALUES,BLOCK_SOFTMAX,PLAIN_TC_ROWS,PLAIN_PACKED_TC_ROWS,PREFILL_PACKED_TC,PREFILL_FLASH_WINDOW,PREFILL_GATE_FUSE,MOE_GROUP_ROUTE,FLASH_WINDOW_ATTN,FLASH_WINDOW_SPLIT16,FLASH_WINDOW_SPLIT32,FLASH_WINDOW_REDUCE,FAST_MIX_BLEND,FAST_ROW_DOTS,FAST_NORM,FAST_CAPPED_GATE,FAST_ROUTER_PICK,FAST_STREAM_OPS,PLAIN_PACKED_ROWS,EMBED_ROWS,DRAFT_LANES,PLAIN_TC_BIG,DRAFT_PANEL,DRAFT_HEAD_FOLD},resident_launch::Kind};
+    use crate::{inkling_launch::{BLOCK_ARMS,BLOCK_ROWS,PLAIN_STAGED,PLAIN_STAGED_ROWS,PLAIN_STAGED_FEW,PLAIN_STAGED_ONE,PLAIN_STAGED_NARROW,PLAIN_PACKED,PLAIN_PACKED_GROUP,PLAIN_PACKED_PICKED,BLOCK_SCORES,BLOCK_VALUES,BLOCK_SOFTMAX,PLAIN_TC_ROWS,PLAIN_PACKED_TC_ROWS,PREFILL_PACKED_TC,PREFILL_FLASH_WINDOW,PREFILL_GATE_FUSE,MOE_GROUP_ROUTE,FLASH_WINDOW_ATTN,FLASH_WINDOW_SPLIT16,FLASH_WINDOW_SPLIT32,FLASH_WINDOW_REDUCE,FAST_MIX_BLEND,FAST_ROW_DOTS,FAST_NORM,FAST_CAPPED_GATE,FAST_ROUTER_PICK,FAST_STREAM_OPS,PLAIN_PACKED_ROWS,EMBED_ROWS,DRAFT_LANES,PLAIN_TC_BIG,PLAIN_TC_PANEL64,DRAFT_PANEL,DRAFT_HEAD_FOLD},resident_launch::Kind};
     #[test] fn the_inkling_entries_are_the_kernels_of_its_kinds() {
         for kind in Kind::ALL {
-            assert_eq!(super::in_inkling_image(kind.kernel()),[BLOCK_ARMS,BLOCK_ROWS,PLAIN_STAGED,PLAIN_STAGED_ROWS,PLAIN_STAGED_FEW,PLAIN_STAGED_ONE,PLAIN_STAGED_NARROW,PLAIN_PACKED,PLAIN_PACKED_GROUP,PLAIN_PACKED_PICKED,BLOCK_SCORES,BLOCK_VALUES,BLOCK_SOFTMAX,PLAIN_TC_ROWS,PLAIN_PACKED_TC_ROWS,PREFILL_PACKED_TC,PREFILL_FLASH_WINDOW,PREFILL_GATE_FUSE,MOE_GROUP_ROUTE,FLASH_WINDOW_ATTN,FLASH_WINDOW_SPLIT16,FLASH_WINDOW_SPLIT32,FLASH_WINDOW_REDUCE,FAST_MIX_BLEND,FAST_ROW_DOTS,FAST_NORM,FAST_CAPPED_GATE,FAST_ROUTER_PICK,FAST_STREAM_OPS,PLAIN_PACKED_ROWS,EMBED_ROWS,DRAFT_LANES,PLAIN_TC_BIG,DRAFT_PANEL,DRAFT_HEAD_FOLD].contains(&(kind as u32)),"{}",kind.kernel());
+            assert_eq!(super::in_inkling_image(kind.kernel()),[BLOCK_ARMS,BLOCK_ROWS,PLAIN_STAGED,PLAIN_STAGED_ROWS,PLAIN_STAGED_FEW,PLAIN_STAGED_ONE,PLAIN_STAGED_NARROW,PLAIN_PACKED,PLAIN_PACKED_GROUP,PLAIN_PACKED_PICKED,BLOCK_SCORES,BLOCK_VALUES,BLOCK_SOFTMAX,PLAIN_TC_ROWS,PLAIN_PACKED_TC_ROWS,PREFILL_PACKED_TC,PREFILL_FLASH_WINDOW,PREFILL_GATE_FUSE,MOE_GROUP_ROUTE,FLASH_WINDOW_ATTN,FLASH_WINDOW_SPLIT16,FLASH_WINDOW_SPLIT32,FLASH_WINDOW_REDUCE,FAST_MIX_BLEND,FAST_ROW_DOTS,FAST_NORM,FAST_CAPPED_GATE,FAST_ROUTER_PICK,FAST_STREAM_OPS,PLAIN_PACKED_ROWS,EMBED_ROWS,DRAFT_LANES,PLAIN_TC_BIG,PLAIN_TC_PANEL64,DRAFT_PANEL,DRAFT_HEAD_FOLD].contains(&(kind as u32)),"{}",kind.kernel());
         }
         assert!(!super::in_inkling_image("causal_operation") && !super::in_inkling_image("resident_launch_causal"));
     }

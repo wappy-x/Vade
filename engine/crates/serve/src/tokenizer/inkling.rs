@@ -354,7 +354,6 @@ fn turn(source: &str, max_bytes: usize) -> Result<Turn, String> {
     let mut calls = Vec::new();
     if role == MODEL && let Some(raw) = raw_member(source, "tool_calls")? {
         let raw_calls = super::raw_array(raw)?;
-        if raw_calls.len() > 64 { return Err("too many tool calls".into()); }
         for raw_call in &raw_calls { calls.push(call(raw_call, max_bytes)?); }
     }
     Ok(Turn { role, name: text_field(source, "name", max_bytes)?.filter(|name| !name.is_empty()), tool_call_id, reasoning, content, calls })

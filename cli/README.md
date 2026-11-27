@@ -105,10 +105,10 @@ the smaller sizes from 32768, 16384, 8192 and 4096. It saves the first one that
 starts and tells you which size it selected.
 
 You can raise the limits with `--context` and `--output`. Stop the engine first
-with `vade down`. `--context 262144` selects the largest context. The engine
-still decides how many chats can run at once from the available memory.
-Output is capped at 16384 tokens and at the configured context. If the engine
-refuses a `--context` you passed, you get an error with its memory message.
+with `vade down`. The engine checks the requested context against the
+checkpoint and available memory and decides how many chats can run at once.
+Output must fit within the configured context. If the engine refuses a
+`--context` you passed, you get an error with its memory message.
 
 ### Chats at once and the prompt cache
 
@@ -494,7 +494,7 @@ Choose the checkpoint profile deliberately:
 
 | Profile | Example config | How to start |
 | :---: | :---: | :---: |
-| Current FP4-Local model on 1 to 24 Sparks | [fp4-local.conf](examples/fp4-local.conf) | `vade up` (add `--sparks N` or ordered `--hosts` for a chain, or `--replicas N` for independent one-Spark copies) |
+| Current FP4-Local or Inkling model on 1 or more Sparks | [fp4-local.conf](examples/fp4-local.conf) | `vade up` (add `--sparks N` or ordered `--hosts` for a chain, or `--replicas N` for independent one-Spark copies) |
 | FP8 model on 2 or 4 machines; 6 machines start but are not covered yet ([FP8 install](../docs/install-fp8.md)) | [vade.conf](examples/vade.conf) | `vade up --fp8` (the older flag `--fp8-legacy` also works) |
 
 </div>
@@ -514,11 +514,11 @@ memory.
 The engine decides from context and memory how many chats can run at once. It
 reports that count when it starts, and the controller's `vade status` prints it.
 
-An explicit `--context` wins, up to 262144 on either route. This long-context
-setting still lets the engine decide the chat count from memory. An explicit
-`--output` reaches 16384. MTP stays engine-selected unless you override it. A request
-longer than the configured context is refused, and the refusal names
-`--context`.
+An explicit `--context` wins, subject to the checkpoint limit and free GPU
+memory, while the engine still decides the chat count from memory. An explicit
+`--output` may reach the configured context. MTP stays engine-selected unless
+you override it. A request longer than the configured context is refused, and
+the refusal names `--context`.
 
 Before it touches any machine, `vade up` prints its plan: which model and
 machines it will use, the context and output limits, your drafting and
@@ -701,8 +701,8 @@ With `VADE_CONFIG` set, the lifecycle commands work like this:
 | `vade up --sparks a,b` | Sets up and starts these Sparks, from 1 to 24, in any order. Vade checks each one over SSH, reads the cables, prints the chain and copies itself to each Spark. A new list replaces the setup in place, and the old file moves aside. `--link FROM:TO=ADDRESS` overrides one cable end. |
 | `vade up --sparks N` | Starts N Sparks of your setup. Larger chains need a current staged build, and each must still pass its own live checks on real Sparks. |
 | `vade up --hosts a,b` | Starts these machines of your config, in cable order. It never changes the setup. |
-| `vade up --replicas N` | FP4-Local only, N = 2 to 16: one independent one-Spark server on each of the first N configured machines (or the N `--hosts`), behind a local gateway. Details below the table. |
-| `vade up --replicas N --pairs` | FP4-Local only, N = 2 to 12: N two-Spark tensor-split servers on 2N machines, in pairs in list order, behind a local gateway. This mode is an option. It is not the four-Spark default ([two pairs behind one address](../docs/four-sparks.md#two-pairs-behind-one-address)). |
+| `vade up --replicas N` | N >= 2: one independent one-Spark server (FP4-Local or Inkling 2 Mini) on each of the first N configured machines (or the N `--hosts`), behind a local gateway. Details below the table. |
+| `vade up --replicas N --pairs` | FP4-Local only, N >= 2: N two-Spark tensor-split servers on 2N machines, in pairs in list order, behind a local gateway. This mode is an option. It is not the four-Spark default ([two pairs behind one address](../docs/four-sparks.md#two-pairs-behind-one-address)). |
 | `vade up --fp8` | FP8: starts on the first two configured machines, tensor parallel on a ring. |
 | `vade up --fp8 --sparks 4` | FP8: four machines in config order, tensor parallel on a path. It gives the two-Spark token IDs ([benchmarks](../docs/history/benchmarks-2026-10.md#fp8-on-two-and-four-sparks-different-token-ids)). |
 | `vade up --hosts spark-a,spark-b` | Selects connected machines of your config in the given order. Give what you type after ssh, as in the `ssh` line of each machine, or its `[machine NAME]` name. `--sparks spark-a,spark-b` is the same. |
@@ -799,8 +799,8 @@ previews skip this remote check.
 For the FP8 profile, the defaults are strict MTP 2 for a cold standalone
 chat, context 131072, and output `min(65536, context)`.
 
-- `--context N` accepts 4096..262144.
-- `--output N` accepts 1024..262144 and may equal the configured context.
+- `--context N` accepts any context at least 4096 that fits the checkpoint and hardware memory.
+- `--output N` accepts any positive output size up to the configured context.
 - Each reply is capped at the smaller of the service output limit and the
   context minus the tokenized prompt length, even when the request leaves out
   its output limit.

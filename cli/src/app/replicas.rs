@@ -35,13 +35,14 @@ impl<R: Runner> App<R> {
     /// Start the staged harness's vade-gateway in front of every replica tunnel.
     pub(super) fn start_gateway(&mut self, session: &mut Session) -> Result<(), String> {
         self.verify_harness()?;
-        let mut args = vec!["vade-gateway".into(), "--bind".into(), format!("127.0.0.1:{}", session.local_port)];
+        let bind = session.gateway_bind();
+        let mut args = vec!["vade-gateway".into(), "--bind".into(), bind.clone()];
         for index in session.servers() {
             args.extend(["--upstream".into(), format!("http://127.0.0.1:{}", session.tunnel_port(index))]);
         }
-        // Pairs keep a chat's prefix cache: the gateway gives each chat a stable
-        // prompt_cache_key and cache:true, so a later turn on its pair restores it.
-        if session.chained() {
+        // Pairs and looped checkpoints keep a chat's prefix cache: the gateway gives each chat a
+        // stable prompt_cache_key and cache:true, so a later turn returns to its warm replica.
+        if session.chained() || session.loop_service {
             args.push("--stable-prefix".into());
         }
         let mut exec = Exec::new("replica gateway", &self.config.stage_dir.join("vade-harness").to_string_lossy(), args);
@@ -59,8 +60,7 @@ impl<R: Runner> App<R> {
         }
         // A gateway that already exited is a zombie until `up` ends: ps still answers
         // for its PID, with `<defunct>` as the command. Record only the owned command.
-        let port = session.local_port;
-        let started = self.process_identity(pid)?.filter(|(_, command)| owned_gateway(command, port))
+        let started = self.process_identity(pid)?.filter(|(_, command)| owned_gateway(command, &bind))
             .map(|(started, _)| started).ok_or_else(|| self.gateway_exited(session))?;
         session.gateway = Some((pid, started));
         session.save(&self.config.state_dir)
@@ -97,9 +97,9 @@ impl<R: Runner> App<R> {
     /// None without a recorded gateway; Some(false) after exit or PID reuse.
     pub(super) fn gateway_alive(&mut self, session: &Session) -> Result<Option<bool>, String> {
         let Some((pid, started)) = session.gateway.clone() else { return Ok(None) };
-        let port = session.local_port;
+        let bind = session.gateway_bind();
         Ok(Some(self.process_identity(pid)?.is_some_and(|(start, command)| {
-            start == started.split_whitespace().collect::<Vec<_>>().join(" ") && owned_gateway(&command, port)
+            start == started.split_whitespace().collect::<Vec<_>>().join(" ") && owned_gateway(&command, &bind)
         })))
     }
 
@@ -130,6 +130,6 @@ impl<R: Runner> App<R> {
 }
 
 /// The command line `vade up` gave this session's gateway (never `<defunct>`).
-fn owned_gateway(command: &str, port: u16) -> bool {
-    format!("{command} ").contains(&format!(" vade-gateway --bind 127.0.0.1:{port} "))
+fn owned_gateway(command: &str, bind: &str) -> bool {
+    format!("{command} ").contains(&format!(" vade-gateway --bind {bind} "))
 }

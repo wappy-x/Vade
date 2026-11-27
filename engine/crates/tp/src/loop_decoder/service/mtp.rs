@@ -27,8 +27,11 @@ pub trait Model<C:Compute,W:Weights<C>> {
         }
         Ok(())
     }
-    /// Batched `propose_confident` across multiple chats sharing draft weights.
-    fn propose_confident_batch(&self,c:&C,w:&W,items:&mut [(&mut DraftChat<C::Value>,u32,&C::Value,usize)])->Result<Vec<(Vec<u32>,Vec<f32>)>> {
+    /// Batched `propose_confident` across multiple chats sharing draft weights. `before_read` runs once inside the
+    /// work scope after every draft launch is queued and before the host reads the picks, so host work that the picks
+    /// do not need (the cohort's deferred target accepts) overlaps the draft kernels. Here it runs first.
+    fn propose_confident_batch(&self,c:&C,w:&W,items:&mut [(&mut DraftChat<C::Value>,u32,&C::Value,usize)],before_read:&mut dyn FnMut()->Result<()>)->Result<Vec<(Vec<u32>,Vec<f32>)>> {
+        before_read()?;
         items.iter_mut().map(|(chat,anchor,embed,depth)|self.propose_confident(c,w,chat,*anchor,embed,*depth,0.0)).collect()
     }
 }
@@ -47,8 +50,8 @@ impl<C:ResidentProduct<V>+super::super::draft::Lanes,W:Weights<C>,V> Model<C,W> 
     fn push_batch(&self,c:&C,items:&mut [(&mut DraftChat<C::Value>,&[C::Value],usize)])->Result<()> {
         self.push_values_batch(c,items)
     }
-    fn propose_confident_batch(&self,c:&C,w:&W,items:&mut [(&mut DraftChat<C::Value>,u32,&C::Value,usize)])->Result<Vec<(Vec<u32>,Vec<f32>)>> {
-        self.propose_confident_batch(c,w,items)
+    fn propose_confident_batch(&self,c:&C,w:&W,items:&mut [(&mut DraftChat<C::Value>,u32,&C::Value,usize)],before_read:&mut dyn FnMut()->Result<()>)->Result<Vec<(Vec<u32>,Vec<f32>)>> {
+        self.propose_confident_batch(c,w,items,before_read)
     }
 }
 /// The draft window of a chat: the draft context, the resident depth of the request, the online logistic acceptance

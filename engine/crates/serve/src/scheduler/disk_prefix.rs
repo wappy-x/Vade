@@ -5,7 +5,31 @@ use crate::{
     Engine, Session,
     cache::{CachedSession, SessionCache, SessionKey},
 };
+use std::cell::Cell;
 use std::time::Instant;
+
+thread_local! {
+    static MIN_RESTORE_TOKENS: Cell<usize> = const { Cell::new(0) };
+}
+
+struct MinTokensGuard(usize);
+impl MinTokensGuard {
+    fn new(min_tokens: usize) -> Self {
+        let prev = MIN_RESTORE_TOKENS.with(|cell| cell.replace(min_tokens));
+        Self(prev)
+    }
+}
+impl Drop for MinTokensGuard {
+    fn drop(&mut self) {
+        MIN_RESTORE_TOKENS.with(|cell| cell.set(self.0));
+    }
+}
+
+/// Minimum prefix length a disk restore must strictly exceed to beat the best
+/// in-RAM prefix candidate for the current request (`0` when RAM missed).
+pub fn min_restore_tokens() -> usize {
+    MIN_RESTORE_TOKENS.with(Cell::get)
+}
 
 /// Persist a completed prompt-end snapshot to the engine's optional disk prefix cache.
 pub(super) fn persist_prompt_end<'e, E: Engine>(
@@ -25,15 +49,17 @@ pub(super) fn persist_prompt_end<'e, E: Engine>(
     }
 }
 
-/// Attempt to restore the longest matching prefix from disk when RAM lookup missed.
-pub(super) fn restore_on_miss<'e, E: Engine>(
+/// Attempt to restore the longest matching prefix from disk strictly longer than `min_tokens`.
+pub(super) fn restore_longer<'e, E: Engine>(
     engine: &'e E,
     scope: Option<&str>,
     prompt: &[u32],
     target_tokens: usize,
+    min_tokens: usize,
 ) -> Option<CachedSession<E::Session<'e>>> {
+    let _guard = MinTokensGuard::new(min_tokens);
     match engine.restore_prefix_from_disk(scope, prompt, target_tokens) {
-        Ok(restored) => restored,
+        Ok(restored) => restored.filter(|s| s.tokens.len() > min_tokens),
         Err(error) => {
             engine_model::events::note(
                 "disk_prefix_cache_restore_failed",
@@ -61,5 +87,27 @@ pub(super) fn promote_and_trim<S: Session>(
     }
     if state.tokens.len() < prompt_len {
         state.next_logits.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn min_tokens_guard_restores_previous_threshold_on_drop_and_unwind() {
+        assert_eq!(min_restore_tokens(), 0);
+        {
+            let _outer = MinTokensGuard::new(4096);
+            assert_eq!(min_restore_tokens(), 4096);
+            let panicked = std::panic::catch_unwind(|| {
+                let _inner = MinTokensGuard::new(16_384);
+                assert_eq!(min_restore_tokens(), 16_384);
+                panic!("unwind check");
+            });
+            assert!(panicked.is_err());
+            assert_eq!(min_restore_tokens(), 4096);
+        }
+        assert_eq!(min_restore_tokens(), 0);
     }
 }

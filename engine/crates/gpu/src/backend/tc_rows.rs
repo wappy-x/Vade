@@ -15,6 +15,16 @@ pub struct MoeRoutePlan<'a> {
     in_rows: DeviceVector<'a>,
     out_slots: DeviceVector<'a>,
     tile_meta: DeviceVector<'a>,
+    /// Optional 2-Spark expert-ID shard `(expert_start, expert_count)` (`None` on 1-Spark).
+    shard: Option<(usize, usize)>,
+}
+
+#[derive(Clone, Copy)]
+struct ArmedShard { route_addr: u64, rows: usize, picks: usize, experts: usize, half: usize }
+
+thread_local! {
+    static ARMED_SHARD: std::cell::Cell<Option<ArmedShard>> = const { std::cell::Cell::new(None) };
+    static SHARD_SLOTS: std::cell::RefCell<Option<(Vec<usize>, Vec<usize>)>> = const { std::cell::RefCell::new(None) };
 }
 
 impl MoeRoutePlan<'_> {
@@ -71,6 +81,10 @@ impl<'a> Backend<'a> {
         } else if !pair && tc_rows::tc_big_wanted(rows, inputs) {
             (Kind::PlainTcBig, tc_rows::TC_MODE_DENSE, [tc_rows::tc_big_blocks(rows, inputs), 1, 1, tc_rows::TC_THREADS as u32, 0], false, 0)
         } else {
+            if let Some(slices) = panel_slices.filter(|_| tc_rows::tc_panel64_wanted(rows, cols, inputs)) {
+                let (threads, blocks, smem) = tc_rows::tc_panel64_spec(rows, inputs, slices);
+                return (Kind::PlainTcPanel64, tc_rows::TC_MODE_DENSE, [blocks, 1, 1, threads as u32, smem as u32], false, 0);
+            }
             let (threads, blocks, raw_smem) = tc_rows::tc_dense_spec(rows, cols, inputs, false);
             let smem = match panel_slices {
                 Some(slices) => tc_rows::tc_dense_panel_smem(rows, cols, inputs, slices),
@@ -81,7 +95,7 @@ impl<'a> Backend<'a> {
     }
     /// Attach registered lossless Vade-BF11-BP `bf16_panels` `(base, first_band | (slices << 32))` to Mode 0 commands.
     fn attach_tc_panels(command: &mut Command, panels: Option<(u64, u64, usize)>, kind: Kind, mode: u64) {
-        if kind == Kind::PlainTcRows && mode == tc_rows::TC_MODE_DENSE {
+        if matches!(kind, Kind::PlainTcRows | Kind::PlainTcPanel64) && mode == tc_rows::TC_MODE_DENSE {
             if let Some((base, meta, _)) = panels {
                 command.word(tc_rows::TC_PANEL_WORD, base);
                 command.word(tc_rows::TC_PANEL_WORD + 1, meta);
@@ -91,13 +105,15 @@ impl<'a> Backend<'a> {
     fn tc_panels_for(&self, weight: &DeviceVector<'_>, rows: usize, cols: usize, inputs: usize) -> Option<(u64, u64, usize)> {
         // Small-row projections (`rows <= 1280`, e.g. K/V 1024 and K+KTap 1056) are L2-resident and faster on raw
         // `LDG.128`; larger matrices (`O_proj` 2304, `QKV` 6552/8600, `LM Head` 200k) stream Vade-BF11-BP panels.
-        if rows <= tc_rows::TC_PANEL_ROWS_MIN || inputs > tc_rows::TC_SMALL_BM { return None; }
+        // 33..=128 inputs of a matrix wider than 2560 rows stream them in `PLAIN_TC_PANEL64` (any slice count).
+        let panel64 = tc_rows::tc_panel64_wanted(rows, cols, inputs);
+        if rows <= tc_rows::TC_PANEL_ROWS_MIN || (inputs > tc_rows::TC_SMALL_BM && !panel64) { return None; }
         let chunks = cols / crate::bf16_panels::CHUNK_COLS;
         let (base, first_band, slices) = self.panel_at(weight, cols)?;
         if base == 0 || (base & 15) != 0 || !matches!(slices, 1 | 4 | 8) || !chunks.is_multiple_of(slices) {
             return None;
         }
-        if tc_rows::tc_coop_w_wanted(rows, cols, inputs) && (slices < 4 || !chunks.is_multiple_of(4)) {
+        if !panel64 && tc_rows::tc_coop_w_wanted(rows, cols, inputs) && (slices < 4 || !chunks.is_multiple_of(4)) {
             return None;
         }
         Some((base, (first_band as u64) | ((slices as u64) << 32), slices))
@@ -419,16 +435,146 @@ impl<'a> Backend<'a> {
             && self.resident_launches_active()
     }
 
+    /// Arm 2-Spark expert-ID sharding (`0..experts/2` on half 0, `experts/2..experts` on half 1) for the
+    /// immediately following `moe_group_route_into` on `route`. 1-Spark never calls this.
+    pub fn arm_moe_route_shard(&self, route: &DeviceVector<'_>, rows: usize, picks: usize, experts: usize, half: usize) {
+        SHARD_SLOTS.with(|s| *s.borrow_mut() = None);
+        ARMED_SHARD.with(|a| a.set(Some(ArmedShard { route_addr: route.device_address(), rows, picks, experts, half })));
+    }
+
+    /// Consume `(mine_slots, peer_slots)` produced by an armed sharded `moe_group_route_into` (clearing any armed state).
+    pub fn take_moe_route_shard(&self) -> Option<(Vec<usize>, Vec<usize>)> {
+        ARMED_SHARD.with(|a| a.set(None));
+        SHARD_SLOTS.with(|s| s.borrow_mut().take())
+    }
+
+    /// Partition `route` on host by a cost-balanced expert-ID cut (`0..mid` vs `mid..experts`) when armed for
+    /// 2-Spark expert-ID sharding. Both ranks see identical `route` words and choose the exact same `mid`.
+    /// Returns `Ok(None)` if either half owns 0 picks so both ranks fall back identically to unsharded routing.
+    #[allow(clippy::too_many_arguments, reason = "shape, shard half, and route operands")]
+    fn moe_group_route_sharded(
+        &self, rows: usize, each: usize, picks: usize, experts: usize, half: usize,
+        route: &DeviceVector<'_>, weights_out: &mut DeviceVector<'_>,
+    ) -> Result<Option<MoeRoutePlan<'a>>, String> {
+        if half > 1 || experts < 2 { return Ok(None); }
+        let all = rows.checked_mul(picks).ok_or("moe route shard: pick overflow")?;
+        self.check_vector(route, rows * each)?;
+        self.check_vector(weights_out, all)?;
+        if route.is_segmented() || weights_out.is_segmented() || !weights_out.writable_from(0) {
+            return Err("moe route shard: contiguous route and private contiguous weights required".into());
+        }
+        let words = self.read_vector_values(route)?;
+        if words.len() != rows * each { return Err("moe route shard: route length mismatch".into()); }
+        let mut weights_host = Vec::with_capacity(all);
+        let mut ids_host = Vec::with_capacity(all);
+        let mut counts = vec![0usize; experts];
+        for r in 0..rows {
+            let base = r * each;
+            for s in 0..picks {
+                let id_f = words[base + s];
+                if !(id_f >= 0.0 && id_f < experts as f32) || (id_f as u32) as f32 != id_f {
+                    return Err("moe route shard: invalid expert id".into());
+                }
+                let e = id_f as usize;
+                weights_host.push(words[base + picks + s]);
+                ids_host.push(e as u16);
+                counts[e] += 1;
+            }
+        }
+        // Balance DRAM weight streams (active experts) + compute (picks) deterministically across `0..mid` vs `mid..experts`.
+        let total_cost: usize = counts.iter().map(|&c| if c > 0 { 8 + c } else { 0 }).sum();
+        let (mut pref_picks, mut pref_cost, mut best_mid, mut best_diff) = (0usize, 0usize, 0usize, usize::MAX);
+        for (e, &c) in counts.iter().enumerate().take(experts - 1) {
+            pref_picks += c;
+            if c > 0 { pref_cost += 8 + c; }
+            if pref_picks > 0 && pref_picks < all {
+                let diff = pref_cost.abs_diff(total_cost - pref_cost);
+                if diff < best_diff { best_diff = diff; best_mid = e + 1; }
+            }
+        }
+        if best_mid == 0 { return Ok(None); }
+        let (expert_start, expert_count) = if half == 0 { (0, best_mid) } else { (best_mid, experts - best_mid) };
+        let (peer_start, peer_count) = if half == 0 { (best_mid, experts - best_mid) } else { (0, best_mid) };
+        let mut mine_off = vec![0usize; expert_count];
+        let mut own_picks = 0usize;
+        for (le, off) in mine_off.iter_mut().enumerate() {
+            *off = own_picks;
+            own_picks += counts[expert_start + le];
+        }
+        let mut peer_off = vec![0usize; peer_count];
+        let mut peer_picks = 0usize;
+        for (le, off) in peer_off.iter_mut().enumerate() {
+            *off = peer_picks;
+            peer_picks += counts[peer_start + le];
+        }
+        if own_picks == 0 || peer_picks == 0 || own_picks + peer_picks != all { return Ok(None); }
+        let mut in_rows_f = vec![0.0f32; own_picks];
+        let mut mine_slots = vec![0usize; own_picks];
+        let mut peer_slots = vec![0usize; peer_picks];
+        let mut mine_cur = mine_off.clone();
+        let mut peer_cur = peer_off;
+        for (pick, &e_u16) in ids_host.iter().enumerate() {
+            let e = e_u16 as usize;
+            if e >= expert_start && e < expert_start + expert_count {
+                let pos = mine_cur[e - expert_start];
+                mine_cur[e - expert_start] = pos + 1;
+                in_rows_f[pos] = f32::from_bits((pick / picks) as u32);
+                mine_slots[pos] = pick;
+            } else {
+                let pos = peer_cur[e - peer_start];
+                peer_cur[e - peer_start] = pos + 1;
+                peer_slots[pos] = pick;
+            }
+        }
+        let meta_words = tc_rows::moe_tile_meta_words(own_picks, expert_count);
+        let mut tile_meta_f = vec![0.0f32; meta_words];
+        let mut total_tiles = 0usize;
+        for (local_e, &base_pos) in mine_off.iter().enumerate() {
+            let cnt = counts[expert_start + local_e];
+            if cnt == 0 { continue; }
+            let ntiles = cnt.div_ceil(tc_rows::TC_BM);
+            for t in 0..ntiles {
+                let rem = cnt - t * tc_rows::TC_BM;
+                let m_cnt = rem.min(tc_rows::TC_BM);
+                let at = 1 + 3 * (total_tiles + t);
+                tile_meta_f[at] = f32::from_bits(local_e as u32);
+                tile_meta_f[at + 1] = f32::from_bits((base_pos + t * tc_rows::TC_BM) as u32);
+                tile_meta_f[at + 2] = f32::from_bits(m_cnt as u32);
+            }
+            total_tiles += ntiles;
+        }
+        tile_meta_f[0] = f32::from_bits(total_tiles as u32);
+        // Deferred pinned uploads (zero extra stream sync) + skip unused `out_slots` upload.
+        let weights_up = self.upload_vector(&weights_host)?;
+        self.copy_prefix(&weights_up, weights_out, all)?;
+        let in_rows = self.upload_vector(&in_rows_f)?;
+        let out_slots = self.vector(1)?;
+        let tile_meta = self.upload_vector(&tile_meta_f)?;
+        SHARD_SLOTS.with(|s| *s.borrow_mut() = Some((mine_slots, peer_slots)));
+        Ok(Some(MoeRoutePlan {
+            rows, all: own_picks, experts, in_rows, out_slots, tile_meta,
+            shard: Some((expert_start, expert_count)),
+        }))
+    }
+
     /// Device-side deterministic MoE router grouping (`MOE_GROUP_ROUTE`, 1 block of 256 threads).
     pub fn moe_group_route_into(&self, rows: usize, each: usize, picks: usize, experts: usize, route: &DeviceVector<'_>, weights_out: &mut DeviceVector<'_>) -> Result<MoeRoutePlan<'a>, String> {
         if self.arm_capture() { return Err("moe route: refused inside a stream capture".into()); }
         self.require_resident_stream()?;
+        let armed = ARMED_SHARD.with(std::cell::Cell::take);
         let span = |v: &DeviceVector<'_>| Span { address: v.device_address(), bytes: v.len() as u64 * 4 };
         let all = rows.checked_mul(picks).filter(|&n| n <= tc_rows::MOE_ALL_MAX).ok_or("moe route: too many picks")?;
         if experts > tc_rows::MOE_EXPERTS_MAX { return Err("moe route: too many experts".into()); }
         let max_tiles = tc_rows::moe_max_tiles(all, experts);
         if !tc_rows::moe_route_admitted(rows, each, picks, experts, max_tiles, tc_rows::MOE_ROUTE_THREADS) {
             return Err("moe route: shape outside envelope".into());
+        }
+        if let Some(a) = armed {
+            if a.route_addr == route.device_address() && a.rows == rows && a.picks == picks && a.experts == experts {
+                if let Some(plan) = self.moe_group_route_sharded(rows, each, picks, experts, a.half, route, weights_out)? {
+                    return Ok(plan);
+                }
+            }
         }
         let meta_words = tc_rows::moe_tile_meta_words(all, experts);
         let (in_rows, out_slots, tile_meta) = (self.vector(all)?, self.vector(all)?, self.vector(meta_words)?);
@@ -456,7 +602,7 @@ impl<'a> Backend<'a> {
                 return Err("moe route: launches are not recorded now".into());
             }
             self.resident_completion()?;
-            return Ok(MoeRoutePlan { rows, all, experts, in_rows, out_slots, tile_meta });
+            return Ok(MoeRoutePlan { rows, all, experts, in_rows, out_slots, tile_meta, shard: None });
         }
         let block_hist = self.vector(blocks * experts)?;
         let ids_buf = self.vector(all.div_ceil(2))?;
@@ -483,7 +629,7 @@ impl<'a> Backend<'a> {
             }
         }
         self.resident_completion()?;
-        Ok(MoeRoutePlan { rows, all, experts, in_rows, out_slots, tile_meta })
+        Ok(MoeRoutePlan { rows, all, experts, in_rows, out_slots, tile_meta, shard: None })
     }
 
     /// Device-routed tensor-core MoE expert stack GEMM (`PLAIN_TC_ROWS` Mode 1, zero CPU sync).
@@ -591,6 +737,108 @@ impl<'a> Backend<'a> {
         self.packed_moe_into(rows, cols, wide, true, stack, route, input, output, false, Some(caps), true, true)
     }
 
+    /// Sharded packed MoE launch (`PREFILL_PACKED_TC` over `[expert_start..expert_start + expert_count]`):
+    /// reads only this half's experts and writes packed BF16 outputs directly into `output[0..out_words]`.
+    #[allow(clippy::too_many_arguments, reason = "shape, packed form, shard range, route, caps and operands")]
+    fn packed_moe_sharded_into(
+        &self, rows: usize, cols: usize, wide: bool, pairs: bool,
+        stack: &DeviceVector<'_>, route: &MoeRoutePlan<'_>, input: &DeviceVector<'_>,
+        output: &mut DeviceVector<'_>, down: bool, caps: Option<[f32; 4]>,
+        expert_start: usize, expert_count: usize,
+    ) -> Result<(), String> {
+        use crate::prefill_moe::{
+            self, PREFILL_HALF_IN, PREFILL_OP_GEMM, PREFILL_OUT_BF16,
+            PREFILL_OUT_BF16_GATED, PREFILL_THREADS, gemm_blocks,
+        };
+        let format = if !down && pairs && caps.is_some() {
+            PREFILL_OUT_BF16_GATED
+        } else if down && !pairs && caps.is_none() {
+            PREFILL_OUT_BF16
+        } else {
+            return Err("tc packed moe shard: unsupported projection form".into());
+        };
+        let all = route.all;
+        let unit_bytes = crate::packed_product::layout(rows, cols, wide).bytes;
+        let unit_words = unit_bytes / 4;
+        if expert_count == 0 || expert_start.checked_add(expert_count).is_none_or(|end| end > route.experts) {
+            return Err("tc packed moe shard: expert range out of bounds".into());
+        }
+        self.check_vector(stack, route.experts * unit_words)?;
+        self.check_vector(&route.tile_meta, tc_rows::moe_tile_meta_words(all, expert_count))?;
+        if stack.is_segmented() || route.tile_meta.is_segmented() || input.is_segmented() {
+            return Err("tc packed moe shard: operand segmented".into());
+        }
+        if output.is_segmented() || !output.writable_from(0) {
+            return Err("tc packed moe shard: output requires private contiguous storage".into());
+        }
+        let in_table = if down { None } else { Some(&route.in_rows) };
+        if let Some(t) = in_table {
+            self.check_vector(t, all)?;
+            if t.is_segmented() { return Err("tc packed moe shard: in_table segmented".into()); }
+        }
+        let (in_count, encoded, act_bytes) = if down {
+            let in_words = all.checked_mul(cols / 2).ok_or("tc packed moe shard: down input overflow")?;
+            self.check_vector_prefix(input, in_words)?;
+            (all, None, (in_words * 4) as u64)
+        } else {
+            let in_count = route.rows;
+            let half_words = in_count.checked_mul(cols / 2).ok_or("tc packed moe shard: input overflow")?;
+            if input.len() == half_words {
+                self.check_vector(input, half_words)?;
+                (in_count, None, (half_words * 4) as u64)
+            } else {
+                let fp_words = in_count.checked_mul(cols).ok_or("tc packed moe shard: fp32 input overflow")?;
+                self.check_vector(input, fp_words)?;
+                let packed = if fp_words.is_multiple_of(8) && (input.device_address() & 15) == 0 {
+                    self.prefill_pack_bf16(in_count, cols, input)?
+                } else {
+                    self.pack_tc_input(input, in_count, cols)?
+                };
+                (in_count, Some(packed), (half_words * 4) as u64)
+            }
+        };
+        let act_in = encoded.as_ref().unwrap_or(input);
+        let width = if caps.is_some() { rows / 2 } else { rows };
+        let out_words = all.checked_mul(width / 2).ok_or("tc packed moe shard: output overflow")?;
+        self.check_vector_prefix(output, out_words)?;
+        self.skip_fill(output)?;
+        let gate_words = 2 * crate::fast_ops::CAPPED_GATE_TABLE_WORDS;
+        let tables = caps.map(|_| self.vector(gate_words)).transpose()?;
+        if let Some(t) = &tables { self.check_vector(t, gate_words)?; }
+        let span = |v: &DeviceVector<'_>| Span { address: v.device_address(), bytes: v.len() as u64 * 4 };
+        let stack_addr = stack.device_address().checked_add((expert_start * unit_bytes) as u64)
+            .ok_or("tc packed moe shard: stack address overflow")?;
+        let stack_span = Span { address: stack_addr, bytes: (expert_count * unit_bytes) as u64 };
+        let act_span = Span { address: act_in.device_address(), bytes: act_bytes };
+        let out_span = Span { address: output.device_address(), bytes: (out_words * 4) as u64 };
+        prefill_moe::check_gemm(
+            rows, cols, wide, pairs, format, all, expert_count,
+            stack_span, span(&route.tile_meta), act_span, in_count, in_table.map(span),
+            out_span, all, None, tables.as_ref().map(span),
+        )?;
+        self.require_arm_kernels(&[Kind::PrefillPackedTc.kernel()])?;
+        self.resident_completion()?;
+        if let (Some(c), Some(t)) = (caps, &tables) { self.record_capped_gate_tables(c, t)?; }
+        let max_tiles = tc_rows::moe_max_tiles(all, expert_count);
+        let mut command = Command::new(Kind::PrefillPackedTc);
+        let payload = [
+            stack_addr, act_in.device_address(), output.device_address(),
+            rows as u64, u64::from(crate::packed_product::cols_word(cols, wide, pairs)) | (format << 32),
+            all as u64, width as u64, unit_bytes as u64,
+            in_table.map_or(0, DeviceVector::device_address), in_count as u64,
+            0, all as u64,
+            route.tile_meta.device_address(), max_tiles as u64, expert_count as u64,
+            tables.as_ref().map_or(0, DeviceVector::device_address),
+            0, PREFILL_HALF_IN, PREFILL_OP_GEMM,
+        ];
+        for (i, w) in payload.into_iter().enumerate() { command.word(i, w); }
+        let grid = [gemm_blocks(rows, max_tiles), 1, 1, PREFILL_THREADS as u32, 0];
+        if !self.record_resident_block(Kind::PrefillPackedTc, command, grid)? {
+            return Err("tc packed moe shard: launches are not recorded now".into());
+        }
+        self.resident_completion()
+    }
+
     /// The launch of every packed MoE form. The product reads BF16 input rows only (`packed_product::HALF_IN`): an
     /// FP32 `input` (`half_in` false) is rounded first by a `TC_MODE_PACK` launch into a private vector, with the
     /// rounding (`cvt.rn.bf16x2.f32`) the product made of each word before.
@@ -602,6 +850,11 @@ impl<'a> Backend<'a> {
     ) -> Result<(), String> {
         if self.arm_capture() { return Err("tc packed moe: refused inside a stream capture".into()); }
         self.require_resident_stream()?;
+        if let Some((expert_start, expert_count)) = route.shard {
+            return self.packed_moe_sharded_into(
+                rows, cols, wide, pairs, stack, route, input, output, down, caps, expert_start, expert_count,
+            );
+        }
         let span = |v: &DeviceVector<'_>| Span { address: v.device_address(), bytes: v.len() as u64 * 4 };
         let (all, experts, tile_meta) = (route.all, route.experts, &route.tile_meta);
         let (in_count, in_table, out_table) = route.tables(down);
@@ -922,17 +1175,83 @@ impl<'a> Backend<'a> {
         if multi_chat && (planes.len() != rows || delta.is_some()) {
             return Err("flash window split: invalid multi-chat planes or delta".into());
         }
+        if heads == 0 || kv_heads == 0 || !heads.is_multiple_of(kv_heads) {
+            return Err("flash window split: invalid head counts".into());
+        }
         let split_kv = flash_window::flash_window_split_kv(is_ring);
+        // Coalesce multi-chat rows sharing identical `(keys, values)` addresses and contiguous positions into
+        // one CTA-group so verify rows of the same chat read KV once from DRAM and pack into one MMA tile.
+        let mut raw_runs: Vec<(usize, usize)> = Vec::new();
+        if multi_chat {
+            let mut r = 0usize;
+            while r < rows {
+                let (ka, va) = (planes[r].0.device_address(), planes[r].1.device_address());
+                let pos0 = row_pos_live[r].0;
+                let mut end = r + 1;
+                while end < rows
+                    && planes[end].0.device_address() == ka
+                    && planes[end].1.device_address() == va
+                    && row_pos_live[end].0 == pos0 + (end - r) as u64
+                {
+                    end += 1;
+                }
+                raw_runs.push((r, end - r));
+                r = end;
+            }
+        }
+        let max_run = if multi_chat {
+            raw_runs.iter().map(|&(_, len)| len).max().unwrap_or(1)
+        } else {
+            rows
+        };
+        let (q_groups, rows_per_cta) = flash_window::flash_window_split_q_groups_for(max_run, heads, kv_heads);
+        let mut groups: Vec<(usize, usize, u64, &DeviceVector<'_>, &DeviceVector<'_>)> = Vec::new();
+        if multi_chat {
+            for &(run_start, run_len) in &raw_runs {
+                let mut off = 0usize;
+                while off < run_len {
+                    let rb = run_start + off;
+                    let mc = (run_len - off).min(rows_per_cta);
+                    let fp = row_pos_live[rb].0;
+                    if rb > u16::MAX as usize || mc > u8::MAX as usize || fp >= (1u64 << 40) {
+                        return Err("flash window split: multi-chat group descriptor overflow".into());
+                    }
+                    // Take the plane slice with the largest length in the run (for straight planes, the last row).
+                    let mut best_k = planes[rb].0;
+                    let mut best_v = planes[rb].1;
+                    for &(kp, vp) in &planes[rb + 1..rb + mc] {
+                        if kp.len() > best_k.len() { best_k = kp; }
+                        if vp.len() > best_v.len() { best_v = vp; }
+                    }
+                    groups.push((rb, mc, fp, best_k, best_v));
+                    off += mc;
+                }
+            }
+            if groups.len() > flash_window::FW_SPLIT_GROUPS_MAX {
+                return Err("flash window split: multi-chat group count exceeds command payload".into());
+            }
+        }
         let (split_start, num_splits) = if multi_chat {
             let mut max_s = 1usize;
-            for &(pos, live) in row_pos_live {
-                if live > view || live as u64 > pos.saturating_add(1) || (!is_ring && live > 0 && pos >= view as u64) {
-                    return Err("flash window split: multi-chat live or position out of bounds".into());
+            for &(rb, mc, fp, _, _) in &groups {
+                let (mut kmin, mut kmax, mut any) = (usize::MAX, 0usize, false);
+                for r_loc in 0..mc {
+                    let (pos, live) = row_pos_live[rb + r_loc];
+                    if pos != fp + r_loc as u64 || live > view || live as u64 > pos.saturating_add(1)
+                        || (!is_ring && live > 0 && pos >= view as u64)
+                    {
+                        return Err("flash window split: multi-chat live or position out of bounds".into());
+                    }
+                    if live > 0 {
+                        let klo = (pos + 1 - live as u64) as usize;
+                        let khi = pos as usize;
+                        if klo < kmin { kmin = klo; }
+                        if khi > kmax { kmax = khi; }
+                        any = true;
+                    }
                 }
-                if live > 0 {
-                    let klo = (pos + 1 - live as u64) as usize;
-                    let khi = pos as usize;
-                    let s = khi / split_kv - klo / split_kv + 1;
+                if any {
+                    let s = kmax / split_kv - kmin / split_kv + 1;
                     if s > max_s { max_s = s; }
                 }
             }
@@ -957,14 +1276,23 @@ impl<'a> Backend<'a> {
                 (s0, k_max / split_kv - s0 + 1)
             }
         };
-        let (q_groups, rows_per_cta) = flash_window::flash_window_split_q_groups(rows, heads, kv_heads, multi_chat);
+        let band_splits = flash_window::flash_window_split_band_splits(rows, heads, num_splits);
+        let banded = band_splits < num_splits;
         let partial_words = rows.checked_mul(heads)
-            .and_then(|n| n.checked_mul(num_splits))
+            .and_then(|n| n.checked_mul(band_splits))
             .and_then(|n| n.checked_mul(flash_window::FW_SPLIT_PARTIAL_STRIDE))
             .ok_or("flash window split: partial buffer overflow")?;
         let partials = self.vector(partial_words)?;
+        let state = if banded {
+            let state_words = rows.checked_mul(heads)
+                .and_then(|n| n.checked_mul(flash_window::FW_SPLIT_PARTIAL_STRIDE))
+                .ok_or("flash window split: reduce state overflow")?;
+            Some(self.vector(state_words)?)
+        } else {
+            None
+        };
         if !flash_window::flash_window_split_admitted(
-            rows, heads, kv_heads, view, extent, split_kv, num_splits, q_groups, rows_per_cta, planes.len(),
+            rows, heads, kv_heads, view, extent, split_kv, band_splits, q_groups, rows_per_cta, groups.len(),
             query.device_address() as usize, keys.device_address() as usize, values.device_address() as usize,
             moved.device_address() as usize, partials.device_address() as usize, flash_window::FW_THREADS,
         ) {
@@ -1006,7 +1334,13 @@ impl<'a> Backend<'a> {
         let meets = |a: FwSpan, b: FwSpan| a.address < b.address.saturating_add(b.bytes) && b.address < a.address.saturating_add(a.bytes);
         let out_sp = span(output);
         let part_sp = span(&partials);
+        let state_sp = state.as_ref().map(span);
         if meets(out_sp, part_sp) { return Err("flash window split: partials overlaps output".into()); }
+        if let Some(st_sp) = state_sp {
+            if st_sp.address == 0 || st_sp.address % 16 != 0 || meets(out_sp, st_sp) || meets(part_sp, st_sp) {
+                return Err("flash window split: reduce state invalid or overlaps output/partials".into());
+            }
+        }
         if meets(out_sp, span(keys)) || meets(out_sp, span(values)) || meets(part_sp, span(keys)) || meets(part_sp, span(values)) {
             return Err("flash window split: KV plane overlaps output or partials".into());
         }
@@ -1032,7 +1366,7 @@ impl<'a> Backend<'a> {
         self.require_arm_kernels(&[split_kind.kernel(), Kind::FlashWindowReduce.kernel()])?;
         self.resident_completion()?;
 
-        let mut cmd1 = Command::new(split_kind);
+        let mut base_cmd1 = Command::new(split_kind);
         let words1 = [
             query.device_address(), keys.device_address(), values.device_address(),
             moved.device_address(), rel_table.device_address(),
@@ -1041,25 +1375,26 @@ impl<'a> Backend<'a> {
             rows as u64, heads as u64, kv_heads as u64, view as u64, extent as u64,
             u64::from(scale.to_bits()), first_pos,
         ];
-        for (i, w) in words1.into_iter().enumerate() { cmd1.word(i, w); }
-        cmd1.word(flash_window::FW_SP_FLAGS_WORD, flash_window::fw_split_pack_flags(split_kv, num_splits, is_ring));
+        for (i, w) in words1.into_iter().enumerate() { base_cmd1.word(i, w); }
         let addr = |v: Option<&DeviceVector<'_>>| v.map_or(0, |v| v.device_address());
-        cmd1.word(17, addr(clips.query_scale));
-        cmd1.word(18, addr(clips.moved_scale));
-        cmd1.word(19, addr(clips.position));
-        cmd1.word(20, u64::from(clips.query_bound.to_bits()));
-        cmd1.word(21, u64::from(clips.moved_bound.to_bits()));
-        cmd1.word(flash_window::FW_SP_SPLIT_START_WORD, split_start as u64);
-        cmd1.word(flash_window::FW_SP_PLANE_COUNT_WORD, planes.len() as u64);
-        cmd1.word(flash_window::FW_SP_ROWS_PER_CTA_WORD, rows_per_cta as u64);
-        for (chat, &(key, value)) in planes.iter().enumerate() {
-            let (pos, live) = row_pos_live[chat];
+        base_cmd1.word(17, addr(clips.query_scale));
+        base_cmd1.word(18, addr(clips.moved_scale));
+        base_cmd1.word(19, addr(clips.position));
+        base_cmd1.word(20, u64::from(clips.query_bound.to_bits()));
+        base_cmd1.word(21, u64::from(clips.moved_bound.to_bits()));
+        base_cmd1.word(flash_window::FW_SP_PLANE_COUNT_WORD, groups.len() as u64);
+        for (gi, &(rb, mc, fp, key, value)) in groups.iter().enumerate() {
             let need_words = if is_ring {
                 kv_words
-            } else if live > 0 {
-                (pos as usize + 1) * row_words
             } else {
-                row_words
+                let mut max_end = 1usize;
+                for r_loc in 0..mc {
+                    let (pos, live) = row_pos_live[rb + r_loc];
+                    if live > 0 {
+                        max_end = max_end.max(pos as usize + 1);
+                    }
+                }
+                max_end * row_words
             };
             for (side, plane) in [key, value].into_iter().enumerate() {
                 self.check_vector_prefix(plane, need_words)?;
@@ -1067,31 +1402,46 @@ impl<'a> Backend<'a> {
                 if p.address == 0 || p.address % 16 != 0 || meets(out_sp, p) || meets(part_sp, p) {
                     return Err("flash window split: invalid chat plane or overlap".into());
                 }
-                cmd1.word(flash_window::FW_SP_PLANES_AT + 2 * chat + side, plane.device_address());
+                base_cmd1.word(flash_window::FW_SP_PLANES_AT + 3 * gi + side, plane.device_address());
             }
-            cmd1.word(flash_window::FW_SP_POS_AT + chat, pos);
-            cmd1.word(flash_window::FW_SP_LIVE_AT + chat, live as u64);
+            base_cmd1.word(flash_window::FW_SP_PLANES_AT + 3 * gi + 2, flash_window::fw_split_pack_group(rb, mc, fp));
         }
-        let q_ctas = rows.div_ceil(rows_per_cta);
+        let q_ctas = if multi_chat { groups.len() } else { rows.div_ceil(rows_per_cta) };
         let gx1 = u32::try_from(q_ctas.checked_mul(kv_heads).ok_or("flash window split: grid x overflow")?)
             .map_err(|_| "flash window split: grid x overflow")?;
-        let gy1 = u32::try_from(flash_window::flash_window_split_grid_y(num_splits)).map_err(|_| "flash window split: grid y overflow")?;
-        if !self.record_resident_block(split_kind, cmd1, [gx1, gy1, 1, flash_window::FW_THREADS as u32, 0])? {
-            return Err("flash window split: launches are not recorded now".into());
-        }
-
-        let mut cmd2 = Command::new(Kind::FlashWindowReduce);
-        let words2 = [
-            partials.device_address(), sink.device_address(), gate.device_address(), output.device_address(),
-            rows as u64, heads as u64, num_splits as u64,
-        ];
-        for (i, w) in words2.into_iter().enumerate() { cmd2.word(i, w); }
         let gx2 = u32::try_from(rows.checked_mul(heads).ok_or("flash window reduce: grid overflow")?)
             .map_err(|_| "flash window reduce: grid overflow")?;
-        if !self.record_resident_block(Kind::FlashWindowReduce, cmd2, [gx2, 1, 1, flash_window::FW_THREADS as u32, 0])? {
-            return Err("flash window reduce: launches are not recorded now".into());
+        let state_addr = state.as_ref().map_or(0, DeviceVector::device_address);
+        let mut band_off = 0usize;
+        while band_off < num_splits {
+            let b_len = (num_splits - band_off).min(band_splits);
+            let splits_per_cta = flash_window::flash_window_splits_per_cta_for(q_ctas, b_len);
+            let mut cmd1 = base_cmd1;
+            cmd1.word(flash_window::FW_SP_FLAGS_WORD, flash_window::fw_split_pack_flags(split_kv, b_len, is_ring));
+            cmd1.word(flash_window::FW_SP_SPLIT_START_WORD, (split_start + band_off) as u64);
+            cmd1.word(flash_window::FW_SP_ROWS_PER_CTA_WORD, (rows_per_cta as u64) | ((splits_per_cta as u64) << 32));
+            let split_blocks = b_len.div_ceil(splits_per_cta);
+            let gy1 = u32::try_from(flash_window::flash_window_split_grid_y(split_blocks))
+                .map_err(|_| "flash window split: grid y overflow")?;
+            if !self.record_resident_block(split_kind, cmd1, [gx1, gy1, 1, flash_window::FW_THREADS as u32, 0])? {
+                return Err("flash window split: launches are not recorded now".into());
+            }
+            let first_band = band_off == 0;
+            let last_band = band_off + b_len == num_splits;
+            let r_flags = if !first_band { flash_window::FW_REDUCE_LOAD_STATE } else { 0 }
+                | if !last_band { flash_window::FW_REDUCE_STORE_STATE } else { 0 };
+            let mut cmd2 = Command::new(Kind::FlashWindowReduce);
+            let words2 = [
+                partials.device_address(), sink.device_address(), gate.device_address(), output.device_address(),
+                rows as u64, heads as u64, b_len as u64, r_flags, state_addr,
+            ];
+            for (i, w) in words2.into_iter().enumerate() { cmd2.word(i, w); }
+            if !self.record_resident_block(Kind::FlashWindowReduce, cmd2, [gx2, 1, 1, flash_window::FW_THREADS as u32, 0])? {
+                return Err("flash window reduce: launches are not recorded now".into());
+            }
+            band_off += b_len;
         }
-        // `partials` drops here; inside the resident queue, deferred retirement keeps it alive until both launches finish.
+        // `partials` and optional `state` drop here; deferred retirement keeps them alive until all bands finish.
         self.resident_completion()
     }
 

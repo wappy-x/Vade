@@ -122,6 +122,7 @@ pub(crate) unsafe fn warp(weights: *const u16, input: *const f32, input2: *const
     }
     crate::ptx::commit();
     asm!("griddepcontrol.wait;", options(nostack));
+    asm!("griddepcontrol.launch_dependents;", options(nostack));
     s = 0;
     while s + 1 < NS {
         if s < stages { issue_x(s); }

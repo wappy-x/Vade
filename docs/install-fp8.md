@@ -204,8 +204,8 @@ If the engine does not have enough memory for a context, it refuses to start.
 Then choose a smaller `--context`. The controller does not lower the context
 for you.
 
-- `--context N` accepts 4096 to 262144.
-- `--output N` accepts 1024 to 262144, up to the context.
+- `--context N` accepts any context at least 4096 that fits the checkpoint and hardware memory.
+- `--output N` accepts any positive output size up to the context.
 - `--mtp 0` turns drafting off. `--mtp 1` to `--mtp 3` sets a fixed depth.
 - A request with `"draft": "plain"` decodes without drafting.
 

@@ -18,6 +18,7 @@ pub(super) struct Panel<'a> {
     tiles: usize,
     outliers: usize,
     slices: usize,
+    offs: u64,
 }
 
 impl<'a> Backend<'a> {
@@ -38,6 +39,9 @@ impl<'a> Backend<'a> {
         let source = weight.resident_range(0..raw / 2)?;
         let (encoded, tiles, outliers) = bf16_panels::encode_with_stats(rows, cols, bytes)?;
         let slices = bf16_panels::slice_count(rows, cols / bf16_panels::CHUNK_COLS);
+        let chunks_off = u32::from_le_bytes(encoded[4..8].try_into().unwrap());
+        let esc_off = u32::from_le_bytes(encoded[8..12].try_into().unwrap());
+        let offs = u64::from(chunks_off) | (u64::from(esc_off) << 32);
         let panel = self.vector(encoded.len() / 4)?.into_resident_shared()?;
         // Keep the pinned staging bounded for the vocabulary head.
         let mut word = 0;
@@ -46,7 +50,7 @@ impl<'a> Backend<'a> {
             self.write_vector_bytes(&mut panel.resident_range(word..end)?, part)?;
             word = end;
         }
-        self.inkling.panels.borrow_mut().insert(address, Panel { source, encoded: panel, columns: cols, tiles, outliers, slices });
+        self.inkling.panels.borrow_mut().insert(address, Panel { source, encoded: panel, columns: cols, tiles, outliers, slices, offs });
         Ok(encoded.len())
     }
 
@@ -61,15 +65,20 @@ impl<'a> Backend<'a> {
         self.few_panel(weight, cols, weight.len().saturating_mul(2) / cols.max(1)).is_some()
     }
 
-    fn few_panel(&self, weight: &DeviceVector<'_>, cols: usize, stride: usize) -> Option<(u64, usize, usize)> {
+    fn few_panel(&self, weight: &DeviceVector<'_>, cols: usize, stride: usize) -> Option<(u64, usize, usize, u64)> {
         if crate::staged_narrow::shape_admitted(stride, cols) { return None; }
-        self.panel_at(weight, cols)
+        self.panel_at_offs(weight, cols)
     }
 
     /// The base device address, starting 16-row band, and encoded K-slice count (`panel.slices`) of the registered
     /// Vade-BF11-BP encoding covering `weight` (at a 16-row band boundary). Always launches `panel.slices` rather
     /// than recomputing from sub-view stride so sub-views inside stacked matrices never mismatch `slices_enc`.
     pub(crate) fn panel_at(&self, weight: &DeviceVector<'_>, cols: usize) -> Option<(u64, usize, usize)> {
+        let (addr, band, slices, _) = self.panel_at_offs(weight, cols)?;
+        Some((addr, band, slices))
+    }
+
+    fn panel_at_offs(&self, weight: &DeviceVector<'_>, cols: usize) -> Option<(u64, usize, usize, u64)> {
         let address = weight.device_address();
         let panels = self.inkling.panels.borrow();
         let (&base, panel) = panels.range(..=address).next_back()?;
@@ -79,17 +88,17 @@ impl<'a> Backend<'a> {
         }
         let row = offset / (2 * cols);
         if !row.is_multiple_of(16) { return None; }
-        Some((panel.encoded.device_address(), row / 16, panel.slices))
+        Some((panel.encoded.device_address(), row / 16, panel.slices, panel.offs))
     }
 
     /// The Vade-BF11-BP panel form of `PlainStagedOne` for 1 to 8 input rows: returns
-    /// `(panels_base, first_band, slices, part_chunks, warps)` using `panel.slices` directly.
-    #[allow(clippy::type_complexity, reason = "panel base, first band, slices, staged chunks, warps per block")]
-    fn one_panel_form(&self, rows: usize, cols: usize, inputs: usize, stride: usize, weight: &DeviceVector<'_>, force: Option<Option<usize>>) -> Result<Option<(u64, usize, usize, usize, usize)>, String> {
+    /// `(panels_base, first_band, slices, part_chunks, warps, offs)` using `panel.slices` directly.
+    #[allow(clippy::type_complexity, reason = "panel base, first band, slices, staged chunks, warps per block, packed header offsets")]
+    fn one_panel_form(&self, rows: usize, cols: usize, inputs: usize, stride: usize, weight: &DeviceVector<'_>, force: Option<Option<usize>>) -> Result<Option<(u64, usize, usize, usize, usize, u64)>, String> {
         let admitted = if inputs == 1 { few_product::one_panel_admitted(rows, cols) } else { few_product::one_panel_rows_admitted(rows, cols, inputs) };
         let sms = self.multiprocessor_count().max(1);
         let bands = rows.div_ceil(16);
-        let plan = |(data, first_band, slices): (u64, usize, usize), given: Option<usize>| -> Option<(u64, usize, usize, usize, usize)> {
+        let plan = |(data, first_band, slices, offs): (u64, usize, usize, u64), given: Option<usize>| -> Option<(u64, usize, usize, usize, usize, u64)> {
             let chunks = cols / crate::bf16_panels::CHUNK_COLS;
             if !matches!(slices, 1 | 4 | 6 | 8) || !chunks.is_multiple_of(slices) { return None; }
             let warps = if slices > 1 {
@@ -134,11 +143,11 @@ impl<'a> Backend<'a> {
                 }
                 found?
             };
-            Some((data, first_band, slices, part_chunks, warps))
+            Some((data, first_band, slices, part_chunks, warps, offs))
         };
         match force {
             Some(given) => {
-                let found = self.panel_at(weight, cols).filter(|_| admitted).ok_or("one-row panels: no registered panel form for these rows")?;
+                let found = self.panel_at_offs(weight, cols).filter(|_| admitted).ok_or("one-row panels: no registered panel form for these rows")?;
                 Ok(Some(plan(found, given).ok_or("one-row panels: no staged part fits the shared budget")?))
             }
             None => {
@@ -148,12 +157,13 @@ impl<'a> Backend<'a> {
         }
     }
     /// The words of a Vade-BF11-BP panel launch (`word 7` in `1..=4`) and its grid.
-    fn one_panel_command(command: &mut Command, rows: usize, inputs: usize, (data, first_band, slices, part_chunks, warps): (u64, usize, usize, usize, usize)) -> [u32; 5] {
-        let mode = match slices { 8 => 3, 6 => 4, 4 => 2, _ => 1 };
+    fn one_panel_command(command: &mut Command, rows: usize, inputs: usize, (data, first_band, slices, part_chunks, warps, offs): (u64, usize, usize, usize, usize, u64)) -> [u32; 5] {
+        let mode = match slices { 8 if inputs <= 4 => 4, 8 => 3, 4 => 2, _ => 1 };
         command.word(7, mode);
         command.word(few_product::ONE_PANEL_WORD, data);
         command.word(few_product::ONE_PANEL_WORD + 1, first_band as u64);
         command.word(few_product::ONE_PART_WORD, part_chunks as u64);
+        command.word(few_product::ONE_OFFS_WORD, offs);
         let blocks = if slices > 1 { rows.div_ceil(16) } else { rows.div_ceil(16 * warps) };
         let shared = few_product::one_panel_shared_slices(inputs, part_chunks, slices);
         [blocks as u32, 1, 1, (warps * 32) as u32, shared as u32]

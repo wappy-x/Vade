@@ -20,7 +20,7 @@ pub(crate) fn validate(path: &std::path::Path) -> Result<bool> {
 }
 
 pub(super) fn render(messages: &[Message], options: &Options, current_date: bool) -> Result<Output> {
-    if messages.is_empty() || messages.len() > 4096 { return Err(err("Llama chat requires 1..4096 messages")); }
+    if messages.is_empty() { return Err(err("chat requires at least one message")); }
     if !options.tools.is_empty() || messages.iter().any(|m| m.role == Role::Tool || !m.tool_calls.is_empty()) {
         return Err(err("Llama tool chat is not yet supported"));
     }

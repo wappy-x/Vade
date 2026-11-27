@@ -7,8 +7,12 @@ const TRANSPORT: &str = "One Spark needs no fabric or RDMA; linked Sparks use RD
 const GPU_BUSY: &str = "Only a running compute app or power draw of at least 30 W makes a GPU busy; a stale utilization reading is reported and never blocks.";
 const DRY_RUN: (&str, &str) = ("--dry-run", "Show what would happen; change nothing");
 const API_KEY: (&str, &str) = ("--api-key-file PATH", "Bearer credential file (or VADE_API_KEY_FILE)");
-const CONTEXT: (&str, &str) = ("--context N", "Context window in tokens, 4096 or more (Inkling default 524288; FP4-Local 4096..262144, default 32768)");
-const OUTPUT: (&str, &str) = ("--output N", "Output limit in tokens (Inkling default 16384 up to context; FP4-Local 1024..16384, default 8192)");
+const CONTEXT: (&str, &str) = ("--context N", "Context window in tokens, 4096 or more (Inkling default 524288; FP4-Local default 32768; hardware admission decides ceiling)");
+const OUTPUT: (&str, &str) = ("--output N", "Output limit in tokens, up to context (Inkling default 16384; FP4-Local default 8192)");
+const BIND: (&str, &str) = ("--bind ADDR", "HTTP listen socket address (for example 0.0.0.0:18080; default 127.0.0.1:<port>)");
+const DISK_CACHE_DIR: (&str, &str) = ("--disk-cache-dir PATH", "Persistent NVMe disk prefix cache directory (Inkling default $VADE_HOME/cache/prefix)");
+const DISK_CACHE_BYTES: (&str, &str) = ("--disk-cache-bytes N", "Disk prefix cache budget in bytes (default hardware-derived NVMe budget)");
+const NO_DISK_CACHE: (&str, &str) = ("--no-disk-cache", "Disable persistent NVMe disk prefix cache");
 /// `vade up`: every start it can make. FP4-Local takes 0..3. Inkling 2 Mini takes 0..7 (default 7).
 /// A two-Spark text service takes 0..7 and loads 3 when unset.
 const MTP: (&str, &str) = ("--mtp N", "Drafting depth (Inkling 0..7, default 7; FP4-Local 0..3, engine chooses; controller FP8 passes 2; 0 turns drafting off). From a controller with --diagnostic-unqualified-text, a two-Spark text service takes 0..7 and loads 3 when this and MTP are unset; a one-Spark plan uses its checkpoint default");
@@ -115,7 +119,7 @@ fn page(command: &str) -> Option<Page<'static>> {
         "launch" => Page {
             summary: "Install if needed, start Vade on this Spark, then open chat.",
             usage: &["vade launch [MODEL] [OPTIONS]"],
-            options: &[CONTEXT, OUTPUT, MTP_LOCAL, ("--memory-bytes N", "Memory budget for this Spark, in bytes"), ("--cache-bytes 0", "Turn the retained prompt cache off"), DRY_RUN],
+            options: &[CONTEXT, OUTPUT, MTP_LOCAL, BIND, DISK_CACHE_DIR, DISK_CACHE_BYTES, NO_DISK_CACHE, ("--memory-bytes N", "Memory budget for this Spark, in bytes"), ("--cache-bytes 0", "Turn the retained prompt cache off"), DRY_RUN],
             examples: &["vade launch inkling", "vade launch", "vade launch --context 262144 --output 16384", "vade launch --dry-run"],
             notes: &[
                 "With inkling (or inkling-2-mini), starts Inkling 2 Mini on this Spark with 524288 context (up to the checkpoint limit), 16384 output, MTP 7 drafting and prompt cache on. Checks ~/models/thinkingmachines/Inkling-2-Mini first, then the read-only Hugging Face cache.",
@@ -133,29 +137,29 @@ fn page(command: &str) -> Option<Page<'static>> {
             options: &[
                 ("MODEL", "Optional short alias: inkling (Inkling 2 Mini) or qwen (Qwen3.8 FP4-Local)"),
                 ("--fp4-local", "Qwen3.8 Flash-Next FP4-Local (the default without MODEL; optional)"),
-                ("--fp8", "Qwen3.8 Flash-Next FP8 on 2 or 4 Sparks; 6 Sparks start but are not covered (older spelling: --fp8-legacy): context 131072, output 65536 (or the context if smaller), drafting depth 2; output limit up to 262144"),
+                ("--fp8", "Qwen3.8 Flash-Next FP8 on 2 or 4 Sparks; 6 Sparks start but are not covered (older spelling: --fp8-legacy): context 131072, output 65536 (or the context if smaller), drafting depth 2"),
                 ("--sparks a,b", "The Sparks as you type them after ssh, in any order. Vade reads the cables and sets them up"),
-                ("--sparks N", "How many Sparks of your setup to start, from 1 to 24"),
+                ("--sparks N", "How many Sparks of your setup to start (1 or more)"),
                 ("--link FROM:TO=ADDR", "With --sparks a,b: FROM's own address on its cable to TO, to override what Vade reads"),
                 ("--hosts a,b", "Machines of your config, in cable order; this never changes the setup"),
-                ("--replicas N", "2..16 independent one-Spark servers (FP4-Local, or a diagnostic text plan that declares one Spark) behind a local gateway"),
-                ("--pairs", "With --replicas 2..12: N two-Spark tensor-split servers on 2N Sparks instead"),
-                MTP, CONTEXT, OUTPUT,
-                ("--chats N", "Concurrent FP8 chats, 1..32 (controller)"),
+                ("--replicas N", "2 or more independent servers (Inkling, FP4-Local, or paired FP8) behind a local gateway"),
+                ("--pairs", "With --replicas N: N two-Spark tensor-split servers on 2N Sparks instead"),
+                MTP, CONTEXT, OUTPUT, BIND, DISK_CACHE_DIR, DISK_CACHE_BYTES, NO_DISK_CACHE,
+                ("--chats N", "Concurrent FP8 chats, 1 or more (controller)"),
                 ("--memory-bytes N", "Memory budget per rank, in bytes"),
-                ("--cache-bytes N", "FP8 retained prompt cache, in bytes; 0 disables it. Local FP4, Inkling and --diagnostic-unqualified-text accept only 0 (prompt cache is on by default)"),
+                ("--cache-bytes N", "FP8 retained prompt cache, in bytes; 0 disables it. Local FP4 and Inkling accept only 0 (prompt cache is on by default)"),
                 ("--decode-fuse MODE", "on for one Spark by default; off disables the decode kernel chain"),
-                ("--diagnostic-unqualified-text", "Unqualified text diagnostics on loopback only; default off"),
+                ("--diagnostic-unqualified-text", "Legacy no-op for Inkling; enables two-Spark unqualified text diagnostics"),
                 ("--fast-prompts", "Older option, kept for scripts; it has no effect"),
                 DRY_RUN,
             ],
-            examples: &["vade up inkling", "vade up inkling --context 1048576", "vade up", "vade up --sparks spark-a,spark-b,spark-c,spark-d", "VADE_CONFIG=cluster.conf vade up --sparks 2"],
+            examples: &["vade up inkling", "vade up inkling --bind 0.0.0.0:18080", "vade up inkling --context 1048576", "vade up", "vade up --sparks spark-a,spark-b,spark-c,spark-d", "VADE_CONFIG=cluster.conf vade up inkling --replicas 2"],
             notes: &[
-                "vade up inkling starts Inkling 2 Mini on one Spark with context 524288 (up to the checkpoint limit with --context), output 16384 (up to context), drafting depth 7 (--mtp 0 disables drafting) and prompt cache on (--cache-bytes 0 disables it). Checks ~/models/thinkingmachines/Inkling-2-Mini first, then the read-only Hugging Face Hub cache.",
+                "vade up inkling starts Inkling 2 Mini on one Spark with context 524288 (up to the checkpoint limit with --context), output 16384 (up to context), drafting depth 7 (--mtp 0 disables drafting), RAM prompt cache on (--cache-bytes 0 disables it), and persistent NVMe disk prefix cache on under $VADE_HOME/cache/prefix (--no-disk-cache disables it). Checks ~/models/thinkingmachines/Inkling-2-Mini first, then the read-only Hugging Face Hub cache.",
                 "Default: Qwen3.8 Flash-Next FP4-Local on one Spark.",
                 crate::config::FP4_SPARKS,
                 crate::config::FP8_SPARKS,
-                "--sparks a,b is all you need for 1 to 24 Sparks. Vade checks each Spark over SSH, reads the cables, prints the chain, copies itself to each Spark and starts them. Type the Sparks in any order. Each name is what you type after ssh, or user@address.",
+                "--sparks a,b checks each Spark over SSH, reads the cables, prints the chain, copies itself to each Spark and starts them. Type the Sparks in any order. Each name is what you type after ssh, or user@address.",
                 "A new list replaces the last setup: one line says so, the old file moves aside, and a running engine stops first. The same Sparks in the same order start with no new setup. After that, vade up alone starts the same Sparks, vade down stops them and vade chat opens a chat.",
                 "Local up and launch reuse saved limits. FP4-Local starts with context 32768 and output 8192 (or the context if smaller). A memory refusal lowers a default or saved context to a smaller size from 32768, 16384, 8192 and 4096. The first size that starts is saved. A refused explicit --context is an error. Local --chats and positive --cache-bytes are refused; --cache-bytes 0 disables retention.",
                 "Controller FP4 defaults match local ones on one Spark: context 32768, output 8192 (or the context if smaller). On 2 or more Sparks in one group, a chain or a pair, the default context is 131072; if it does not fit in memory, up falls to 32768 and says so. --context 262144 requests a larger context. The engine still sets the chat count from context and memory.",
@@ -487,23 +491,22 @@ mod tests {
         assert!(up.contains("vade up --sparks 1 --diagnostic-unqualified-text") && up.contains("7 for Inkling 2 Mini"), "{up}");
         assert!(!up.contains("GLM"), "{up}");
         let parse = |args: &str| crate::cli::parse(&args.split(' ').map(str::to_owned).collect::<Vec<_>>());
-        assert!(parse("up --mtp 3").is_ok() && parse("up --mtp 4").is_err());
+        assert!(parse("up --fp4-local --mtp 3").is_ok() && parse("up --fp4-local --mtp 4").is_err());
         assert!(parse("up inkling --mtp 7").is_ok() && parse("up inkling --mtp 8").is_err());
         assert!(parse("up --diagnostic-unqualified-text --mtp 7").is_ok() && parse("up --diagnostic-unqualified-text --mtp 8").is_err());
     }
     #[test]
     fn help_and_errors_give_the_same_spark_counts() {
-        use crate::config::{FP4_SPARKS, FP8_SPARKS, MAX_FP4_SPARKS};
+        use crate::config::{FP4_SPARKS, FP8_SPARKS};
         // The wrapped help page, with its line breaks taken out.
         let up = help(Some("up")).split_whitespace().collect::<Vec<_>>().join(" ");
         for text in [FP4_SPARKS, FP8_SPARKS] { assert!(up.contains(text), "{text}:\n{up}"); }
-        assert!(FP4_SPARKS.contains(&format!("3 to {MAX_FP4_SPARKS} Sparks")));
-        assert!(up.contains(&format!("How many Sparks of your setup to start, from 1 to {MAX_FP4_SPARKS}")));
+        assert!(FP4_SPARKS.contains("3 or more Sparks"));
+        assert!(up.contains("How many Sparks of your setup to start (1 or more)"));
         let parse = |args: &[&str]| crate::cli::parse(&args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>());
-        let beyond = (MAX_FP4_SPARKS + 1).to_string();
-        let error = parse(&["up", "--sparks", &beyond]).unwrap_err();
-        assert!(error.contains(&format!("from 1 to {MAX_FP4_SPARKS},")), "{error}");
-        assert!(parse(&["up", "--sparks", &MAX_FP4_SPARKS.to_string()]).is_ok());
+        let error = parse(&["up", "--sparks", "0"]).unwrap_err();
+        assert!(error.contains("positive whole number"), "{error}");
+        assert!(parse(&["up", "--sparks", "32"]).is_ok());
         for page in [Some("up"), Some("setup")] {
             assert!(!help(page).contains("1..24") && !help(page).contains("1 to 64"), "{page:?}");
         }

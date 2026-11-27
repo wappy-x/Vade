@@ -350,20 +350,13 @@ port, the short IPv6 form. A pattern or a path never loads. A model tool can
 write files in the workspace, and a project can ship hidden files, so chat
 does not use the file, and `4` cannot save, when the Vade home is anywhere
 inside the workspace, at any depth and under any name; it says so when it
-starts. A home path through a project folder is refused too, also through a
-link outside the workspace that points into it, and also when it names the
-workspace by another name of the same folder. For each read or save of
-`allowed.json`, `trust.json` or the user `permissions.json`, Vade opens the
-home folder once, walks up from that open folder by `..` and compares device
-and inode with the workspace folder, held open for the session; then it reads
-and writes the file through that same open folder. So any name that the
-system resolves (`/System/Volumes/Data`, `/.vol`, letter case, links, `..`)
-is seen, and a name changed after the check changes nothing. Not seen: a
-hard-linked folder or a Linux bind mount of a folder below the workspace
-(each has its own `..`), and a disk whose inode numbers do not name one
-folder for sure (some network and FUSE disks). The `4` save checks the
-home again. Only the default `~/.vade` is exempt when the workspace is the
-user's `HOME` folder.
+starts. A home path through a project folder is refused too, including through
+a symlink outside the workspace that points into it. For each read or save of
+`allowed.json`, `trust.json`, or user `permissions.json`, Vade verifies the
+canonical path against the canonical workspace root and opens the home folder
+through an anchored directory handle so later symlink swaps cannot redirect
+subsequent reads or writes. The `4` save checks the home again. Only the
+default `~/.vade` is exempt when the workspace is the user's `HOME` folder.
 Saved memory approval is off if the canonical workspace path is not UTF-8.
 Memory changes then need approval in each session, and `4` cannot save them.
 The notice after `4` gives a shell-quoted removal command with the selected

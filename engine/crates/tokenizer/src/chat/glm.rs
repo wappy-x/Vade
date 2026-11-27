@@ -25,7 +25,7 @@ pub(crate) fn format(messages: &[Message], options: &Options) -> Result<String> 
     Ok(render(messages, options)?.text)
 }
 pub(super) fn render(messages: &[Message], options: &Options) -> Result<Output> {
-    if messages.is_empty() || messages.len() > 4096 { return Err(err("chat item count limit exceeded")); }
+    if messages.is_empty() { return Err(err("chat requires at least one message")); }
     if !options.tools.is_empty() || !options.generation_prefix.is_empty() {
         return Err(err("GLM plain chat does not support tools or a forced generation prefix"));
     }

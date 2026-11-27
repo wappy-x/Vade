@@ -61,21 +61,66 @@ pub fn root() -> Result<PathBuf, String> {
     Ok(path)
 }
 
-/// The engine arguments of the local one-Spark start, and the line the start prints. FP4-Local: `--fp4-local` and
-/// the decode fuse, no line. A looped block checkpoint: its text service, which starts only behind
-/// `--diagnostic-unqualified-text` and passes `--mtp N` (the checkpoint's default depth — `7` for Inkling 2 Mini —
-/// when unset, or the validated explicit depth); whenever the start adds that option it also says so in plain words
-/// (`model::loop_preview_line`), and with no such line it does not add the option.
-pub(crate) fn local_start(ptx: &str, model: &Path, context: u32, port: &str, decode_fuse: bool, loop_text: bool, mtp: Option<u32>) -> Result<(Vec<String>, Option<String>), String> {
+/// The engine arguments of the local one-Spark start. FP4-Local passes `--fp4-local` and
+/// `--decode-fuse`. A looped block checkpoint (such as Inkling 2 Mini) starts as a first-class
+/// qualified HTTP service on `bind` with `--mtp N` (default `7` for Inkling 2 Mini) and optional
+/// persistent NVMe disk prefix cache flags (`--disk-cache-dir`, `--disk-cache-bytes`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn local_start(
+    ptx: &str,
+    model: &Path,
+    context: u32,
+    bind: &str,
+    decode_fuse: bool,
+    loop_text: bool,
+    mtp: Option<u32>,
+    disk_cache_dir: Option<&Path>,
+    disk_cache_bytes: Option<u64>,
+) -> Result<(Vec<String>, Option<String>), String> {
     let depth = if loop_text { mtp.unwrap_or_else(|| model::local_default_mtp(model)) } else { 0 };
-    let note = if loop_text { Some(model::loop_preview_line(model, depth).ok_or("This engine cannot bind this looped checkpoint for a preview start.")?) } else { None };
-    Ok((local_engine_args(ptx, &model.to_string_lossy(), context, port, decode_fuse, note.is_some(), depth), note))
+    if loop_text && engine_model::plan::inkling_index::inspect(model).is_err() {
+        return Err("This engine cannot bind this looped checkpoint.".into());
+    }
+    Ok((
+        local_engine_args(
+            ptx,
+            &model.to_string_lossy(),
+            context,
+            bind,
+            decode_fuse,
+            loop_text,
+            depth,
+            disk_cache_dir,
+            disk_cache_bytes,
+        ),
+        None,
+    ))
 }
-fn local_engine_args(ptx: &str, model: &str, context: u32, port: &str, decode_fuse: bool, loop_text: bool, depth: u32) -> Vec<String> {
-    let mut args: Vec<String> = vec!["0".into(), "1".into(), "127.0.0.1:0".into(), "127.0.0.1:0".into(), ptx.into(), model.into(),
-        context.to_string(), format!("127.0.0.1:{port}"), "0".into()];
+#[allow(clippy::too_many_arguments)]
+fn local_engine_args(
+    ptx: &str,
+    model: &str,
+    context: u32,
+    bind: &str,
+    decode_fuse: bool,
+    loop_text: bool,
+    depth: u32,
+    disk_cache_dir: Option<&Path>,
+    disk_cache_bytes: Option<u64>,
+) -> Vec<String> {
+    let bind_addr = if bind.contains(':') { bind.to_owned() } else { format!("127.0.0.1:{bind}") };
+    let mut args: Vec<String> = vec![
+        "0".into(), "1".into(), "127.0.0.1:0".into(), "127.0.0.1:0".into(), ptx.into(), model.into(),
+        context.to_string(), bind_addr, "0".into(),
+    ];
     if loop_text {
-        args.extend(["--diagnostic-unqualified-text".into(), "--mtp".into(), depth.to_string()]);
+        args.extend(["--mtp".into(), depth.to_string()]);
+        if let Some(dir) = disk_cache_dir {
+            args.extend(["--disk-cache-dir".into(), dir.to_string_lossy().into_owned()]);
+            if let Some(bytes) = disk_cache_bytes {
+                args.extend(["--disk-cache-bytes".into(), bytes.to_string()]);
+            }
+        }
     } else {
         args.extend(["--fp4-local".into(), "--decode-fuse".into(), if decode_fuse { "on" } else { "off" }.into()]);
     }
@@ -150,15 +195,31 @@ pub(crate) fn saved_settings() -> Result<Option<(PathBuf, Vec<(&'static str, Str
         Some(0) => "off (--mtp 0)".into(),
         Some(depth) => format!("depth {depth}"),
     };
-    Ok(Some((root.join("config"), vec![
+    let mut rows = vec![
         ("Model", config.model.display().to_string(), "model_path", config.model.to_string_lossy().as_ref().into()),
         ("Size", format!("{} bytes", config.model_bytes), "model_bytes", Value::Int(config.model_bytes as i64)),
         ("Context", format!("{} tokens", config.context), "context_tokens", Value::Int(config.context.into())),
         ("Output", format!("{} tokens", config.output), "output_tokens", Value::Int(config.output.into())),
-        ("Port", format!("{} on 127.0.0.1", config.port), "port", Value::Int(config.port.into())),
+        ("Port", format!("{} on {}", config.port, config.bind.map_or_else(|| "127.0.0.1".to_owned(), |addr| addr.ip().to_string())), "port", Value::Int(config.port.into())),
         ("Drafting", drafting, "mtp", config.mtp().map_or(Value::Null, |depth| Value::Int(depth.into()))),
         ("Sparks", "1 (this Spark)".into(), "sparks", Value::Int(1)),
-    ])))
+    ];
+    if model::loop_text(&config.model) {
+        let dir = config.effective_disk_cache_dir(&root);
+        let summary = crate::doctor::disk_cache_summary(
+            dir.as_deref(),
+            config.disk_cache_bytes,
+            config.no_disk_cache,
+            config.prefix_cache().ok().flatten().as_deref() == Some("0"),
+        );
+        rows.push((
+            "Disk cache",
+            summary,
+            "disk_cache_dir",
+            dir.map_or(Value::Null, |path| path.to_string_lossy().as_ref().into()),
+        ));
+    }
+    Ok(Some((root.join("config"), rows)))
 }
 
 /// Whether the legacy `vade run qwen3-8b` home has a setup or a running server.
@@ -243,8 +304,7 @@ pub fn run(command: Command, dry: bool) -> Result<(), String> {
         return Err("This installation uses vade run qwen3-8b; reuse that command, choose a fresh VADE_HOME for vade launch, or set VADE_CONFIG for controller up and its lifecycle commands.".into());
     }
     match &command {
-        Command::Up(options) => Config::validate_up_options(options)?,
-        Command::Launch(options) => Config::validate_options(options)?,
+        Command::Up(options) | Command::Launch(options) => Config::validate_up_options(options)?,
         _ => {}
     }
     if matches!(command, Command::Install | Command::Launch(_) | Command::Up(_))
@@ -348,7 +408,7 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
                     Some(repo) => model::named_alias_path(&self.home, repo, &self.root)
                         .map_or_else(|| model::loop_text(&config.model) == options.is_inkling(), |path| path == config.model),
                 });
-                let planned = saved.as_ref().map(|config| config.planned(options));
+                let planned = saved.as_ref().map(|config| config.planned(options, &self.home));
                 let context = if options.supplied_options.contains("--context") { format!("{} (explicit)", options.context) }
                     else if let Some(config) = &planned { format!("{} (saved; lowered only on engine refusal)", config.context) }
                     else { format!("{} (default; lowered only on engine refusal)", options.context) };
@@ -423,7 +483,7 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
                                     text::terminal_text(&config.model.to_string_lossy()), text::terminal_text(&requested.to_string_lossy())));
                             }
                         }
-                        (config.check_running_options(&options, record)?, false)
+                        (config.check_running_options(&options, record, &self.home)?, false)
                     } else {
                         let install_space = if installed.is_some() { 0 } else { INSTALL_SPACE };
                         let (model, identity) = if let Some(repo) = &options.model {
@@ -455,7 +515,7 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
                                 config
                             }
                         };
-                        config.apply(&options, &model, &identity)?;
+                        config.apply(&options, &model, &identity, &self.home)?;
                         if changed_model {
                             for name in ["model-manifest.sha256", "model-manifest.sha256.sizes"] {
                                 let path = self.root.join("state").join(name);
@@ -500,8 +560,12 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
                 };
                 if command != Command::Install {
                     // One line with what a client needs: where, how much context, how many Sparks.
+                    let where_line = match config.bind {
+                        Some(addr) if !addr.ip().is_loopback() => format!("{} (bind {addr})", config.endpoint()),
+                        _ => config.endpoint(),
+                    };
                     output::line(format_args!("{} ready in {}: {}, context {} tokens, output {}, 1 Spark.",
-                        if matches!(command, Command::Launch(_)) { "Launch" } else { "Up" }, elapsed(began.elapsed()), config.endpoint(), config.context, config.output))?;
+                        if matches!(command, Command::Launch(_)) { "Launch" } else { "Up" }, elapsed(began.elapsed()), where_line, config.context, config.output))?;
                 }
                 if matches!(command, Command::Up(_)) {
                     output::text(format_args!("{}", crate::status::next_steps(&[("Chat", &text::command("chat")), ("Stop", &text::command("down"))])))?;
@@ -914,8 +978,28 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
                 );
             }
             config.engine_env(&mut request);
-            let (mut args, note) = local_start(required(artifacts, "ptx")?, &config.model, config.context,
-                &config.port.to_string(), config.decode_fuse(), loop_text, config.mtp())?;
+            let disk_cache_dir = if loop_text && !disable_prompt_keep {
+                let dir = config.effective_disk_cache_dir(&self.root);
+                if let Some(path) = &dir {
+                    fs::create_dir_all(path).map_err(|error| {
+                        format!("Cannot create disk prefix cache directory {}: {error}.", path.display())
+                    })?;
+                }
+                dir
+            } else {
+                None
+            };
+            let (mut args, note) = local_start(
+                required(artifacts, "ptx")?,
+                &config.model,
+                config.context,
+                &config.bind_addr(),
+                config.decode_fuse(),
+                loop_text,
+                config.mtp(),
+                disk_cache_dir.as_deref(),
+                disk_cache_dir.as_ref().and(config.disk_cache_bytes),
+            )?;
             if disable_prompt_keep {
                 args.push("--no-prompt-keep".into());
             }

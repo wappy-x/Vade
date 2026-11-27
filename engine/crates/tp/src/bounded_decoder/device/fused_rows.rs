@@ -67,7 +67,7 @@ impl<'b, 'd> Device<'b, 'd> {
         let (rows, heads, kv_heads, view, extent) = (a.rows, a.heads, a.kv_heads, a.view, a.extent);
         let (head_dim, rel_dim) = (flash_window::FW_HEAD_DIM, flash_window::FW_REL_DIM);
         if !self.backend.resident_launches_active()
-            || rows == 0 || rows > flash_window::FW_SPLIT_ROWS_MAX
+            || rows == 0 || rows > flash_window::FW_ROWS_MAX
             || heads == 0 || heads > flash_window::FW_HEADS_MAX
             || kv_heads == 0 || kv_heads > heads || !heads.is_multiple_of(kv_heads)
             || heads / kv_heads > flash_window::FW_SPLIT_GROUP_MAX
@@ -76,6 +76,33 @@ impl<'b, 'd> Device<'b, 'd> {
             || s.row_pos_live.len() != rows
             || (!s.planes.is_empty() && (s.planes.len() != rows || s.delta.is_some())) {
             return Ok(None);
+        }
+        if !s.planes.is_empty() {
+            let mut max_run = 1usize;
+            let mut run_lens: Vec<usize> = Vec::new();
+            let mut r = 0usize;
+            while r < rows {
+                let (ka, va) = (s.planes[r].0.vector.device_address(), s.planes[r].1.vector.device_address());
+                let pos0 = s.row_pos_live[r].0;
+                if pos0 >= (1u64 << 40) { return Ok(None); }
+                let mut end = r + 1;
+                while end < rows
+                    && s.planes[end].0.vector.device_address() == ka
+                    && s.planes[end].1.vector.device_address() == va
+                    && s.row_pos_live[end].0 == pos0 + (end - r) as u64
+                {
+                    end += 1;
+                }
+                let len = end - r;
+                if len > max_run { max_run = len; }
+                run_lens.push(len);
+                r = end;
+            }
+            let (_, rows_per_cta) = flash_window::flash_window_split_q_groups_for(max_run, heads, kv_heads);
+            let total_groups: usize = run_lens.iter().map(|&len| len.div_ceil(rows_per_cta)).sum();
+            if total_groups > flash_window::FW_SPLIT_GROUPS_MAX {
+                return Ok(None);
+            }
         }
         let row_words = kv_heads * (head_dim / 2);
         let multi_straight = !s.planes.is_empty() && !s.is_ring;

@@ -107,6 +107,9 @@ resident_launch_moe_group_route   256     44            77824             0
 # four stages of 10,752 bytes in the same buffer). Measured 2026-11-25 (CUDA 13.0 ptxas): 120 registers, 0 stack,
 # 0 spill, 2 blocks a multiprocessor. Row = measured plus 4.
 resident_launch_plain_tc_big      256     124           49152             0
+# SM121a BF16 tensor-core MMA product over `bf16_panels` for 33..=128 input rows (kind 124, 128 or 256 threads: one warp a
+# 16-row band and 64-input half, 32 accumulators a lane, 2 dynamic `X` slabs). Cap 128 registers (`.maxnreg`), 0 spill.
+resident_launch_plain_tc_panel64  256     128                0             0
 # SM121a BF16 tensor-core fused causal/sliding-window attention (kind 105, 128 threads, BQ=64 BKV=32 D=128).
 # Measured (CUDA 13.0 ptxas): 236 regs, 37,120 shared, 0 stack, 0 spill, 2 blocks/SM (smem-bound).
 # Shared 37,120 -> 44,288 (2026-11-25): the relative table words of a key tile (16 x 96 words) are copied with the
@@ -116,10 +119,13 @@ resident_launch_plain_tc_big      256     124           49152             0
 # (`.maxnreg`, build-kernels/src/bin/inkling.rs), 0 stack, 0 spill, 2 blocks/SM (12 warps/SM).
 resident_launch_flash_window      192    168            48640             0
 # GQA-packed Split-KV SM121a BF16 tensor-core decode/verify attention (kinds 118..=120, 0 stack, 0 spill).
-# Measured 2026-11-25 (CUDA 13.0 ptxas): split16 168 regs (3 blk/SM), split32 230 regs (2 blk/SM), reduce 28 regs (12 blk/SM).
-resident_launch_flash_window_split16 128 172            26496             0
-resident_launch_flash_window_split32 128 234            33536             0
-resident_launch_flash_window_reduce  128  32                0             0
+# Measured 2026-11-27 (CUDA 13.0 ptxas, W5-FLASH-SPLIT): chat-grouped multi-chat packing, 48-row 2-barrier split32
+# with single-kb ping-pong & BF16x2-packed RelBias, L2-banded split-reduce with evict_first KV & cached ld.global.nc
+# reloads, vectorized HeadClip, coalesced T staging + fast_rel: split16 119 regs (25,248 B, 4 blk/SM), split32 170 regs
+# (33,440 B, 3 blk/SM), reduce 40 regs (0 B, 12 blk/SM). Ceilings: measured + 4 (reduce kept at 40).
+resident_launch_flash_window_split16 128 123            25248             0
+resident_launch_flash_window_split32 128 174            33440             0
+resident_launch_flash_window_reduce  128  40                0             0
 # SM121a BF16 tensor-core MMA packed MoE product (kind 106, 256 threads, BM=64 BN=128 BK=32, 2-stage XOR-swizzled
 # smem + 8,192 B weight table = 32,768 shared bytes, 0 stack, 0 spill). Measured: 80 regs, 3 blocks/SM.
 # 84 -> 100 (2026-11-24, measured 96 plus 4, 0 spill): the next chunk's global words are held in registers one step
@@ -185,11 +191,14 @@ resident_launch_plain_packed_rows 256  132            0                 0
 # 2026-11-23: 22 registers, 0 shared, 0 stack, no spill. The row = the measured plus 4.
 resident_launch_embed_rows     256      26             0                 0
 inkling_markov_fold             128      44             0                 0
-# Draft lanes (2026-11-25, CUDA 13.0 ptxas): two-stage parallel FoldReduce (64 B shared) + gated FoldFinish +
-# vectorized AddRound + fused MarkovStaticBase/MarkovPrep/MarkovStep + FlashAttn; measured 59 regs, 0 stack, 0 spill (8 blk/SM).
-inkling_draft_lanes             128      64            64                 0
+# Draft lanes (2026-11-27, CUDA 13.0 ptxas): GQA-packed 256-thread BF16 tensor-core Split-KV FlashAttnBatch
+# (27,776 B dynamic shared, 3 blk/SM = 24 warps/SM, 1x DRAM KV reads across GQA heads + draft rows), dynamic-SMEM
+# FoldReduce (64 B dynamic, 0 static), read-ahead Split-KV merges, vectorized AddRound, and fused Markov ops;
+# capped at 64 regs (`.maxnreg`), 0 static shared, 0 stack, 0 spill.
+inkling_draft_lanes             256      64             0                 0
 # Draft panel and head/fold: zero-stack scalar ring, quad-interleaved OMMA.SF scales, hoisted .L2::256B policy +
-# GB10 24 MiB L2 tail-pinning on fold, exact chunks==4 & zero tail over-fetch, gated early stop, and single-pass
-# 2-tile (`inputs = 9..=16`) NVFP4 projection; measured 72 regs (7 blk/SM) / 64 regs capped (8 blk/SM), 0 stack, 0 spill.
+# GB10 24 MiB L2 tail-pinning on fold & HeadFold bias prefetch, 32-thread small-grid dispatch, exact chunks==4 &
+# zero tail over-fetch, gated early stop, and single-pass 2-tile (`inputs = 9..=16`) NVFP4 projection;
+# measured 76 regs (6 blk/SM) / 64 regs capped (8 blk/SM), 0 stack, 0 spill.
 inkling_draft_panel             128      76             0                 0
 inkling_draft_head_fold         128      68             0                 0

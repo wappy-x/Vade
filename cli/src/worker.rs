@@ -403,7 +403,23 @@ fn start(store: &Store, request: &Fields) -> Result<Fields, String> {
     check_hash(&ptx, required(request, "ptx_sha256")?)?;
     let engine_identity = fs::canonicalize(&engine)
         .map_err(|_| "Engine binary is missing. Run vade install.".to_string())?;
-    let arguments = arguments(request)?;
+    let mut arguments = arguments(request)?;
+    let mut expanded_args: Vec<(usize, String)> = Vec::new();
+    for i in 0..arguments.len() {
+        if arguments[i] == "--disk-cache-dir"
+            && let Some(raw) = arguments.get(i + 1)
+        {
+            let expanded = expanded_path(raw)?;
+            fs::create_dir_all(&expanded).map_err(|error| {
+                format!("Cannot create disk prefix cache directory {}: {error}.", expanded.display())
+            })?;
+            let text = expanded.to_string_lossy().into_owned();
+            expanded_args.push((i + 1, text));
+        }
+    }
+    for (index, value) in &expanded_args {
+        arguments[*index] = value.clone();
+    }
     let expected_command = command_bytes(&engine, &arguments);
     let mut environment = environment(request)?;
     persistent_cuda_cache(&store.root, required(request, "ptx_sha256")?, &mut environment)?;
@@ -498,6 +514,9 @@ fn start(store: &Store, request: &Fields) -> Result<Fields, String> {
     };
     let result = (|| {
         let mut launch = request.clone();
+        for (index, value) in &expanded_args {
+            launch.insert(format!("arg.{index}"), value.clone());
+        }
         launch.insert("engine".into(), engine.to_string_lossy().into_owned());
         launch.insert(
             "state_dir".into(),
@@ -552,21 +571,18 @@ fn start(store: &Store, request: &Fields) -> Result<Fields, String> {
 
 fn owns_listener(pid: u32, port: u16) -> Result<bool, String> {
     // Socket inventory is readiness evidence only; it never selects signal targets.
-    let table =
-        fs::read_to_string("/proc/net/tcp").map_err(|_| "Cannot inspect loopback listeners.")?;
-    let address = format!("0100007F:{port:04X}");
-    let inodes = table
-        .lines()
-        .skip(1)
-        .filter_map(|line| {
+    let port_suffix = format!(":{port:04X}");
+    let mut inodes = BTreeSet::new();
+    let tcp = fs::read_to_string("/proc/net/tcp").map_err(|_| "Cannot inspect listeners.")?;
+    let tcp6 = fs::read_to_string("/proc/net/tcp6").ok();
+    for table in std::iter::once(tcp.as_str()).chain(tcp6.as_deref()) {
+        for line in table.lines().skip(1) {
             let columns = line.split_whitespace().collect::<Vec<_>>();
-            if columns.len() > 9 && columns[1] == address && columns[3] == "0A" {
-                Some(format!("socket:[{}]", columns[9]))
-            } else {
-                None
+            if columns.len() > 9 && columns[1].ends_with(&port_suffix) && columns[3] == "0A" {
+                inodes.insert(format!("socket:[{}]", columns[9]));
             }
-        })
-        .collect::<BTreeSet<_>>();
+        }
+    }
     let descriptors = fs::read_dir(format!("/proc/{pid}/fd"))
         .map_err(|_| "Cannot inspect owned server sockets.")?;
     for entry in descriptors {

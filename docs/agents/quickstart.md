@@ -131,7 +131,7 @@ First, find out whether this shell already finds `vade`:
 vade --version
 ```
 
-- **Expected output.** A line that starts with `vade` and a version number, such as `vade 0.2.0-rc.28 (107f396)`.
+- **Expected output.** A line that starts with `vade` and a version number, such as `vade 0.2.0-rc.29 (080cedf)`.
 - **Exit code.** 0 when `vade` is on `PATH`. Then go to step 3.
 
 If `vade` is not found, the shell prints `vade: command not found` and the exit code is 127. Read the installer's last advice line:

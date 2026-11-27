@@ -44,7 +44,8 @@ fn output_parser_profile(request: &protocol::Request, limits: &Limits, hybrid: b
     }
     let bounds = chat_output::Limits {
         total_bytes: limits.output_bytes,
-        tool_call_bytes: (64 * 1024).min(limits.output_bytes),
+        tool_call_bytes: limits.output_bytes,
+        tool_calls: usize::MAX,
         ..chat_output::Limits::default()
     };
     let parser = chat_output::Parser::new(bounds, names)?;
@@ -265,11 +266,13 @@ pub(crate) fn anthropic_error(status: u16, body: &str) -> (u16, String) {
 
 /// Exact Host names and origins prevent rebound DNS names from reaching the
 /// local service. Loopback Host ports may differ when using an SSH tunnel.
-/// Wildcard bind addresses are never accepted as Host names.
+/// Wildcard binds (`0.0.0.0`, `[::]`) allow any valid HTTP Host authority
+/// unless `allowed_hosts` restricts them explicitly; Origin checks still apply.
 pub(crate) struct AccessPolicy {
     credential: Option<crate::auth::ApiKey>,
     hosts: Vec<String>,
     origins: Vec<String>,
+    allow_any_host: bool,
 }
 impl AccessPolicy {
     pub fn new(address: std::net::SocketAddr, limits: &Limits) -> Result<Self, String> {
@@ -291,7 +294,8 @@ impl AccessPolicy {
         }
         for host in &limits.allowed_hosts { hosts.push(Self::authority(host)?); }
         for origin in &limits.allowed_origins { origins.push(Self::origin(origin)?); }
-        Ok(Self { hosts, origins, credential: limits.api_key.clone() })
+        let allow_any_host = address.ip().is_unspecified() && limits.allowed_hosts.is_empty();
+        Ok(Self { hosts, origins, credential: limits.api_key.clone(), allow_any_host })
     }
     fn authority(text: &str) -> Result<String, String> {
         if text.is_empty() || text.len() > 255
@@ -339,7 +343,7 @@ impl AccessPolicy {
             }
         };
         let loopback = matches!(name, "localhost" | "127.0.0.1" | "::1");
-        if !loopback && !self.hosts.contains(&authority) {
+        if !loopback && !self.allow_any_host && !self.hosts.contains(&authority) {
             return Err("Host is not allowed".into());
         }
         if let Some(origin) = origin

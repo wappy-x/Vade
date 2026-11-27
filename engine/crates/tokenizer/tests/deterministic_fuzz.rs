@@ -237,7 +237,11 @@ fn invalid_utf8_stream_bytes_match_lossy_text() {
 #[test]
 fn documented_input_limit_returns_an_error() {
     let text = "a".repeat(1024 * 1024 + 1);
-    for t in [glm(),hybrid()] {
+    for mut t in [glm(),hybrid()] {
+        // Default limits allow >1 MiB inputs cleanly without arbitrary rejection.
+        assert_eq!(t.encode_ordinary(&text).unwrap().len(), text.len());
+        // An explicit limit still returns a structured error without panicking.
+        t.set_limits(engine_tokenizer::Limits { max_input_bytes: 1024 * 1024, max_tokens: 1024 * 1024 }).unwrap();
         for special in [false,true] {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 if special { t.encode(&text) } else { t.encode_ordinary(&text) }

@@ -178,8 +178,18 @@ pub struct Session {
     pub fast_prompts: bool,
     pub memory_bytes: Option<u64>,
     pub cache_bytes: Option<u64>,
+    /// Optional explicit HTTP bind address (gateway bind for replicas, engine bind otherwise).
+    pub bind: Option<String>,
+    /// Optional persistent NVMe disk prefix cache directory for looped checkpoints.
+    pub disk_cache_dir: Option<String>,
+    /// Optional persistent NVMe disk prefix cache byte budget.
+    pub disk_cache_bytes: Option<u64>,
+    /// Whether persistent NVMe disk prefix caching was explicitly disabled.
+    pub no_disk_cache: bool,
     /// The engine's decode_fuse option, passed in the engine arguments.
     pub decode_fuse: bool,
+    /// Looped block checkpoint (such as Inkling 2 Mini): runs as a first-class one-Spark HTTP service.
+    pub loop_service: bool,
     pub diagnostic_unqualified_text: bool,
     /// The text service's default depth met a model with no drafting layer, or too little free memory, so this
     /// start runs at depth 0 (`mtp` is 0 and is passed to the engine). Nobody named that depth: the restart command
@@ -217,8 +227,8 @@ impl Session {
                 "Output must fit in context. Set --output no larger than --context.".into(),
             );
         }
-        if options.chats.is_some_and(|chats| !(1..=32).contains(&chats)) {
-            return Err("Set --chats to a whole number from 1 to 32.".into());
+        if options.chats.is_some_and(|chats| chats == 0) {
+            return Err("Set --chats to a positive whole number.".into());
         }
         let memory_bytes = match options.memory_bytes {
             Some(bytes) => Some(bytes),
@@ -233,24 +243,35 @@ impl Session {
         {
             return Err("Memory must be positive and cache must be smaller than memory.".into());
         }
-        // The diagnostic text service keeps prompts by default and sizes that cache itself. 0 is its off switch
-        // (`engine_args`); a size above 0 would be saved and shown but never used, so it is refused.
-        if options.diagnostic_unqualified_text && cache_bytes.is_some_and(|bytes| bytes > 0) {
-            return Err("With --diagnostic-unqualified-text the prompt cache sizes itself: use --cache-bytes 0 (or FLASH_SERVE_KV_BYTES=0) to turn it off, or give no cache size.".into());
-        }
         let machines = config.selected(options)?;
         // Each group of Sparks serves one model: every machine, or one replica.
         let group = if options.replicas { options.replica_sparks.max(1) } else { machines.len() };
-        // A group of two Sparks takes main's steps: the two-Spark wire, its default depth, no plan read. Only a
-        // looped checkpoint whose config is on this computer is refused here; on a Spark the engine refuses it.
-        // Any other group reads the checkpoint plan. A plan that is not here yet stays the two-Spark wire.
-        // A dry run that got no reply leaves the plan unread: do not invent that wire, and do not refuse a
-        // Spark count for it. Refuse any other known group here, before a remote start.
         use crate::text_service::TextService;
-        let service = if !options.diagnostic_unqualified_text {
+        let local_plan = if group == 1 {
+            crate::text_service::from_local(&machines)?
+        } else {
             None
+        };
+        let local_loop = local_plan.is_some_and(TextService::is_alone)
+            || crate::text_service::any_local_alone(&machines);
+        let inkling_hint = options.is_inkling()
+            || config.model.to_ascii_lowercase().contains("inkling")
+            || options.checkpoint_service.is_some_and(TextService::is_alone)
+            || local_loop;
+        let service = if !options.diagnostic_unqualified_text && !inkling_hint {
+            None
+        } else if !options.diagnostic_unqualified_text {
+            // First-class looped checkpoint (for example Inkling 2 Mini): one Spark per group.
+            let svc = options
+                .checkpoint_service
+                .or(local_plan.filter(|s| s.is_alone()))
+                .unwrap_or_else(|| TextService::alone_with_max_depth(crate::text_service::MAX_DIAGNOSTIC_DEPTH));
+            if group != svc.sparks {
+                return Err(svc.group_refusal());
+            }
+            Some(svc)
         } else if group == 2 {
-            if options.checkpoint_service.is_some_and(TextService::is_alone) || crate::text_service::any_local_alone(&machines) {
+            if options.checkpoint_service.is_some_and(TextService::is_alone) || local_loop {
                 return Err(TextService::alone().group_refusal());
             }
             Some(TextService::pair())
@@ -258,14 +279,21 @@ impl Session {
             // Main's refusal, byte for byte, with no plan read, also in a dry run (REVSHARED-2 item a).
             return Err(TextService::pair().group_refusal());
         } else {
-            let read = match options.checkpoint_service {
-                Some(service) => Some(service),
-                None => crate::text_service::from_local(&machines)?,
-            };
+            let read = options.checkpoint_service.or(local_plan);
             if options.text_width_unread { read } else { Some(read.unwrap_or_else(TextService::pair)) }
         };
         if let Some(service) = service && group != service.sparks {
             return Err(service.group_refusal());
+        }
+        // The text service keeps prompts by default and sizes that cache itself. 0 is its off switch.
+        if (options.diagnostic_unqualified_text || service.is_some_and(TextService::is_alone))
+            && cache_bytes.is_some_and(|bytes| bytes > 0)
+        {
+            return Err(if options.diagnostic_unqualified_text && !service.is_some_and(TextService::is_alone) {
+                "--diagnostic-unqualified-text sizes its prompt cache automatically: use --cache-bytes 0 (or FLASH_SERVE_KV_BYTES=0) to turn it off, or omit the cache size.".into()
+            } else {
+                "This text service sizes its prompt cache automatically: use --cache-bytes 0 (or FLASH_SERVE_KV_BYTES=0) to turn it off, or omit the cache size.".into()
+            });
         }
         // A pair's depth is checked where main checks it (cli.rs); a one-Spark service checks its plan's max depth here.
         if let Some(service) = service && service.is_alone() && options.mtp_explicit && options.mtp > service.max_depth {
@@ -282,19 +310,39 @@ impl Session {
         } else {
             options.output
         };
-        if !is_loop_service && options.fp4_local && context > crate::cli::FP4_CONTEXT_LIMIT {
-            return Err("FP4-Local context is limited to 262144 tokens. Set --context 4096..262144.".into());
-        }
-        if !is_loop_service && options.fp4_local && output > crate::cli::FP4_OUTPUT_LIMIT {
-            return Err("FP4-Local output is limited to 16384 tokens. Set --output 1024..16384.".into());
-        }
         if output > context {
             return Err("Output must fit in context. Set --output no larger than --context.".into());
         }
+        let bind_addr = options.bind.or(config.bind);
+        let local_port = if options.replicas {
+            bind_addr.map_or(config.local_port, |addr| addr.port())
+        } else {
+            config.local_port
+        };
+        let serve_port = if !options.replicas {
+            bind_addr.map_or(config.serve_port, |addr| addr.port())
+        } else {
+            config.serve_port
+        };
+        let no_disk_cache = options.no_disk_cache
+            || (options.disk_cache_dir.is_none()
+                && options.disk_cache_bytes.is_none()
+                && config.disk_cache_dir.as_deref() == Some("off"));
+        let (disk_cache_dir, disk_cache_bytes) = if is_loop_service && !no_disk_cache && cache_bytes != Some(0) {
+            let dir = options
+                .disk_cache_dir
+                .clone()
+                .or_else(|| config.disk_cache_dir.clone().filter(|v| v != "off"))
+                .or_else(|| Some("~/.vade/cache/prefix".into()));
+            let bytes = options.disk_cache_bytes.or(config.disk_cache_bytes);
+            (dir, bytes)
+        } else {
+            (None, None)
+        };
         if machines.len() % group != 0 {
             return Err("Each pair needs two machines. Give --replicas N --pairs 2N machines.".into());
         }
-        if options.replicas && usize::from(u16::MAX - config.local_port) < machines.len() {
+        if options.replicas && usize::from(u16::MAX - local_port) < machines.len() {
             return Err("Replica tunnels need the local ports after local_port. Choose a lower local_port.".into());
         }
         if options.fp4_local && machines.len() > 2 && !manifest.supports_fp4_chain {
@@ -383,8 +431,10 @@ impl Session {
             build: manifest.engine_sha.clone(),
             cli_build: manifest.cli_sha.clone(),
             supports_output: manifest.supports_output,
-            mtp: if options.diagnostic_unqualified_text && !options.mtp_explicit { if options.draft_fall.is_some() {0} else {service.map(|item| item.default_depth).unwrap_or(options.mtp)} } else {options.mtp},
-            mtp_explicit: options.mtp_explicit || !options.fp4_local || (options.diagnostic_unqualified_text && service.is_some()),
+            mtp: if (options.diagnostic_unqualified_text || is_loop_service) && !options.mtp_explicit {
+                if options.draft_fall.is_some() { 0 } else { service.map(|item| item.default_depth).unwrap_or(options.mtp) }
+            } else { options.mtp },
+            mtp_explicit: options.mtp_explicit || !options.fp4_local || ((options.diagnostic_unqualified_text || is_loop_service) && service.is_some()),
             fp4_local: options.fp4_local,
             context,
             output,
@@ -393,11 +443,16 @@ impl Session {
             fast_prompts: options.fast_prompts,
             memory_bytes,
             cache_bytes,
-            decode_fuse: options.decode_fuse.unwrap_or(options.fp4_local && group == 1 && !options.diagnostic_unqualified_text),
-            diagnostic_unqualified_text: options.diagnostic_unqualified_text,
-            draft_fall: options.draft_fall.filter(|_| options.diagnostic_unqualified_text && !options.mtp_explicit),
-            local_port: config.local_port,
-            serve_port: config.serve_port,
+            bind: bind_addr.map(|addr| addr.to_string()),
+            disk_cache_dir,
+            disk_cache_bytes,
+            no_disk_cache,
+            decode_fuse: options.decode_fuse.unwrap_or(options.fp4_local && group == 1 && !options.diagnostic_unqualified_text && !is_loop_service),
+            loop_service: is_loop_service,
+            diagnostic_unqualified_text: options.diagnostic_unqualified_text && !is_loop_service,
+            draft_fall: options.draft_fall.filter(|_| (options.diagnostic_unqualified_text || is_loop_service) && !options.mtp_explicit),
+            local_port,
+            serve_port,
             ranks,
             replicas: options.replicas,
             replica_sparks: if options.replicas { group } else { 1 },
@@ -455,20 +510,41 @@ impl Session {
             "engine default".into()
         }
     }
+    /// The gateway bind address for replica mode (`--bind` or `127.0.0.1:<local_port>`).
+    pub fn gateway_bind(&self) -> String {
+        self.bind.clone().unwrap_or_else(|| format!("127.0.0.1:{}", self.local_port))
+    }
     /// The engine's positional arguments for the rank at `index`.
     pub fn engine_args(&self, index: usize) -> Vec<String> {
         let rank = &self.ranks[index];
         let (engine_rank, size) = self.engine_slot(index);
+        let serve_bind = if !self.replicas {
+            self.bind.clone().unwrap_or_else(|| format!("127.0.0.1:{}", self.serve_port))
+        } else {
+            format!("127.0.0.1:{}", self.serve_port)
+        };
         let mut args = vec![engine_rank.to_string(), size.to_string(),
             rank.listen.clone(), rank.next.clone(), rank.artifact.ptx.clone(),
             rank.machine.model_path.clone(), self.context.to_string(),
-            format!("127.0.0.1:{}", self.serve_port), "0".into()];
+            serve_bind, "0".into()];
+        if self.loop_service {
+            if self.cache_bytes == Some(0) {
+                args.push("--no-prompt-keep".into());
+            } else if let Some(dir) = &self.disk_cache_dir {
+                args.extend(["--disk-cache-dir".into(), dir.clone()]);
+                if let Some(bytes) = self.disk_cache_bytes {
+                    args.extend(["--disk-cache-bytes".into(), bytes.to_string()]);
+                }
+            }
+            if self.mtp_explicit { args.extend(["--mtp".into(), self.mtp.to_string()]); }
+            return args;
+        }
         if self.fp4_local && !self.diagnostic_unqualified_text { args.push("--fp4-local".into()); }
-        if self.diagnostic_unqualified_text {args.push("--diagnostic-unqualified-text".into());}
+        if self.diagnostic_unqualified_text { args.push("--diagnostic-unqualified-text".into()); }
         // The text service keeps prompts unless it is told not to, and it reads no cache size from its environment.
         // `--cache-bytes 0` (or FLASH_SERVE_KV_BYTES=0, or a saved 0) is this CLI's "cache off", and status says so:
         // every rank gets the engine's off switch, so that is what runs.
-        if self.diagnostic_unqualified_text && self.cache_bytes == Some(0) {args.push("--no-prompt-keep".into());}
+        if self.diagnostic_unqualified_text && self.cache_bytes == Some(0) { args.push("--no-prompt-keep".into()); }
         if self.mtp_explicit { args.extend(["--mtp".into(), self.mtp.to_string()]); }
         if !self.diagnostic_unqualified_text && (self.decode_fuse || size == 1) { args.extend(["--decode-fuse".into(), if self.decode_fuse { "on" } else { "off" }.into()]); }
         args
@@ -533,7 +609,12 @@ impl Session {
         ] {
             fields.insert(key.into(), value);
         }
-        if self.diagnostic_unqualified_text {fields.insert("diagnostic_unqualified_text".into(),"true".into());}
+        if self.loop_service { fields.insert("loop_service".into(), "true".into()); }
+        if self.diagnostic_unqualified_text { fields.insert("diagnostic_unqualified_text".into(), "true".into()); }
+        if let Some(bind) = &self.bind { fields.insert("bind".into(), bind.clone()); }
+        if let Some(dir) = &self.disk_cache_dir { fields.insert("disk_cache_dir".into(), dir.clone()); }
+        if let Some(bytes) = self.disk_cache_bytes { fields.insert("disk_cache_bytes".into(), bytes.to_string()); }
+        if self.no_disk_cache { fields.insert("no_disk_cache".into(), "true".into()); }
         if let Some(fall) = self.draft_fall {fields.insert("draft_fall".into(),fall.word().into());}
         if let Some(fingerprint) = &self.launch_fingerprint {
             fields.insert("launch_fingerprint".into(), fingerprint.clone());
@@ -599,7 +680,7 @@ impl Session {
         }
         let count: usize = number(&f, "count")?;
         let fp4_local = f.get("fp4_local").map(|value| boolean(value)).transpose()?.unwrap_or(false);
-        if !(if fp4_local { (1..=crate::config::MAX_FP4_SPARKS).contains(&count) } else { [2, 4, 6].contains(&count) }) {
+        if count == 0 {
             return Err(
                 "Ownership machine count is invalid. Keep the record for manual review.".into(),
             );
@@ -668,7 +749,12 @@ impl Session {
             fast_prompts: f.get("fast_prompts").map(|value| boolean(value)).transpose()?.unwrap_or(false),
             memory_bytes: f.get("memory_bytes").map(|_| number(&f, "memory_bytes")).transpose()?,
             cache_bytes: f.get("cache_bytes").map(|_| number(&f, "cache_bytes")).transpose()?,
+            bind: f.get("bind").cloned(),
+            disk_cache_dir: f.get("disk_cache_dir").cloned(),
+            disk_cache_bytes: f.get("disk_cache_bytes").map(|_| number(&f, "disk_cache_bytes")).transpose()?,
+            no_disk_cache: f.get("no_disk_cache").map(|value| boolean(value)).transpose()?.unwrap_or(false),
             decode_fuse: f.get("decode_fuse").map(|value| boolean(value)).transpose()?.unwrap_or(false),
+            loop_service: f.get("loop_service").map(|value| boolean(value)).transpose()?.unwrap_or(false),
             diagnostic_unqualified_text: f.get("diagnostic_unqualified_text").map(|value| boolean(value)).transpose()?.unwrap_or(false),
             draft_fall: f.get("draft_fall").map(|word| crate::cli::DraftFall::parse(word)).transpose()?,
             local_port: number(&f, "local_port")?,
@@ -686,13 +772,13 @@ impl Session {
             || !text::is_lower_hex(&session.cli_build, 40)
             || session.local_port == 0
             || session.serve_port == 0
-            || (session.replicas && (!session.fp4_local || usize::from(u16::MAX - session.local_port) < session.ranks.len()))
+            || (session.replicas && usize::from(u16::MAX - session.local_port) < session.ranks.len())
             || session.replica_sparks == 0
             || (session.replica_sparks > 1 && (!session.replicas || !session.ranks.len().is_multiple_of(session.replica_sparks)))
-            || session.mtp > if session.diagnostic_unqualified_text { crate::text_service::TextService::pair().max_depth } else { 3 }
+            || session.mtp > if session.diagnostic_unqualified_text || session.loop_service { crate::text_service::TextService::pair().max_depth } else { 3 }
             || session.context < 4096
-            || !((if session.diagnostic_unqualified_text {1} else {1024})..=session.context).contains(&session.output)
-            || session.chats.is_some_and(|chats| !(1..=32).contains(&chats))
+            || !(1..=session.context).contains(&session.output)
+            || session.chats == Some(0)
             || session.admitted_chats == Some(0)
             || (!session.supports_output && session.output != session.context.min(8192))
             || session.memory_bytes == Some(0)

@@ -32,19 +32,22 @@ fn depth(args: &[String], value: &str) -> bool {
 fn a_loop_checkpoint_starts_on_one_spark() {
     let mut f = with_config(1, "checkpoint", Some(LOOP));
     let manifest = f.app.manifest().unwrap();
-    let direct = Session::new(&f.app.config, &fp4_options(&["--sparks", "1", "--diagnostic-unqualified-text"]), &manifest, "a".repeat(64)).unwrap();
+    // Works cleanly WITHOUT --diagnostic-unqualified-text, and also accepts it as a backward-compatible no-op.
+    let direct = Session::new(&f.app.config, &fp4_options(&["--sparks", "1"]), &manifest, "a".repeat(64)).unwrap();
     assert_eq!((direct.group_len(), direct.topology(), direct.two_sparks()), (1, "path", false));
     assert_eq!((direct.mtp, direct.mtp_explicit, direct.context, direct.output), (0, true, 524_288, 16384));
+    assert!(direct.loop_service);
     let args = direct.engine_args(0);
     assert_eq!(&args[..4], &[String::from("0"), String::from("1"), String::from("127.0.0.1:0"), String::from("127.0.0.1:0")]);
-    assert!(args.iter().any(|arg| arg == "--diagnostic-unqualified-text") && depth(&args, "0"));
+    assert!(!args.iter().any(|arg| arg == "--diagnostic-unqualified-text") && depth(&args, "0"));
+    assert!(args.windows(2).any(|p| p == ["--disk-cache-dir", "~/.vade/cache/prefix"]), "{args:?}");
     assert!(!args.iter().any(|arg| arg == "--fp4-local" || arg == "--decode-fuse"));
     assert!(!std::path::Path::new(&direct.ranks[0].machine.model_path).file_name().unwrap().to_string_lossy().contains("inkling"));
     f.app.up(&fp4_options(&["--sparks", "1", "--diagnostic-unqualified-text"])).unwrap();
     let saved = Session::load(&f.app.config.state_dir).unwrap().unwrap();
     let saved_args = saved.engine_args(0);
     assert_eq!(&saved_args[..4], &[String::from("0"), String::from("1"), String::from("127.0.0.1:0"), String::from("127.0.0.1:0")]);
-    assert!(saved_args.iter().any(|arg| arg == "--diagnostic-unqualified-text") && depth(&saved_args, "0"));
+    assert!(!saved_args.iter().any(|arg| arg == "--diagnostic-unqualified-text") && depth(&saved_args, "0"));
     assert!(!saved_args.iter().any(|arg| arg == "--fp4-local" || arg == "--decode-fuse"));
     assert_eq!((saved.group_len(), saved.mtp, saved.topology()), (1, 0, "path"));
     assert!(!f.app.runner.calls.iter().any(|call| call.label.ends_with(" text service")));
@@ -65,22 +68,27 @@ fn a_loop_checkpoint_on_any_other_group_is_refused() {
         let mut f = with_config(count, "checkpoint", Some(LOOP));
         let err = f.app.up(&fp4_options(args)).unwrap_err();
         assert!(err.contains("no transport between Sparks") && err.contains("RANK 0 of WORLD 1"), "{args:?} {err}");
-        assert!(err.contains("vade up --sparks 1 --diagnostic-unqualified-text") && !err.contains("exactly two Sparks"), "{args:?} {err}");
+        assert!(err.contains("vade up --sparks 1") && !err.contains("exactly two Sparks"), "{args:?} {err}");
         assert!(!started(&f) && !f.recorded(), "{args:?}");
     }
 }
 
 #[test]
 fn loop_replicas_are_one_spark_each() {
-    let mut f = with_config(2, "checkpoint", Some(LOOP));
-    f.app.up(&fp4_options(&["--replicas", "2", "--diagnostic-unqualified-text"])).unwrap();
+    // Works first-class with `vade up inkling --replicas 2` (no --diagnostic-unqualified-text required)
+    // and respects --bind on the gateway + --stable-prefix + NVMe disk cache on each replica!
+    let mut f = with_config(2, "checkpoint", Some(crate::text_service::LOOP_DRAFT_CONFIG));
+    let Command::Up(options) = crate::cli::parse(&["up", "inkling", "--replicas", "2", "--bind", "0.0.0.0:18092"].map(str::to_owned)).unwrap().command else { panic!() };
+    f.app.up(&options).unwrap();
     let session = Session::load(&f.app.config.state_dir).unwrap().unwrap();
-    assert_eq!((session.group_len(), session.ranks.len(), session.replica_sparks), (1, 2, 1));
+    assert_eq!((session.group_len(), session.ranks.len(), session.replica_sparks, session.local_port), (1, 2, 1, 18092));
+    assert_eq!(session.gateway_bind(), "0.0.0.0:18092");
     for index in 0..2 {
         let args = session.engine_args(index);
         assert_eq!(&args[..2], &[String::from("0"), String::from("1")]);
         assert_eq!((&*session.ranks[index].listen, &*session.ranks[index].next), ("127.0.0.1:0", "127.0.0.1:0"));
-        assert!(depth(&args, "0") && !args.iter().any(|arg| arg == "--fp4-local" || arg == "--decode-fuse"));
+        assert!(depth(&args, "7") && !args.iter().any(|arg| arg == "--fp4-local" || arg == "--decode-fuse" || arg == "--diagnostic-unqualified-text"), "{args:?}");
+        assert!(args.windows(2).any(|p| p == ["--disk-cache-dir", "~/.vade/cache/prefix"]), "{args:?}");
     }
 }
 

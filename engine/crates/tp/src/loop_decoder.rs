@@ -16,6 +16,8 @@
 //! - `rows`: many rows a step. The row list, the limits of a step and the launch of one arm on many rows.
 //! - `service`: the engine and the session of the text service over this driver. A prompt in pieces of rows, and
 //!   the new tokens of several chats in one step.
+//! - `tp2`: the weights of one Spark of a cabled pair. The large decode products are cut between the two Sparks
+//!   with the arithmetic of one Spark; every other product runs whole on both.
 //!
 //! Every size and every visit comes from the description of the checkpoint. No line here names a model, a layer
 //! count or a count of ranks.
@@ -30,6 +32,7 @@ pub mod rows;
 pub mod service;
 pub mod draft;
 pub mod disk_cache;
+pub mod tp2;
 
 use crate::{Result,bounded_decoder::{Compute,greedy_logits}};
 use attention::rounded_norm;

@@ -10,13 +10,9 @@ use crate::cli::{UpOptions, identifier};
 mod names;
 pub(crate) use names::{PublicNames, hostname as public_hostname};
 
-/// The most Sparks one FP4-Local launch may chain.
-pub const MAX_FP4_SPARKS: usize = 24;
-/// Independent one-Spark servers behind one local gateway.
-pub const MAX_REPLICAS: usize = 16;
 /// What each Spark count gives with FP4-Local. The help and the errors print
 /// this text, so they cannot disagree. README.md says the same.
-pub const FP4_SPARKS: &str = "FP4-Local runs on 1, 2 or 4 Sparks over RDMA, or as a layer chain of 3 to 24 Sparks over TCP. We have measured chains up to four Sparks.";
+pub const FP4_SPARKS: &str = "FP4-Local runs on 1, 2 or 4 Sparks over RDMA, or as a layer chain of 3 or more Sparks over TCP. We have measured chains up to four Sparks.";
 /// What each Spark count gives with FP8, for the help and the errors.
 pub const FP8_SPARKS: &str = "FP8 runs on 2 or 4 Sparks, and the same request with the same settings gives the same token IDs on both. FP8 also starts on 6 Sparks, but its token IDs differ there, so 6 Sparks are not covered yet.";
 
@@ -41,6 +37,12 @@ pub struct Config {
     pub local_port: u16,
     pub serve_port: u16,
     pub tp_port: u16,
+    /// Optional explicit HTTP bind address (for example `0.0.0.0:18080`).
+    pub bind: Option<std::net::SocketAddr>,
+    /// Optional persistent NVMe disk prefix cache directory (or `"off"` to disable).
+    pub disk_cache_dir: Option<String>,
+    /// Optional persistent NVMe disk prefix cache byte budget.
+    pub disk_cache_bytes: Option<u64>,
     pub health_timeout_secs: u64,
     pub build_manifest: PathBuf,
     pub machines: Vec<Machine>,
@@ -249,6 +251,31 @@ impl Config {
             local_port: port(&mut globals, "local_port", 18080)?,
             serve_port: port(&mut globals, "serve_port", 18080)?,
             tp_port: integer(&mut globals, "tp_port", 29960, 1024, 65534)? as u16,
+            bind: match globals.take("bind") {
+                None => None,
+                Some(raw) => {
+                    let addr: std::net::SocketAddr = raw.parse().map_err(|_| {
+                        "Set bind in [global] to an IP:PORT socket address (for example 0.0.0.0:18080).".to_owned()
+                    })?;
+                    if addr.port() == 0 {
+                        return Err("Set bind port in [global] to 1..65535.".into());
+                    }
+                    Some(addr)
+                }
+            },
+            disk_cache_dir: match globals.take("disk_cache_dir") {
+                None => None,
+                Some(raw) if raw == "off" || raw == "none" => Some("off".into()),
+                Some(raw) => Some(remote_path(raw, "global", "disk_cache_dir")?),
+            },
+            disk_cache_bytes: match globals.take("disk_cache_bytes") {
+                None => None,
+                Some(raw) => {
+                    let n = raw.parse::<u64>().ok().filter(|&n| n > 0)
+                        .ok_or("Set disk_cache_bytes in [global] to a positive whole number of bytes.")?;
+                    Some(n)
+                }
+            },
             health_timeout_secs: integer(&mut globals, "health_timeout_secs", 360, 1, 3600)?,
             build_manifest: activation,
             lock_dir: state_dir.clone(),
@@ -272,6 +299,9 @@ impl Config {
         }
         if config.serve_port == config.tp_port || config.serve_port == config.tp_port + 1 {
             return Err("Set serve_port apart from tp_port and tp_port + 1 in the config.".into());
+        }
+        if config.disk_cache_dir.as_deref() == Some("off") && config.disk_cache_bytes.is_some() {
+            return Err("Remove disk_cache_bytes in [global] when disk_cache_dir = off.".into());
         }
         let mut config = config;
         for (name, values) in rows {
@@ -569,15 +599,11 @@ impl Config {
                 let count = if options.hosts.is_empty() { options.sparks } else { Some(options.hosts.len()) };
                 if options.replicas && count != Some(group.hosts.len()) {
                     // Name only commands the parser accepts for this group size.
-                    // FP4-Local stops at MAX_FP4_SPARKS, so a larger group has no command.
                     let size = group.hosts.len();
                     let machines = crate::text::count(size, "machine", "machines");
-                    if size > MAX_FP4_SPARKS {
-                        return Err(format!("Group {} has {machines}. {FP4_SPARKS} Shorten the group, or unset VADE_GROUP.", group.name));
-                    }
                     let mut runs = Vec::new();
-                    if (2..=MAX_REPLICAS).contains(&size) { runs.push(format!("vade up --replicas {size} for one replica on each")); }
-                    if size % 2 == 0 && (2..=MAX_REPLICAS).contains(&(size / 2)) { runs.push(format!("vade up --replicas {} --pairs for a pair each", size / 2)); }
+                    if size >= 2 { runs.push(format!("vade up --replicas {size} for one replica on each")); }
+                    if size % 2 == 0 && size / 2 >= 2 { runs.push(format!("vade up --replicas {} --pairs for a pair each", size / 2)); }
                     if size % 2 == 0 && size / 2 == 1 { runs.push("vade up without --replicas for one tensor-split pair".into()); }
                     if runs.is_empty() { runs.push("vade up without --replicas".into()); }
                     return Err(format!("Group {} has {machines}. Run {}, or unset VADE_GROUP.", group.name, runs.join(", or ")));
@@ -595,8 +621,8 @@ impl Config {
         let requested = if options.hosts.is_empty() {
             options.sparks.unwrap_or(if options.fp4_local { 1 } else { 2 })
         } else { options.hosts.len() };
-        if options.fp4_local && !(1..=MAX_FP4_SPARKS).contains(&requested) {
-            return Err(format!("{FP4_SPARKS} Choose --sparks from 1 to {MAX_FP4_SPARKS}, or list that many distinct --hosts."));
+        if requested == 0 {
+            return Err(format!("{FP4_SPARKS} Choose at least 1 Spark with --sparks or --hosts."));
         }
         let selected = if !options.hosts.is_empty() {
             options.hosts.iter().map(|name| {
@@ -614,7 +640,8 @@ impl Config {
             }
             self.machines[..count].to_vec()
         };
-        if !options.fp4_local && !matches!(selected.len(), 2 | 4 | 6) {
+        let group_size = if options.replicas { options.replica_sparks.max(1) } else { selected.len() };
+        if !options.fp4_local && !matches!(group_size, 2 | 4 | 6) {
             return Err(format!("{FP8_SPARKS} Run vade up --fp8 --sparks 2, or list 2 or 4 Sparks in --hosts. For one Spark, select an FP4-Local config with VADE_CONFIG and run vade up."));
         }
         let names: BTreeSet<&str> = selected
@@ -1042,23 +1069,19 @@ mod tests {
             assert_eq!(error, hint);
             assert!(!error.contains("--replicas 1") && crate::cli::parse(&["up".into(), "--replicas".into(), "1".into()]).is_err());
         }
-        // For every group size, each hinted command parses; a group over 24 machines gets no command.
+        // For every group size, each hinted command parses cleanly with no arbitrary cap.
         for size in 1..=32 {
             let mut sized = eight(LAYOUTS).unwrap();
             sized.groups.push(Group { name: "sized".into(), hosts: (1..=size).map(|index| format!("m{index}")).collect(), local_port: 18100, layout: "sized".into() });
             sized.select_group("sized").unwrap();
             let error = sized.selected(&UpOptions { replicas: true, replica_sparks: 2, sparks: Some(size + 2), ..UpOptions::default() }).unwrap_err();
-            if size > MAX_FP4_SPARKS {
-                assert_eq!(error, format!("Group sized has {size} machines. {FP4_SPARKS} Shorten the group, or unset VADE_GROUP."));
-                continue;
-            }
             let runs = error.split_once(". Run ").and_then(|(_, runs)| runs.strip_suffix(", or unset VADE_GROUP.")).unwrap_or_else(|| panic!("{error}"));
             for run in runs.split(", or ") {
                 let words: Vec<String> = run.split(' ').skip(1).take_while(|word| !["for", "without"].contains(word)).map(String::from).collect();
                 assert!(words[0] == "up" && crate::cli::parse(&words).is_ok(), "size {size}: {run}");
             }
         }
-        assert!(crate::cli::parse(&["up", "--replicas", "13", "--pairs"].map(String::from)).is_err());
+        assert!(crate::cli::parse(&["up", "--replicas", "13", "--pairs"].map(String::from)).is_ok());
         for options in [UpOptions { sparks: Some(2), ..UpOptions::default() }, UpOptions { hosts: vec!["s1".into()], ..UpOptions::default() }] {
             assert!(config.selected(&options).unwrap_err().contains("Remove --sparks and --hosts"));
         }

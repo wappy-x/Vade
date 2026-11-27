@@ -190,6 +190,14 @@ pub struct UpOptions {
     pub fast_prompts: bool,
     pub memory_bytes: Option<u64>,
     pub cache_bytes: Option<u64>,
+    /// Optional explicit HTTP bind address (for example `0.0.0.0:18080`). Defaults to `127.0.0.1:<port>`.
+    pub bind: Option<std::net::SocketAddr>,
+    /// Optional persistent NVMe disk prefix cache directory (defaults to `$VADE_HOME/cache/prefix` for Inkling).
+    pub disk_cache_dir: Option<String>,
+    /// Optional explicit persistent NVMe disk prefix cache byte budget (defaults to hardware-derived NVMe budget).
+    pub disk_cache_bytes: Option<u64>,
+    /// Disable persistent NVMe disk prefix caching (`--no-disk-cache`).
+    pub no_disk_cache: bool,
     /// The engine's decode_fuse option: Some(true) runs one Spark's decode steps as a chain.
     pub decode_fuse: Option<bool>,
     pub diagnostic_unqualified_text: bool,
@@ -234,6 +242,10 @@ impl Default for UpOptions {
             fast_prompts: false,
             memory_bytes: None,
             cache_bytes: None,
+            bind: None,
+            disk_cache_dir: None,
+            disk_cache_bytes: None,
+            no_disk_cache: false,
             decode_fuse: None,
             diagnostic_unqualified_text: false,
             checkpoint_service: None,
@@ -523,7 +535,9 @@ fn parse_up(args: &[&str]) -> Result<UpOptions, String> {
         }
         found
     };
-    let deep_mtp_ok = args.contains(&"--diagnostic-unqualified-text") || inkling_named;
+    let deep_mtp_ok = args.contains(&"--diagnostic-unqualified-text")
+        || inkling_named
+        || (!args.contains(&"--fp4-local") && !args.contains(&"--fp8") && !args.contains(&"--fp8-legacy"));
     while index < args.len() {
         // --fp8-legacy is the older spelling of --fp8; both name the same profile.
         let flag = if args[index] == "--fp8-legacy" { "--fp8" } else { args[index] };
@@ -550,6 +564,11 @@ fn parse_up(args: &[&str]) -> Result<UpOptions, String> {
         }
         if flag == "--diagnostic-unqualified-text" {
             options.diagnostic_unqualified_text = true;
+            index += 1;
+            continue;
+        }
+        if flag == "--no-disk-cache" {
+            options.no_disk_cache = true;
             index += 1;
             continue;
         }
@@ -580,7 +599,7 @@ fn parse_up(args: &[&str]) -> Result<UpOptions, String> {
         match flag {
             // A count, or the Sparks themselves, which is --hosts by another name.
             "--sparks" if value.bytes().all(|byte| byte.is_ascii_digit()) => {
-                options.sparks = Some(number(value, flag, 1, crate::config::MAX_FP4_SPARKS as u32).map_err(|_| sparks_error())? as usize);
+                options.sparks = Some(min_number(value, flag, 1).map_err(|_| sparks_error())? as usize);
             }
             "--sparks" => {
                 options.hosts = ssh_targets(value).ok_or_else(sparks_error)?;
@@ -588,7 +607,7 @@ fn parse_up(args: &[&str]) -> Result<UpOptions, String> {
             }
             "--replicas" => {
                 options.replicas = true;
-                replicas = number(value, flag, 2, crate::config::MAX_REPLICAS as u32)? as usize;
+                replicas = min_number(value, flag, 2)? as usize;
             }
             "--hosts" => options.hosts = ssh_targets(value).ok_or(HOSTS)?,
             "--mtp" => {
@@ -597,12 +616,32 @@ fn parse_up(args: &[&str]) -> Result<UpOptions, String> {
             },
             "--context" => options.context = min_number(value, flag, 4096)?,
             "--output" => {
-                options.output = min_number(value, flag, if deep_mtp_ok { 1 } else { 1024 })?;
+                options.output = min_number(value, flag, 1)?;
                 options.output_explicit = true;
             }
-            "--chats" => options.chats = Some(number(value, flag, 1, 32)? as usize),
+            "--chats" => options.chats = Some(min_number(value, flag, 1)? as usize),
             "--memory-bytes" => options.memory_bytes = Some(bytes(value, flag)?),
             "--cache-bytes" => options.cache_bytes = Some(bytes(value, flag)?),
+            "--bind" => {
+                let addr: std::net::SocketAddr = value.parse().map_err(|_| {
+                    "Set --bind to an IP:PORT socket address (for example 127.0.0.1:18080 or 0.0.0.0:18080). Run vade up --help.".to_owned()
+                })?;
+                if addr.port() == 0 {
+                    return Err("Set --bind port to 1..65535. Run vade up --help.".into());
+                }
+                options.bind = Some(addr);
+            }
+            "--disk-cache-dir" => {
+                validate_disk_cache_path(value)?;
+                options.disk_cache_dir = Some(value.to_owned());
+            }
+            "--disk-cache-bytes" => {
+                let n = bytes(value, flag)?;
+                if n == 0 {
+                    return Err("Set --disk-cache-bytes to a positive whole number of bytes. Use --no-disk-cache to disable the disk prefix cache.".into());
+                }
+                options.disk_cache_bytes = Some(n);
+            }
             "--decode-fuse" => options.decode_fuse = Some(match value {
                 "on" => true,
                 "off" => false,
@@ -618,11 +657,23 @@ fn parse_up(args: &[&str]) -> Result<UpOptions, String> {
     if options.is_inkling() && seen.contains("--fp4-local") {
         return Err("Choose inkling or --fp4-local, not both. Run vade up --help.".into());
     }
+    if options.model.as_deref() == Some(crate::pull::alias::QWEN_REPO) && options.mtp_explicit && options.mtp > 3 {
+        return Err("Set --mtp to a whole number from 0 to 3.".into());
+    }
+    if options.no_disk_cache && (options.disk_cache_dir.is_some() || options.disk_cache_bytes.is_some()) {
+        return Err("Cannot combine --no-disk-cache with --disk-cache-dir or --disk-cache-bytes. Run vade up --help.".into());
+    }
+    if options.cache_bytes == Some(0) && (options.disk_cache_dir.is_some() || options.disk_cache_bytes.is_some()) {
+        return Err("Cannot combine --cache-bytes 0 with --disk-cache-dir or --disk-cache-bytes. Run vade up --help.".into());
+    }
     if options.decode_fuse == Some(true) && (options.sparks.is_some_and(|n| n != 1) || !options.hosts.is_empty()) {
         return Err("--decode-fuse on runs on one Spark. Use --sparks 1, or leave it off.".into());
     }
     if !seen.contains("--mtp") {
-        let max_mtp = if options.diagnostic_unqualified_text || options.is_inkling() { 7 } else { 3 };
+        let max_mtp = if options.diagnostic_unqualified_text
+            || options.is_inkling()
+            || (!seen.contains("--fp4-local") && !seen.contains("--fp8") && options.model.is_none())
+        { 7 } else { 3 };
         match std::env::var("MTP") {
             Ok(value) => {
                 options.mtp = number(&value, "MTP", 0, max_mtp)?;
@@ -638,13 +689,10 @@ fn parse_up(args: &[&str]) -> Result<UpOptions, String> {
         return Err("Use --pairs with --replicas N: N tensor-split pairs on 2N Sparks. Run vade up --help.".into());
     }
     if options.replicas {
-        let machines = replicas * options.replica_sparks;
-        if machines > crate::config::MAX_FP4_SPARKS {
-            return Err(format!("Use --replicas 2..{} with --pairs: each pair takes two of the {} Sparks FP4-Local supports. Run vade up --help.",
-                crate::config::MAX_FP4_SPARKS / options.replica_sparks, crate::config::MAX_FP4_SPARKS));
-        }
-        if !options.fp4_local || seen.contains("--sparks") || !(options.hosts.is_empty() || options.hosts.len() == machines) {
-            return Err("Use --replicas N with FP4-Local alone, or with N Sparks in --hosts (2N with --pairs). Run vade up --help.".into());
+        let machines = replicas.checked_mul(options.replica_sparks)
+            .ok_or("Replica machine count overflows.")?;
+        if seen.contains("--sparks") || !(options.hosts.is_empty() || options.hosts.len() == machines) {
+            return Err("Use --replicas N without --sparks, and with either no --hosts or N Sparks in --hosts (2N with --pairs). Run vade up --help.".into());
         }
         if options.hosts.is_empty() { options.sparks = Some(machines); }
     }
@@ -654,22 +702,9 @@ fn parse_up(args: &[&str]) -> Result<UpOptions, String> {
     } else if options.fp4_local {
         if !seen.contains("--context") { options.context = FP4_CONTEXT; }
         if !options.output_explicit { options.output = fp4_output(options.context); }
-        let explicit_fp4 = seen.contains("--fp4-local") || options.model.is_some();
-        if explicit_fp4 && options.context > FP4_CONTEXT_LIMIT {
-            return Err("FP4-Local context is limited to 262144 tokens. Set --context 4096..262144.".into());
-        }
-        if explicit_fp4 && options.output > FP4_OUTPUT_LIMIT {
-            return Err("FP4-Local output is limited to 16384 tokens. Set --output 1024..16384.".into());
-        }
     } else {
         if !seen.contains("--context") { options.context = 131072; }
         if !options.output_explicit { options.output = 65536; }
-        if options.context > FP4_CONTEXT_LIMIT {
-            return Err("FP8 context is limited to 262144 tokens. Set --context 4096..262144.".into());
-        }
-        if options.output > FP4_CONTEXT_LIMIT {
-            return Err("FP8 output is limited to 262144 tokens. Set --output 1024..262144.".into());
-        }
     }
     if seen.contains("--sparks") && seen.contains("--hosts") {
         return Err("Choose --sparks or --hosts. Run vade up --help.".into());
@@ -716,15 +751,11 @@ fn parse_up(args: &[&str]) -> Result<UpOptions, String> {
 /// `--context 262144` selects the
 /// single-chat long-context preset explicitly.
 pub const FP4_CONTEXT: u32 = 32768;
-/// Largest FP4-Local context window.
-pub const FP4_CONTEXT_LIMIT: u32 = 262144;
 /// The FP4-Local default for a group of two or more Sparks, which `vade up` sets
 /// once it knows the group. A start that does not fit falls to [`FP4_CONTEXT`].
 pub const FP4_LONG_CONTEXT: u32 = 131072;
 /// Default FP4-Local output limit: `min(FP4_OUTPUT, context)`.
 pub const FP4_OUTPUT: u32 = 8192;
-/// Largest explicit FP4-Local output limit.
-pub const FP4_OUTPUT_LIMIT: u32 = 16384;
 /// Default Inkling 2 Mini context window (512K with Paged KV).
 pub const INKLING_CONTEXT: u32 = 524_288;
 /// Default Inkling 2 Mini output limit (16K, capped at context).
@@ -735,9 +766,17 @@ pub fn fp4_output(context: u32) -> u32 { context.min(FP4_OUTPUT) }
 /// Default Inkling 2 Mini output limit for a context.
 pub fn inkling_output(context: u32) -> u32 { context.min(INKLING_OUTPUT) }
 
-/// The error for a bad `--sparks`: the range of the help, and the list form.
+/// The error for a bad `--sparks`: the count form and the list form.
 fn sparks_error() -> String {
-    format!("Set --sparks to a whole number from 1 to {}, or to distinct SSH destinations separated by commas, with no spaces. Run vade up --help.", crate::config::MAX_FP4_SPARKS)
+    "Set --sparks to a positive whole number, or to distinct SSH destinations separated by commas, with no spaces. Run vade up --help.".into()
+}
+
+fn validate_disk_cache_path(value: &str) -> Result<(), String> {
+    let rest = value.strip_prefix("~/").or_else(|| value.strip_prefix('/'));
+    if rest.is_none_or(|r| r.is_empty() || r.split('/').any(|part| part == "..") || r.chars().any(char::is_control)) {
+        return Err("Set --disk-cache-dir to an absolute or ~/ path without parent traversal. Run vade up --help.".into());
+    }
+    Ok(())
 }
 
 fn bytes(value: &str, flag: &str) -> Result<u64, String> {
@@ -765,7 +804,10 @@ fn link(value: &str, links: &[(String, String, String)], command: &str) -> Resul
 }
 
 /// The `vade up` options that take a value.
-const UP_VALUE_OPTIONS: [&str; 10] = ["--sparks", "--hosts", "--replicas", "--mtp", "--context", "--output", "--chats", "--memory-bytes", "--cache-bytes", "--decode-fuse"];
+const UP_VALUE_OPTIONS: [&str; 13] = [
+    "--sparks", "--hosts", "--replicas", "--mtp", "--context", "--output", "--chats",
+    "--memory-bytes", "--cache-bytes", "--bind", "--disk-cache-dir", "--disk-cache-bytes", "--decode-fuse",
+];
 
 /// The word after the option at `index`. A word that starts with `-` is the
 /// next option, unless a digit follows: `--context -5` then names the range.
@@ -879,7 +921,11 @@ mod tests {
         let Command::Up(options) = cli("up --fp4-local --context 4096").unwrap().command else { panic!() };
         assert_eq!((options.context, options.output), (4096, 4096));
         assert!(cli("up --fp4-local --fp4-local").is_err());
-        assert!(cli("up --fp4-local --output 32768").unwrap_err().contains("limited to 16384"));
+        // Rule 17: no arbitrary CLI context/output ceilings; real hardware admission decides.
+        let Command::Up(wide) = cli("up --fp4-local --context 524288 --output 32768").unwrap().command else { panic!() };
+        assert_eq!((wide.context, wide.output), (524_288, 32768));
+        let Command::Up(wide_fp8) = cli("up --fp8 --context 524288 --output 131072").unwrap().command else { panic!() };
+        assert_eq!((wide_fp8.context, wide_fp8.output), (524_288, 131_072));
     }
     #[test]
     fn a_spark_list_keeps_its_links_and_the_other_options() {
@@ -955,11 +1001,11 @@ mod tests {
     #[test]
     fn deep_mtp_is_only_for_the_text_service() {
         for depth in 4..=7 {
-            for args in [format!("up --mtp {depth} --diagnostic-unqualified-text"),format!("up --diagnostic-unqualified-text --mtp {depth}")] {
+            for args in [format!("up --mtp {depth} --diagnostic-unqualified-text"),format!("up --diagnostic-unqualified-text --mtp {depth}"), format!("up inkling --mtp {depth}"), format!("up --mtp {depth}")] {
                 let Command::Up(options)=cli(&args).unwrap().command else {panic!("{args}")};
                 assert_eq!(options.mtp,depth);assert!(options.mtp_explicit);
             }
-            for model in ["", "--fp4-local", "--fp8"] {assert!(cli(&format!("up {model} --mtp {depth}")).is_err());}
+            for model in ["--fp4-local", "--fp8", "qwen"] {assert!(cli(&format!("up {model} --mtp {depth}")).is_err());}
         }
         assert!(cli("up --diagnostic-unqualified-text --mtp 8").is_err());
         const CASE:&str="VADE_TEST_DEEP_MTP";
@@ -976,11 +1022,21 @@ mod tests {
     #[test]
     fn bad_options_are_actionable() {
         for args in [
-            "up --hosts a,a", "up --hosts a,", "up --sparks 2 --hosts a,b", "up --mtp 4",
-            "up --context 4095", "up --output 262145", "up --mtp", "up --mtp 1 --mtp 2", "down --force", "unknown",
-            "up --output 1023", "up --context 4096 --output 8192", "up --fp4-local --fp8", "up --fp4-local --fp8-legacy", "up --fp8 --fp8-legacy",
-            "up --replicas 1", "up --replicas 17", "up --replicas 2 --sparks 2", "up --replicas 3 --hosts a,b", "up --fp8 --replicas 2", "up --pairs", "up --replicas 2 --pairs --pairs", "up --replicas 2 --pairs --hosts a,b", "up --replicas 13 --pairs",
+            "up --hosts a,a", "up --hosts a,", "up --sparks 2 --hosts a,b", "up --fp4-local --mtp 4",
+            "up --context 4095", "up --output 0", "up --mtp", "up --mtp 1 --mtp 2", "down --force", "unknown",
+            "up --context 4096 --output 8192", "up --fp4-local --fp8", "up --fp4-local --fp8-legacy", "up --fp8 --fp8-legacy",
+            "up --replicas 1", "up --replicas 2 --sparks 2", "up --replicas 3 --hosts a,b", "up --pairs", "up --replicas 2 --pairs --pairs", "up --replicas 2 --pairs --hosts a,b",
+            "up --bind not-an-addr", "up --bind 0.0.0.0:0", "up --disk-cache-dir relative/path", "up --disk-cache-dir /tmp/../escape",
+            "up --disk-cache-bytes 0", "up --no-disk-cache --disk-cache-dir /tmp/cache", "up --no-disk-cache --disk-cache-bytes 1024",
+            "up --cache-bytes 0 --disk-cache-dir /tmp/cache",
         ] { assert!(cli(args).is_err(), "{args}"); }
+        // Rule 17: replicas, sparks, chats, bind and disk cache options scale without arbitrary caps.
+        for ok in [
+            "up inkling --replicas 2", "up inkling --replicas 4 --hosts a,b,c,d", "up --fp8 --replicas 2 --pairs",
+            "up --replicas 17", "up --replicas 13 --pairs", "up --chats 64",
+            "up inkling --bind 0.0.0.0:18080 --disk-cache-dir /tmp/vade-prefix --disk-cache-bytes 1073741824",
+            "up inkling --no-disk-cache",
+        ] { assert!(cli(ok).is_ok(), "{ok}"); }
         assert_eq!(cli("up --hosts a,b --chats 3 --fast-prompts").unwrap().command, Command::Up(UpOptions {
             supplied_options: ["--hosts".into(), "--chats".into(), "--fast-prompts".into()].into(),
             hosts: vec!["a".into(), "b".into()], chats: Some(3), fast_prompts: true, context: 32768, ..UpOptions::default()
@@ -1001,11 +1057,11 @@ mod tests {
         assert_eq!(list.supplied_options, ["--hosts".to_owned()].into());
         assert_eq!(UpOptions { listed: false, ..list }, up("up --hosts spark-a,user@spark-b,192.0.2.7"));
         assert_eq!(up("up --sparks spark-a").hosts, ["spark-a"]);
-        assert_eq!((up("up --sparks 24").sparks, up("up --sparks 1").sparks), (Some(24), Some(1)));
+        assert_eq!((up("up --sparks 24").sparks, up("up --sparks 64").sparks, up("up --sparks 1").sparks), (Some(24), Some(64), Some(1)));
         let setup = |args: &str| match cli(args).unwrap().command { Command::Setup(options) => options.hosts, other => panic!("{other:?}") };
         assert_eq!(up("up --hosts user@spark-a,spark-b.lan").hosts, setup("setup --hosts user@spark-a,spark-b.lan"));
-        let sparks = "Set --sparks to a whole number from 1 to 24, or to distinct SSH destinations separated by commas, with no spaces. Run vade up --help.";
-        for bad in ["up --sparks 0", "up --sparks 25", "up --sparks 64", "up --sparks a,a", "up --sparks a,", "up --sparks ,a", "up --sparks -5", "up --sparks a;b", "launch --sparks 25"] {
+        let sparks = "Set --sparks to a positive whole number, or to distinct SSH destinations separated by commas, with no spaces. Run vade up --help.";
+        for bad in ["up --sparks 0", "up --sparks a,a", "up --sparks a,", "up --sparks ,a", "up --sparks -5", "up --sparks a;b", "launch --sparks 0"] {
             assert_eq!(cli(bad).unwrap_err(), sparks.replace("vade up", if bad.starts_with("launch") { "vade launch" } else { "vade up" }), "{bad}");
         }
         let hosts = "Give --hosts distinct SSH destinations (what you type after ssh), separated by commas, with no spaces.";
@@ -1052,7 +1108,7 @@ mod tests {
     fn negative_numbers_and_equals_signs_get_the_error_that_names_the_fix() {
         // A negative number is a bad value, not a missing one; the next option is still missing.
         assert_eq!(cli("up --context -5").unwrap_err(), "Set --context to a whole number of at least 4096.");
-        assert_eq!(cli("up --mtp -1").unwrap_err(), "Set --mtp to a whole number from 0 to 3.");
+        assert_eq!(cli("up --mtp -1").unwrap_err(), "Set --mtp to a whole number from 0 to 7.");
         let Command::Up(fused) = cli("up --decode-fuse on").unwrap().command else { panic!() };
         assert_eq!(fused.decode_fuse, Some(true));
         assert_eq!(cli("up --decode-fuse 1").unwrap_err(), "Set --decode-fuse to off or on.");
@@ -1078,8 +1134,10 @@ mod tests {
         let Command::Up(o) = cli("up inkling --context 1048576 --output 65536 --mtp 7").unwrap().command else { panic!() };
         assert_eq!((o.context, o.output, o.mtp, o.mtp_explicit), (1_048_576, 65536, 7, true));
         assert!(cli("up inkling --mtp 8").is_err());
-        assert!(cli("up qwen --context 1048576").is_err());
-        assert!(cli("up --fp4-local --context 1048576").is_err());
+        let Command::Up(qwen_wide) = cli("up qwen --context 1048576").unwrap().command else { panic!() };
+        assert_eq!(qwen_wide.context, 1_048_576);
+        let Command::Up(fp4_wide) = cli("up --fp4-local --context 1048576").unwrap().command else { panic!() };
+        assert_eq!(fp4_wide.context, 1_048_576);
         let Command::Up(qwen) = cli("up qwen").unwrap().command else { panic!() };
         assert_eq!(qwen.model.as_deref(), Some(crate::pull::alias::QWEN_REPO));
         assert_eq!((qwen.context, qwen.output), (FP4_CONTEXT, FP4_OUTPUT));

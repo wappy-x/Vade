@@ -62,7 +62,7 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
             Ok(options) => {
                 // vade launch serves one Spark, where an unset prefix cache switch means on.
                 let (context, output, mtp, cache) = if let Some(config) = &config {
-                    let planned = config.planned(&options);
+                    let planned = config.planned(&options, &self.home);
                     let mtp = planned.mtp().or_else(|| model::loop_text(&planned.model).then(|| model::local_default_mtp(&planned.model)));
                     (planned.context, planned.output, mtp, planned.prefix_cache().map(|value| Some(value.as_deref() != Some("0"))))
                 } else {
@@ -79,7 +79,18 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
                     };
                     (context, output, mtp, crate::doctor::prefix_cache().map(|value| Some(value.unwrap_or(true))))
                 };
+                let prompt_cache_off = matches!(cache, Ok(Some(false)));
                 crate::doctor::defaults(&mut report, context, output, mtp, cache)?;
+                let is_loop = model.as_ref().is_some_and(|m| m.loop_text)
+                    || config.as_ref().is_some_and(|c| model::loop_text(&c.model));
+                if is_loop {
+                    let (dir, budget, disabled) = match &config {
+                        Some(config) => (config.effective_disk_cache_dir(&self.root), config.disk_cache_bytes, config.no_disk_cache),
+                        None => (Some(self.root.join("cache/prefix")), None, false),
+                    };
+                    let detail = crate::doctor::disk_cache_summary(dir.as_deref(), budget, disabled, prompt_cache_off);
+                    report.ok("disk prefix cache", &detail)?;
+                }
             }
             Err(error) => report.fail("launch defaults", &error, "Correct MTP, then run vade doctor.")?,
         }
@@ -128,7 +139,8 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
             }
             (config, Some(None)) => {
                 let port = config.map_or(18080, |config| config.port);
-                report.check(&format!("port {port}"), self.runner.port_free(port), |_| "free on 127.0.0.1".into(),
+                let host = config.and_then(|c| c.bind).map_or_else(|| "127.0.0.1".to_owned(), |addr| addr.ip().to_string());
+                report.check(&format!("port {port}"), self.runner.port_free(port), |_| format!("free on {host}"),
                     &format!("Close the program listening on port {port}, then retry vade doctor."))?;
                 report.skip("engine health", &format!("stopped; start: {}", text::command("launch")))?;
             }

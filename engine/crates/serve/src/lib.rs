@@ -21,6 +21,7 @@ pub mod qwen;
 #[cfg(target_os = "linux")]
 pub mod hybrid;
 pub mod scheduler;
+pub use scheduler::disk_prefix_min_tokens;
 pub mod route_receipt;
 pub mod tokenizer;
 pub mod text_program;

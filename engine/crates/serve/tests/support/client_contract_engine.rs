@@ -10,6 +10,7 @@ pub struct Ledger {
     pub validated: BTreeMap<u32, usize>,
     pub rejected_proposals: usize,
     pub retired: BTreeMap<usize, usize>, pub dropped_ids: BTreeSet<usize>, pub modes: BTreeMap<usize, u32>,
+    pub prefilled: BTreeSet<usize>,
 }
 pub struct Model {
     ledger: Arc<Mutex<Ledger>>, passes: mpsc::Sender<()>, permits: mpsc::Receiver<()>,
@@ -27,7 +28,11 @@ impl Session for Row {
     fn retire(&mut self) { *self.ledger.lock().unwrap().retired.entry(self.id).or_default() += 1; }
     fn prefill_slice(&mut self, tokens: &[u32], last: bool, _: Option<Duration>, _: usize) -> Result<Option<Vec<f32>>, String> {
         if self.hold.load(Ordering::Relaxed) { return Ok(None); }
-        if last { self.prefill(tokens).map(Some) } else { self.prefill_advance(tokens).map(|_| Some(Vec::new())) }
+        if last {
+            let logits = self.prefill(tokens)?;
+            self.ledger.lock().unwrap().prefilled.insert(self.id);
+            Ok(Some(logits))
+        } else { self.prefill_advance(tokens).map(|_| Some(Vec::new())) }
     }
     fn configure_request(&mut self, request: &protocol::Request) -> Result<(), String> {
         if let protocol::Prompt::Tokens(tokens) = &request.prompt {

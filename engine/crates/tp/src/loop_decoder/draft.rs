@@ -248,6 +248,27 @@ fn global_kv_rows_words(kv_words:usize,needed:usize,limit:usize,page_bytes:usize
 pub(crate) fn global_kv_rows(cfg:&MtpConfig,needed:usize,limit:usize,page_bytes:usize)->usize {
     global_kv_rows_words(cfg.kv_width(),needed,limit,page_bytes)
 }
+/// Split-KV count for single-chat draft flash attention (`width == 128`).
+/// Matches `propose_confident_batch` (`1 / 8 / 16`) for short/medium contexts and snaps long contexts (`>= 32K`)
+/// to full `18`-split waves (`18 * 8 kv = 144` CTAs = `48` SMs x `3` blk/SM) with zero arbitrary upper cap,
+/// eliminating wave-tail imbalance and keeping split partials L2-resident.
+fn draft_attn_splits(keys:usize)->usize {
+    if keys>=32_768 {keys.div_ceil(16_384).next_multiple_of(18)} else if keys>=256 {16} else if keys>=64 {8} else {1}
+}
+#[test]
+fn draft_attn_splits_matches_short_and_scales_wave_aligned_uncapped() {
+    assert_eq!(draft_attn_splits(1),1);
+    assert_eq!(draft_attn_splits(63),1);
+    assert_eq!(draft_attn_splits(64),8);
+    assert_eq!(draft_attn_splits(255),8);
+    assert_eq!(draft_attn_splits(256),16);
+    assert_eq!(draft_attn_splits(32_767),16);
+    assert_eq!(draft_attn_splits(32_768),18);
+    assert_eq!(draft_attn_splits(130_779),18);
+    assert_eq!(draft_attn_splits(306_907),36);
+    assert_eq!(draft_attn_splits(1_048_576),72);
+    assert!(draft_attn_splits(4_194_304)>72);
+}
 /// Total draft KV bytes (K + V across all draft layers) reserved for a chat at `tokens` tokens.
 pub(crate) fn draft_kv_bytes(cfg:&MtpConfig,tokens:usize,limit:usize,page_bytes:usize)->usize {
     let row_bytes=cfg.kv_width().saturating_mul(4);
@@ -823,7 +844,7 @@ impl<'a,V,A> Drafter<'a,V,A> {
             let keys=hist_keys+rows;let (ck,cv)=chat.kv[i].as_ref().ok_or("draft keys missing")?;
             let a=if flash_attn {
                 let k=c.lanes(DraftOp::RopeBf16{rows,heads:kvheads,width:hd},&k,Some(&phases))?;
-                let splits=if keys>=256 {16} else if keys>=64 {8} else {1};
+                let splits=draft_attn_splits(keys);
                 let part=c.flash_attn_batch(&q,&k,&v_new,&[(ck,cv,rel_start,hist_keys,splits)],heads,kvheads,hd,q_rows,rows,chat.kv_bf16,true,0,0)?;
                 if splits>1 {c.lanes(DraftOp::FlashAttnMerge{rows:q_rows,heads,width:hd,splits},&part,None)?} else {part}
             } else {
@@ -895,7 +916,7 @@ impl<'a,V,A> Drafter<'a,V,A> {
             let a=if flash_attn {
                 let k=c.lanes(DraftOp::RopeBf16{rows,heads:kvheads,width:hd},&k,Some(&phases))?;
                 let (ck,cv)=chat.kv[i].as_ref().ok_or("draft keys missing")?;
-                let splits=if keys>=256 {16} else if keys>=64 {8} else {1};
+                let splits=draft_attn_splits(keys);
                 let causal_base=if rows>cfg.block_size {hist_keys+cfg.block_size} else {0};
                 let row_off=usize::from(last_layer);
                 let part=c.flash_attn_batch(&q,&k,&v_new,&[(ck,cv,rel_start,hist_keys,splits)],heads,kvheads,hd,q_rows,rows,chat.kv_bf16,true,causal_base,row_off)?;

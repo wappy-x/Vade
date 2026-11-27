@@ -457,6 +457,8 @@ pub fn run(b: &Backend<'_>, recorded: &dyn Fn(Kind) -> u128) -> Result<(), Strin
             ("gqa3_fp32_s1", 24, 8, 3, 3, false, false, 0, 0, &[(0, 12, 1), (4, 20, 1)][..]),
             ("nongqa3_bf16", 16, 8, 4, 4, true, true, 0, 0, &[(1, 70, 8), (0, 260, 16)][..]),
             ("gqa3_bf16_causal", 24, 8, 15, 15, true, true, 135, 1, &[(2, 128, 8), (0, 128, 8)][..]),
+            ("gqa3_bf16_wide16", 24, 8, 16, 16, true, true, 136, 0, &[(1, 128, 8), (0, 128, 8)][..]),
+            ("gqa3_bf16_long_splits72", 24, 8, 8, 8, true, true, 0, 0, &[(0, 4096, 72)][..]),
         ] {
             let batch = spec.len();
             let q_host = (0..batch * q_rows * heads * 128).map(|i| rn(input(i + 17) * 0.5)).collect::<Vec<_>>();
@@ -468,6 +470,7 @@ pub fn run(b: &Backend<'_>, recorded: &dyn Fn(Kind) -> u128) -> Result<(), Strin
             let mut cks = Vec::with_capacity(batch);
             let mut cvs = Vec::with_capacity(batch);
             let mut want_all = Vec::with_capacity(q_host.len());
+            let mut solo_all = Vec::with_capacity(q_host.len());
             for (bi, &(rel_start, hist_keys, splits_b)) in spec.iter().enumerate() {
                 let plane_rows = (rel_start + hist_keys).max(1);
                 let hk_fp = (0..plane_rows * kv * 128).map(|i| rn(input(i + bi * 7919 + 101) * 0.5)).collect::<Vec<_>>();
@@ -484,6 +487,12 @@ pub fn run(b: &Backend<'_>, recorded: &dyn Fn(Kind) -> u128) -> Result<(), Strin
                 let part = b.draft_lanes(FlashAttn { rows: q_rows, heads, kv, width: 128, keys, splits: splits_b, causal_base, row_off }, [Some(&q_sub), Some(&kc), Some(&vc)])?;
                 let out = if splits_b > 1 { b.draft_lanes(FlashAttnMerge { rows: q_rows, heads, width: 128, splits: splits_b }, [Some(&part), None, None])? } else { part };
                 want_all.extend(b.read_vector_values(&out)?);
+                let kn_sub_fp = &kn_fp[bi * new_rows * kv * 128..(bi + 1) * new_rows * kv * 128];
+                let kn_sub = if k_new_bf16 { b.upload_vector(&pack_bf16_host(kn_sub_fp))? } else { b.upload_vector(kn_sub_fp)? };
+                let vn_sub = b.upload_vector(&vn_fp[bi * new_rows * kv * 128..(bi + 1) * new_rows * kv * 128])?;
+                let sp_part = b.draft_flash_attn_batch(&q_sub, &kn_sub, &vn_sub, &[(&cks[bi], &cvs[bi], rel_start, hist_keys, splits_b)], heads, kv, 128, q_rows, new_rows, kv_bf16, k_new_bf16, causal_base, row_off)?;
+                let sp_out = if splits_b > 1 { b.draft_lanes(FlashAttnMerge { rows: q_rows, heads, width: 128, splits: splits_b }, [Some(&sp_part), None, None])? } else { sp_part };
+                solo_all.extend(b.read_vector_values(&sp_out)?);
             }
             let chat_descs: Vec<_> = spec.iter().enumerate().map(|(bi, &(rs, hk, sp))| (&cks[bi], &cvs[bi], rs, hk, sp)).collect();
             let splits_vec: Vec<usize> = spec.iter().map(|&(_, _, sp)| sp).collect();
@@ -491,8 +500,22 @@ pub fn run(b: &Backend<'_>, recorded: &dyn Fn(Kind) -> u128) -> Result<(), Strin
             let part = b.draft_flash_attn_batch(&q_dev, &kn_dev, &vn_dev, &chat_descs, heads, kv, 128, q_rows, new_rows, kv_bf16, k_new_bf16, causal_base, row_off)?;
             let got_dev = if max_splits > 1 { b.draft_flash_attn_merge_batch(&part, &splits_vec, heads, q_rows, max_splits)? } else { part };
             let got_all = b.read_vector_values(&got_dev)?;
-            if let Some(at) = got_all.iter().zip(&want_all).position(|(a, w)| a.to_bits() != w.to_bits()) {
-                return Err(format!("FlashAttnBatch {name} bit mismatch at word {at}: got={} want={}", got_all[at], want_all[at]));
+            if let Some(at) = got_all.iter().zip(&solo_all).position(|(a, w)| a.to_bits() != w.to_bits()) {
+                return Err(format!("FlashAttnBatch {name} solo vs batch bit mismatch at word {at}: got={} solo={}", got_all[at], solo_all[at]));
+            }
+            if !kv_bf16 {
+                if let Some(at) = got_all.iter().zip(&want_all).position(|(a, w)| a.to_bits() != w.to_bits()) {
+                    return Err(format!("FlashAttnBatch {name} bit mismatch at word {at}: got={} want={}", got_all[at], want_all[at]));
+                }
+            } else {
+                let mut max_err = 0.0f32;
+                for (at, (&g, &w)) in got_all.iter().zip(&want_all).enumerate() {
+                    if !g.is_finite() { return Err(format!("FlashAttnBatch {name} non-finite at word {at}: got={g}")); }
+                    max_err = max_err.max((g - w).abs());
+                }
+                if max_err > 2.0e-3 {
+                    return Err(format!("FlashAttnBatch {name} TC vs FP32 max_err={max_err:.6e} exceeds 2e-3"));
+                }
             }
         }
         println!("FEW CHECK DRAFT BATCH BF16 KV + FLASH_ATTN_BATCH + SCATTER_KV PASS");

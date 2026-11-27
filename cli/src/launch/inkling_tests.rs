@@ -151,11 +151,16 @@ fn vade_up_inkling_defaults_to_512k_16k_mtp_7_and_prompt_cache_on() {
     output::with_writer(capture.clone(), || launcher.execute(parse_cmd("up inkling"), false)).unwrap();
 
     let args = launcher.runner.last_args();
+    let expected_cache = f.root.join("cache/prefix").to_string_lossy().into_owned();
     assert_eq!(args[6], "524288", "default Inkling context should be 512K: {args:?}");
     assert!(args.windows(2).any(|p| p == ["--mtp", "7"]), "default Inkling MTP should be 7: {args:?}");
-    assert!(args.iter().any(|a| a == "--diagnostic-unqualified-text"), "{args:?}");
+    assert!(!args.iter().any(|a| a == "--diagnostic-unqualified-text"), "Inkling is first-class qualified: {args:?}");
+    assert!(args.windows(2).any(|p| p == ["--disk-cache-dir", expected_cache.as_str()]), "default NVMe disk prefix cache should be wired: {args:?}");
     assert!(!args.iter().any(|a| a == "--no-prompt-keep"), "prompt cache should be ON by default: {args:?}");
     assert_eq!(launcher.runner.start_requests[0]["env.FLASH_SERVE_OUTPUT_TOKENS"], "16384");
+
+    // Seed a mock .vdpc entry and verify status + doctor report entries & bytes.
+    fs::write(f.root.join("cache/prefix/sample.vdpc"), vec![0u8; 4096]).unwrap();
 
     // Status and doctor both succeed cleanly on tiktoken Inkling.
     let status_cap = output::testing::Capture::default();
@@ -163,6 +168,7 @@ fn vade_up_inkling_defaults_to_512k_16k_mtp_7_and_prompt_cache_on() {
     let status_text = String::from_utf8(status_cap.bytes.borrow().clone()).unwrap();
     assert!(status_text.contains("524288 tokens, output 16384"), "{status_text}");
     assert!(status_text.contains("MTP 7 (default)"), "{status_text}");
+    assert!(status_text.contains("Disk cache") && status_text.contains("1 entry, 4.0 KiB"), "{status_text}");
 
     let doctor_cap = output::testing::Capture::default();
     output::with_writer(doctor_cap.clone(), || launcher.execute(Command::Doctor, false)).unwrap();
@@ -171,8 +177,34 @@ fn vade_up_inkling_defaults_to_512k_16k_mtp_7_and_prompt_cache_on() {
     assert!(doctor_text.contains("default context") && doctor_text.contains("524288 tokens"), "{doctor_text}");
     assert!(doctor_text.contains("default output") && doctor_text.contains("16384 tokens"), "{doctor_text}");
     assert!(doctor_text.contains("on (MTP 7)"), "{doctor_text}");
+    assert!(doctor_text.contains("disk prefix cache") && doctor_text.contains("1 entry, 4.0 KiB"), "{doctor_text}");
     assert!(doctor_text.contains("PASS"), "{doctor_text}");
 
+    launcher.execute(Command::Down, false).unwrap();
+}
+
+#[test]
+fn vade_up_inkling_supports_bind_custom_disk_cache_and_no_disk_cache() {
+    let f = InklingFixture::new();
+    let ckpt = f.home.join("models/thinkingmachines/Inkling-2-Mini");
+    f.write_inkling(&ckpt);
+    let custom_dir = f.base.join("nvme-prefix");
+    let mut launcher = f.launcher();
+
+    launcher.execute(
+        parse_cmd(&format!("up inkling --bind 0.0.0.0:18095 --disk-cache-dir {} --disk-cache-bytes 2147483648", custom_dir.display())),
+        false,
+    ).unwrap();
+    let args = launcher.runner.last_args();
+    assert_eq!(args[7], "0.0.0.0:18095", "explicit --bind must pass straight to flash-serve: {args:?}");
+    assert!(args.windows(2).any(|p| p == ["--disk-cache-dir", &custom_dir.to_string_lossy()]), "{args:?}");
+    assert!(args.windows(2).any(|p| p == ["--disk-cache-bytes", "2147483648"]), "{args:?}");
+    assert!(custom_dir.is_dir(), "disk cache directory should be created automatically");
+    launcher.execute(Command::Down, false).unwrap();
+
+    launcher.execute(parse_cmd("up inkling --no-disk-cache"), false).unwrap();
+    let args = launcher.runner.last_args();
+    assert!(!args.iter().any(|a| a == "--disk-cache-dir" || a == "--disk-cache-bytes"), "{args:?}");
     launcher.execute(Command::Down, false).unwrap();
 }
 

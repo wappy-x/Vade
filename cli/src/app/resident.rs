@@ -25,7 +25,7 @@ impl<R: Runner> App<R> {
                 let mut options = options.clone();
                 // A chain or a pair spreads the weights, so it has room for a long
                 // context. One Spark, as each plain replica is, keeps the short one.
-                if options.fp4_local && !options.supplied_options.contains("--context") {
+                if options.fp4_local && !options.is_inkling() && !options.supplied_options.contains("--context") {
                     let sparks = if options.replicas { options.replica_sparks.max(1) } else { self.config.selected(&options)?.len() };
                     // A running engine keeps its size, which may be the fallback.
                     if let Some(session) = existing {
@@ -180,6 +180,10 @@ pub(super) fn recorded_options(session: &Session) -> UpOptions {
         fast_prompts: session.fast_prompts,
         memory_bytes: session.memory_bytes,
         cache_bytes: session.cache_bytes,
+        bind: session.bind.as_deref().and_then(|s| s.parse().ok()),
+        disk_cache_dir: session.disk_cache_dir.clone(),
+        disk_cache_bytes: session.disk_cache_bytes,
+        no_disk_cache: session.no_disk_cache,
         decode_fuse: Some(session.decode_fuse),
         diagnostic_unqualified_text: session.diagnostic_unqualified_text,
         checkpoint_service: None,

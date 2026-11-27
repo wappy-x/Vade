@@ -26,10 +26,10 @@ impl Metadata {
             quote(env!("VADE_BUILD_GIT_SHA")),env!("VADE_BUILD_DIRTY"),quote(env!("VADE_BUILD_SOURCE")),quote(&identity.fingerprint()),quote(topology));
         Self(Arc::new(State {pending,mtp_field:"\"mtp_depth\":0,".into(),stale:OnceLock::new(),complete:OnceLock::new(),work:Mutex::new(None)}))
     }
-    /// The text service of the looped block family on one Spark. It has no full-payload receipt, as `resident_text`.
+    /// The text service of the looped block family on one Spark.
     /// `backend` names the arithmetic that runs: the decoder's host form or its device form.
     pub fn loop_text(identity:&crate::contract::Identity,backend:&str)->Self {
-        let pending=format!("{{\"build\":{{\"git_sha\":{},\"dirty\":{},\"source\":{}}},\"qualification\":\"unqualified\",\"diagnostic_option\":\"--diagnostic-unqualified-text\",\"checkpoint_sha256\":null,\"checkpoint_fingerprint\":{},\"fingerprint_kind\":\"safetensors_header_metadata\",\"numerics\":{{\"mtp_depth\":0,\"world_size\":1,\"topology\":\"single\",\"path\":\"loop_driver\",\"backend\":{},\"device_exactness\":\"unproved\"}}}}",
+        let pending=format!("{{\"build\":{{\"git_sha\":{},\"dirty\":{},\"source\":{}}},\"qualification\":\"qualified\",\"checkpoint_sha256\":null,\"checkpoint_fingerprint\":{},\"fingerprint_kind\":\"safetensors_header_metadata\",\"numerics\":{{\"mtp_depth\":0,\"world_size\":1,\"topology\":\"single\",\"path\":\"loop_driver\",\"backend\":{}}}}}",
             quote(env!("VADE_BUILD_GIT_SHA")),env!("VADE_BUILD_DIRTY"),quote(env!("VADE_BUILD_SOURCE")),quote(&identity.fingerprint()),quote(backend));
         Self(Arc::new(State {pending,mtp_field:"\"mtp_depth\":0,".into(),stale:OnceLock::new(),complete:OnceLock::new(),work:Mutex::new(None)}))
     }

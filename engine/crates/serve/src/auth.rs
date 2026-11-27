@@ -147,6 +147,14 @@ mod tests {
         let limits = crate::Limits { api_key: Some(ApiKey(Arc::from(&b"0123456789abcdef"[..]), None)), ..Default::default() };
         let access = crate::http::AccessPolicy::new(std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 8080)), &limits).unwrap();
         for (host, ok) in [("localhost:18085", true), ("127.0.0.1:18085", true), ("[::1]:18085", true), ("LOCALHOST:65535", true), ("localhost:0", true), ("localhost:65536", false), ("localhost:", false), ("localhost:bad", false), ("localhost.example:18085", false), ("127.0.0.1.example:18085", false), ("[::ffff:127.0.0.1]:18085", false)] { assert_eq!(crate::http::parse_head(format!("GET /health HTTP/1.1\r\nHost: {host}").as_bytes(), &access, false).is_ok(), ok, "{host}"); }
+        // Wildcard bind (0.0.0.0 / [::]) accepts valid LAN Host authorities unless allowed_hosts restricts them.
+        let lan = crate::http::AccessPolicy::new(std::net::SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, 8080)), &crate::Limits::default()).unwrap();
+        for (host, ok) in [("192.0.2.50:8080", true), ("spark.local:8080", true), ("0.0.0.0:8080", true), ("127.0.0.1:8080", true), ("bad host:8080", false)] {
+            assert_eq!(crate::http::parse_head(format!("GET /health HTTP/1.1\r\nHost: {host}").as_bytes(), &lan, false).is_ok(), ok, "wildcard {host}");
+        }
+        let restricted = crate::http::AccessPolicy::new(std::net::SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, 8080)), &crate::Limits { allowed_hosts: vec!["spark.local:8080".into()], ..Default::default() }).unwrap();
+        assert!(crate::http::parse_head(b"GET /health HTTP/1.1\r\nHost: spark.local:8080", &restricted, false).is_ok());
+        assert!(crate::http::parse_head(b"GET /health HTTP/1.1\r\nHost: 192.0.2.50:8080", &restricted, false).is_err());
         for (path, header, ok) in [("/v1/models", "aUtHoRiZaTiOn: Bearer 0123456789abcdef", true), ("/v1/models", "X-Api-Key: 0123456789abcdef", true), ("/v1/models", "X-Api-Key: wrong", false), ("/v1/models", "Accept: application/json", false), ("/health", "Accept: application/json", true)] {
             let head = format!("GET {path} HTTP/1.1\r\nHost: localhost:8080\r\n{header}"); let result = crate::http::parse_head(head.as_bytes(), &access, false);
             assert_eq!(result.is_ok(), ok); if !ok { assert_eq!(result.err().unwrap(), UNAUTHORIZED); }

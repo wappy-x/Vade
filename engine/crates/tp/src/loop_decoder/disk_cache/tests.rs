@@ -12,6 +12,7 @@ use crate::{
 };
 use engine_model::mtp_draft::MtpConfig;
 use std::{
+    io::{Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     sync::atomic::{AtomicBool, Ordering},
     time::Duration,
@@ -452,8 +453,9 @@ fn lru_eviction_enforces_disk_budget_and_refreshes_hit_entries() {
     // Touch p1 via restore so p2 becomes the LRU victim.
     assert!(cache.restore(&Host, &layouts, None, None, &p1, CONTEXT).unwrap().is_some());
 
-    // Saving p3 must evict p2 (oldest), keeping p1 and p3 within budget.
+    // Saving p3 must evict p2 (oldest), keeping p1 and p3 within budget and last_dir_mtime synchronized.
     cache.save(&Host, &layouts, &s3, None, None, &p3, &l3).unwrap();
+    assert_eq!(cache.last_dir_mtime, fs::metadata(dir.path()).and_then(|m| m.modified()).ok());
     assert!(cache.total_bytes() <= budget, "total {} <= budget {budget}", cache.total_bytes());
     assert_eq!(cache.len(), 2);
     assert!(cache.restore(&Host, &layouts, None, None, &p1, CONTEXT).unwrap().is_some(), "p1 survived LRU");
@@ -578,4 +580,393 @@ fn bf16_draft_roundtrip_and_layout_mismatch() {
             .is_none(),
         "fp32 cache must reject bf16 draft snapshot"
     );
+}
+
+#[test]
+fn longer_disk_prefix_beats_shorter_ram_prefix_after_restart_with_zero_diffs() {
+    let fixture = Fixture::small();
+    let dir = TempDir::new("ram-shorter-than-disk");
+    let shared: Vec<u32> = vec![3, 5, 2, 7, 11, 13, 4, 6, 8, 10];
+    let mut long = shared.clone();
+    long.extend_from_slice(&[12, 14, 15, 9, 17, 18, 19, 2]);
+    let mut long_cont = long.clone();
+    long_cont.extend_from_slice(&[4, 6, 8, 10]);
+
+    let want_shared = direct_decode(&fixture, CONTEXT, &shared, 8);
+    let want_long = direct_decode(&fixture, CONTEXT, &long, 8);
+    let want_cont = direct_decode(&fixture, CONTEXT, &long_cont, 8);
+
+    // Server #1: warm both the short shared-system prompt and the longer session onto disk.
+    serve_once(&fixture, CONTEXT, dir.path(), Some(16 << 20), TEST_FP, 2, |send, addr| {
+        let r1 = ask_ids(send, addr, &shared, 8, "");
+        assert!(r1.starts_with("HTTP/1.1 200 "), "{r1}");
+        assert_eq!(parse_token_ids(&r1), want_shared);
+
+        let r2 = ask_ids(send, addr, &long, 8, "");
+        assert!(r2.starts_with("HTTP/1.1 200 "), "{r2}");
+        assert_eq!(parse_token_ids(&r2), want_long);
+    });
+    assert_eq!(vdpc_files(dir.path()).len(), 2, "both short and long snapshots persisted");
+
+    // Server #2 (fresh RAM, warm disk): first promote the shorter shared prefix into RAM,
+    // then send the longer session — disk MUST override the shorter RAM fork and hit 100% (18/18),
+    // not shadow disk with the 10-token RAM prefix.
+    serve_once(&fixture, CONTEXT, dir.path(), Some(16 << 20), TEST_FP, 3, |send, addr| {
+        let r_short = ask_ids(send, addr, &shared, 8, "");
+        assert!(r_short.starts_with("HTTP/1.1 200 "), "{r_short}");
+        assert_eq!(parse_cached_tokens(&r_short), shared.len(), "short session hits disk and warms RAM: {r_short}");
+        assert_eq!(parse_token_ids(&r_short), want_shared);
+
+        let r_long = ask_ids(send, addr, &long, 8, "");
+        assert!(r_long.starts_with("HTTP/1.1 200 "), "{r_long}");
+        assert_eq!(
+            parse_cached_tokens(&r_long),
+            long.len(),
+            "longer disk prefix must beat shorter RAM prefix: {r_long}"
+        );
+        assert_eq!(parse_token_ids(&r_long), want_long);
+
+        // Next continuation matches the 18-token promoted RAM prefix (disk is not strictly longer).
+        let r_cont = ask_ids(send, addr, &long_cont, 8, "");
+        assert!(r_cont.starts_with("HTTP/1.1 200 "), "{r_cont}");
+        assert_eq!(parse_cached_tokens(&r_cont), long.len(), "continuation hits promoted RAM prefix: {r_cont}");
+        assert_eq!(parse_token_ids(&r_cont), want_cont);
+    });
+
+    // Server #3 (fresh RAM, warm disk): warm `shared` into RAM, then send a *continuation*
+    // (`long_cont` > `long`) directly — disk's 18-token entry MUST still beat RAM's 10-token prefix!
+    serve_once(&fixture, CONTEXT, dir.path(), Some(16 << 20), TEST_FP, 2, |send, addr| {
+        let r_short = ask_ids(send, addr, &shared, 8, "");
+        assert!(r_short.starts_with("HTTP/1.1 200 "), "{r_short}");
+        assert_eq!(parse_cached_tokens(&r_short), shared.len());
+        assert_eq!(parse_token_ids(&r_short), want_shared);
+
+        let mut longer_tail = long_cont.clone();
+        longer_tail.extend_from_slice(&[1, 3]);
+        let want_tail = direct_decode(&fixture, CONTEXT, &longer_tail, 8);
+        let r_tail = ask_ids(send, addr, &longer_tail, 8, "");
+        assert!(r_tail.starts_with("HTTP/1.1 200 "), "{r_tail}");
+        assert_eq!(
+            parse_cached_tokens(&r_tail),
+            long_cont.len(),
+            "longer disk continuation must beat shorter RAM prefix: {r_tail}"
+        );
+        assert_eq!(parse_token_ids(&r_tail), want_tail);
+    });
+}
+
+#[test]
+fn multi_chunk_direct_stream_roundtrips_and_detects_per_chunk_tamper() {
+    // Construct a synthetic state whose payload spans > 2.5 * CHUNK_BYTES (> 10 MiB, 3+ chunks)
+    // so multi-worker parallel DirectReader + DirectSequentialWriter + sub-chunk upload +
+    // cross-chunk tensor boundaries are all exercised end-to-end.
+    let layout = Layout {
+        rows: 1024,
+        window: 1024,
+        step_rows: 16,
+        key_bytes: 64 << 20,
+        ring: false,
+        row_words: 1536, // 1024 * 1536 * 4 = 6 MiB per plane => K+V = 12 MiB (+ rings => 4 chunks)
+        kv_channels: 16,
+        kv_taps: 4,
+        channels: 32,
+        taps: 4,
+    };
+    let layouts = [layout];
+    let pos = 1024u64;
+    let plane_words = state::prefix_plane_words(&layout, pos);
+    let keys: Vec<f32> = (0..plane_words)
+        .map(|i| f32::from_bits(0x3F80_0000 ^ ((i as u32).wrapping_mul(2_654_435_761) & 0x007F_FFFF)))
+        .collect();
+    let values: Vec<f32> = (0..plane_words)
+        .map(|i| f32::from_bits(0xBF80_0000 ^ ((i as u32).wrapping_mul(1_597_334_677) & 0x007F_FFFF)))
+        .collect();
+    let rings: [Vec<f32>; 4] = [
+        (0..64).map(|i| i as f32 * 0.25).collect(),
+        (0..64).map(|i| -(i as f32) * 0.5).collect(),
+        (0..128).map(|i| i as f32 * 0.125 + 1.0).collect(),
+        (0..128).map(|i| -(i as f32) * 0.125 - 1.0).collect(),
+    ];
+    let state = State {
+        position: pos,
+        visits: vec![state::VisitState {
+            keys: keys.clone(),
+            values: values.clone(),
+            rings: rings.clone(),
+            next: std::array::from_fn(|_| None),
+            planes: None,
+            every: std::array::from_fn(|_| None),
+            written: None,
+        }],
+    };
+    let prompt: Vec<u32> = (0..pos as u32).map(|i| (i * 7 + 3) % 1000).collect();
+    let logits: Vec<f32> = (0..64).map(|i| (i as f32) * 0.1 - 3.0).collect();
+
+    let dir = TempDir::new("multichunk-direct");
+    let mut cache = DiskPrefixCache::open(
+        dir.path().to_path_buf(),
+        Some(128 << 20),
+        TEST_FP.to_owned(),
+        &layouts,
+        64,
+        pos as usize,
+        None,
+    )
+    .unwrap();
+    cache.save(&Host, &layouts, &state, None, Some("mc"), &prompt, &logits).unwrap();
+    let saved_path = vdpc_files(dir.path()).pop().unwrap();
+    let saved_bytes = fs::read(&saved_path).unwrap();
+    assert!(saved_bytes.len() > 3 * CHUNK_BYTES, "test must span >= 4 chunks");
+
+    // Clean restore must match every single float bit-for-bit across all chunks and tensors.
+    let restored = cache
+        .restore(&Host, &layouts, None, Some("mc"), &prompt, pos as usize)
+        .unwrap()
+        .expect("multi-chunk snapshot restores");
+    assert_eq!(restored.tokens, prompt);
+    assert_eq!(restored.state.visits[0].keys.len(), keys.len());
+    assert!(restored.state.visits[0].keys.iter().zip(&keys).all(|(a, b)| a.to_bits() == b.to_bits()));
+    assert!(restored.state.visits[0].values.iter().zip(&values).all(|(a, b)| a.to_bits() == b.to_bits()));
+    for (got_ring, want_ring) in restored.state.visits[0].rings.iter().zip(&rings) {
+        assert!(got_ring.iter().zip(want_ring).all(|(a, b)| a.to_bits() == b.to_bits()));
+    }
+
+    // Flipping a single bit in chunk 0, chunk 1, chunk 2, or final chunk must fail CRC and delete file.
+    let file_len = saved_bytes.len();
+    for (label, offset) in [
+        ("chunk0", 5000usize),
+        ("chunk1", CHUNK_BYTES + 12345),
+        ("chunk2", 2 * CHUNK_BYTES + 98765),
+        ("last_chunk", file_len - 128),
+    ] {
+        let tdir = TempDir::new(&format!("mc-tamper-{label}"));
+        let mut bad = saved_bytes.clone();
+        bad[offset] ^= 0x08;
+        let bad_path = tdir.path().join(saved_path.file_name().unwrap());
+        fs::write(&bad_path, &bad).unwrap();
+        let mut tcache = DiskPrefixCache::open(
+            tdir.path().to_path_buf(),
+            Some(128 << 20),
+            TEST_FP.to_owned(),
+            &layouts,
+            64,
+            pos as usize,
+            None,
+        )
+        .unwrap();
+        assert!(
+            tcache.restore(&Host, &layouts, None, Some("mc"), &prompt, pos as usize).unwrap().is_none(),
+            "{label}: tampered multi-chunk snapshot must never restore"
+        );
+        assert!(!bad_path.exists(), "{label}: tampered multi-chunk snapshot must be removed");
+    }
+}
+
+#[test]
+fn multi_replica_shared_dir_discovers_peer_entries_after_own_save_and_enforces_shared_budget() {
+    let fixture = Fixture::small();
+    let layouts = crate::loop_decoder::state::layouts_for(&fixture.description, CONTEXT as u64, TEST_LIMITS).unwrap();
+    let driver = Driver::with_limits(&Host, &fixture, &fixture.description, CONTEXT as u64, TEST_LIMITS).unwrap();
+
+    let make = |p: &[u32]| {
+        let mut s = driver.clean().unwrap();
+        let mut l = Vec::new();
+        for &t in p {
+            l = driver.step(&mut s, t).unwrap().logits;
+        }
+        (s, l)
+    };
+    let p1 = [1u32, 2, 3, 4, 5, 6];
+    let p2 = [2u32, 3, 4, 5, 6, 7];
+    let p3 = [3u32, 4, 5, 6, 7, 8];
+    let p4 = [4u32, 5, 6, 7, 8, 9];
+    let (s1, l1) = make(&p1);
+    let (s2, l2) = make(&p2);
+    let (s3, l3) = make(&p3);
+    let (s4, l4) = make(&p4);
+
+    let probe = TempDir::new("mr-probe");
+    let single_size = {
+        let mut c = DiskPrefixCache::open(
+            probe.path().to_path_buf(), Some(64 << 20), TEST_FP.to_owned(), &layouts, 20, CONTEXT, None,
+        ).unwrap();
+        c.save(&Host, &layouts, &s1, None, None, &p1, &l1).unwrap();
+        c.total_bytes()
+    };
+    let budget = single_size * 2 + single_size / 2;
+
+    // 1. Lost-update mtime race: Replica A saves p1, then Replica B saves p2 (bumping dir mtime).
+    // Replica B MUST still discover and restore p1 from the shared directory without restarting!
+    let dir = TempDir::new("mr-handoff");
+    let mut rep_a = DiskPrefixCache::open(
+        dir.path().to_path_buf(), Some(64 << 20), TEST_FP.to_owned(), &layouts, 20, CONTEXT, None,
+    ).unwrap();
+    let mut rep_b = DiskPrefixCache::open(
+        dir.path().to_path_buf(), Some(64 << 20), TEST_FP.to_owned(), &layouts, 20, CONTEXT, None,
+    ).unwrap();
+
+    rep_a.save(&Host, &layouts, &s1, None, None, &p1, &l1).unwrap();
+    rep_b.save(&Host, &layouts, &s2, None, None, &p2, &l2).unwrap();
+
+    let hit_b_on_p1 = rep_b.restore(&Host, &layouts, None, None, &p1, CONTEXT).unwrap();
+    assert!(
+        hit_b_on_p1.is_some(),
+        "Replica B must discover Replica A's snapshot even after Replica B saved its own entry"
+    );
+    let hit_a_on_p2 = rep_a.restore(&Host, &layouts, None, None, &p2, CONTEXT).unwrap();
+    assert!(
+        hit_a_on_p2.is_some(),
+        "Replica A must discover Replica B's snapshot"
+    );
+
+    // 2. Shared tight LRU budget: two replicas saving to the same directory must jointly respect budget.
+    let bdir = TempDir::new("mr-budget");
+    let mut b_a = DiskPrefixCache::open(
+        bdir.path().to_path_buf(), Some(budget), TEST_FP.to_owned(), &layouts, 20, CONTEXT, None,
+    ).unwrap();
+    let mut b_b = DiskPrefixCache::open(
+        bdir.path().to_path_buf(), Some(budget), TEST_FP.to_owned(), &layouts, 20, CONTEXT, None,
+    ).unwrap();
+
+    b_a.save(&Host, &layouts, &s1, None, None, &p1, &l1).unwrap();
+    b_a.save(&Host, &layouts, &s2, None, None, &p2, &l2).unwrap();
+    b_b.save(&Host, &layouts, &s3, None, None, &p3, &l3).unwrap();
+    b_b.save(&Host, &layouts, &s4, None, None, &p4, &l4).unwrap();
+
+    let files = vdpc_files(bdir.path());
+    let actual_bytes: u64 = files.iter().map(|p| fs::metadata(p).unwrap().len()).sum();
+    assert!(
+        actual_bytes <= budget,
+        "shared dir bytes ({actual_bytes}) exceeded budget ({budget}); files={}",
+        files.len()
+    );
+    assert_eq!(files.len(), 2, "only 2 entries fit in shared budget");
+    // The newest entry saved by Replica B must survive its own eviction pass.
+    assert!(b_a.restore(&Host, &layouts, None, None, &p4, CONTEXT).unwrap().is_some());
+
+    // 3. Cross-replica LRU touch propagation: Replica A saves p1 & p2; Replica B hits p1
+    // (advancing mtime); Replica A saves p3 -> Replica A must evict p2 and keep p1.
+    let ldir = TempDir::new("mr-lru-touch");
+    let mut l_a = DiskPrefixCache::open(
+        ldir.path().to_path_buf(), Some(budget), TEST_FP.to_owned(), &layouts, 20, CONTEXT, None,
+    ).unwrap();
+    let mut l_b = DiskPrefixCache::open(
+        ldir.path().to_path_buf(), Some(budget), TEST_FP.to_owned(), &layouts, 20, CONTEXT, None,
+    ).unwrap();
+    l_a.save(&Host, &layouts, &s1, None, None, &p1, &l1).unwrap();
+    l_a.save(&Host, &layouts, &s2, None, None, &p2, &l2).unwrap();
+    std::thread::sleep(Duration::from_millis(20));
+    assert!(l_b.restore(&Host, &layouts, None, None, &p1, CONTEXT).unwrap().is_some());
+    l_a.save(&Host, &layouts, &s3, None, None, &p3, &l3).unwrap();
+    assert!(l_a.restore(&Host, &layouts, None, None, &p1, CONTEXT).unwrap().is_some(), "peer-touched p1 must survive LRU");
+    assert!(l_a.restore(&Host, &layouts, None, None, &p3, CONTEXT).unwrap().is_some(), "newly saved p3 must survive");
+    assert!(l_a.restore(&Host, &layouts, None, None, &p2, CONTEXT).unwrap().is_none(), "untouched p2 must be evicted");
+}
+
+#[test]
+fn concurrent_dual_replica_http_stress_with_tight_lru_has_zero_diffs_and_zero_corrupt_files() {
+    let fixture = Fixture::small();
+    let layouts = crate::loop_decoder::state::layouts_for(&fixture.description, CONTEXT as u64, TEST_LIMITS).unwrap();
+    let driver = Driver::with_limits(&Host, &fixture, &fixture.description, CONTEXT as u64, TEST_LIMITS).unwrap();
+
+    // Measure single entry size to set a tight shared budget holding ~4 of 16 sessions.
+    let sample_prompt: Vec<u32> = (0..12).map(|i| ((i * 3 + 2) % 18 + 2) as u32).collect();
+    let single_size = {
+        let mut s = driver.clean().unwrap();
+        let mut l = Vec::new();
+        for &t in &sample_prompt {
+            l = driver.step(&mut s, t).unwrap().logits;
+        }
+        let probe = TempDir::new("mr-http-probe");
+        let mut c = DiskPrefixCache::open(
+            probe.path().to_path_buf(), Some(64 << 20), TEST_FP.to_owned(), &layouts, 20, CONTEXT, None,
+        ).unwrap();
+        c.save(&Host, &layouts, &s, None, None, &sample_prompt, &l).unwrap();
+        c.total_bytes()
+    };
+    let budget = single_size * 4 + single_size / 2;
+
+    let prompts: Vec<Vec<u32>> = (0u32..16)
+        .map(|s| (0u32..12).map(|i| ((s * 5 + i * 3 + 2) % 18) + 2).collect())
+        .collect();
+    let expected: Vec<Vec<u32>> = prompts.iter().map(|p| direct_decode(&fixture, CONTEXT, p, 8)).collect();
+
+    let shared_dir = TempDir::new("mr-http-stress");
+    let listener_a = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr_a = listener_a.local_addr().unwrap();
+    let listener_b = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr_b = listener_b.local_addr().unwrap();
+    let stop = AtomicBool::new(false);
+
+    std::thread::scope(|scope| {
+        for (listener, dir) in [(listener_a, shared_dir.path().to_path_buf()), (listener_b, shared_dir.path().to_path_buf())] {
+            let stop = &stop;
+            let fixture = &fixture;
+            let layouts = &layouts;
+            scope.spawn(move || {
+                let seats = Seats { limits: TEST_LIMITS, chat: 1 << 20, room: 64 << 20, most: 4 };
+                let service = Service::new(&Host, fixture, &fixture.description, CONTEXT, vec![1], seats).unwrap();
+                let disk = DiskPrefixCache::open(
+                    dir, Some(budget), TEST_FP.to_owned(), layouts, fixture.description.head_rows as usize, CONTEXT, None,
+                ).unwrap();
+                let service = service.with_disk_cache(disk);
+                let lim = limits(CONTEXT, 24).unwrap();
+                let (cache, config) = service.schedule();
+                spark_serve::scheduler::serve_requests(
+                    listener, &service, None::<&spark_serve::tokenizer::ModelTokenizer>, &lim, &cache, &config, stop, "fixture", 16,
+                ).unwrap();
+            });
+        }
+
+        let send_one = |addr: SocketAddr, prompt: &[u32]| -> String {
+            let mut stream = TcpStream::connect(addr).unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
+            let ids = prompt.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
+            let body = format!(
+                r#"{{"prompt_token_ids":[{ids}],"stream":true,"max_tokens":8,"temperature":0,"ignore_eos":true,"stream_options":{{"include_usage":true}}}}"#
+            );
+            let req = format!(
+                "POST /v1/completions HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(req.as_bytes()).unwrap();
+            let mut reply = String::new();
+            let _ = stream.read_to_string(&mut reply);
+            reply
+        };
+
+        // Wave 1 (16 concurrent writes across both replicas) + Wave 2 (16 cross-replica reads/writes).
+        for wave in 0..2 {
+            let mut handles = Vec::new();
+            for s in 0..16 {
+                let addr = if (s + wave) % 2 == 0 { addr_a } else { addr_b };
+                let p = prompts[s].clone();
+                let want = expected[s].clone();
+                handles.push(scope.spawn(move || {
+                    let reply = send_one(addr, &p);
+                    assert!(reply.starts_with("HTTP/1.1 200 "), "wave={wave} s={s}: {reply}");
+                    assert_eq!(parse_token_ids(&reply), want, "wave={wave} s={s}: token-ID mismatch");
+                }));
+            }
+            for h in handles {
+                h.join().unwrap();
+            }
+        }
+    });
+
+    // Zero leftover temp files, zero corrupt entries, and total bytes within budget (allowing at most 1 in-flight concurrent overlap? Actually sequential end settles <= budget + 1 entry, verify intact envelopes).
+    let mut vdpc_count = 0usize;
+    let mut total_bytes = 0u64;
+    for entry in fs::read_dir(shared_dir.path()).unwrap() {
+        let entry = entry.unwrap();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        assert!(!name.contains(".tmp."), "leftover temp file: {name}");
+        if name.ends_with(".vdpc") {
+            let mut file = File::open(entry.path()).unwrap();
+            read_and_verify_envelope(&mut file, true).expect("every surviving .vdpc must pass full envelope verification");
+            total_bytes += entry.metadata().unwrap().len();
+            vdpc_count += 1;
+        }
+    }
+    assert!(vdpc_count > 0 && vdpc_count <= 5, "expected bounded entries under tight LRU, got {vdpc_count} ({total_bytes} B vs budget {budget} B)");
 }

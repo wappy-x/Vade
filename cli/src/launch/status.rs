@@ -61,7 +61,23 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
             ("Context", format!("{} tokens, output {}", field("context_tokens").unwrap_or_default(), field("output_tokens").unwrap_or_default())),
             ("Drafting", drafting),
         ];
-        if record.get("prefix_cache").is_some_and(|value| value == "0") { rows.push(("Cache", "retained prompt cache off".into())); }
+        if config.bind.is_some() {
+            rows.push(("Listen", config.bind_addr()));
+        }
+        let prompt_cache_off = record.get("prefix_cache").is_some_and(|value| value == "0");
+        if prompt_cache_off { rows.push(("Cache", "retained prompt cache off".into())); }
+        if model::loop_text(&config.model) {
+            let dir = config.effective_disk_cache_dir(&self.root);
+            rows.push((
+                "Disk cache",
+                crate::doctor::disk_cache_summary(
+                    dir.as_deref(),
+                    config.disk_cache_bytes,
+                    config.no_disk_cache,
+                    prompt_cache_off,
+                ),
+            ));
+        }
         if let Some(artifacts) = install::load(&self.root)?.filter(|artifacts| artifacts.get("engine") == record.get("engine")) {
             let build = required(&artifacts, "engine_sha256")?;
             let generation: String = required(&artifacts, "generation")?.chars().take(12).collect();
@@ -131,6 +147,10 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
             Some("engine_default") | None if is_loop => Value::Int(model::local_default_mtp(&config.model).into()),
             _ => recorded("mtp"),
         };
+        let prompt_cache_off = record.get("prefix_cache").is_some_and(|v| v == "0");
+        let disk_dir = if is_loop && !prompt_cache_off { config.effective_disk_cache_dir(&self.root) } else { None };
+        let disk_stats = disk_dir.as_deref().and_then(crate::doctor::scan_disk_cache);
+        report.set("bind", config.bind_addr());
         report.set("settings", json::object(vec![
             ("fp4_local", (!is_loop).into()),
             ("mtp", effective_mtp),
@@ -140,7 +160,11 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
             ("requested_chats", Value::Null),
             ("admitted_chats", Value::Null),
             ("memory_bytes_per_rank", recorded("memory_bytes")),
-            ("retained_cache_bytes", if record.get("prefix_cache").is_some_and(|v| v == "0") { 0usize.into() } else { Value::Null }),
+            ("retained_cache_bytes", if prompt_cache_off { 0usize.into() } else { Value::Null }),
+            ("disk_cache_dir", disk_dir.as_ref().map_or(Value::Null, |p| p.to_string_lossy().as_ref().into())),
+            ("disk_cache_bytes", disk_dir.as_ref().and(config.disk_cache_bytes).map_or(Value::Null, |n| Value::BigInt(n.to_string()))),
+            ("disk_cache_entries", disk_stats.map_or(Value::Null, |s| Value::Int(s.entries as i64))),
+            ("disk_cache_used_bytes", disk_stats.map_or(Value::Null, |s| Value::BigInt(s.used_bytes.to_string()))),
         ]));
         if let Some(artifacts) = install::load(&self.root)? {
             // The active installation describes this engine only if its saved

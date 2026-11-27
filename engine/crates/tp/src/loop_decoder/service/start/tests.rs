@@ -13,9 +13,9 @@ fn start(context:&str,bind:&str,options:&str)->Vec<String> {words(&format!("0 1 
 fn the_options_are_read_one_time_each_and_others_are_refused_with_the_list() {
     assert_eq!(options(&[]).unwrap(),Options::default());
     let all=options(&words("--mtp 0 --diagnostic-unqualified-text --no-prompt-keep --api-key-file key --diagnostic-host-arithmetic")).unwrap();
-    assert_eq!(all,Options {diagnostic:true,host:true,key:Some("key".into()),no_prompt_keep:true,depth:0,disk_cache_dir:None,disk_cache_bytes:None});
+    assert_eq!(all,Options {diagnostic:true,host:true,pair:false,key:Some("key".into()),no_prompt_keep:true,depth:0,disk_cache_dir:None,disk_cache_bytes:None});
     let disk=options(&words("--diagnostic-unqualified-text --disk-cache-dir /tmp/vade-cache --disk-cache-bytes 1048576")).unwrap();
-    assert_eq!(disk,Options {diagnostic:true,host:false,key:None,no_prompt_keep:false,depth:0,disk_cache_dir:Some("/tmp/vade-cache".into()),disk_cache_bytes:Some(1_048_576)});
+    assert_eq!(disk,Options {diagnostic:true,host:false,pair:false,key:None,no_prompt_keep:false,depth:0,disk_cache_dir:Some("/tmp/vade-cache".into()),disk_cache_bytes:Some(1_048_576)});
     assert_eq!(options(&words("--disk-cache-bytes 1024")).unwrap_err(),"--disk-cache-bytes requires --disk-cache-dir");
     assert_eq!(options(&words("--no-prompt-keep --disk-cache-dir /tmp/c")).unwrap_err(),"--disk-cache-dir cannot be combined with --no-prompt-keep");
     assert!(options(&words("--disk-cache-dir /tmp/c --disk-cache-bytes 0")).unwrap_err().contains("--disk-cache-bytes needs a positive byte count"));
@@ -36,22 +36,25 @@ fn the_options_are_read_one_time_each_and_others_are_refused_with_the_list() {
 }
 #[test]
 fn the_places_are_read_and_a_start_that_cannot_be_served_is_refused() {
+    // Starts cleanly without --diagnostic-unqualified-text.
+    let plain=settings(&start("4096","127.0.0.1:18191","--mtp 0"),None).unwrap();
+    assert_eq!((plain.rank,plain.world,plain.context,plain.bind,plain.requests,plain.output),(0,1,4096,"127.0.0.1:18191".parse().unwrap(),3,4096));
+    assert_eq!(plain.options,Options::default());
+    // Legacy --diagnostic-unqualified-text stays accepted as a backward-compatible no-op.
     let s=settings(&start("4096","127.0.0.1:18191","--diagnostic-unqualified-text --mtp 0"),None).unwrap();
     assert_eq!((s.rank,s.world,s.context,s.bind,s.requests,s.output),(0,1,4096,"127.0.0.1:18191".parse().unwrap(),3,4096));
     assert_eq!(s.options,Options {diagnostic:true,..Options::default()});
     // The output cap: the setting of the caller, else the context up to 8,192 tokens.
-    let wide=|output:Option<&str>|settings(&start("32768","[::1]:18191","--diagnostic-unqualified-text"),output.map(str::to_owned));
+    let wide=|output:Option<&str>|settings(&start("32768","[::1]:18191",""),output.map(str::to_owned));
     assert_eq!((wide(None).unwrap().output,wide(Some("512")).unwrap().output),(8192,512));
     for output in ["0","many"] {assert!(wide(Some(output)).unwrap_err().contains("FLASH_SERVE_OUTPUT_TOKENS must be a positive token count"));}
-    // Without the diagnostic option the service does not start.
-    let plain=settings(&start("4096","127.0.0.1:18191","--mtp 0"),None).unwrap_err();
-    assert!(plain.starts_with("text service refused: this engine has not qualified this model family") && plain.ends_with("give --diagnostic-unqualified-text"),"{plain}");
-    // The HTTP bind is loopback only.
+    // Non-loopback HTTP binds are respected cleanly, with or without the legacy flag.
     for bind in ["0.0.0.0:18191","[::]:18191","192.0.2.1:18191"] {
-        assert_eq!(settings(&start("4096",bind,"--diagnostic-unqualified-text"),None).unwrap_err(),"--diagnostic-unqualified-text requires a loopback HTTP bind");
+        assert_eq!(settings(&start("4096",bind,""),None).unwrap().bind,bind.parse::<SocketAddr>().unwrap());
+        assert_eq!(settings(&start("4096",bind,"--diagnostic-unqualified-text"),None).unwrap().bind,bind.parse::<SocketAddr>().unwrap());
     }
-    assert!(settings(&start("0","127.0.0.1:18191","--diagnostic-unqualified-text"),None).unwrap_err().contains("CONTEXT must be a positive token count"));
-    assert!(settings(&start("many","127.0.0.1:18191","--diagnostic-unqualified-text"),None).unwrap_err().contains("CONTEXT must be a whole number, got many"));
+    assert!(settings(&start("0","127.0.0.1:18191",""),None).unwrap_err().contains("CONTEXT must be a positive token count"));
+    assert!(settings(&start("many","127.0.0.1:18191",""),None).unwrap_err().contains("CONTEXT must be a whole number, got many"));
     let short=settings(&words("0 1 127.0.0.1:1 127.0.0.1:1 flash.ptx model 4096 127.0.0.1:18191"),None).unwrap_err();
     assert!(short.starts_with(PLACES) && short.ends_with(OPTIONS),"{short}");
 }
@@ -99,7 +102,7 @@ fn the_stop_set_is_the_eos_list_of_the_checkpoint() {
 #[test]
 fn a_whole_start_serves_a_chat_with_text_on_the_host_backend() {
     let folder=Folder::new("start-serve");let fixture=chat_model_with(folder.stop);let d=&fixture.description;
-    let settings=settings(&start(&CHAT_CONTEXT.to_string(),"127.0.0.1:0","--diagnostic-unqualified-text --mtp 0 --no-prompt-keep --diagnostic-host-arithmetic"),Some("24".into())).unwrap();
+    let settings=settings(&start(&CHAT_CONTEXT.to_string(),"127.0.0.1:0","--mtp 0 --no-prompt-keep --diagnostic-host-arithmetic"),Some("24".into())).unwrap();
     assert!(settings.options.host);
     let admitted=admit(d,&LoadBytes {device:1<<20,..Default::default()},settings.context,64<<20,4,super::super::tests::LIMITS).unwrap();
     let listener=TcpListener::bind(settings.bind).unwrap();let address=listener.local_addr().unwrap();
@@ -117,7 +120,7 @@ fn a_whole_start_serves_a_chat_with_text_on_the_host_backend() {
         let send=|text:String| {let mut stream=TcpStream::connect(address).unwrap();stream.set_read_timeout(Some(Duration::from_secs(120))).unwrap();
             stream.write_all(text.as_bytes()).unwrap();let mut reply=String::new();stream.read_to_string(&mut reply).unwrap();reply};
         let record=health(&send,address);
-        assert!(record.contains("\"status\":\"ready\"") && record.contains("\"path\":\"loop_driver\"") && record.contains("\"backend\":\"host\"") && record.contains("\"qualification\":\"unqualified\""),"{record}");
+        assert!(record.contains("\"status\":\"ready\"") && record.contains("\"path\":\"loop_driver\"") && record.contains("\"backend\":\"host\"") && record.contains("\"qualification\":\"qualified\""),"{record}");
         for run in 0..2 {
             let reply=post(&send,address,"/v1/chat/completions",body);assert!(ok(&reply),"{reply}");
             let served=ids(&reply);assert!(!served.is_empty(),"the answer holds no token ID: {reply}");

@@ -377,41 +377,62 @@ pub fn half_rows<C:Compute,W:Weights<C>>(run:&Run<'_,C,W>,visit:&Visit,layout:&L
     let view=short.checked_next_multiple_of(32).unwrap_or(layout.rows).min(layout.rows);
     let words=rows.saturating_mul(view).saturating_mul(2*heads)
         .saturating_add(rows.saturating_mul(heads).saturating_mul(extent));
-    // Multi-chat decode & unwrapped multi-chat verify (`C >= 2`): run GQA-packed Split-KV in chunks of
-    // `FW_SPLIT_ROWS_MAX` (16), bit-exact with C1 at any context length and avoiding per-chat attention launches.
+    // Multi-chat decode & unwrapped multi-chat verify (`C >= 2`): run chat-grouped GQA-packed Split-KV in batches of
+    // up to `FW_SPLIT_GROUPS_MAX` (32) CTA-groups so all verify rows of each chat pack into one CTA and read KV once!
     let mut cohort_done = false;
-    let split_max = spark_gpu_probe::flash_window::FW_SPLIT_ROWS_MAX;
     if !prefill && !any_wraps && spans.len() >= 2 && scratch.iter().all(Option::is_none) {
-        let mut row_meta: Vec<(usize, u64)> = Vec::with_capacity(rows);
-        for (chat, span) in spans.iter().enumerate() {
-            for r in 0..span.count {
-                row_meta.push((chat, span.first + r as u64));
+        let groups_max = spark_gpu_probe::flash_window::FW_SPLIT_GROUPS_MAX;
+        let max_rows_launch = spark_gpu_probe::flash_window::FW_ROWS_MAX;
+        let max_span = spans.iter().map(|s| s.count).max().unwrap_or(1);
+        let (_, cap) = spark_gpu_probe::flash_window::flash_window_split_q_groups_for(max_span, heads, kv_heads);
+        let mut cohort_parts = Vec::new();
+        let (mut chat_i, mut row_start, mut done) = (0usize, 0usize, 0usize);
+        while chat_i < spans.len() {
+            let mut chat_end = chat_i;
+            let (mut batch_groups, mut batch_rows) = (0usize, 0usize);
+            while chat_end < spans.len() {
+                let cnt = spans[chat_end].count;
+                let g = cnt.div_ceil(cap);
+                if batch_groups + g > groups_max || batch_rows + cnt > max_rows_launch {
+                    break;
+                }
+                batch_groups += g;
+                batch_rows += cnt;
+                chat_end += 1;
             }
-        }
-        let mut cohort_parts = Vec::with_capacity(rows.div_ceil(split_max));
-        let mut done = 0usize;
-        for start in (0..rows).step_by(split_max) {
-            let n = split_max.min(rows - start);
+            if chat_end == chat_i {
+                break;
+            }
+            let n = batch_rows;
             let mut steps_v = Vec::with_capacity(2 * n);
             let mut row_pos_live = Vec::with_capacity(n);
             let mut planes = Vec::with_capacity(n);
-            for &(chat, pos) in &row_meta[start..start + n] {
-                let live = layout.live(pos)?;
-                steps_v.extend([live, layout.slot(pos)?]);
-                row_pos_live.push((pos, live));
+            for (chat, span) in spans[chat_i..chat_end].iter().enumerate().map(|(k, s)| (chat_i + k, s)) {
                 let state = &states[chat];
+                let span_last = span.first + span.count as u64 - 1;
                 let chat_view = if layout.ring {
                     view
                 } else {
-                    layout.view_rows_in(pos, state::plane_rows(c, layout, &state.keys)?)?
+                    layout.view_rows_in(span_last, state::plane_rows(c, layout, &state.keys)?)?
                 };
-                planes.push((state::view(c, layout, &state.keys, chat_view)?, state::view(c, layout, &state.values, chat_view)?));
+                let (kv, vv) = (state::view(c, layout, &state.keys, chat_view)?, state::view(c, layout, &state.values, chat_view)?);
+                let (kw, vw) = (c.words(&kv), c.words(&vv));
+                for r in 0..span.count {
+                    let pos = span.first + r as u64;
+                    let live = layout.live(pos)?;
+                    steps_v.extend([live, layout.slot(pos)?]);
+                    row_pos_live.push((pos, live));
+                    if r + 1 < span.count {
+                        planes.push((c.range(&kv, 0, kw)?, c.range(&vv, 0, vw)?));
+                    }
+                }
+                planes.push((kv, vv));
             }
             let both = state::step_words(c, &steps_v)?;
             let (q_part, m_part, s_part, g_part, pos_part) = if n == rows {
                 (None, None, None, None, None)
             } else {
-                let part = |x: &C::Value, words: usize| c.range(x, start * words, n * words);
+                let part = |x: &C::Value, words: usize| c.range(x, row_start * words, n * words);
                 (Some(part(&products.0, heads * head)?), Some(part(&products.1, heads * relative)?),
                     Some(part(&sink, heads)?), Some(part(&gate, heads * head)?),
                     match &factor { Some(f) => Some(part(f, 1)?), None => None })
@@ -430,7 +451,9 @@ pub fn half_rows<C:Compute,W:Weights<C>>(run:&Run<'_,C,W>,visit:&Visit,layout:&L
             let Some(output) = c.window_split(&split_req)? else { break };
             need(c.words(&output) == n * heads * head, "the split-kv cohort attention differs from the description")?;
             cohort_parts.push(output);
+            row_start += n;
             done += n;
+            chat_i = chat_end;
         }
         if done == rows {
             parts.extend(cohort_parts);

@@ -345,16 +345,13 @@ pub(crate) fn parse_with_reservation(body: &[u8], chat: bool, limits: &Limits, m
         let messages = json::field(object, "messages")
             .and_then(Value::array)
             .map_err(|e| e.to_string())?;
-        if messages.is_empty() || messages.len() > 4096 {
-            return Err("messages count outside 1..4096".into());
+        if messages.is_empty() {
+            return Err("messages must not be empty".into());
         }
         let tools = match get("tools") {
             None => Vec::new(),
             Some(v) => {
-                let list = v.array().map_err(|e| e.to_string())?;
-                if list.len() > 64 {
-                    return Err("too many tools".into());
-                }
+                let _ = v.array().map_err(|e| e.to_string())?;
                 raw_array(
                     raw_member(
                         std::str::from_utf8(body).map_err(|_| "invalid UTF-8")?,

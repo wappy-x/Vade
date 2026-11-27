@@ -30,10 +30,13 @@ fn pairs_start_world_two_servers_with_one_tunnel_per_pair_behind_one_gateway() {
 #[test]
 fn pairs_need_replicas_an_even_host_list_and_a_link_inside_each_pair() {
     for (args, error) in [(&["--pairs"][..], "Use --pairs with --replicas N"), (&["--replicas", "2", "--pairs", "--hosts", "a,b"], "(2N with --pairs)"),
-        (&["--replicas", "13", "--pairs"], "Use --replicas 2..12 with --pairs")] {
+        (&["--replicas", "1", "--pairs"], "at least 2")] {
         let args = ["up"].into_iter().chain(args.iter().copied()).map(str::to_string).collect::<Vec<_>>();
         assert!(crate::cli::parse(&args).unwrap_err().contains(error), "{args:?}");
     }
+    // No arbitrary replica ceiling (Rule 17): --replicas 13 --pairs parses cleanly as 26 Sparks.
+    let many = fp4_options(&["--replicas", "13", "--pairs"]);
+    assert_eq!((many.sparks, many.replicas, many.replica_sparks), (Some(26), true, 2));
     let options = fp4_options(&["--replicas", "2", "--pairs", "--hosts", "a,b,c,d"]);
     assert_eq!((options.sparks, options.replica_sparks, options.hosts.len()), (None, 2, 4));
     assert_eq!(fp4_options(&["--replicas", "2", "--pairs"]).sparks, Some(4));

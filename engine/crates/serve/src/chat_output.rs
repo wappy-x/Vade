@@ -45,23 +45,20 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            total_bytes: 1024 * 1024,
-            tool_call_bytes: 64 * 1024,
-            tool_calls: 16,
-            name_bytes: 128,
+            total_bytes: usize::MAX,
+            tool_call_bytes: usize::MAX,
+            tool_calls: usize::MAX,
+            name_bytes: 1024,
         }
     }
 }
 impl Limits {
     fn validate(&self) -> Result<(), String> {
         if self.total_bytes == 0
-            || self.total_bytes > 16 * 1024 * 1024
             || self.tool_call_bytes == 0
             || self.tool_call_bytes > self.total_bytes
             || self.tool_calls == 0
-            || self.tool_calls > 128
             || self.name_bytes == 0
-            || self.name_bytes > 1024
         {
             return Err("invalid chat output parser limits".into());
         }
@@ -109,9 +106,6 @@ pub struct Parser {
 impl Parser {
     pub fn new(limits: Limits, allowed_tool_names: Vec<String>) -> Result<Self, String> {
         limits.validate()?;
-        if allowed_tool_names.len() > 64 {
-            return Err("too many declared tools".into());
-        }
         let mut declared = BTreeSet::new();
         for name in allowed_tool_names {
             if name.is_empty()

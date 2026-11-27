@@ -147,7 +147,7 @@ impl Default for Options {
             preserve_thinking: false,
             add_generation_prompt: true,
             tools: Vec::new(),
-            max_bytes: 1024 * 1024,
+            max_bytes: usize::MAX,
             generation_prefix: String::new(),
         }
     }
@@ -274,8 +274,8 @@ pub fn encode(
 // One renderer for the recognized hybrid template semantics, including XML tools.
 fn render_hybrid(messages: &[Message], options: &Options, template: HybridTemplate) -> Result<Output> {
     let reasoning = template.effort;
-    if messages.is_empty() || messages.len() > 4096 || options.tools.len() > 1024 {
-        return Err(err("chat item count limit exceeded"));
+    if messages.is_empty() {
+        return Err(err("chat requires at least one message"));
     }
     let last_query = messages.iter().rposition(|m| {
         let c = py_trim(&m.content);
@@ -363,7 +363,7 @@ fn template_arguments(arguments: &str, max_bytes: usize, scalar_strings: bool) -
         let key = i;
         i += 1;
         while b[i] != b'"' { i += if b[i] == b'\\' { 2 } else { 1 }; }
-        let name = json::parse(&b[key..=i], json::Limits { string_bytes: text.len(), ..Default::default() })?.string()?.to_owned();
+        let name = json::parse(&b[key..=i], json::Limits { bytes: text.len(), nodes: usize::MAX, string_bytes: text.len(), ..Default::default() })?.string()?.to_owned();
         i += 3;
         let start = i;
         let (mut depth, mut quoted) = (0usize, false);
@@ -379,7 +379,7 @@ fn template_arguments(arguments: &str, max_bytes: usize, scalar_strings: bool) -
         }
         let raw = &text[start..i];
         let value = if raw.starts_with('"') {
-            json::parse(raw.as_bytes(), json::Limits { string_bytes: text.len(), ..Default::default() })?.string()?.to_owned()
+            json::parse(raw.as_bytes(), json::Limits { bytes: text.len(), nodes: usize::MAX, string_bytes: text.len(), ..Default::default() })?.string()?.to_owned()
         } else if scalar_strings {
             match raw { "true" => "True", "false" => "False", "null" => "None", _ => raw }.to_owned()
         } else { raw.to_owned() };
@@ -393,7 +393,6 @@ pub fn format_phi(messages: &[Message], options: &Options) -> Result<String> {
     Ok(render_phi(messages, options)?.text)
 }
 fn render_phi(messages: &[Message], options: &Options) -> Result<Output> {
-    if messages.len() > 4096 { return Err(err("chat item count limit exceeded")); }
     let mut out = Output { text: String::new(), limit: options.max_bytes, ordinary: Vec::new() };
     for m in messages {
         if m.role == Role::Tool { continue; }
@@ -409,9 +408,6 @@ fn render_phi(messages: &[Message], options: &Options) -> Result<Output> {
 fn render(messages: &[Message], options: &Options) -> Result<Output> {
     if messages.is_empty() {
         return Err(err("chat requires at least one message"));
-    }
-    if messages.len() > 4096 || options.tools.len() > 1024 {
-        return Err(err("chat item count limit exceeded"));
     }
     let mut out = Output {
         text: String::new(),
@@ -432,9 +428,6 @@ fn render(messages: &[Message], options: &Options) -> Result<Output> {
             total = total
                 .checked_add(s.len())
                 .ok_or_else(|| err("chat input overflow"))?
-        }
-        if m.tool_calls.len() > 1024 {
-            return Err(err("tool-call count limit exceeded"));
         }
         if m.role != Role::Assistant && (!m.tool_calls.is_empty() || m.reasoning_content.is_some())
         {
@@ -458,7 +451,7 @@ fn render(messages: &[Message], options: &Options) -> Result<Output> {
         out.push("# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>")?;
         for tool in &options.tools {
             out.push("\n")?;
-            out.data(&json_for_template(tool)?)?
+            out.data(&json_for_template_limit(tool, options.max_bytes)?)?
         }
         out.push("\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n")?;
     } else if matches!(messages[0].role, Role::System | Role::Developer) {
@@ -525,6 +518,7 @@ fn render(messages: &[Message], options: &Options) -> Result<Output> {
                         call.arguments.as_bytes(),
                         json::Limits {
                             bytes: options.max_bytes,
+                            nodes: usize::MAX,
                             string_bytes: options.max_bytes,
                             ..Default::default()
                         },
@@ -568,7 +562,8 @@ pub fn json_for_template(input: &str) -> Result<String> {
     json_for_template_limit(input, input.len())
 }
 fn json_for_template_limit(input: &str, max_bytes: usize) -> Result<String> {
-    json::parse(input.as_bytes(), json::Limits { string_bytes: max_bytes.max(json::Limits::default().string_bytes), ..Default::default() })?;
+    let limit = max_bytes.max(input.len()).max(json::Limits::default().string_bytes);
+    json::parse(input.as_bytes(), json::Limits { bytes: limit, nodes: usize::MAX, string_bytes: limit, ..Default::default() })?;
     let b = input.as_bytes();
     let mut out = String::new();
     let mut i = 0;
@@ -596,7 +591,7 @@ fn json_for_template_limit(input: &str, max_bytes: usize) -> Result<String> {
                         i += 1
                     }
                 }
-                let v = json::parse(&b[start..i], json::Limits { string_bytes: input.len(), ..Default::default() })?;
+                let v = json::parse(&b[start..i], json::Limits { bytes: input.len(), nodes: usize::MAX, string_bytes: input.len(), ..Default::default() })?;
                 out.push_str(&quote(v.string()?));
             }
             b'-' | b'0'..=b'9' => {
@@ -734,6 +729,10 @@ mod tests {
             )
             .is_err()
         );
+        // Default options have no arbitrary 1 MiB ceiling so 512K-1M+ coding prompts render cleanly.
+        let large = "x".repeat(1_600_000);
+        let rendered = format(&[Message::new(Role::User, large.clone())], &Options::default()).unwrap();
+        assert!(rendered.len() > 1_600_000 && rendered.contains(&large));
     }
     #[test]
     fn gemma_official_thinking_and_tool_fixture() {

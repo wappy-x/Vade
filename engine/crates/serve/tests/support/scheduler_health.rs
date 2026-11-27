@@ -176,8 +176,7 @@ fn queued_responses_cancellation_reports_prompt_usage() {
     assert!(reply.contains(r#""input_tokens":1,"output_tokens":0,"total_tokens":1"#), "{reply}");
 }
 
-/// The intake part of `full_table_cancel_preflight_preserves_response_and_control_admission`. It is in this file so
-/// that scheduler.rs stays within the ratchet's 1,500 lines. A socket holds a slot only when its head passed the
+/// The intake part of `full_table_cancel_preflight_preserves_response_and_control_admission`. A socket holds a slot only when its head passed the
 /// checks: 26 sockets that send nothing or a bad head refuse nothing. Then 17 good heads with no body fill the table.
 /// 26 is one more than the 17 slots and the 8 reserve places together. Not more: this file's tests run in parallel
 /// with a 60 second test that holds about 100 sockets, and the file must pass at the default limit of 256 open files.

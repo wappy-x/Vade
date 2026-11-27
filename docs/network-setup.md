@@ -129,8 +129,8 @@ This **chain** runs over RDMA or TCP.
 | --- | --- | --- | --- |
 | **1** | One Spark on its own | none | `vade up`, on the Spark or from a controller |
 | **2** | Tensor split, over RDMA only | 1 | `vade up --sparks 2` |
-| **3 to 24** | Layer chain, in cable order | one fewer than the Sparks | `vade up --sparks a,b,c`, in any order |
-| **Many chats** | Replicas: a separate one-Spark server on each Spark, behind a local gateway | none | `vade up --replicas N` (2 to 16) |
+| **3 or more** | Layer chain, in cable order | one fewer than the Sparks | `vade up --sparks a,b,c`, in any order |
+| **Many chats** | Replicas: a separate one-Spark server on each Spark, behind a local gateway | none | `vade up --replicas N` (2 or more) |
 
 A chain does not need the cable that would close it into a ring. Before you
 choose more than two Sparks, run `vade install` from current source, so the

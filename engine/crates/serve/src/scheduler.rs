@@ -1,6 +1,7 @@
 //! One CUDA thread, bounded nonblocking sockets, priority between model steps.
 mod dispatch;
 mod disk_prefix;
+pub use disk_prefix::min_restore_tokens as disk_prefix_min_tokens;
 mod draft_admission;
 mod intake;
 mod refusal;

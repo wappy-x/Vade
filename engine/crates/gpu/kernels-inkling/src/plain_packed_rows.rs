@@ -114,6 +114,10 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
             };
             let e_u32 = e as u32;
             let picks_u32 = picks as u32;
+            let is_down_pdl = caps.is_null() && !pairs && repeat == 1 && input_words != 0;
+            if !is_down_pdl {
+                asm!("griddepcontrol.wait;", options(nostack));
+            }
             let id = id_at(e_u32);
             if !(id >= 0.0 && id < experts as f32) || (id as u32) as f32 != id || id as u32 >= experts {
                 nvptx::trap();
@@ -276,6 +280,9 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
                     fetch_panel!(if 2u32 < last_c { 2u32 } else { last_c }),
                     fetch_panel!(if 3u32 < last_c { 3u32 } else { last_c }),
                 ];
+                if is_down_pdl {
+                    asm!("griddepcontrol.wait;", options(nostack));
+                }
                 load_x_slab!(input, stride_u32, repeat, idx_lo, idx_hi, row_stride, 0u32, slab_chunks);
                 cp_async_wait_zero();
                 nvptx::_syncthreads();
@@ -358,6 +365,9 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
                                 part_end = k + next_len;
                                 x_off = 0;
                             }
+                            if k + DEPTH >= chunks {
+                                asm!("griddepcontrol.launch_dependents;", options(nostack));
+                            }
                             step_one!($is_two, 0, k, x_off);
                             step_one!($is_two, 1, k, x_off);
                             step_one!($is_two, 2, k, x_off);
@@ -370,6 +380,7 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
                                 reload_x!(k, chunks - k);
                                 x_off = 0;
                             }
+                            asm!("griddepcontrol.launch_dependents;", options(nostack));
                             consume_slot!($is_two, ring[0], x_off);
                             if k + 1 < chunks { consume_slot!($is_two, ring[1], x_off + 128); }
                             if k + 2 < chunks { consume_slot!($is_two, ring[2], x_off + 256); }
@@ -539,6 +550,9 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
                 let mut acc0 = [0.0f32; 4];
                 let mut acc1 = [0.0f32; 4];
 
+                if is_down_pdl {
+                    asm!("griddepcontrol.wait;", options(nostack));
+                }
                 if wide {
                     issue_stage(0, 0);
                     if chunks > 1 {
@@ -554,6 +568,8 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
                         if ch + 2 < chunks {
                             let nxt_slot = if slot == 0 { 2 } else { slot - 1 };
                             issue_stage(ch + 2, nxt_slot);
+                        } else if ch + 1 >= chunks {
+                            asm!("griddepcontrol.launch_dependents;", options(nostack));
                         }
                         let cur = smem + slot * stage_bytes;
                         let (sc0, sc1) = (
@@ -625,7 +641,11 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
                     nvptx::_syncthreads();
                     let mut ch = 0u32;
                     while ch < chunks {
-                        if ch + 1 < chunks { issue_stage(ch + 1, (ch + 1) & 1); }
+                        if ch + 1 < chunks {
+                            issue_stage(ch + 1, (ch + 1) & 1);
+                        } else {
+                            asm!("griddepcontrol.launch_dependents;", options(nostack));
+                        }
                         let cur = smem + (ch & 1) * stage_bytes;
                         let (sc0, sc1) = (
                             if live0 { load_u32(cur + scale_at + r0 * 4) } else { 0 },

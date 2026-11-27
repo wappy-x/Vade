@@ -114,7 +114,7 @@ Decode steps for all active chats run together in one batch. Prompt reading shar
 
 The repository holds more than one server, from different stages of the project. Only one is the release path.
 
-- **[`flash-serve`](../engine/crates/tp/src/bin/flash-serve.rs): the release server.** It serves FP4-Local on one Spark, across two Sparks, or as a longer chain. It also serves the Flash-Next FP8 checkpoint on 2, 4 or 6 Sparks, and the unqualified GLM (two Sparks) and Inkling (one Spark) text services under `--diagnostic-unqualified-text`. `vade launch` and `vade up` start it.
+- **[`flash-serve`](../engine/crates/tp/src/bin/flash-serve.rs): the release server.** It serves FP4-Local on one Spark, across two Sparks, or as a longer chain. It also serves the Flash-Next FP8 checkpoint on 2, 4 or 6 Sparks, Inkling 2 Mini on one Spark (or N copies behind the gateway), and the unqualified GLM (two Sparks) text service under `--diagnostic-unqualified-text`. `vade launch` and `vade up` start it.
 - **[`spark-serve`](../engine/crates/serve/src/bin/spark-serve.rs): the original one-Spark server.** It serves earlier models (Qwen3, Qwen3.8-27B, Gemma 4). It shares the HTTP and scheduler library with `flash-serve`, but it is not a v0.1.0 route. See [its README](../engine/crates/serve/README.md).
 - **[`next-http`](../engine/crates/tp/src/bin/next-http.rs): a compatibility launcher.** It hands off to `flash-serve` on the older tensor-map rank path, with drafting off.
 - **[`next-tp`](../engine/crates/tp/src/bin/next-tp.rs): the rank qualification tool.** It is not an HTTP service.

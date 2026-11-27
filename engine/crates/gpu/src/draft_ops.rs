@@ -201,12 +201,12 @@ impl DraftOp {
                 let r3=batch.checked_mul(latent)?.checked_mul(3)?;
                 let lens=[r3,r3,if has_state {batch.checked_mul(latent)?} else {0}];
                 (lens,batch.checked_mul(2*latent+(latent/64)*18)?,batch.checked_mul(latent.div_ceil(256))?.checked_mul(128)?,[26,latent,usize::from(has_state),0,batch,0])}
-            FlashAttn{rows,heads,kv,width,keys,splits,causal_base,row_off} if width==128 && kv>0 && heads>0 && heads%kv==0 && rows>0 && rows<65536 && keys>0 && (1..=32).contains(&splits) && row_off<256 && causal_base<=keys && causal_base<=u32::MAX as usize=>{
+            FlashAttn{rows,heads,kv,width,keys,splits,causal_base,row_off} if width==128 && kv>0 && heads>0 && heads%kv==0 && rows>0 && rows<65536 && keys>0 && (1..=255).contains(&splits) && row_off<256 && causal_base<=keys && causal_base<=u32::MAX as usize=>{
                 let queries=rows.checked_mul(heads)?;let q=queries.checked_mul(width)?;
                 let k=keys.checked_mul(kv)?.checked_mul(width)?;
                 let out=if splits==1 {q} else {queries.checked_mul(splits)?.checked_mul(132)?};
                 ([q,k,k],out,queries.checked_mul(splits)?.checked_mul(32)?,[20,(1.0/(width as f32).sqrt()).to_bits() as usize,heads,kv,(causal_base<<32)|(row_off<<24)|(splits<<16)|rows,keys])}
-            FlashAttnMerge{rows,heads,width,splits} if width==128 && rows>0 && heads>0 && (2..=32).contains(&splits)=>{
+            FlashAttnMerge{rows,heads,width,splits} if width==128 && rows>0 && heads>0 && splits>=2=>{
                 let queries=rows.checked_mul(heads)?;let parts=queries.checked_mul(splits)?.checked_mul(132)?;
                 ([parts,0,0],queries.checked_mul(width)?,queries.checked_mul(32)?,[21,heads,rows,splits,0,0])}
             Gate(n) if n>0 && n<=1<<24=>([n,n,0],n,n.div_ceil(4),[0,n,0,0,0,0]),

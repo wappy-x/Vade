@@ -316,8 +316,7 @@ fn run() -> Result<(), String> {
         limits.output_tokens = value.parse().map_err(|_| "invalid output token limit")?;
         if limits.output_tokens > context { return Err(spark_gpu_probe::admission::token_refusal(limits.output_tokens as u128, context, &format!("CONTEXT={context}; OUTPUT={}", limits.output_tokens), "configured CONTEXT", "OUTPUT / FLASH_SERVE_OUTPUT_TOKENS")); }
     }
-    if next_model && limits.output_tokens > 16384 { return Err("FP4-Local OUTPUT must be at most 16384 tokens".into()); }
-    limits.output_bytes = limits.output_bytes.max(limits.output_tokens.saturating_mul(256).saturating_add(4096).min(16 * 1024 * 1024));
+    limits.output_bytes = limits.output_bytes.max(limits.output_tokens.saturating_mul(256).saturating_add(4096).min(spark_serve::Limits::MAX_CONTEXT_TOKENS * 256));
     if let Ok(value) = std::env::var("FLASH_SERVE_GENERATION_TIMEOUT_MS") {
         limits.generation_timeout = Duration::from_millis(value.parse().map_err(|_| "invalid generation timeout")?);
     }

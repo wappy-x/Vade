@@ -75,6 +75,21 @@ impl<R: Runner> App<R> {
                         .map(|n| Value::BigInt(n.to_string()))
                         .unwrap_or(Value::Null),
                 ),
+                (
+                    "disk_cache_dir",
+                    session
+                        .disk_cache_dir
+                        .as_deref()
+                        .map(Value::from)
+                        .unwrap_or(Value::Null),
+                ),
+                (
+                    "disk_cache_bytes",
+                    session
+                        .disk_cache_bytes
+                        .map(|n| Value::BigInt(n.to_string()))
+                        .unwrap_or(Value::Null),
+                ),
             ]),
         );
         let mut ranks = Vec::new();

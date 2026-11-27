@@ -454,14 +454,15 @@ pub unsafe extern "ptx-kernel" fn inkling_draft_head_fold(table: *const crate::C
 /// COMBINED selects the checked HeadFold ABI. Otherwise the command is Panel, PanelGated, Panels, or FoldPick.
 #[inline(always)]
 unsafe fn run<const COMBINED: bool>(table: *const crate::Command, index: u64) {
-    // SAFETY: whole blocks of 128 lanes have four complete 16-row panels.
+    // SAFETY: block_dim_x is a multiple of 32 (32 for small-grid single-slab panels, else 128).
     // Each active warp owns a distinct 16-row tile. Padded rows cannot enter a pick.
     // All pointer arithmetic stays inside the extents verified by `DraftOp::layout` and `Backend::draft_lanes`.
     unsafe {
         let cmd = (*table.add(index as usize)).payload.as_ptr().cast::<u64>();
         let kind = *cmd as u32;
         let n = *cmd.add(5) as u32;
-        let i = core::arch::nvptx::_block_idx_x() as u32 * 128 + core::arch::nvptx::_thread_idx_x() as u32;
+        let i = core::arch::nvptx::_block_idx_x() as u32 * core::arch::nvptx::_block_dim_x() as u32
+            + core::arch::nvptx::_thread_idx_x() as u32;
         if i >= n { return; }
         if COMBINED && kind == 28 {
             let x = *cmd.add(1) as *const f32;
@@ -740,12 +741,23 @@ unsafe fn run<const COMBINED: bool>(table: *const crate::Command, index: u64) {
             if COMBINED || kind == 14 {
                 let total_panels = a.div_ceil(16);
                 let pin_from = total_panels.saturating_sub(PIN_FOLD_PANELS);
-                let (fold, columns, acc) = if COMBINED {
+                let (fold, columns, acc, comb_b_lo, comb_b_hi) = if COMBINED {
                     let width = (c & 0x7fff_ffff) >> 6;
                     let latent = head_input.add((inputs * (b >> 6) * 18) as usize);
-                    (y, width, project_panel!(y, latent, a, width, 1, panel, lane, group, pair, panel >= pin_from))
+                    let pin_fold = panel >= pin_from;
+                    let (blo, bhi) = if pair == 0 {
+                        let f_elems = (a as usize).next_multiple_of(64) * (width as usize);
+                        let f_bias = y.cast::<u8>().add(f_elems / 2 + f_elems / 16 + 8192).cast::<f32>();
+                        let b_pol = if pin_fold { l2_evict_last!() } else { l2_evict_first!() };
+                        let lo = if row < a { ld_f32_hint!(f_bias.add(row as usize), b_pol) } else { 0.0 };
+                        let hi = if row + 8 < a { ld_f32_hint!(f_bias.add((row + 8) as usize), b_pol) } else { 0.0 };
+                        (lo, hi)
+                    } else {
+                        (0.0f32, 0.0f32)
+                    };
+                    (y, width, project_panel!(y, latent, a, width, 1, panel, lane, group, pair, pin_fold), blo, bhi)
                 } else {
-                    (x, b, head)
+                    (x, b, head, pref_bias_lo, pref_bias_hi)
                 };
                 let elements = (a as usize).next_multiple_of(64) * (columns as usize);
                 let bias = fold.cast::<u8>().add(elements / 2 + elements / 16 + 8192).cast::<f32>();
@@ -753,9 +765,9 @@ unsafe fn run<const COMBINED: bool>(table: *const crate::Command, index: u64) {
                 let eps = f32::from_bits(*cmd.add(9) as u32);
                 let bound = f32::from_bits(*cmd.add(10) as u32);
                 let evict_first = l2_evict_first!();
-                let prefetched_bias = !COMBINED && (batch == 1 || bf16_base);
-                let b_lo = if prefetched_bias { pref_bias_lo } else if row < a { *bias.add(row as usize) } else { 0.0 };
-                let b_hi = if prefetched_bias { pref_bias_hi } else if row + 8 < a { *bias.add((row + 8) as usize) } else { 0.0 };
+                let prefetched_bias = COMBINED || batch == 1 || bf16_base;
+                let b_lo = if prefetched_bias { comb_b_lo } else if row < a { *bias.add(row as usize) } else { 0.0 };
+                let b_hi = if prefetched_bias { comb_b_hi } else if row + 8 < a { *bias.add((row + 8) as usize) } else { 0.0 };
                 let subs = if !COMBINED && batch > 1 { 2u32 } else { 1u32 };
                 let mut sub = 0u32;
                 while sub < subs {

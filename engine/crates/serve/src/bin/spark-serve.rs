@@ -362,7 +362,7 @@ fn run() -> Result<(), String> {
                 target.checked_add(draft_checkpoint.as_ref().map_or(Some(0),|m|
                     spark_engine::hybrid::Model::session_bytes(&m.config,tokens).checked_add((if fixed_rows { 16usize } else { 4 }).checked_mul(m.config.state_bytes() as usize)?))?)
             };
-            let ceiling = (c.max_positions as usize).min(262144)
+            let ceiling = (c.max_positions as usize)
                 .min(draft_checkpoint.as_ref().map_or(usize::MAX, |m| m.config.max_positions as usize));
             let session_bytes = sizing.session_bytes.unwrap_or(available_sessions);
             let memory_error = |required, tokens| refusal(required, available_sessions.min(session_bytes), &format!("weights/rank {} bytes; shared workspace {shared_scratch} bytes; per-session {} x 1 session; CONTEXT={tokens} (position ceiling {ceiling}); OUTPUT={}", resident, bytes(reservation_for(tokens,tokens,true).unwrap_or(usize::MAX) as u128), limits.output_tokens), &format!("{CUDA}; available input {available} bytes, capped by GPU ceiling {budget} bytes, less weights and shared workspace; --session-budget-mib={session_bytes} bytes; --kv-budget-mib={:?}", sizing.kv_bytes), SERVE);
@@ -383,8 +383,8 @@ fn run() -> Result<(), String> {
             };
             if !output_tokens_explicit { limits.output_tokens = limits.context_tokens.saturating_sub(1).max(1); }
             if !input_tokens_explicit { limits.input_tokens = limits.context_tokens.saturating_sub(1).max(1); }
-            limits.body_bytes = limits.body_bytes.max(limits.input_tokens.saturating_mul(16)).min(4 * 1024 * 1024);
-            if !output_bytes_explicit { limits.output_bytes = limits.output_tokens.saturating_mul(256).saturating_add(4096).min(16 * 1024 * 1024); }
+            limits.body_bytes = limits.body_bytes.max(limits.input_tokens.saturating_mul(16)).min(Limits::MAX_BODY_BYTES);
+            if !output_bytes_explicit { limits.output_bytes = limits.output_tokens.saturating_mul(256).saturating_add(4096).min(Limits::MAX_CONTEXT_TOKENS * 256); }
             limits.validate()?;
             tokenizer.as_mut().unwrap().set_limits(limits.tokenizer_limits()).map_err(|e| e.to_string())?;
             let reservation = reservation_for(limits.context_tokens,limits.context_tokens,true).ok_or("request byte overflow")?;
@@ -437,11 +437,11 @@ fn run() -> Result<(), String> {
             limits.input_tokens = limits.context_tokens.saturating_sub(1);
         }
         limits.body_bytes = limits.body_bytes.max(limits.input_tokens.saturating_mul(16))
-            .min(4 * 1024 * 1024);
+            .min(Limits::MAX_BODY_BYTES);
         if !output_bytes_explicit {
             limits.output_bytes = limits.output_bytes.max(
                 limits.output_tokens.saturating_mul(256).saturating_add(4096)
-            ).min(16 * 1024 * 1024);
+            ).min(Limits::MAX_CONTEXT_TOKENS * 256);
         }
         limits.validate()?;
         let load = |path: &Path, context_tokens: usize| {

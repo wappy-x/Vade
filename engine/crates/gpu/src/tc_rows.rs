@@ -228,6 +228,45 @@ pub const TC_COOP_SMALL_MIN: usize = 8;
 /// Dense matrices of at most this many rows (`K/V` 1024, `K+KTap` 1056) read raw weights, not `bf16_panels`.
 pub const TC_PANEL_ROWS_MIN: usize = 1280;
 
+/// True when a dense product with registered `bf16_panels` takes `PLAIN_TC_PANEL64` (kind 124): 33..=128 input rows
+/// (C16/C32 verify) of a matrix wider than `TC_TINY_ROWS_MAX` rows (LM head, `QKV`). One warp decodes a 16-row band
+/// in registers and multiplies up to 64 inputs; smaller matrices (`O_proj` 2304) keep the 4-warp cooperative-W tile.
+#[inline(always)]
+pub const fn tc_panel64_wanted(rows: usize, cols: usize, inputs: usize) -> bool {
+    inputs > TC_SMALL_BM && inputs <= 128 && rows > TC_TINY_ROWS_MAX && cols > TC_STAGE
+}
+/// Warps a block of `PLAIN_TC_PANEL64`: 8 for the LM head (more bands share each staged `X` slab), else 4 (a fuller
+/// last wave on 48 multiprocessors for `QKV`).
+#[inline(always)]
+pub const fn tc_panel64_warps(rows: usize) -> usize {
+    if rows > 16_384 { 8 } else { 4 }
+}
+/// Rows of one staged `X` slab of `PLAIN_TC_PANEL64`: the inputs rounded up to a whole `n8` tile.
+#[inline(always)]
+pub const fn tc_panel64_x_rows(inputs: usize) -> usize {
+    inputs.div_ceil(8) * 8
+}
+/// Dynamic shared bytes of `PLAIN_TC_PANEL64`: two 64-column `X` slabs plus each warp's escape cursors.
+#[inline(always)]
+pub const fn tc_panel64_smem(inputs: usize, warps: usize, slices: usize) -> usize {
+    2 * tc_panel64_x_rows(inputs) * 128 + warps * slices * 128
+}
+/// Launch geometry `(threads, blocks_x, dynamic_smem_bytes)` of `PLAIN_TC_PANEL64`: one warp a (16-row band,
+/// 64-input half).
+#[inline(always)]
+pub const fn tc_panel64_spec(rows: usize, inputs: usize, slices: usize) -> (usize, u32, usize) {
+    let warps = tc_panel64_warps(rows);
+    (warps * 32, (rows.div_ceil(16) * inputs.div_ceil(64)).div_ceil(warps) as u32, tc_panel64_smem(inputs, warps, slices))
+}
+/// Device-side admission guard for `PLAIN_TC_PANEL64`: an admitted dense shape, the host's thread count, and enough
+/// dynamic shared memory for the slabs and cursors.
+#[inline(always)]
+pub const fn tc_panel64_admitted(rows: usize, cols: usize, inputs: usize, threads: usize, shared: usize, slices: usize) -> bool {
+    let warps = tc_panel64_warps(rows);
+    tc_shape_admitted(rows, cols, inputs) && cols > TC_STAGE && threads == warps * 32
+        && shared >= tc_panel64_smem(inputs, warps, slices)
+}
+
 /// True when medium-M (`129..=256`, `128 < rows <= 2560`, `cols > 64`) uses the 2-warp `32x32` tiled path to saturate 48 SMs.
 #[inline(always)]
 pub const fn tc_med_w2_wanted(rows: usize, cols: usize, inputs: usize) -> bool {

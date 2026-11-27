@@ -7,6 +7,10 @@
 //! - Integrity: whole-manifest SHA-256 (prelude + header + prompt tokens + logits + chunk CRC table)
 //!   plus per-chunk IEEE CRC-32 across every byte of the streamed tensor payload.
 //! - Crash safety: writes to `<entry>.tmp.<pid>.<seq>`, `fsync`, atomic `rename`, directory `fsync`.
+//! - Direct NVMe streaming: multi-worker Linux `O_DIRECT` (`FileExt::read_at` / sequential `4 MiB`
+//!   direct writes) overlaps NVMe queue depth, slicing-by-8 CRC-32, LE conversion, and sub-chunk
+//!   GPU transfers with near-zero unified-RAM page-cache footprint (transparent buffered fallback
+//!   on non-Linux hosts or filesystems without `O_DIRECT`).
 //! - Bounded LRU eviction: hardware-derived default budget (50% of free filesystem space via POSIX
 //!   `df -kP`, or explicit `--disk-cache-bytes`), zero arbitrary token-length caps (Rule 17).
 //! - Zero `unsafe`, zero third-party crates, zero hot-path overhead on RAM hits.
@@ -20,8 +24,8 @@ use crate::{
 };
 use engine_model::mtp_draft::MtpConfig;
 use std::{
+    collections::HashMap,
     fs::{self, File, OpenOptions},
-    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::Command,
     sync::{
@@ -35,15 +39,21 @@ use std::{
 #[path = "../../../../tools/export/src/sha256.rs"]
 mod sha256;
 mod crc32;
+mod direct_io;
 mod format;
 #[cfg(test)]
 mod tests;
 
+use direct_io::{AlignedBuf, DirectReader, DirectSequentialWriter};
 use format::{
     CHUNK_BYTES, CHUNK_WORDS, DraftDesc, ENGINE_TAG, FLAG_HAS_DRAFT, FOOTER_FIXED_BYTES,
     FOOTER_MAGIC, PRELUDE_BYTES, Prelude, VisitDesc, encode_header, expected_payload_bytes,
     manifest_sha256, prefix_64_hash, prompt_sha256, read_and_verify_envelope, scope_sha256, to_hex,
 };
+
+/// Sub-chunk upload granularity (`1 MiB` = 1/4 of the `4 MiB` pinned CUDA upload staging ring)
+/// so host-to-pinned memcpy overlaps with asynchronous GPU H2D + D2D copies without growing staging.
+const UPLOAD_SUBCHUNK_WORDS: usize = CHUNK_WORDS / 4;
 
 static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -59,6 +69,7 @@ pub(super) struct DiskRestored<V> {
 struct DiskEntry {
     path: PathBuf,
     file_bytes: u64,
+    ino: u64,
     lru_seq: u64,
     mtime_ns: u128,
     scope: Option<String>,
@@ -75,6 +86,7 @@ struct DiskEntry {
 struct ForeignFile {
     path: PathBuf,
     file_bytes: u64,
+    ino: u64,
     lru_seq: u64,
     mtime_ns: u128,
 }
@@ -110,6 +122,33 @@ fn system_time_ns(t: SystemTime) -> u128 {
 
 fn file_mtime_ns(path: &Path) -> u128 {
     fs::metadata(path).and_then(|m| m.modified()).map(system_time_ns).unwrap_or(0)
+}
+
+fn file_ino(meta: &fs::Metadata) -> u64 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        meta.ino()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        0
+    }
+}
+
+fn file_meta_stats(path: &Path) -> (u128, u64) {
+    fs::metadata(path)
+        .map(|m| (m.modified().map(system_time_ns).unwrap_or(0), file_ino(&m)))
+        .unwrap_or((0, 0))
+}
+
+fn remove_file_if_same_ino(path: &Path, expected_ino: u64) {
+    #[cfg(unix)]
+    if expected_ino != 0 && fs::metadata(path).ok().map(|m| file_ino(&m)) != Some(expected_ino) {
+        return;
+    }
+    let _ = fs::remove_file(path);
 }
 
 /// Hardware-derived default disk budget (50% of free filesystem space + existing cache files) via
@@ -201,8 +240,17 @@ fn is_stale_temp(name: &str, path: &Path) -> bool {
     }
 }
 
-fn worker_count() -> usize {
-    std::thread::available_parallelism().map_or(2, |n| n.get()).clamp(1, 4)
+fn save_worker_count(expected_chunks: usize) -> usize {
+    let cpus = std::thread::available_parallelism().map_or(2, |n| n.get());
+    cpus.clamp(1, 8).min(expected_chunks.max(1))
+}
+
+fn read_worker_count(chunk_bytes: usize, chunk_count: usize) -> usize {
+    let cpus = std::thread::available_parallelism().map_or(2, |n| n.get());
+    // Keep total host read+decode scratch bounded (~192 MiB) even for larger custom chunk sizes.
+    let per_worker = chunk_bytes.max(1).saturating_mul(3);
+    let max_by_mem = (192 * 1024 * 1024 / per_worker).max(1);
+    cpus.clamp(1, 12).min(max_by_mem).min(chunk_count.max(1))
 }
 
 impl DiskPrefixCache {
@@ -281,12 +329,25 @@ impl DiskPrefixCache {
         self.lru_clock
     }
 
+    /// Incrementally synchronize in-memory directory index with on-disk `.vdpc` files.
+    ///
+    /// Reuses already-parsed metadata when `(path, file_bytes, ino)` is unchanged (avoiding
+    /// multi-MB header re-reads and SHA-256 passes on every lookup), discovers files written by
+    /// peer replicas without relying on coarse directory `mtime` ticks, drops peer-evicted files,
+    /// and promotes LRU sequence numbers when peer hits advance file `mtime`.
     fn scan_dir(&mut self, clean_temps: bool) -> Result<()> {
         let dir_mtime = fs::metadata(&self.dir).and_then(|m| m.modified()).ok();
+        let initial_scan = self.lru_clock == 0;
+        let mut old_entries: HashMap<PathBuf, DiskEntry> =
+            self.entries.drain(..).map(|e| (e.path.clone(), e)).collect();
+        let mut old_foreign: HashMap<PathBuf, ForeignFile> =
+            self.foreign.drain(..).map(|f| (f.path.clone(), f)).collect();
         let mut scanned_entries = Vec::new();
         let mut scanned_foreign = Vec::new();
+        let mut lru_updates: Vec<(u128, bool, usize)> = Vec::new();
         let mut total_bytes = 0u64;
-        let read_dir = fs::read_dir(&self.dir).map_err(|e| format!("cannot read disk cache dir {}: {e}", self.dir.display()))?;
+        let read_dir = fs::read_dir(&self.dir)
+            .map_err(|e| format!("cannot read disk cache dir {}: {e}", self.dir.display()))?;
         for item in read_dir {
             let Ok(entry) = item else { continue; };
             let path = entry.path();
@@ -306,10 +367,49 @@ impl DiskPrefixCache {
             }
             let file_bytes = meta.len();
             let mtime_ns = meta.modified().map(system_time_ns).unwrap_or(0);
+            let ino = file_ino(&meta);
+
+            // Fast O(1) reuse for already-verified inodes (zero file open, zero SHA-256).
+            if let Some(mut existing) = old_entries.remove(&path) {
+                if existing.file_bytes == file_bytes && existing.ino == ino && ino != 0 {
+                    let touched = mtime_ns > existing.mtime_ns;
+                    existing.mtime_ns = mtime_ns;
+                    total_bytes = total_bytes.saturating_add(file_bytes);
+                    let idx = scanned_entries.len();
+                    scanned_entries.push(existing);
+                    if initial_scan || touched {
+                        lru_updates.push((mtime_ns, true, idx));
+                    }
+                    continue;
+                }
+            } else if let Some(mut existing) = old_foreign.remove(&path)
+                && existing.file_bytes == file_bytes
+                && existing.ino == ino
+                && ino != 0
+            {
+                let touched = mtime_ns > existing.mtime_ns;
+                existing.mtime_ns = mtime_ns;
+                total_bytes = total_bytes.saturating_add(file_bytes);
+                let idx = scanned_foreign.len();
+                scanned_foreign.push(existing);
+                if initial_scan || touched {
+                    lru_updates.push((mtime_ns, false, idx));
+                }
+                continue;
+            }
+
             let mut file = match File::open(&path) {
                 Ok(f) => f,
                 Err(_) => continue,
             };
+            // Re-stat the opened fd so size, mtime, and inode match the exact verified file.
+            let Ok(open_meta) = file.metadata() else { continue; };
+            if !open_meta.is_file() {
+                continue;
+            }
+            let file_bytes = open_meta.len();
+            let mtime_ns = open_meta.modified().map(system_time_ns).unwrap_or(0);
+            let ino = file_ino(&open_meta);
             match read_and_verify_envelope(&mut file, false) {
                 Ok((_prelude, header, _crcs)) => {
                     let compatible = header.engine_tag == ENGINE_TAG
@@ -324,9 +424,11 @@ impl DiskPrefixCache {
                         };
                     total_bytes = total_bytes.saturating_add(file_bytes);
                     if compatible {
+                        let idx = scanned_entries.len();
                         scanned_entries.push(DiskEntry {
                             path,
                             file_bytes,
+                            ino,
                             lru_seq: 0,
                             mtime_ns,
                             scope: header.scope,
@@ -338,26 +440,23 @@ impl DiskPrefixCache {
                             has_logits: header.logits_len > 0,
                             has_draft: header.draft.is_some(),
                         });
+                        lru_updates.push((mtime_ns, true, idx));
                     } else {
-                        scanned_foreign.push(ForeignFile { path, file_bytes, lru_seq: 0, mtime_ns });
+                        let idx = scanned_foreign.len();
+                        scanned_foreign.push(ForeignFile { path, file_bytes, ino, lru_seq: 0, mtime_ns });
+                        lru_updates.push((mtime_ns, false, idx));
                     }
                 }
                 Err(reason) => {
                     eprintln!("disk_prefix_cache_corrupt path={} reason={reason} action=removed_on_scan", path.display());
-                    let _ = fs::remove_file(&path);
+                    remove_file_if_same_ino(&path, ino);
                 }
             }
         }
-        // Assign initial monotonic LRU sequence numbers ordered by file mtime (oldest first).
-        let mut order: Vec<(u128, bool, usize)> = scanned_entries
-            .iter()
-            .enumerate()
-            .map(|(i, e)| (e.mtime_ns, true, i))
-            .chain(scanned_foreign.iter().enumerate().map(|(i, f)| (f.mtime_ns, false, i)))
-            .collect();
-        order.sort_by_key(|&(m, _, _)| m);
-        self.lru_clock = 0;
-        for (_, is_entry, idx) in order {
+        // Assign monotonic LRU sequence numbers (oldest mtime first) for newly discovered or
+        // peer-touched entries while preserving relative order of untouched local entries.
+        lru_updates.sort_by_key(|&(m, _, _)| m);
+        for (_, is_entry, idx) in lru_updates {
             let seq = self.next_lru();
             if is_entry {
                 scanned_entries[idx].lru_seq = seq;
@@ -372,14 +471,11 @@ impl DiskPrefixCache {
         Ok(())
     }
 
-    fn refresh_if_dir_changed(&mut self) {
-        let now_mtime = fs::metadata(&self.dir).and_then(|m| m.modified()).ok();
-        if now_mtime != self.last_dir_mtime {
-            let _ = self.scan_dir(false);
-        }
+    fn sync_from_disk(&mut self) {
+        let _ = self.scan_dir(false);
     }
 
-    fn remove_entry_by_path(&mut self, path: &Path, delete_file: bool) {
+    fn remove_entry_by_path(&mut self, path: &Path, delete_ino: Option<u64>) {
         if let Some(idx) = self.entries.iter().position(|e| e.path == path) {
             let removed = self.entries.swap_remove(idx);
             self.total_bytes = self.total_bytes.saturating_sub(removed.file_bytes);
@@ -387,14 +483,16 @@ impl DiskPrefixCache {
             let removed = self.foreign.swap_remove(idx);
             self.total_bytes = self.total_bytes.saturating_sub(removed.file_bytes);
         }
-        if delete_file {
-            let _ = fs::remove_file(path);
+        if let Some(ino) = delete_ino {
+            remove_file_if_same_ino(path, ino);
+            self.last_dir_mtime = fs::metadata(&self.dir).and_then(|m| m.modified()).ok();
         }
     }
 
     /// Evict oldest entries (across both compatible and foreign `.vdpc` files) until
     /// `total_bytes + incoming_bytes <= budget_bytes`. Never evicts `protect`.
     fn evict_to_budget(&mut self, incoming_bytes: u64, protect: Option<&Path>) {
+        let mut evicted_any = false;
         while self.total_bytes.saturating_add(incoming_bytes) > self.budget_bytes {
             let oldest_entry = self
                 .entries
@@ -417,15 +515,16 @@ impl DiskPrefixCache {
                 (None, None) => None,
             };
             let Some((_, _, is_entry, idx)) = victim else { break; };
-            let (path, bytes) = if is_entry {
+            let (path, bytes, ino) = if is_entry {
                 let e = self.entries.swap_remove(idx);
-                (e.path, e.file_bytes)
+                (e.path, e.file_bytes, e.ino)
             } else {
                 let f = self.foreign.swap_remove(idx);
-                (f.path, f.file_bytes)
+                (f.path, f.file_bytes, f.ino)
             };
             self.total_bytes = self.total_bytes.saturating_sub(bytes);
-            let _ = fs::remove_file(&path);
+            remove_file_if_same_ino(&path, ino);
+            evicted_any = true;
             eprintln!(
                 "disk_prefix_cache_evicted path={} freed_bytes={} disk_bytes={} budget_bytes={}",
                 path.display(),
@@ -433,6 +532,9 @@ impl DiskPrefixCache {
                 self.total_bytes,
                 self.budget_bytes
             );
+        }
+        if evicted_any {
+            self.last_dir_mtime = fs::metadata(&self.dir).and_then(|m| m.modified()).ok();
         }
     }
 
@@ -463,6 +565,9 @@ impl DiskPrefixCache {
                 return Err("disk cache save: cannot persist unfinished step".into());
             }
         }
+        // Synchronize with peer replicas before checking dedup or enforcing shared disk budget.
+        self.sync_from_disk();
+
         let prompt_hash = prompt_sha256(tokens);
         let has_draft = draft.is_some();
         let final_path = self.dir.join(self.entry_filename(scope, tokens.len(), &prompt_hash));
@@ -543,24 +648,21 @@ impl DiskPrefixCache {
         let mut tmp_guard = TempFileGuard(Some(tmp_path.clone()));
         let started = Instant::now();
 
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&tmp_path)
+        let mut writer = DirectSequentialWriter::create_new(&tmp_path)
             .map_err(|e| format!("cannot create disk cache temp file {}: {e}", tmp_path.display()))?;
-        file.write_all(&prelude_raw).map_err(|e| format!("write prelude failed: {e}"))?;
-        file.write_all(&header_bytes).map_err(|e| format!("write header failed: {e}"))?;
+        writer.write_all(&prelude_raw).map_err(|e| format!("write prelude failed: {e}"))?;
+        writer.write_all(&header_bytes).map_err(|e| format!("write header failed: {e}"))?;
 
         let draft_export = match draft {
             Some((chat, cfg)) => Some(chat.export_parts(compute, cfg)?),
             None => None,
         };
-        let chunk_crcs = stream_gpu_to_file(
+        let (chunk_crcs, mut writer) = stream_gpu_to_file(
             compute,
             layouts,
             state,
             draft_export.as_ref(),
-            &mut file,
+            writer,
             chunk_count as usize,
         )?;
         if chunk_crcs.len() != chunk_count as usize {
@@ -573,21 +675,21 @@ impl DiskPrefixCache {
         }
         footer.extend_from_slice(&manifest);
         footer.extend_from_slice(FOOTER_MAGIC);
-        file.write_all(&footer).map_err(|e| format!("write footer failed: {e}"))?;
-        file.sync_all().map_err(|e| format!("fsync failed: {e}"))?;
-        drop(file);
+        writer.write_all(&footer).map_err(|e| format!("write footer failed: {e}"))?;
+        writer.finish().map_err(|e| format!("direct flush/fsync failed: {e}"))?;
 
         fs::rename(&tmp_path, &final_path)
             .map_err(|e| format!("atomic rename {} -> {} failed: {e}", tmp_path.display(), final_path.display()))?;
         tmp_guard.0 = None;
         sync_dir(&self.dir);
 
-        self.remove_entry_by_path(&final_path, false);
+        self.remove_entry_by_path(&final_path, None);
+        let (mtime_ns, ino) = file_meta_stats(&final_path);
         let lru_seq = self.next_lru();
-        let mtime_ns = file_mtime_ns(&final_path);
         self.entries.push(DiskEntry {
-            path: final_path,
+            path: final_path.clone(),
             file_bytes: total_file_bytes,
+            ino,
             lru_seq,
             mtime_ns,
             scope: scope.map(str::to_owned),
@@ -600,8 +702,15 @@ impl DiskPrefixCache {
             has_draft,
         });
         self.total_bytes = self.total_bytes.saturating_add(total_file_bytes);
+        // Re-sync after rename to account for any peer files written concurrently while streaming,
+        // keep this newly written entry strictly newest, and enforce the shared budget.
+        self.sync_from_disk();
+        let newest_seq = self.next_lru();
+        if let Some(entry) = self.entries.iter_mut().find(|e| e.path == final_path) {
+            entry.lru_seq = newest_seq;
+        }
+        self.evict_to_budget(0, Some(&final_path));
         self.last_dir_mtime = fs::metadata(&self.dir).and_then(|m| m.modified()).ok();
-        self.evict_to_budget(0, None);
 
         let elapsed = started.elapsed().as_secs_f64();
         let mib_s = if elapsed > 0.0 { (total_file_bytes as f64 / (1024.0 * 1024.0)) / elapsed } else { 0.0 };
@@ -616,7 +725,8 @@ impl DiskPrefixCache {
         Ok(())
     }
 
-    /// Find and restore the longest verified matching prefix from NVMe on a RAM cache miss.
+    /// Find and restore the longest verified matching prefix from NVMe that strictly beats
+    /// the best in-RAM prefix candidate (`spark_serve::disk_prefix_min_tokens()`).
     /// Any corrupt, truncated, or tampered entry is logged, removed, and skipped cleanly.
     pub(super) fn restore<C: Compute>(
         &mut self,
@@ -627,10 +737,11 @@ impl DiskPrefixCache {
         prompt: &[u32],
         target_tokens: usize,
     ) -> Result<Option<DiskRestored<C::Value>>> {
-        if prompt.is_empty() {
+        let min_tokens = spark_serve::disk_prefix_min_tokens();
+        if prompt.is_empty() || min_tokens >= prompt.len() {
             return Ok(None);
         }
-        self.refresh_if_dir_changed();
+        self.sync_from_disk();
         let p_first = prompt[0];
         let p_hash64 = prefix_64_hash(prompt);
 
@@ -641,7 +752,7 @@ impl DiskPrefixCache {
             .enumerate()
             .filter(|(_, e)| {
                 e.scope.as_deref() == scope
-                    && e.position > 0
+                    && e.position > min_tokens
                     && e.position <= prompt.len()
                     && e.position <= self.context
                     && (e.position < prompt.len() || e.has_logits)
@@ -660,12 +771,18 @@ impl DiskPrefixCache {
                 .then(eb.lru_seq.cmp(&ea.lru_seq))
         });
 
-        // Verify SHA-256 of prompt[..len] for distinct matching candidate lengths (computed lazily).
+        // Snapshot candidate metadata in priority order so SHA-256 is computed lazily only until
+        // the longest matching entry restores cleanly.
+        let ordered_candidates: Vec<(PathBuf, usize, [u8; 32])> = candidates
+            .into_iter()
+            .map(|idx| {
+                let e = &self.entries[idx];
+                (e.path.clone(), e.position, e.prompt_sha256)
+            })
+            .collect();
+
         let mut sha_cache: Vec<(usize, [u8; 32])> = Vec::new();
-        let mut matched_paths: Vec<PathBuf> = Vec::new();
-        for idx in candidates {
-            let pos = self.entries[idx].position;
-            let expected = self.entries[idx].prompt_sha256;
+        for (path, pos, expected) in ordered_candidates {
             let actual = match sha_cache.iter().find(|&&(l, _)| l == pos) {
                 Some(&(_, h)) => h,
                 None => {
@@ -674,12 +791,9 @@ impl DiskPrefixCache {
                     h
                 }
             };
-            if actual == expected {
-                matched_paths.push(self.entries[idx].path.clone());
+            if actual != expected {
+                continue;
             }
-        }
-
-        for path in matched_paths {
             let started = Instant::now();
             match self.try_load_file(compute, layouts, draft_config, scope, prompt, target_tokens, &path) {
                 Ok(Some((state, draft, tokens, next_logits, file_bytes))) => {
@@ -702,14 +816,14 @@ impl DiskPrefixCache {
                 }
                 Ok(None) => {
                     // File vanished concurrently (e.g. evicted by another process) or incompatible.
-                    self.remove_entry_by_path(&path, false);
+                    self.remove_entry_by_path(&path, None);
                 }
-                Err(CorruptOrIo::Corrupt(reason)) => {
+                Err(CorruptOrIo::Corrupt(reason, ino)) => {
                     eprintln!(
                         "disk_prefix_cache_corrupt path={} reason={reason} action=removed_and_miss",
                         path.display()
                     );
-                    self.remove_entry_by_path(&path, true);
+                    self.remove_entry_by_path(&path, Some(ino));
                 }
                 Err(CorruptOrIo::Backend(reason)) => {
                     return Err(reason);
@@ -733,11 +847,13 @@ impl DiskPrefixCache {
         let mut file = match File::open(path) {
             Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(CorruptOrIo::Corrupt(format!("open failed: {e}"))),
+            Err(e) => return Err(CorruptOrIo::Corrupt(format!("open failed: {e}"), 0)),
         };
-        let file_bytes = file.metadata().map_err(|e| CorruptOrIo::Corrupt(format!("stat failed: {e}")))?.len();
+        let meta = file.metadata().map_err(|e| CorruptOrIo::Corrupt(format!("stat failed: {e}"), 0))?;
+        let file_bytes = meta.len();
+        let ino = file_ino(&meta);
         let (prelude, header, chunk_crcs) =
-            read_and_verify_envelope(&mut file, true).map_err(CorruptOrIo::Corrupt)?;
+            read_and_verify_envelope(&mut file, true).map_err(|r| CorruptOrIo::Corrupt(r, ino))?;
 
         // Full strict compatibility and exact token-by-token verification (zero collision risk).
         if header.engine_tag != ENGINE_TAG
@@ -756,24 +872,24 @@ impl DiskPrefixCache {
             return Ok(None);
         }
         let expected_payload = expected_payload_bytes(layouts, header.position, header.draft.as_ref())
-            .map_err(CorruptOrIo::Corrupt)?;
+            .map_err(|r| CorruptOrIo::Corrupt(r, ino))?;
         if expected_payload != prelude.payload_bytes {
             return Err(CorruptOrIo::Corrupt(format!(
                 "payload size mismatch: header={} expected={expected_payload}",
                 prelude.payload_bytes
-            )));
+            ), ino));
         }
         let restore_draft_cfg = match (&header.draft, draft_config, &self.draft_desc) {
             (Some(file_draft), Some(cfg), Some(expected)) => {
                 if file_draft != expected {
-                    return Err(CorruptOrIo::Corrupt("draft layout mismatch".into()));
+                    return Err(CorruptOrIo::Corrupt("draft layout mismatch".into(), ino));
                 }
                 Some((cfg, file_draft.kv_width as usize != cfg.kv_width()))
             }
             (Some(file_draft), Some(cfg), None) => {
                 let expected = DraftDesc::from_config(cfg, false).map_err(CorruptOrIo::Backend)?;
                 if file_draft != &expected {
-                    return Err(CorruptOrIo::Corrupt("draft layout mismatch".into()));
+                    return Err(CorruptOrIo::Corrupt("draft layout mismatch".into(), ino));
                 }
                 Some((cfg, false))
             }
@@ -791,19 +907,20 @@ impl DiskPrefixCache {
             None => None,
         };
 
-        // Seek to start of Section 3 Tensor Payload and stream with parallel CRC-32 verification + GPU upload.
-        file.seek(SeekFrom::Start(PRELUDE_BYTES + prelude.header_bytes))
-            .map_err(|e| CorruptOrIo::Corrupt(format!("seek payload failed: {e}")))?;
-
+        // Stream Section 3 Tensor Payload via concurrent O_DIRECT read_at + CRC-32 + GPU upload.
+        let payload_offset = PRELUDE_BYTES + prelude.header_bytes;
+        let reader = DirectReader::from_file(file);
         stream_file_to_gpu(
             compute,
             layouts,
             &mut state,
             draft.as_mut().zip(restore_draft_cfg.map(|(cfg, _)| cfg)),
-            &mut file,
+            &reader,
+            payload_offset,
             prelude.payload_bytes,
             prelude.chunk_bytes as usize,
             &chunk_crcs,
+            ino,
         )?;
 
         Ok(Some((state, draft, header.tokens, header.next_logits, file_bytes)))
@@ -811,7 +928,7 @@ impl DiskPrefixCache {
 }
 
 enum CorruptOrIo {
-    Corrupt(String),
+    Corrupt(String, u64),
     Backend(String),
 }
 
@@ -822,7 +939,7 @@ fn read_tensor_slice<C: Compute>(
     v: &C::Value,
     start_word: usize,
     count_words: usize,
-    mut on_words: impl FnMut(&[f32]) -> Result<()>,
+    mut on_words: impl FnMut(Vec<f32>) -> Result<()>,
 ) -> Result<()> {
     if count_words == 0 {
         return Ok(());
@@ -846,45 +963,56 @@ fn read_tensor_slice<C: Compute>(
         if words.len() != take {
             return Err(format!("disk cache save: expected {take} words, read {}", words.len()));
         }
-        on_words(&words)?;
+        on_words(words)?;
         done += take;
     }
     Ok(())
 }
 
-/// Pipelined GPU -> 4x parallel CRC-32 workers -> sequential NVMe temp file writer.
+/// Pipelined GPU -> parallel LE-encode + CRC-32 workers -> sequential O_DIRECT NVMe writer.
 fn stream_gpu_to_file<C: Compute>(
     compute: &C,
     layouts: &[Layout],
     state: &State<C::Value>,
     draft: Option<&super::draft::DraftExport<'_, C::Value>>,
-    file: &mut File,
+    mut writer_sink: DirectSequentialWriter,
     expected_chunks: usize,
-) -> Result<Vec<u32>> {
-    let w = worker_count();
-    let pool_buffers = w * 2 + 4;
-    let (recycle_tx, recycle_rx) = mpsc::sync_channel::<Vec<u8>>(pool_buffers);
-    for _ in 0..pool_buffers {
-        let _ = recycle_tx.send(Vec::with_capacity(CHUNK_BYTES));
-    }
+) -> Result<(Vec<u32>, DirectSequentialWriter)> {
+    let w = save_worker_count(expected_chunks);
 
     let mut in_txs = Vec::with_capacity(w);
     let mut in_rxs = Vec::with_capacity(w);
     let mut out_txs = Vec::with_capacity(w);
     let mut out_rxs = Vec::with_capacity(w);
+    let mut worker_buf_txs = Vec::with_capacity(w);
+    let mut worker_buf_rxs = Vec::with_capacity(w);
     for _ in 0..w {
-        let (itx, irx) = mpsc::sync_channel::<(usize, Vec<u8>)>(2);
+        let (itx, irx) = mpsc::sync_channel::<(usize, Vec<f32>)>(2);
         let (otx, orx) = mpsc::sync_channel::<(usize, u32, Vec<u8>)>(2);
+        let (btx, brx) = mpsc::sync_channel::<Vec<u8>>(2);
+        for _ in 0..2 {
+            let _ = btx.send(vec![0u8; CHUNK_BYTES]);
+        }
         in_txs.push(itx);
         in_rxs.push(irx);
         out_txs.push(otx);
         out_rxs.push(orx);
+        worker_buf_txs.push(btx);
+        worker_buf_rxs.push(brx);
     }
 
     std::thread::scope(|scope| {
-        for (irx, otx) in in_rxs.into_iter().zip(out_txs) {
+        for ((irx, otx), brx) in in_rxs.into_iter().zip(out_txs).zip(worker_buf_rxs) {
             scope.spawn(move || {
-                while let Ok((idx, buf)) = irx.recv() {
+                while let Ok((idx, words)) = irx.recv() {
+                    let Ok(mut buf) = brx.recv() else {
+                        break;
+                    };
+                    buf.resize(words.len() * 4, 0);
+                    for (dst, &val) in buf.as_chunks_mut::<4>().0.iter_mut().zip(&words) {
+                        *dst = val.to_bits().to_le_bytes();
+                    }
+                    drop(words);
                     let crc = crc32::checksum(&buf);
                     if otx.send((idx, crc, buf)).is_err() {
                         break;
@@ -893,45 +1021,47 @@ fn stream_gpu_to_file<C: Compute>(
             });
         }
 
-        let writer = scope.spawn(move || -> Result<Vec<u32>> {
+        let writer = scope.spawn(move || -> Result<(Vec<u32>, DirectSequentialWriter)> {
             let mut crcs = Vec::with_capacity(expected_chunks);
             for idx in 0..expected_chunks {
-                let Ok((got_idx, crc, mut buf)) = out_rxs[idx % w].recv() else {
+                let Ok((got_idx, crc, buf)) = out_rxs[idx % w].recv() else {
                     return Err("disk cache writer stopped before receiving all chunks".into());
                 };
                 if got_idx != idx {
                     return Err("disk cache writer chunk order mismatch".into());
                 }
-                file.write_all(&buf).map_err(|e| format!("disk cache payload write failed: {e}"))?;
+                writer_sink
+                    .write_all(&buf)
+                    .map_err(|e| format!("disk cache payload write failed: {e}"))?;
                 crcs.push(crc);
-                buf.clear();
-                let _ = recycle_tx.send(buf);
+                let _ = worker_buf_txs[idx % w].send(buf);
             }
-            Ok(crcs)
+            Ok((crcs, writer_sink))
         });
 
         let gpu_read = compute.work(|| {
             let paused = compute.rows_unrecorded(true)?;
             let res = (|| -> Result<()> {
                 let mut chunk_idx = 0usize;
-                let mut cur = recycle_rx.recv().map_err(|_| "disk cache writer aborted early".to_owned())?;
-                cur.clear();
+                let mut cur: Vec<f32> = Vec::with_capacity(CHUNK_WORDS);
 
-                let mut push_words = |words: &[f32]| -> Result<()> {
+                let mut push_words = |words: Vec<f32>| -> Result<()> {
+                    // Zero-copy fast path for full chunk-aligned tensor reads (99%+ of long-context KV).
+                    if cur.is_empty() && words.len() == CHUNK_WORDS {
+                        in_txs[chunk_idx % w]
+                            .send((chunk_idx, words))
+                            .map_err(|_| "disk cache hash worker stopped".to_owned())?;
+                        chunk_idx += 1;
+                        return Ok(());
+                    }
                     let mut src = 0usize;
                     while src < words.len() {
-                        let space_words = (CHUNK_BYTES - cur.len()) / 4;
-                        let take = (words.len() - src).min(space_words);
-                        for &val in &words[src..src + take] {
-                            cur.extend_from_slice(&val.to_bits().to_le_bytes());
-                        }
+                        let space = CHUNK_WORDS - cur.len();
+                        let take = (words.len() - src).min(space);
+                        cur.extend_from_slice(&words[src..src + take]);
                         src += take;
-                        if cur.len() == CHUNK_BYTES {
-                            let full = std::mem::replace(
-                                &mut cur,
-                                recycle_rx.recv().map_err(|_| "disk cache writer aborted".to_owned())?,
-                            );
-                            cur.clear();
+                        if cur.len() == CHUNK_WORDS {
+                            let full = std::mem::replace(&mut cur, Vec::with_capacity(CHUNK_WORDS));
                             in_txs[chunk_idx % w]
                                 .send((chunk_idx, full))
                                 .map_err(|_| "disk cache hash worker stopped".to_owned())?;
@@ -977,48 +1107,39 @@ fn stream_gpu_to_file<C: Compute>(
         });
 
         drop(in_txs);
-        drop(recycle_rx);
         let written = writer.join().map_err(|_| "disk cache writer thread panicked".to_owned())?;
         gpu_read?;
         written
     })
 }
 
-/// Pipelined sequential NVMe reader -> 4x parallel CRC-32 + LE-to-f32 workers -> streaming GPU upload.
+/// Pipelined concurrent O_DIRECT NVMe reader + CRC-32 + LE-to-f32 workers -> streaming GPU upload.
 #[allow(clippy::too_many_arguments)]
 fn stream_file_to_gpu<C: Compute>(
     compute: &C,
     layouts: &[Layout],
     state: &mut State<C::Value>,
     draft: Option<(&mut DraftChat<C::Value>, &MtpConfig)>,
-    file: &mut File,
+    reader: &DirectReader,
+    payload_offset: u64,
     payload_bytes: u64,
     chunk_bytes: usize,
     expected_crcs: &[u32],
+    ino: u64,
 ) -> std::result::Result<(), CorruptOrIo> {
     let chunk_count = expected_crcs.len();
-    let w = worker_count();
-    let buf_pool = w * 2 + 2;
-    let (buf_rec_tx, buf_rec_rx) = mpsc::sync_channel::<Vec<u8>>(buf_pool);
-    for _ in 0..buf_pool {
-        let _ = buf_rec_tx.send(vec![0u8; chunk_bytes]);
-    }
+    let w = read_worker_count(chunk_bytes, chunk_count);
 
-    let mut in_txs = Vec::with_capacity(w);
-    let mut in_rxs = Vec::with_capacity(w);
     let mut out_txs = Vec::with_capacity(w);
     let mut out_rxs = Vec::with_capacity(w);
     let mut f32_rec_txs = Vec::with_capacity(w);
     let mut f32_rec_rxs = Vec::with_capacity(w);
     for _ in 0..w {
-        let (itx, irx) = mpsc::sync_channel::<std::result::Result<(usize, Vec<u8>), String>>(2);
         let (otx, orx) = mpsc::sync_channel::<std::result::Result<(usize, Vec<f32>), String>>(2);
         let (ftx, frx) = mpsc::sync_channel::<Vec<f32>>(2);
         for _ in 0..2 {
             let _ = ftx.send(Vec::with_capacity(chunk_bytes / 4));
         }
-        in_txs.push(itx);
-        in_rxs.push(irx);
         out_txs.push(otx);
         out_rxs.push(orx);
         f32_rec_txs.push(ftx);
@@ -1058,58 +1179,46 @@ fn stream_file_to_gpu<C: Compute>(
         }
     }
 
-    std::thread::scope(|scope| {
-        // Reader thread: sequential NVMe reads in `chunk_bytes` units.
-        scope.spawn(move || {
-            let mut remaining = payload_bytes;
-            for idx in 0..chunk_count {
-                let take = remaining.min(chunk_bytes as u64) as usize;
-                let Ok(mut buf) = buf_rec_rx.recv() else { break; };
-                buf.resize(take, 0);
-                let msg = match file.read_exact(&mut buf) {
-                    Ok(()) => Ok((idx, buf)),
-                    Err(e) => Err(format!("payload read failed at chunk {idx}: {e}")),
-                };
-                let failed = msg.is_err();
-                if in_txs[idx % w].send(msg).is_err() || failed {
-                    break;
-                }
-                remaining -= take as u64;
-            }
-        });
+    let io_buf_cap = DirectReader::buffer_capacity(chunk_bytes);
 
-        // Parallel CRC-32 + LE-to-f32 verification workers.
-        for ((irx, otx), frx) in in_rxs.into_iter().zip(out_txs).zip(f32_rec_rxs) {
-            let buf_tx = buf_rec_tx.clone();
+    std::thread::scope(|scope| {
+        // Concurrent O_DIRECT read_at + in-cache CRC-32 + LE-to-f32 verification workers.
+        // Each worker owns its reusable page-aligned read buffer and handles chunks
+        // `worker_id, worker_id + w, ...` with zero mutexes and full NVMe queue depth.
+        for (worker_id, (otx, frx)) in out_txs.into_iter().zip(f32_rec_rxs).enumerate() {
             scope.spawn(move || {
-                while let Ok(item) = irx.recv() {
-                    match item {
+                let mut io_buf = AlignedBuf::new(io_buf_cap);
+                let mut idx = worker_id;
+                while idx < chunk_count {
+                    let rel_off = (idx as u64) * (chunk_bytes as u64);
+                    let take = payload_bytes.saturating_sub(rel_off).min(chunk_bytes as u64) as usize;
+                    let chunk = match reader.read_exact_chunk(payload_offset + rel_off, take, &mut io_buf) {
+                        Ok(slice) => slice,
                         Err(e) => {
-                            let _ = otx.send(Err(e));
+                            let _ = otx.send(Err(format!("payload read failed at chunk {idx}: {e}")));
                             break;
                         }
-                        Ok((idx, buf)) => {
-                            let got = crc32::checksum(&buf);
-                            let want = expected_crcs[idx];
-                            if got != want {
-                                let _ = otx.send(Err(format!(
-                                    "payload chunk {idx} crc32 mismatch: got={got:#010x} expected={want:#010x}"
-                                )));
-                                break;
-                            }
-                            let Ok(mut words) = frx.recv() else { break; };
-                            words.clear();
-                            words.extend(buf.as_chunks::<4>().0.iter().map(|b| f32::from_bits(u32::from_le_bytes(*b))));
-                            let _ = buf_tx.send(buf);
-                            if otx.send(Ok((idx, words))).is_err() {
-                                break;
-                            }
-                        }
+                    };
+                    let got = crc32::checksum(chunk);
+                    let want = expected_crcs[idx];
+                    if got != want {
+                        let _ = otx.send(Err(format!(
+                            "payload chunk {idx} crc32 mismatch: got={got:#010x} expected={want:#010x}"
+                        )));
+                        break;
                     }
+                    let Ok(mut words) = frx.recv() else { break; };
+                    words.resize(take / 4, 0.0);
+                    for (dst, src) in words.iter_mut().zip(chunk.as_chunks::<4>().0) {
+                        *dst = f32::from_bits(u32::from_le_bytes(*src));
+                    }
+                    if otx.send(Ok((idx, words))).is_err() {
+                        break;
+                    }
+                    idx += w;
                 }
             });
         }
-        drop(buf_rec_tx);
 
         // Main GPU thread: consume verified `f32` chunks in order and stream into VMM planes via `state_fill`.
         let result = compute.work(|| -> Result<()> {
@@ -1120,10 +1229,10 @@ fn stream_file_to_gpu<C: Compute>(
                 for idx in 0..chunk_count {
                     let msg = out_rxs[idx % w]
                         .recv()
-                        .map_err(|_| CorruptOrIo::Corrupt("verification worker stopped early".into()))?;
-                    let (got_idx, words) = msg.map_err(CorruptOrIo::Corrupt)?;
+                        .map_err(|_| CorruptOrIo::Corrupt("verification worker stopped early".into(), ino))?;
+                    let (got_idx, words) = msg.map_err(|r| CorruptOrIo::Corrupt(r, ino))?;
                     if got_idx != idx {
-                        return Err(CorruptOrIo::Corrupt("restore chunk order mismatch".into()));
+                        return Err(CorruptOrIo::Corrupt("restore chunk order mismatch".into(), ino));
                     }
                     let mut pos = 0usize;
                     while pos < words.len() {
@@ -1136,7 +1245,7 @@ fn stream_file_to_gpu<C: Compute>(
                             break;
                         }
                         let need_words = targets[t_idx].1 - t_off;
-                        let take = (words.len() - pos).min(need_words).min(CHUNK_WORDS);
+                        let take = (words.len() - pos).min(need_words).min(UPLOAD_SUBCHUNK_WORDS);
                         let uploaded = compute
                             .upload(&words[pos..pos + take])
                             .map_err(CorruptOrIo::Backend)?;
@@ -1153,20 +1262,20 @@ fn stream_file_to_gpu<C: Compute>(
                     t_off = 0;
                 }
                 if t_idx < targets.len() {
-                    return Err(CorruptOrIo::Corrupt("payload ended before filling all target tensors".into()));
+                    return Err(CorruptOrIo::Corrupt("payload ended before filling all target tensors".into(), ino));
                 }
                 Ok(())
             })();
             let resumed = compute.rows_unrecorded(paused);
             match (fill_res, resumed) {
                 (Ok(()), Ok(_)) => Ok(()),
-                (Err(CorruptOrIo::Corrupt(e)), _) => Err(format!("CORRUPT:{e}")),
+                (Err(CorruptOrIo::Corrupt(e, _)), _) => Err(format!("CORRUPT:{e}")),
                 (Err(CorruptOrIo::Backend(e)), _) => Err(format!("BACKEND:{e}")),
                 (Ok(()), Err(e)) => Err(format!("BACKEND:{e}")),
             }
         });
 
-        // Explicitly drop channels before scope exit so workers and reader unblock immediately on error.
+        // Explicitly drop channels before scope exit so workers unblock immediately on error.
         drop(out_rxs);
         drop(f32_rec_txs);
 
@@ -1174,7 +1283,7 @@ fn stream_file_to_gpu<C: Compute>(
             Ok(()) => Ok(()),
             Err(e) => {
                 if let Some(msg) = e.strip_prefix("CORRUPT:") {
-                    Err(CorruptOrIo::Corrupt(msg.to_owned()))
+                    Err(CorruptOrIo::Corrupt(msg.to_owned(), ino))
                 } else if let Some(msg) = e.strip_prefix("BACKEND:") {
                     Err(CorruptOrIo::Backend(msg.to_owned()))
                 } else {

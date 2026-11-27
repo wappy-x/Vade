@@ -19,7 +19,7 @@
 //!   `TC_MODE_GATE_BLEND_NORM`.
 
 use crate::block_ops::{NORM_CHUNK, root};
-use crate::fixed_math::{exp, rn, tanh};
+use crate::fixed_math::{exp, rn};
 use crate::prefill_gate::{
     PG_BM, PG_DIM_MAX, PG_FLAG_HALF_OUT, PG_GATE_AT, PG_GATE_STRIDE, PG_K_MAX,
     PG_KEPT_MAX, PG_META_THREADS, PG_OP_FULL, PG_OP_MSG_META, PG_OP_WORD, full_admitted,
@@ -607,6 +607,92 @@ unsafe fn replay_full(w: *const u64, smem: u32) {
         let s0_row = if r_ok { s0.add(r_off).cast::<u32>() } else { core::ptr::null() };
         let s1_row = if r_ok && kept >= 2 { s1.add(r_off).cast::<u32>() } else { core::ptr::null() };
 
+        // `tanh_fast!(x)` gives the same bits as `fixed_math::tanh(x)` for all 2^32 inputs (two NaN results count as
+        // equal), with no branch. It does the series and the `exp` form on every lane with the same IEEE operations in
+        // the same order as `fixed_math::tanh`, then selects one result. The two divisions by `d` (in `1.0..=2.0`) use
+        // one reciprocal with one correction step: the first quotient gets the correction of `div.rn.f32`, the second
+        // quotient is only a small term of the sum and one product gives the same sum. Proof: a device test on
+        // SM121a ran this exact text and a step-by-step copy of `fixed_math::tanh` (with `div.rn.f32`) on all 2^32
+        // input patterns: 0 different results. The gate cases of `tc-rows-check` compare this kernel with the
+        // `TC_MODE_GATE_BLEND_NORM` path, which calls `fixed_math::tanh`.
+        macro_rules! tanh_fast {
+            ($x:expr) => {{
+                let x: f32 = $x;
+                let y: f32;
+                core::arch::asm!(
+                    "{{ .reg .f32 a, z, p, az, s, t, k, n, r, q, sc, e, nn, nl, d, dl, r0, nd, e1, rr, q0, rm, q1, w, num, q2, m, c; \
+                    .reg .b32 ab, sg, kb; \
+                    .reg .pred lo, sm; \
+                    mov.b32 ab, {x}; \
+                    and.b32 sg, ab, 0x80000000; \
+                    and.b32 ab, ab, 0x7fffffff; \
+                    mov.b32 a, ab; \
+                    mul.rn.f32 z, a, a; \
+                    mov.f32 c, 0fb97abebb; \
+                    fma.rn.f32 p, c, z, 0f3a1aac13; \
+                    fma.rn.f32 p, p, z, 0fbabed1b2; \
+                    fma.rn.f32 p, p, z, 0f3b6b69e8; \
+                    fma.rn.f32 p, p, z, 0fbc11371b; \
+                    fma.rn.f32 p, p, z, 0f3cb327a4; \
+                    fma.rn.f32 p, p, z, 0fbd5d0dd1; \
+                    fma.rn.f32 p, p, z, 0f3e088889; \
+                    fma.rn.f32 p, p, z, 0fbeaaaaab; \
+                    mul.rn.f32 az, a, z; \
+                    fma.rn.f32 s, az, p, a; \
+                    mul.rn.f32 t, a, 0fc0000000; \
+                    mov.f32 c, 0fc2ae0000; \
+                    setp.lt.f32 lo, t, c; \
+                    selp.f32 t, c, t, lo; \
+                    mul.rn.f32 k, t, 0f3fb8aa3b; \
+                    add.rn.f32 k, k, 0f4b400000; \
+                    add.rn.f32 n, k, 0fcb400000; \
+                    neg.f32 n, n; \
+                    fma.rn.f32 r, n, 0f3f317200, t; \
+                    fma.rn.f32 r, n, 0f35bfbe8e, r; \
+                    mov.f32 c, 0f39500d01; \
+                    fma.rn.f32 q, c, r, 0f3ab60b61; \
+                    fma.rn.f32 q, q, r, 0f3c088889; \
+                    fma.rn.f32 q, q, r, 0f3d2aaaab; \
+                    fma.rn.f32 q, q, r, 0f3e2aaaab; \
+                    fma.rn.f32 q, q, r, 0f3f000000; \
+                    fma.rn.f32 q, q, r, 0f3f800000; \
+                    fma.rn.f32 q, q, r, 0f3f800000; \
+                    mov.b32 kb, k; \
+                    add.u32 kb, kb, 127; \
+                    shl.b32 kb, kb, 23; \
+                    mov.b32 sc, kb; \
+                    mul.rn.f32 e, q, sc; \
+                    mov.f32 c, 0f3f800000; \
+                    sub.rn.f32 nn, c, e; \
+                    sub.rn.f32 nl, c, nn; \
+                    sub.rn.f32 nl, nl, e; \
+                    add.rn.f32 d, e, c; \
+                    sub.rn.f32 dl, d, c; \
+                    sub.rn.f32 dl, e, dl; \
+                    rcp.approx.ftz.f32 r0, d; \
+                    neg.f32 nd, d; \
+                    fma.rn.f32 e1, nd, r0, c; \
+                    fma.rn.f32 rr, r0, e1, r0; \
+                    fma.rn.f32 q0, nn, rr, 0f00000000; \
+                    fma.rn.f32 rm, nd, q0, nn; \
+                    fma.rn.f32 q1, rr, rm, q0; \
+                    fma.rn.f32 rm, nd, q1, nn; \
+                    mul.rn.f32 w, q1, dl; \
+                    sub.rn.f32 w, nl, w; \
+                    add.rn.f32 num, rm, w; \
+                    mul.rn.f32 q2, rr, num; \
+                    add.rn.f32 m, q1, q2; \
+                    setp.lt.f32 sm, a, 0f3f100000; \
+                    selp.f32 m, s, m, sm; \
+                    mov.b32 kb, m; \
+                    or.b32 kb, kb, sg; \
+                    mov.b32 {y}, kb; }}",
+                    x = in(reg32) x, y = out(reg32) y,
+                    options(pure, nomem, nostack),
+                );
+                y
+            }};
+        }
         macro_rules! load_b_pair {
             ($row_p:expr, $off:expr) => {{
                 let v = ld_global_nc_v4_u32(($row_p).add(($off) + t * 4));
@@ -696,8 +782,8 @@ unsafe fn replay_full(w: *const u64, smem: u32) {
                         m1 += mw3 * f32::from_bits(sv3[1]);
                     }
                     (
-                        (1.0f32 - tanh(df0)) * f32::from_bits(kv[0]) + tanh(dg0) * m0,
-                        (1.0f32 - tanh(df1)) * f32::from_bits(kv[1]) + tanh(dg1) * m1,
+                        (1.0f32 - tanh_fast!(df0)) * f32::from_bits(kv[0]) + tanh_fast!(dg0) * m0,
+                        (1.0f32 - tanh_fast!(df1)) * f32::from_bits(kv[1]) + tanh_fast!(dg1) * m1,
                     )
                 } else {
                     (0.0f32, 0.0f32)

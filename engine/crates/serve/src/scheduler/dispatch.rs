@@ -605,28 +605,54 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
                     fork_failed("session", ready.prompt.len(), &forked.failed);
                     state = forked.state;
                 }
+            let mut disk_restored = false;
             if automatic_cache && kv.is_none_or(|kv| kv.reuse != "hit") {
-                if cache.automatic_prefix_len(ready.scope.as_deref(), &ready.prompt) > state.as_ref().map_or(0, |s| s.tokens.len()) {
-                    drop(state.take());
-                    let forked = cache.fork_automatic(ready.scope.as_deref(), &ready.prompt, clock_now());
-                    fork_failed("automatic", ready.prompt.len(), &forked.failed);
-                    state = forked.state;
+                let scoped_len = state.as_ref().map_or(0, |s| s.tokens.len());
+                let auto_len = cache.automatic_prefix_len(ready.scope.as_deref(), &ready.prompt);
+                let active_len = active.iter()
+                    .filter(|a| a.automatic_cache && a.ready.scope == ready.scope
+                        && a.prefill_rows == 0 && a.long_prefill.is_none())
+                    .filter_map(|source| source.generation.state.restorable_prefix(&ready.prompt, source.ready.prompt.len()))
+                    .map(|(_, restored)| restored)
+                    .max()
+                    .unwrap_or(0);
+                let best_ram_len = scoped_len.max(auto_len).max(active_len);
+                if best_ram_len < ready.prompt.len()
+                    && let Some(restored) = super::disk_prefix::restore_longer(
+                        engine, ready.scope.as_deref(), &ready.prompt, tokens, best_ram_len,
+                    )
+                {
+                    state = Some(restored);
+                    disk_restored = true;
                 }
-                for source in active.iter().filter(|a| a.automatic_cache && a.ready.scope == ready.scope
-                    && a.prefill_rows == 0 && a.long_prefill.is_none()) {
-                    if shared_prefix(&source.generation.state.tokens, &ready.prompt).min(source.ready.prompt.len()) > state.as_ref().map_or(0, |s| s.tokens.len()) {
-                        match source.generation.state.fork_prefix_limit(&ready.prompt, source.ready.prompt.len()) {
-                            Ok(Some(fork)) => state = Some(fork),
-                            Ok(None) => {}
-                            Err(error) => fork_failed("active", ready.prompt.len(), &[error]),
+                if !disk_restored {
+                    if auto_len > state.as_ref().map_or(0, |s| s.tokens.len()) {
+                        drop(state.take());
+                        let forked = cache.fork_automatic(ready.scope.as_deref(), &ready.prompt, clock_now());
+                        fork_failed("automatic", ready.prompt.len(), &forked.failed);
+                        state = forked.state;
+                    }
+                    for source in active.iter().filter(|a| a.automatic_cache && a.ready.scope == ready.scope
+                        && a.prefill_rows == 0 && a.long_prefill.is_none()) {
+                        if shared_prefix(&source.generation.state.tokens, &ready.prompt).min(source.ready.prompt.len()) > state.as_ref().map_or(0, |s| s.tokens.len()) {
+                            match source.generation.state.fork_prefix_limit(&ready.prompt, source.ready.prompt.len()) {
+                                Ok(Some(fork)) => state = Some(fork),
+                                Ok(None) => {}
+                                Err(error) => fork_failed("active", ready.prompt.len(), &[error]),
+                            }
                         }
+                    }
+                    let ram_len = state.as_ref().map_or(0, |s| s.tokens.len());
+                    if ram_len < best_ram_len
+                        && let Some(restored) = super::disk_prefix::restore_longer(
+                            engine, ready.scope.as_deref(), &ready.prompt, tokens, ram_len,
+                        )
+                    {
+                        state = Some(restored);
+                        disk_restored = true;
                     }
                 }
             }
-            let disk_restored = if state.is_none() && automatic_cache && kv.is_none_or(|kv| kv.reuse != "hit") {
-                state = super::disk_prefix::restore_on_miss(engine, ready.scope.as_deref(), &ready.prompt, tokens);
-                state.is_some()
-            } else { false };
             let reused = state.as_ref().map_or(0, |s| s.tokens.len()); if automatic_cache || ready.request.cache && ready.request.session.is_some() { cache.count_lookup(reused); }
             if reused == 0 && (automatic_cache || ready.request.cache && ready.request.session.is_some()) {
                 let (reason, scoped) = cache.miss_reason(ready.scope.as_deref());

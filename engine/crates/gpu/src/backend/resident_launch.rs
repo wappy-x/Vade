@@ -56,7 +56,7 @@ fn first_arithmetic(calls:&[Call])->Option<Kind> {calls.iter().map(|call|call.gr
 /// from the moment they fuse. A grouped launch is one command the same way: the member it absorbs is not counted again.
 fn arithmetic(kind:Kind)->bool {
     matches!(kind,Kind::AbsorbDense|Kind::AbsorbAttention
-        |Kind::Causal|Kind::DraftLanes|Kind::DraftPanel|Kind::DraftHeadFold|Kind::BlockArms|Kind::BlockRows|Kind::BlockScores|Kind::BlockValues|Kind::BlockSoftmax|Kind::PlainStaged|Kind::PlainStagedRows|Kind::PlainStagedFew|Kind::PlainStagedOne|Kind::PlainStagedNarrow|Kind::PlainPackedRows|Kind::PlainTcRows|Kind::PlainTcBig|Kind::PlainPackedTcRows|Kind::PrefillPackedTc|Kind::PrefillFlashWindow|Kind::PrefillGateFuse|Kind::MoeGroupRoute|Kind::FlashWindowAttn|Kind::FlashWindowSplit16|Kind::FlashWindowSplit32|Kind::FlashWindowReduce|Kind::FastMixBlend|Kind::FastRowDots|Kind::FastNorm|Kind::FastCappedGate|Kind::FastRouterPick|Kind::FastStreamOps|Kind::Expert|Kind::Plain|Kind::PlainBf16|Kind::PlainPacked|Kind::PlainPackedGroup|Kind::PlainPackedPicked|Kind::Mx|Kind::Mixed|Kind::MixedBf16|Kind::PlainBatch|Kind::NvStream|Kind::CausalFast|Kind::CausalChain|Kind::CausalGroup
+        |Kind::Causal|Kind::DraftLanes|Kind::DraftPanel|Kind::DraftHeadFold|Kind::BlockArms|Kind::BlockRows|Kind::BlockScores|Kind::BlockValues|Kind::BlockSoftmax|Kind::PlainStaged|Kind::PlainStagedRows|Kind::PlainStagedFew|Kind::PlainStagedOne|Kind::PlainStagedNarrow|Kind::PlainPackedRows|Kind::PlainTcRows|Kind::PlainTcBig|Kind::PlainTcPanel64|Kind::PlainPackedTcRows|Kind::PrefillPackedTc|Kind::PrefillFlashWindow|Kind::PrefillGateFuse|Kind::MoeGroupRoute|Kind::FlashWindowAttn|Kind::FlashWindowSplit16|Kind::FlashWindowSplit32|Kind::FlashWindowReduce|Kind::FastMixBlend|Kind::FastRowDots|Kind::FastNorm|Kind::FastCappedGate|Kind::FastRouterPick|Kind::FastStreamOps|Kind::Expert|Kind::Plain|Kind::PlainBf16|Kind::PlainPacked|Kind::PlainPackedGroup|Kind::PlainPackedPicked|Kind::Mx|Kind::Mixed|Kind::MixedBf16|Kind::PlainBatch|Kind::NvStream|Kind::CausalFast|Kind::CausalChain|Kind::CausalGroup
         |Kind::NvTile|Kind::Fp8Tile|Kind::DeviceRoute|Kind::NvQuarters|Kind::MxRows2|Kind::MxRows4|Kind::MxRows8|Kind::MxRows8w|Kind::MxRowsTile
         |Kind::MixedRows|Kind::FoldRows|Kind::FoldRowsF32|Kind::Fp8RowsSmall|Kind::Fp8RowsMulti|Kind::Fp8RowsFew|Kind::Fp8RowsShare|Kind::PlainRowsSmall|Kind::DeviceRouteRows|Kind::RowRecurrent)
 }
@@ -148,10 +148,15 @@ fn dependent_launch(before:&Grid,g:&Grid)->bool {
         (matches!(before.kind, Kind::FastNorm | Kind::FastMixBlend | Kind::FastStreamOps)
             && ((g.kind==Kind::PlainStagedOne && ((g.shared>=4608 && g.shared!=crate::few_product::ONE_BLOCK_BYTES as u32) || g.threads==32))
                 || g.kind==Kind::PlainStagedNarrow))
-        || (before.kind==Kind::FastRowDots && before.threads==32 && g.kind==Kind::FlashWindowSplit16)
-        || (before.kind==Kind::FastRouterPick && g.kind==Kind::PlainPackedPicked)
+        || (before.kind==Kind::PlainStagedNarrow && g.kind==Kind::PlainStagedOne && g.threads==64 && (g.shared==4_224 || g.shared==4_352))
+        || (before.kind==Kind::PlainStagedOne && before.threads==64 && before.shared==4_224 && g.kind==Kind::FastStreamOps && g.threads>=576)
+        || (before.kind==Kind::PlainStagedOne && before.threads==256 && g.kind==Kind::FastStreamOps && g.threads<=128)
+        || (before.kind==Kind::FastRowDots && matches!(g.kind, Kind::FlashWindowSplit16 | Kind::FlashWindowSplit32))
+        || (before.kind==Kind::FastRouterPick && (g.kind==Kind::PlainPackedPicked || (g.kind==Kind::PlainPackedRows && g.threads==128)))
         || (before.kind==Kind::PlainPackedPicked && g.kind==Kind::PlainPackedPicked)
         || (before.kind==Kind::PlainPackedPicked && g.kind==Kind::FastStreamOps)
+        || (before.kind==Kind::PlainPackedRows && before.threads==128 && g.kind==Kind::PlainPackedRows && g.threads==128)
+        || (before.kind==Kind::PlainPackedRows && before.threads==128 && g.kind==Kind::FastStreamOps && g.threads<=128)
         || (before.kind==Kind::FastStreamOps && g.kind==Kind::FastMixBlend && g.threads>=576)
     )
 }
@@ -285,7 +290,7 @@ impl<'a> Backend<'a> {
         self.context.side_lane_active.set(r.lane_side || r.lane_open);
         let fusable=|calls:&[Call],n:usize|->bool {lane!=JOIN && calls.len()>=n && calls[calls.len()-n..].iter().all(|c|c.grid.lane==lane || lane==MAIN && c.grid.lane==JOIN)};
         let fused_lane=|calls:&[Call],n:usize|->u8 {if calls[calls.len()-n..].iter().any(|c|c.grid.lane==JOIN) {JOIN} else {lane}};
-        if kind == Kind::FastStreamOps && lane == MAIN && !r.lane_open && r.bells.is_empty() {
+        if kind == Kind::FastStreamOps && lane == MAIN && !r.lane_open && r.bells.iter().all(|b| b.0 + 1 < r.calls.len()) {
             let at = r.calls.len();
             let out = u64::from_ne_bytes(command.payload[40..48].try_into().unwrap());
             let dim = u64::from_ne_bytes(command.payload[56..64].try_into().unwrap());
@@ -330,7 +335,7 @@ impl<'a> Backend<'a> {
         }
         // Fast 2-warp single-row `cols == 64` BF16 projection (`mode = 5`, 12+ blk/SM, `4,224 B` SMEM) and 1..=3
         // automatic batching (`grid.y = count`) for consecutive independent `GateForget+GateGain` calls (Q/K/V).
-        if kind == Kind::PlainStagedOne && lane == MAIN && !r.lane_open && r.bells.is_empty() && grid[1] == 1 {
+        if kind == Kind::PlainStagedOne && lane == MAIN && !r.lane_open && r.bells.iter().all(|b| b.0 < r.calls.len()) && grid[1] == 1 {
             let word = |c: &Command, i: usize| u64::from_ne_bytes(c.payload[i*8..i*8+8].try_into().unwrap());
             let (rows, cols, inputs, stride, mode) = (word(&command, 3), word(&command, 4), word(&command, 5), word(&command, 6), word(&command, 7));
             if mode == 0 && inputs == 1 && cols == 64 && rows >= 32 && rows % 32 == 0 && stride == rows {
@@ -384,7 +389,7 @@ impl<'a> Backend<'a> {
         // Fuse up to 3 consecutive independent panel products (4-warp cooperative mode 2 e.g. Q+K+V on the 28 loop
         // layers, or 1-warp mode 1 up to 96 blocks) into one launch so all parts share waves and PDL overlap in strict
         // ascending-K order.
-        if kind == Kind::PlainStagedOne && lane == MAIN && !r.lane_open && r.bells.is_empty()
+        if kind == Kind::PlainStagedOne && lane == MAIN && !r.lane_open && r.bells.iter().all(|b| b.0 + 1 < r.calls.len())
             && ((grid[3] == 128 && grid[0] <= 1024) || (grid[3] == 32 && grid[0] <= 96))
         {
             let at = r.calls.len();
@@ -454,6 +459,7 @@ impl<'a> Backend<'a> {
                             prev.command.word(dst_w + 3, word(&command, panel_w));
                             prev.command.word(dst_w + 4, word(&command, panel_w + 1));
                             prev.command.word(dst_w + 5, prev_blocks);
+                            prev.command.word(if bands_a == 0 { pair_w + 7 } else { triple_w + 6 }, word(&command, crate::few_product::ONE_OFFS_WORD));
                             prev.command.word(pair_w + 6, total_blocks);
                             prev.grid.blocks = total_blocks as u32;
                             for z in &mut r.zeros { if z.0 == at { z.0 -= 1; } }
@@ -466,13 +472,13 @@ impl<'a> Backend<'a> {
         }
         // The calls a one-row stream convolution takes into its launch (`conv_ring`), only right before it on the main
         // lane and with no zero row placed after them: the copy into its ring row, and the route fold before that copy.
-        if kind==Kind::BlockArms && lane==MAIN && !r.lane_open && r.bells.is_empty() {
+        if kind==Kind::BlockArms && lane==MAIN && !r.lane_open {
             let at=r.calls.len();
-            if at>0 && r.calls[at-1].grid.lane==MAIN && r.calls[at-1].grid.kind==Kind::CopyWords && r.zeros.iter().all(|z|z.0<at-1)
+            if at>0 && r.calls[at-1].grid.lane==MAIN && r.calls[at-1].grid.kind==Kind::CopyWords && r.zeros.iter().all(|z|z.0<at-1) && r.bells.iter().all(|b|b.0<at-1)
                 && conv_ring::ring(&mut command,Kind::CopyWords,&r.calls[at-1].command) {
                 let copy=r.calls.pop().ok_or("resident ring copy vanished")?;copy_bytes=copy_bytes.saturating_add(copy.copy_bytes);
                 let at=r.calls.len();
-                if at>0 && r.calls[at-1].grid.lane==MAIN && r.calls[at-1].grid.kind==Kind::FastStreamOps && r.zeros.iter().all(|z|z.0<at-1)
+                if at>0 && r.calls[at-1].grid.lane==MAIN && r.calls[at-1].grid.kind==Kind::FastStreamOps && r.zeros.iter().all(|z|z.0<at-1) && r.bells.iter().all(|b|b.0<at-1)
                     && conv_ring::fold(&mut command,Kind::FastStreamOps,&r.calls[at-1].command) {
                     r.calls.pop();r.heavy=r.heavy.saturating_sub(1);
                 }
@@ -486,7 +492,7 @@ impl<'a> Backend<'a> {
                 }
             }
         }
-        if kind==Kind::BlockArms && lane==MAIN && !r.lane_open && r.bells.is_empty() {
+        if kind==Kind::BlockArms && lane==MAIN && !r.lane_open && r.bells.iter().all(|b|b.0+1<r.calls.len()) {
             let at=r.calls.len();
             if at>0 && r.calls[at-1].grid.lane==MAIN && r.calls[at-1].grid.kind==Kind::BlockArms {
                 // A fill between the calls must initialize only the new norm output; move it
@@ -887,21 +893,26 @@ impl<'a> Backend<'a> {
         let wave=crate::packed_product::spread(rows as usize,picks,self.multiprocessor_count());
         let row_tiles=rows.div_ceil(64);
         // NVFP4 in-place MMA-lane panels and MXFP8 zero-barrier register-pipelined tiles (`rows % 64 == 0`):
-        // exact 3 blk/SM at M=1 (18*8=144, 2 tiles/blk, zero wave-2 tail);
-        // with opt-in LPT compaction at M=2..8, launch `row_tiles` (36) so every live CTA
-        // executes 1 tile (zero 3:1 tail imbalance) while idle CTAs early-exit before tile entry.
+        // at M=1, fused GateUp (`caps.is_some()`) uses a 36x8 grid (1 tile/blk) with 16 KiB dynamic shared to cap
+        // occupancy to 2 blk/SM (3 exact waves, 2.67 concurrent experts/wave) and cut LPDDR5X bank contention, while
+        // shorter Down (`caps.is_none()`) keeps a 1-wave 18x8 3 blk/SM grid (`shared = 0`) to preserve full
+        // GateUp->Down PDL overlap and single-wave MXFP8 bandwidth. With opt-in LPT compaction at M=2..8, launch
+        // `row_tiles` (36) so every live CTA executes 1 tile while idle CTAs early-exit before tile entry.
         let blocks=if compact!=0 && picks>8 {
             row_tiles
         } else if panels!=0 || rows.is_multiple_of(64) {
             let sm=self.multiprocessor_count();
-            if picks<=8 {
+            if picks<=8 && caps.is_some() {
+                row_tiles.min((6*sm).div_ceil(picks).max(1) as u32)
+            } else if picks<=8 {
                 row_tiles.min((3*sm).div_ceil(picks).max(1) as u32)
             } else {
                 row_tiles.min((6*wave).max(1))
             }
         } else if picks>8 {(6*wave).min(rows.div_ceil(crate::packed_product::BLOCK_ROWS as u32))} else {wave};
         let threads=crate::packed_product::PICKED_THREADS as u32;
-        self.append_resident(Kind::PlainPackedPicked,command,[blocks,picks as u32,1,threads,0])?;Ok(true)
+        let shared=if one_row && picks<=8 && caps.is_some() && (panels!=0 || rows.is_multiple_of(64)) {16_384} else {0};
+        self.append_resident(Kind::PlainPackedPicked,command,[blocks,picks as u32,1,threads,shared])?;Ok(true)
     }
     pub(super) fn record_resident_copy(&self,source:u64,target:u64,words:usize)->Result<bool,String> {
         if let Some(error)=self.fatal_error() {return Err(error);}

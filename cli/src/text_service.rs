@@ -51,7 +51,7 @@ impl TextService {
     /// Why `group` cannot start, and the command that can.
     pub fn group_refusal(self) -> String {
         if self.is_alone() {
-            "This checkpoint's text service has no transport between Sparks. It runs on one Spark: RANK 0 of WORLD 1. Start it as: vade up --sparks 1 --diagnostic-unqualified-text.".into()
+            "This checkpoint's text service has no transport between Sparks. It runs on one Spark: RANK 0 of WORLD 1. Start it as: vade up --sparks 1 (or vade up --replicas N).".into()
         } else {
             // Main's text, byte for byte: a pair checkpoint on a wrong Spark count is refused as before.
             "--diagnostic-unqualified-text runs on exactly two Sparks. Start it as: vade up --sparks 2 --diagnostic-unqualified-text.".into()

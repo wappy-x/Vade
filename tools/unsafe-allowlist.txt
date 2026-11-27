@@ -2621,3 +2621,7 @@ engine/crates/gpu/kernels-inkling	src/prefill_gate.rs	fn:replay_msg_meta	fn:1	ru
 engine/crates/gpu/kernels-inkling	src/prefill_gate.rs	fn:replay_msg_meta	block:1	ruling 2026-11-25 21:44
 engine/crates/gpu/kernels-inkling	src/prefill_gate.rs	fn:replay_full	fn:1	ruling 2026-11-25 21:44
 engine/crates/gpu/kernels-inkling	src/prefill_gate.rs	fn:replay_full	block:1	ruling 2026-11-25 21:44
+# Wave 5 order of 2026-11-27 (W5-BATCH-C, new GPU entry PLAIN_TC_PANEL64 in its own file, one replay block):
+engine/crates/gpu/kernels-inkling	src/lib.rs	fn:resident_launch_plain_tc_panel64	fn:1	ruling 2026-11-27 03:05
+engine/crates/gpu/kernels-inkling	src/plain_tc_panel64.rs	fn:replay	fn:1	ruling 2026-11-27 03:05
+engine/crates/gpu/kernels-inkling	src/plain_tc_panel64.rs	fn:replay	block:1	ruling 2026-11-27 03:05

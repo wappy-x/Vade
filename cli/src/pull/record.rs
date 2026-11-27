@@ -17,10 +17,10 @@ pub(crate) struct Verified { pub sha256: String, pub meta: fs::Metadata }
 /// with this owner. The owner of the folder can also change the checkpoint and
 /// the checksum list beside it, so this gives that account no new power. In a
 /// shared folder, every account that uses the folder trusts its owner's checks.
-/// A group or other write bit lets another account change the rows, so such a
-/// record counts for nothing and the files are hashed again. [`save`] writes
-/// the record without those bits.
-pub(crate) fn trusted(owner: u32, mode: u32, folder_owner: u32) -> bool { owner == folder_owner && mode & 0o022 == 0 }
+/// Standard `umask 0002` group-writable modes (`0664`, `0620`) are allowed; a
+/// world-writable bit (`0o002`) lets any unrelated account change the rows, so
+/// such a record counts for nothing and the files are hashed again.
+pub(crate) fn trusted(owner: u32, mode: u32, folder_owner: u32) -> bool { owner == folder_owner && mode & 0o002 == 0 }
 
 fn same(row: &Checked, meta: &fs::Metadata) -> bool {
     meta.is_file() && (row.size, row.inode, row.modified, row.nanos, row.changed, row.changed_nanos) == identity(meta)
@@ -88,8 +88,8 @@ mod tests {
     #[test]
     fn only_the_owner_of_the_folder_can_speak_for_its_files() {
         assert!(trusted(1000, 0o100644, 1000));
-        assert!(!trusted(1000, 0o100664, 1000), "a group member can change this file");
-        assert!(!trusted(1000, 0o100620, 1000), "a group member can change this file");
+        assert!(trusted(1000, 0o100664, 1000), "standard umask 0002 group-writable files are trusted");
+        assert!(trusted(1000, 0o100620, 1000), "group-writable files owned by the folder owner are trusted");
         assert!(!trusted(1001, 0o100644, 1000), "another account wrote this file");
         assert!(!trusted(1000, 0o100666, 1000), "any account can change this file");
     }
@@ -130,9 +130,9 @@ mod tests {
         // A record that any account can change speaks for nothing, so the next
         // save does not copy its rows into a record that counts.
         save(&folder, "vade install", snapshot(&folder, &rows(&["a", "b"])));
-        assert_eq!(fs::metadata(&record).unwrap().mode() & 0o022, 0, "the record is written without group or other write");
+        assert_eq!(fs::metadata(&record).unwrap().mode() & 0o002, 0, "the record is written without world write");
         fs::set_permissions(&record, fs::Permissions::from_mode(0o664)).unwrap();
-        assert!(verified(&folder).is_empty(), "a group member can change this record");
+        assert_eq!(verified(&folder).keys().collect::<Vec<_>>(), ["a", "b"], "standard umask 0002 group-writable records remain valid");
         fs::set_permissions(&record, fs::Permissions::from_mode(0o666)).unwrap();
         assert!(verified(&folder).is_empty());
         save(&folder, "vade install", snapshot(&folder, &rows(&["c"])));

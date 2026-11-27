@@ -6,6 +6,7 @@ use super::lineage::Lineage;
 #[path="device/loop_product.rs"] mod loop_product;
 #[path="device/draft.rs"] mod draft;
 #[path="device/loop_packed.rs"] mod loop_packed;
+#[path="device/loop_pair.rs"] mod loop_pair;
 #[path="device/fast_ops.rs"] mod fast_ops; #[path="device/fused_rows.rs"] mod fused_rows; #[path="device/planes.rs"] mod planes;
 pub struct Device<'b,'d> {pub backend:&'b Backend<'d>,weights:Rc<RefCell<crate::resident_weights::Weights<'b,'d>>>,
     expert_panels:Rc<BTreeMap<u64,DeviceVector<'d>>>,

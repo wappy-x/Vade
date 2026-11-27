@@ -1,4 +1,4 @@
 $ vade up --mtp 9
 --- stderr
-error: Set --mtp to a whole number from 0 to 3.
+error: Set --mtp to a whole number from 0 to 7.
 --- exit 1

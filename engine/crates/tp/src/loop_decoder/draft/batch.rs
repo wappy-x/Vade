@@ -144,12 +144,14 @@ impl<'a,V,A> Drafter<'a,V,A> {
 
     /// Batched DSpark proposal across `B` chats (`items = [(chat, anchor, embed, depth)]`), sharing all draft layer,
     /// head, RNN, and Markov fold weight reads. Produces bit-exact token IDs and top-1 probabilities matching
-    /// single-chat `propose_confident`.
+    /// single-chat `propose_confident`. `before_read` runs exactly once: on the batched Markov path after the last
+    /// draft launch is queued and before the one picks read, on every other path first.
     pub fn propose_confident_batch<C:ResidentProduct<V,Value=A>+Lanes,W:Weights<C>>(
-        &self,c:&C,w:&W,items:&mut [(&mut DraftChat<A>,u32,&A,usize)],
+        &self,c:&C,w:&W,items:&mut [(&mut DraftChat<A>,u32,&A,usize)],before_read:&mut dyn FnMut()->Result<()>,
     )->Result<Vec<(Vec<u32>,Vec<f32>)>> {
-        if items.is_empty() {return Ok(Vec::new());}
+        if items.is_empty() {return before_read().map(|()|Vec::new());}
         if items.len()==1 {
+            before_read()?;
             let (chat,anchor,embed,depth)=&mut items[0];
             return Ok(vec![self.propose_confident(c,w,chat,*anchor,embed,*depth,0.0)?]);
         }
@@ -291,8 +293,9 @@ impl<'a,V,A> Drafter<'a,V,A> {
         } else {res};
         let drafted_all=norm(&drafted_in,q_total,h,&self.final_norm)?;
         if let Some(anchors)=pre_anchors {
-            return self.markov_walk_batch(c,&drafted_all,items,max_depth,&anchors,pre_swap.as_ref());
+            return self.markov_walk_batch(c,&drafted_all,items,max_depth,&anchors,pre_swap.as_ref(),before_read);
         }
+        before_read()?;
         let mut out=Vec::with_capacity(b_count);
         let mut off=0usize;
         for (b,(chat,anchor,_,depth)) in items.iter().enumerate() {
@@ -306,9 +309,11 @@ impl<'a,V,A> Drafter<'a,V,A> {
 
     /// Batched Markov walk across `B <= DRAFT_BATCH_MAX` chats sharing one `head`, `draft_part`, `feat_part`,
     /// `dyn_part`, and `fold` panel read per step. Reads back all `max_depth * B` picks and softmax denominators
-    /// in ONE host sync with zero mid-draft H2D uploads.
+    /// in ONE host sync with zero mid-draft H2D uploads; `before_read` runs just before that sync.
+    #[allow(clippy::too_many_arguments)]
     fn markov_walk_batch<C:ResidentProduct<V,Value=A>+Lanes>(
         &self,c:&C,drafted_all:&A,items:&[(&mut DraftChat<A>,u32,&A,usize)],max_depth:usize,anchors:&A,swap_tbl:Option<&A>,
+        before_read:&mut dyn FnMut()->Result<()>,
     )->Result<Vec<(Vec<u32>,Vec<f32>)>> {
         let cfg=self.config();
         let (b_count,h,rank,vocab)=(items.len(),cfg.hidden_size,cfg.markov_rank,cfg.unpadded_vocab_size);
@@ -389,7 +394,9 @@ impl<'a,V,A> Drafter<'a,V,A> {
             pick_stride=stride;
             prev_result=Some(result);
         }
-        let words=c.read(&c.join(&step_picks.iter().collect::<Vec<_>>())?)?;
+        let picks=c.join(&step_picks.iter().collect::<Vec<_>>())?;
+        before_read()?;
+        let words=c.read(&picks)?;
         need(words.len()==max_depth*b_count*4,"missing batched device draft pick")?;
         let mut out=Vec::with_capacity(b_count);
         for (b,&(_,_,_,depth)) in items.iter().enumerate() {

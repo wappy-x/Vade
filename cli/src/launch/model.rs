@@ -310,28 +310,6 @@ fn locate(root: &Path) -> Result<Model, String> {
         })
 }
 
-/// Whether launch would serve the checkpoint in `path`: `Ok(true)` for
-/// FP4-Local, `Ok(false)` for the legacy FP8 format, else the refusal. Reads
-/// metadata only, never weight payloads.
-/// The line a start prints when it hands a looped block checkpoint to the engine's diagnostic text service, built
-/// from the plan's binding of the checkpoint: what it is called on disk, that only text runs, which stored parts are
-/// not run, and that it has not been qualified. `None` when the plan cannot bind it.
-pub(crate) fn loop_preview_line(path: &Path, mtp: u32) -> Option<String> {
-    let counts = engine_model::plan::inkling_index::inspect(path).ok()?.counts();
-    let name = path.file_name()?.to_string_lossy().replace(['-', '_'], " ");
-    let mut missing = Vec::new();
-    if counts.unused > 0 { missing.push("Image input"); }
-    if counts.draft_stored > 0 && mtp == 0 && local_max_mtp(path) == 0 {
-        missing.push(if missing.is_empty() { "The draft model" } else { "the draft model" });
-    }
-    let missing = match missing.len() {
-        0 => String::new(),
-        1 => format!(" {} is not built yet.", missing[0]),
-        _ => format!(" {} are not built yet.", missing.join(" and ")),
-    };
-    Some(crate::text::terminal_text(&format!("{name} starts as a preview: text only.{missing} It has not been through qualification.")).into_owned())
-}
-
 /// Whether the checkpoint in `path` is the looped block family, by the plan in its config.json.
 pub(super) fn loop_text(path: &Path) -> bool {
     crate::text_service::from_dir(path).is_some_and(crate::text_service::TextService::is_alone)

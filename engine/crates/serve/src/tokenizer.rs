@@ -216,7 +216,7 @@ fn object(source: &str, max_bytes: usize) -> Result<Value, String> {
         json::Limits {
             bytes: max_bytes,
             depth: 24,
-            nodes: 65536,
+            nodes: max_bytes.max(65536),
             string_bytes: max_bytes,
         },
     )
@@ -282,9 +282,6 @@ fn parse_messages_with_roles(input: &ChatInput, max_bytes: usize, gemma: bool, t
         let mut tool_calls = Vec::new();
         if let Some(calls) = raw_member(source, "tool_calls")?.filter(|raw| raw.trim() != "null") {
             let raw_calls = raw_array(calls)?;
-            if raw_calls.len() > 64 {
-                return Err("too many tool calls".into());
-            }
             for raw_call in raw_calls {
                 let root = object(&raw_call, max_bytes)?;
                 let call = root.object().map_err(|e| e.to_string())?;
