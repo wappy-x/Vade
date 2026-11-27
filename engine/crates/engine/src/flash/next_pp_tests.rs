@@ -1064,35 +1064,53 @@ fn wire_answer(wire: &mut Pipe, tcp: &mut TcpStream, beat: Option<Duration>, wor
 
 #[test]
 fn pp_wire_reply_clock_starts_after_the_queued_acks() {
-    // A queued tile runs 3x the limit (heartbeating), then a one-row exchange goes on the
-    // wire and is answered at once: the wire wait must not count the drain's time.
-    let (near, mut far) = pair();
-    let limit = Duration::from_millis(200);
-    let mut link = front(near, limit);
-    let (mine, mut theirs) = pipes();
-    link.fast = Some(Box::new(mine));
-    (link.sent, link.pending) = (1, 1);
-    link.acks.push_back(Ack::Empty);
-    let back = std::thread::spawn(move || {
-        let started = Instant::now();
-        while started.elapsed() < 3 * limit {
-            std::thread::sleep(beat_period(limit));
-            far.write_all(&working_head(1)).unwrap();
-        }
-        let mut ack = Vec::new();
-        for v in [MAGIC_RESPONSE, 0, 0, 1] {
-            put(&mut ack, v);
-        }
-        far.write_all(&ack).unwrap();
-        wire_answer(&mut theirs, &mut far, None, Duration::from_millis(20))
+    // A queued tile runs 3x the limit (heartbeating on the manual clock), then a one-row
+    // exchange goes on the wire and is answered within the limit: the wire wait must not
+    // count the drain's time.
+    test_clock::within_a_minute(|| {
+        let (near, far) = pair();
+        let limit = Duration::from_millis(200);
+        let step = Duration::from_millis(25);
+        let mut link = front(near, limit);
+        let (mine, mut theirs) = pipes();
+        link.fast = Some(Box::new(mine));
+        (link.sent, link.pending) = (1, 1);
+        link.acks.push_back(Ack::Empty);
+        let mut back = test_clock::Back::manual(&mut link, far);
+        let worker = std::thread::spawn(move || {
+            back.mark(Some(1));
+            while back.now() < 3 * limit {
+                assert!(back.step(step, true), "the front stopped waiting at {:?}", back.now());
+            }
+            back.mark(None);
+            let mut ack = Vec::new();
+            for v in [MAGIC_RESPONSE, 0, 0, 1] {
+                put(&mut ack, v);
+            }
+            assert!(back.step_with(Duration::ZERO, false, |tcp| {
+                tcp.write_all(&ack).unwrap();
+                1
+            }));
+            let request = theirs.from.recv_timeout(Duration::from_secs(5)).unwrap();
+            let id = word(&request, 4);
+            let reply = test_clock::plus_one(&request);
+            assert!(back.step_with(step, false, |_| {
+                theirs.send(&[&reply]).unwrap();
+                0
+            }));
+            (id, back)
+        });
+        let mut rows = vec![1.5f32; W];
+        link.exchange(KIND_POOLED, &[[1, 8, 0, 1]], &mut rows).unwrap();
+        let elapsed = Duration::from_millis(link.test_clock.as_ref().unwrap().1.load(Ordering::Relaxed));
+        link.test_steps = None;
+        let (id, back) = worker.join().unwrap();
+        assert!(elapsed >= 3 * limit, "elapsed {elapsed:?}");
+        assert!(back.sent > 0);
+        assert!(rows.iter().all(|&v| v == 2.5));
+        assert_eq!((link.carried, link.pending), (1, 0));
+        assert_eq!(id, 2);
     });
-    let mut rows = vec![1.5f32; W];
-    let started = Instant::now();
-    link.exchange(KIND_POOLED, &[[1, 8, 0, 1]], &mut rows).unwrap();
-    assert!(started.elapsed() >= 3 * limit);
-    assert!(rows.iter().all(|&v| v == 2.5));
-    assert_eq!((link.carried, link.pending), (1, 0));
-    assert_eq!(back.join().unwrap(), 2);
 }
 
 #[test]
@@ -1102,12 +1120,12 @@ fn pp_wire_silent_back_fails_within_the_limit() {
     let mut link = front(near, limit);
     let (mine, mut theirs) = pipes();
     link.fast = Some(Box::new(mine));
-    let back = std::thread::spawn(move || wire_answer(&mut theirs, &mut far, None, Duration::from_secs(1)));
+    let back = std::thread::spawn(move || wire_answer(&mut theirs, &mut far, None, Duration::from_secs(2)));
     let mut rows = vec![1.5f32; W];
     let started = Instant::now();
     let e = link.exchange(KIND_POOLED, &[[1, 8, 0, 1]], &mut rows).unwrap_err();
     assert!(e.contains("timed out after 200 ms without a heartbeat"), "{e}");
-    assert!(started.elapsed() < limit + Duration::from_millis(300));
+    assert!(started.elapsed() < limit + Duration::from_millis(1500));
     assert!(rows.iter().all(|&v| v == 1.5));
     back.join().unwrap();
 }

@@ -221,8 +221,25 @@ pub fn ensure_capacity<C:Compute>(compute:&C,layouts:&[Layout],state:&mut State<
     Ok(())
 }
 /// Live global KV occupies only the committed rows. Wrapped windows must keep their original slot layout.
-fn prefix_plane_words(layout:&Layout,position:u64)->usize {
+pub(super) fn prefix_plane_words(layout:&Layout,position:u64)->usize {
     layout.row_words*if layout.ring {layout.rows} else {(position as usize).min(layout.rows)}
+}
+/// Allocate a fresh target state sized to receive a disk-restored prefix at `position`, with straight
+/// KV planes pre-mapped for `target_tokens.max(position)` tokens. Call outside `compute.work` so CUDA
+/// VMM page maps never run inside an unsubmitted resident launch queue.
+pub(super) fn alloc_for_restore<C:Compute>(compute:&C,layouts:&[Layout],position:u64,target_tokens:usize)->Result<State<C::Value>> {
+    need(position>0,"cannot restore an empty prefix state")?;
+    let page_bytes=compute.plane_page_bytes();
+    let visits=layouts.iter().map(|l| {
+        if !l.ring {need(position<=l.rows as u64,"restored prefix exceeds state capacity")?;}
+        let (max_words,kv,after)=(l.rows*l.row_words,l.kv_taps*l.kv_channels,l.taps*l.channels);
+        let want_tokens=target_tokens.max(position as usize).min(l.rows);
+        let init_words=l.plane_rows_for(want_tokens,page_bytes)*l.row_words;
+        let plane=||if l.ring {compute.zeros(max_words)} else {compute.plane_alloc(max_words,init_words)};
+        Ok(VisitState {keys:plane()?,values:plane()?,rings:[compute.zeros(kv)?,compute.zeros(kv)?,compute.zeros(after)?,compute.zeros(after)?],
+            next:std::array::from_fn(|_|None),planes:None,every:std::array::from_fn(|_|None),written:None})
+    }).collect::<Result<Vec<_>>>()?;
+    Ok(State {position,visits})
 }
 /// Private (non-straight-plane) bytes retained by one snapshot: window rings, convolution rings, and metadata.
 pub(super) fn retained_private_bytes<V>(layouts:&[Layout])->usize {

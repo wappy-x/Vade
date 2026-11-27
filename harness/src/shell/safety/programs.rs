@@ -323,7 +323,15 @@ impl Ctx {
                 if name == "scp" || (name == "rsync" && text.iter().any(|a| a.contains(':'))) {
                     ask(self, "copies files to or from another machine");
                 }
-                self.writes_files(&positional[positional.len().saturating_sub(1)..], display, "copies or links files");
+                let mut targets: Vec<Word> = positional[positional.len().saturating_sub(1)..]
+                    .iter()
+                    .map(|w| (*w).clone())
+                    .collect();
+                if matches!(name, "cp" | "ln" | "install") {
+                    targets.extend(output_values(args, &['t'], &["target-directory"]));
+                }
+                let target_refs: Vec<&Word> = targets.iter().collect();
+                self.writes_files(&target_refs, display, "copies or links files");
             }
             "mkdir" | "touch" | "truncate" | "patch" | "split" | "csplit" | "mkfifo" | "mktemp" => {
                 self.writes_files(&positional, display, "creates or changes files");
@@ -333,10 +341,18 @@ impl Ctx {
                 let listed = match name {
                     "tar" => {
                         let mut words = args.to_vec();
+                        let mut prepended = false;
                         if let Some(first) = words.first_mut().filter(|w| !w.text.starts_with('-') && !w.dynamic) {
                             first.text.insert(0, '-');
+                            prepended = true;
+                        }
+                        if prepended {
+                            self.credentials(&words[0], display);
                         }
                         let read = options::read(&words, "-t --list -v --verbose -z --gzip -j --bzip2 -J --xz -f= --file= -O --to-stdout", GNU);
+                        for file in read.values(&["-f", "--file"]) {
+                            self.credentials(file, display);
+                        }
                         read.unread.is_none() && read.has(&["-t", "--list"])
                     }
                     "unzip" => {
@@ -350,9 +366,14 @@ impl Ctx {
                 }
             }
             "dd" => {
-                for arg in &text {
-                    if let Some(target) = arg.strip_prefix("of=") {
-                        self.write_target(&Word { text: target.to_owned(), ..Word::default() }, display, "writes raw data to");
+                for word in args {
+                    if let Some(target) = word.text.strip_prefix("of=") {
+                        self.write_target(&Word { text: target.to_owned(), ..word.clone() }, display, "writes raw data to");
+                        if options::expands(word) {
+                            self.unread(word, display);
+                        }
+                    } else if options::expands(word) || word.dynamic {
+                        self.add(Class::Ask, format!("dd argument comes from a variable or expansion, which can set of=: {}", word.text), display, false);
                     }
                 }
             }
@@ -706,6 +727,7 @@ impl Ctx {
         }
         let mut index = 0;
         let mut wants_script = false;
+        let mut reads_stdin = false;
         // The shell runs the value of fish `-c` or `--command` itself.
         let mut fish_command = false;
         // Shell options from a closed list; fish `-o` and `-p` write files.
@@ -774,6 +796,9 @@ impl Ctx {
                     if letter == 'c' && !fish_value && flag.starts_with('-') {
                         wants_script = true;
                     }
+                    if letter == 's' && name != "fish" && flag.starts_with('-') {
+                        reads_stdin = true;
+                    }
                     // zsh `-O` is an option of its own (correct_all), not `-O name`.
                     let named = name != "fish" && (letter == 'o' || (letter == 'O' && name != "zsh"));
                     if !fish_value && !named {
@@ -809,11 +834,12 @@ impl Ctx {
             return;
         }
         let ask = |ctx: &mut Self, reason: &str| ctx.add(Class::Ask, reason, display, true);
-        match (wants_script, args.get(index)) {
-            (true, Some(script)) => self.code(Some(script), display),
-            (true, None) => ask(self, "runs a shell with no script"),
-            (false, Some(file)) => ask(self, &format!("runs a shell script file: {}", file.text)),
-            (false, None) => resolved.stdin_script = true,
+        match (wants_script, reads_stdin, args.get(index)) {
+            (true, _, Some(script)) => self.code(Some(script), display),
+            (true, _, None) => ask(self, "runs a shell with no script"),
+            (false, true, _) => resolved.stdin_script = true,
+            (false, false, Some(file)) => ask(self, &format!("runs a shell script file: {}", file.text)),
+            (false, false, None) => resolved.stdin_script = true,
         }
     }
 

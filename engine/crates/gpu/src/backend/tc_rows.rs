@@ -441,16 +441,46 @@ impl<'a> Backend<'a> {
         }
         self.require_arm_kernels(&[Kind::MoeGroupRoute.kernel()])?;
         self.resident_completion()?;
-        let mut command = Command::new(Kind::MoeGroupRoute);
-        let words = [
+        let blocks = tc_rows::moe_route_blocks(rows);
+        if blocks == 1 {
+            let mut command = Command::new(Kind::MoeGroupRoute);
+            let words = [
+                route.device_address(), weights_out.device_address(), in_rows.device_address(),
+                out_slots.device_address(), tile_meta.device_address(),
+                rows as u64, each as u64, picks as u64, experts as u64, max_tiles as u64,
+                tc_rows::MOE_ROUTE_PHASE_SINGLE, 0, 0, 1,
+            ];
+            for (i, w) in words.into_iter().enumerate() { command.word(i, w); }
+            let grid = [1, 1, 1, tc_rows::MOE_ROUTE_THREADS as u32, 0];
+            if !self.record_resident_block(Kind::MoeGroupRoute, command, grid)? {
+                return Err("moe route: launches are not recorded now".into());
+            }
+            self.resident_completion()?;
+            return Ok(MoeRoutePlan { rows, all, experts, in_rows, out_slots, tile_meta });
+        }
+        let block_hist = self.vector(blocks * experts)?;
+        let ids_buf = self.vector(all.div_ceil(2))?;
+        if block_hist.is_segmented() || ids_buf.is_segmented() {
+            return Err("moe route: scratch requires contiguous storage".into());
+        }
+        let base_words = [
             route.device_address(), weights_out.device_address(), in_rows.device_address(),
             out_slots.device_address(), tile_meta.device_address(),
             rows as u64, each as u64, picks as u64, experts as u64, max_tiles as u64,
+            0, block_hist.device_address(), ids_buf.device_address(), blocks as u64,
         ];
-        for (i, w) in words.into_iter().enumerate() { command.word(i, w); }
-        let grid = [1, 1, 1, tc_rows::MOE_ROUTE_THREADS as u32, 0];
-        if !self.record_resident_block(Kind::MoeGroupRoute, command, grid)? {
-            return Err("moe route: launches are not recorded now".into());
+        for (phase, gx) in [
+            (tc_rows::MOE_ROUTE_PHASE_COUNT, blocks as u32),
+            (tc_rows::MOE_ROUTE_PHASE_SCAN, 1u32),
+            (tc_rows::MOE_ROUTE_PHASE_SCATTER, blocks as u32),
+        ] {
+            let mut command = Command::new(Kind::MoeGroupRoute);
+            for (i, w) in base_words.into_iter().enumerate() { command.word(i, w); }
+            command.word(10, phase);
+            let grid = [gx, 1, 1, tc_rows::MOE_ROUTE_THREADS as u32, 0];
+            if !self.record_resident_block(Kind::MoeGroupRoute, command, grid)? {
+                return Err("moe route: launches are not recorded now".into());
+            }
         }
         self.resident_completion()?;
         Ok(MoeRoutePlan { rows, all, experts, in_rows, out_slots, tile_meta })

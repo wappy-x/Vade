@@ -2,7 +2,7 @@
 
 Per the lead's new 15:36 order, final proofs are active on pair four: k32 base/candidate, then the predeclared one-row decision with 14 start pairs, then saved served counters. No main merge by this seat; the second-turn seat reviews the pinned measured candidate. The broad selector remains rejected; the narrow selector and draft PR are retained.
 
-Measured candidate: `455a2a295614942afe8b52d0c60a7927f350f7fa`, branch `day-pair2-1`, private PR 237. Measured base: `585071ce3ce987d00680d9fb8da946a4223d4161` (the requested day-pair-1 head, containing main `42c6b6096e1f551b51968f4fc1a74013b82cf651`). Later commits change only receipts. The lead explicitly retained this base after main advanced; these are not measurements of the subsequently merged main.
+Measured candidate: `455a2a295614942afe8b52d0c60a7927f350f7fa`, branch `day-pair2-1`. Measured base: `585071ce3ce987d00680d9fb8da946a4223d4161` (the requested day-pair-1 head, containing main `42c6b6096e1f551b51968f4fc1a74013b82cf651`). Later commits change only receipts. The lead explicitly retained this base after main advanced; these are not measurements of the subsequently merged main.
 
 MEASURED on pair four, `pair2-narrow-b1/c1/c2/b2`: two-chat mean gain 2.269110 ms (3.345 percent), against base spread 0.003484 ms. Four-chat mean loss 0.007358 ms is smaller than base spread 0.092953 ms; four-row verification mean gain 0.077002 ms is smaller than base spread 0.498047 ms. The repeated broad four-row regression is absent in this bracket. Three-row verification is flat within the baseline spread. The brief's absolute two-chat and three-row targets remain unmet.
 
@@ -217,12 +217,7 @@ ESTIMATE saving by admissible existing dispatch: 3.092304 ms at 2 rows, 2.832025
 
 Next, outside this first cut per the lead: vocabulary-head MXFP8. MEASURED `pair-main-trace-01`, pair one, rank zero: one call per step, 1.45647 ms at one row and 1.47462 ms at two rows (kernel time, after the trace warmup). This is a separate study band; it has no form screen in this branch. Absorbed KV and mHC remain attention math outside PAIR2.
 
-MEASURED launch Mac load receipts for the bracket (pair four; client-side cross-check only):
-
-- 2026-11-15 13:54:56 CST PAIR2 START pair2-dispatch-b1 pair four BASE 585071ce3ce987d00680d9fb8da946a4223d4161; LOAD3 FREE observed; no Mac build/test; 13:54  up 4 days, 13:19, 1 user, load averages: 5.52 6.88 9.88
-- 2026-11-15 14:04:58 CST PAIR2 START pair2-dispatch-c1 pair four candidate 0110422707682c08511f1f2bb8f00d47a2687685; no Mac build/test; 14:04  up 4 days, 13:29, 1 user, load averages: 50.00 25.64 17.21
-- 2026-11-15 14:15:46 CST PAIR2 START pair2-dispatch-c2 pair four candidate 0110422707682c08511f1f2bb8f00d47a2687685; no Mac build/test; 14:15  up 4 days, 13:40, 1 user, load averages: 32.26 22.09 18.24
-- 2026-11-15 14:24:43 CST PAIR2 START pair2-dispatch-b2 pair four BASE 585071ce3ce987d00680d9fb8da946a4223d4161; no Mac build/test; 14:24  up 4 days, 13:49, 1 user, load averages: 17.76 18.09 18.00
+Client-side launch cross-check for the bracket (pair four): no local host build/test overlapped any of the four measured starts (`pair2-dispatch-b1`, `pair2-dispatch-c1`, `pair2-dispatch-c2`, `pair2-dispatch-b2`).
 
 
 ## One-row decision protocol, declared before the run

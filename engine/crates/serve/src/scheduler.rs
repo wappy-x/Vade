@@ -1,5 +1,6 @@
 //! One CUDA thread, bounded nonblocking sockets, priority between model steps.
 mod dispatch;
+mod disk_prefix;
 mod draft_admission;
 mod intake;
 mod refusal;
@@ -1139,7 +1140,8 @@ impl<'e, 't, E: Engine, T: Tokenizer> Active<'e, 't, E, T> {
         } else if tokens.len() != self.ready.prompt.len() && !engine.eos_token_ids().contains(tokens.last().unwrap()) { return; }
         self.settle_prefix(); let state = &self.generation.state;
         cache.fund_pages(state.session.prefix_allocations(state.tokens.len()).unwrap_or_default());
-        cache.snapshot_scoped(key, self.ready.scope.as_deref(), state, clock_now(), state.tokens.len() == self.ready.prompt.len());
+        let prompt_end = state.tokens.len() == self.ready.prompt.len();
+        cache.snapshot_scoped(key, self.ready.scope.as_deref(), state, clock_now(), prompt_end); disk_prefix::persist_prompt_end(engine, self.ready.scope.as_deref(), state, prompt_end);
     }
     /// A failed settle stops the link on its next pass, and this chat restores no prefix.
     fn settle_prefix(&mut self) {

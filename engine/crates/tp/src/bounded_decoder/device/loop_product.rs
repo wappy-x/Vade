@@ -683,7 +683,7 @@ impl<'b,'d> Device<'b,'d> {
         if !all.is_multiple_of(picks) || weights.words!=all {return Ok(None);}
         let tokens=all/picks;
         if x.words!=if half_in {tokens*(g_cols/2)} else {tokens*g_cols} {return Ok(None);}
-        if !fast_ops::stream_ops_admitted(fast_ops::STREAM_OP_ROUTE_FOLD_CONV_PREFILL,tokens,d_rows,picks,fast_ops::STREAM_OPS_THREADS)
+        if !fast_ops::stream_ops_admitted(fast_ops::STREAM_OP_ROUTE_FOLD_CONV_PREFILL,tokens,d_rows,picks,fast_ops::ROUTE_FOLD_PREFILL_THREADS)
             || !(2..=fast_ops::ROUTE_FOLD_CONV_TAPS_MAX).contains(&taps) || tokens<taps || first_slot>=taps
             || residual.words!=tokens*d_rows || ring.words!=taps*d_rows || fixed.len()!=d_rows*taps
         {

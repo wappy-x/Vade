@@ -663,7 +663,7 @@ real Node/npm installation or any third-party package.
 Command processes get null stdin and nonblocking captured pipes. The kernel
 limits are
 120 CPU seconds, 64 MiB per output file, 1,024 processes for the user as the OS
-counts them, and 128 descriptors. These are inherited kernel limits, not a
+counts them, and 1,024 descriptors. These are inherited kernel limits, not a
 per-command memory or process-tree quota. Command wall time and combined
 stdout/stderr are polled every 10 ms, and each drain iteration is bounded.
 Outputs keep partial data on timeout, cancellation, nonzero exit or cap

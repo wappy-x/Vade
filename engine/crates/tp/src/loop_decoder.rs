@@ -29,6 +29,7 @@ pub mod host_weights;
 pub mod rows;
 pub mod service;
 pub mod draft;
+pub mod disk_cache;
 
 use crate::{Result,bounded_decoder::{Compute,greedy_logits}};
 use attention::rounded_norm;

@@ -2,6 +2,21 @@
 use super::*;
 
 #[cfg(target_os = "macos")]
+fn regex_escape(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for c in text.chars() {
+        if matches!(
+            c,
+            '\\' | '.' | '^' | '$' | '|' | '(' | ')' | '[' | ']' | '{' | '}' | '*' | '+' | '?' | '"'
+        ) {
+            escaped.push('\\');
+        }
+        escaped.push(c);
+    }
+    escaped
+}
+
+#[cfg(target_os = "macos")]
 pub(super) fn profile(
     root: &std::path::Path,
     exclusions: &Exclusions,
@@ -10,13 +25,13 @@ pub(super) fn profile(
     read_only: bool,
     git: bool,
 ) -> io::Result<String> {
-    let root = root
+    let raw_root = root
         .to_str()
         .ok_or_else(|| io::Error::other("workspace path must be UTF-8"))?;
-    if root.chars().any(char::is_control) {
+    if raw_root.chars().any(char::is_control) {
         return Err(io::Error::other("invalid workspace path"));
     }
-    let root = crate::json::quote(root);
+    let root = crate::json::quote(raw_root);
     let quote_path = |path: &std::path::Path| -> io::Result<String> {
         let path = path
             .to_str()
@@ -32,7 +47,7 @@ pub(super) fn profile(
         private_reads.push_str(&format!(" (subpath (string-append {root} \"/.git\"))"));
     }
     let read_only_policy = if read_only {
-        format!("(deny file-write* (subpath {root}))")
+        format!("(deny file-write* (subpath {root}) (subpath {build}))")
     } else {
         String::new()
     };
@@ -55,6 +70,15 @@ pub(super) fn profile(
         );
     }
     let excluded_access = exclusions.access_denial();
+    let trimmed_root = raw_root.trim_end_matches('/');
+    let root_dot_regex = if trimmed_root.is_empty() {
+        String::from(r#"#"/\.[^/]+(/|$)""#)
+    } else {
+        let cased_root = ascii_case_pattern(&regex_escape(trimmed_root));
+        format!(
+            r#"#"^(/[sS][yY][sS][tT][eE][mM]/[vV][oO][lL][uU][mM][eE][sS]/[dD][aA][tT][aA])?{cased_root}/([^/]+/)*\.[^/]+(/|$)""#
+        )
+    };
     // Keep each sandbox regex short. The expanded case-insensitive form can
     // exceed the macOS parser's string limit when the protected-name list grows.
     let secret_paths = [crate::tools::SecretPathMatch::Exact, crate::tools::SecretPathMatch::Prefix, crate::tools::SecretPathMatch::Suffix]
@@ -99,8 +123,9 @@ pub(super) fn profile(
 {read_only_policy}
 (deny file-link)
 {excluded_access}
-(deny file-read-data file-write* (require-all (regex #"/\.[^/]+(/|$)") (require-not (require-any {private_reads}))))
-(deny file-read-data file-write* (regex {secret_paths}))
+(deny file-read-data file-read-xattr file-write* (require-all (regex #"/\.[^/]+(/|$)") (require-not (subpath {root})) (require-not (require-any {private_reads}))))
+(deny file-read-data file-read-xattr file-write* (require-all (regex {root_dot_regex}) (require-not (require-any {private_reads}))))
+(deny file-read-data file-read-xattr file-write* (regex {secret_paths}))
 "#
     ))
 }
@@ -231,12 +256,34 @@ pub(crate) fn run_in_session_observing(
             .process_group(0);
         build.environment(&mut command, session.toolchain.as_deref());
         // SAFETY: async-signal-safe system calls only between fork and exec.
+        // macOS <sys/resource.h>: RLIMIT_CPU=0, RLIMIT_FSIZE=1, RLIMIT_NPROC=7, RLIMIT_NOFILE=8.
+        // RLIMIT_NPROC on macOS is per-UID across all user processes (128 would break fork on a
+        // normal desktop session), while RLIMIT_NOFILE is per-process (1024 avoids starving
+        // rustc/cargo). Clamp every limit via getrlimit so lowering never fails with EPERM.
         unsafe {
             command.pre_exec(|| {
-                for (resource, value) in [(0, 120u64), (1, 64 * 1024 * 1024), (7, 1024), (8, 128)] {
+                const RLIMIT_CPU: i32 = 0;
+                const RLIMIT_FSIZE: i32 = 1;
+                const RLIMIT_NPROC: i32 = 7;
+                const RLIMIT_NOFILE: i32 = 8;
+                for (resource, value) in [
+                    (RLIMIT_CPU, 120u64),
+                    (RLIMIT_FSIZE, 64 * 1024 * 1024),
+                    (RLIMIT_NPROC, 1024),
+                    (RLIMIT_NOFILE, 1024),
+                ] {
+                    let mut current = Rlimit { current: 0, maximum: 0 };
+                    if getrlimit(resource, &mut current) != 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    let maximum = current.maximum.min(value);
                     let limit = Rlimit {
-                        current: value,
-                        maximum: value,
+                        current: if resource == RLIMIT_NOFILE {
+                            maximum
+                        } else {
+                            current.current.min(maximum)
+                        },
+                        maximum,
                     };
                     if setrlimit(resource, &limit) != 0 {
                         return Err(io::Error::last_os_error());
@@ -249,12 +296,16 @@ pub(crate) fn run_in_session_observing(
         let child = command
             .spawn()
             .map_err(|_| io::Error::other("cannot start sandboxed command"))?;
-        let mut owned = OwnedChild(child);
-        let mut stdout = owned.0.stdout.take().unwrap();
-        let mut stderr = owned.0.stderr.take().unwrap();
+        let mut owned = OwnedChild::new(child);
+        let mut stdout = owned.child.stdout.take().unwrap();
+        let mut stderr = owned.child.stderr.take().unwrap();
         for fd in [stdout.as_raw_fd(), stderr.as_raw_fd()] {
-            let flags = unsafe { fcntl(fd, 3) }; // F_GETFL
-            if flags < 0 || unsafe { fcntl(fd, 4, flags | 4) } < 0 {
+            // SAFETY: `fd` is a live pipe descriptor owned by this process; F_GETFL/F_SETFL enable O_NONBLOCK.
+            let ok = unsafe {
+                let flags = fcntl(fd, 3); // F_GETFL
+                flags >= 0 && fcntl(fd, 4, flags | 4) >= 0 // F_SETFL | O_NONBLOCK
+            };
+            if !ok {
                 return Err(io::Error::other("cannot make command pipes nonblocking"));
             }
         }
@@ -283,12 +334,22 @@ pub(crate) fn run_in_session_observing(
             }
             drain(&mut stdout, &mut out, &mut out_eof)?;
             drain(&mut stderr, &mut errors, &mut err_eof)?;
-            if let Some(status) = owned.0.try_wait()? {
+            let pid = owned.child.id();
+            let mut info = SigInfo::zeroed();
+            // SAFETY: `pid` is our unreaped child; `info` matches macOS `siginfo_t` layout.
+            // P_PID=1, WNOHANG=1, WEXITED=4, WNOWAIT=0x20 peeks exit without reaping so `pid`
+            // remains pinned until `kill_group` finishes.
+            let peek = unsafe { waitid(1, pid, &mut info, 4 | 1 | 0x20) };
+            if peek == 0 && info.si_pid > 0 && info.si_pid as u32 == pid {
+                // Kill leftover group members BEFORE reaping while the zombie still pins `pid`.
+                owned.kill_group();
+                let status = owned.child.wait()?;
+                owned.reaped = true;
                 exit_code = status.code();
                 signal = status.signal();
-                // Kill leftover group members even if the direct child exited.
-                owned.kill_group();
                 break Outcome::Exited(status.code());
+            } else if peek < 0 && io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+                return Err(io::Error::last_os_error());
             }
             // Wake as soon as output is ready. Retain the 10 ms cancellation
             // bound, and never wait beyond the command's remaining deadline.
@@ -582,6 +643,27 @@ const _: () = {
 };
 #[cfg(target_os = "macos")]
 #[repr(C)]
+struct SigInfo {
+    si_signo: i32,
+    si_errno: i32,
+    si_code: i32,
+    si_pid: i32,
+    _pad: [u64; 11],
+}
+#[cfg(target_os = "macos")]
+impl SigInfo {
+    fn zeroed() -> Self {
+        Self { si_signo: 0, si_errno: 0, si_code: 0, si_pid: 0, _pad: [0; 11] }
+    }
+}
+#[cfg(target_os = "macos")]
+const _: () = {
+    assert!(std::mem::size_of::<SigInfo>() == 104);
+    assert!(std::mem::align_of::<SigInfo>() == 8);
+    assert!(std::mem::offset_of!(SigInfo, si_pid) == 12);
+};
+#[cfg(target_os = "macos")]
+#[repr(C)]
 struct PollFd {
     fd: i32,
     events: i16,
@@ -592,24 +674,49 @@ unsafe extern "C" {
     fn kill(pid: i32, signal: i32) -> i32;
     fn fcntl(fd: i32, command: i32, ...) -> i32;
     fn poll(fds: *mut PollFd, nfds: u32, timeout: i32) -> i32;
+    fn getrlimit(resource: i32, limit: *mut Rlimit) -> i32;
     fn setrlimit(resource: i32, limit: *const Rlimit) -> i32;
+    fn waitid(idtype: u32, id: u32, infop: *mut SigInfo, options: i32) -> i32;
 }
 #[cfg(target_os = "macos")]
-struct OwnedChild(std::process::Child);
+struct OwnedChild {
+    child: std::process::Child,
+    reaped: bool,
+}
 #[cfg(target_os = "macos")]
 impl OwnedChild {
+    fn new(child: std::process::Child) -> Self {
+        Self { child, reaped: false }
+    }
     fn kill_group(&mut self) {
-        unsafe {
-            kill(-(self.0.id() as i32), 9);
+        if self.reaped {
+            return;
         }
-        let _ = self.0.kill();
+        let pid = self.child.id();
+        if crate::process_group::group_kill_args(
+            pid,
+            std::process::id(),
+            crate::process_group::own_group(),
+        )
+        .is_some()
+        {
+            // SAFETY: `pid` is unreaped (pinned in the process table), validated by
+            // `group_kill_args`, and leads its own process group (`process_group(0)`).
+            unsafe {
+                kill(-(pid as i32), 9);
+            }
+        }
+        let _ = self.child.kill();
     }
 }
 #[cfg(target_os = "macos")]
 impl Drop for OwnedChild {
     fn drop(&mut self) {
-        self.kill_group();
-        let _ = self.0.wait();
+        if !self.reaped {
+            self.kill_group();
+            let _ = self.child.wait();
+            self.reaped = true;
+        }
     }
 }
 

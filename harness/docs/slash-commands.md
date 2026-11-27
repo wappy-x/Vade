@@ -9,9 +9,9 @@ current mode and the user commands. `/help NAME` shows a command's details.
 
 `/help` and `/compact` already serve chat help and native context compaction.
 `/clear` is an alias for `/new`. It starts fresh conversation state and keeps
-old native journals. It waits for active work to finish. `/memory` reports
-that saved memory is unavailable in this build. It does not save or remove
-files. Use [project instructions](project-instructions.md) for saved rules.
+old native journals. It waits for active work to finish. `/memory` inspects
+whether project memory (`MEMORY.md`) is enabled and lists saved notes without
+editing files. Use [project instructions](project-instructions.md) for static rules.
 
 The full built-in list and mode rules are in the harness
 [command table](../README.md#commands-and-keys) and `/help all`.

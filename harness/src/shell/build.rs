@@ -275,6 +275,8 @@ fn variables_with(area: &Path, toolchain: Option<&Path>, developer: Option<&str>
         ("npm_config_offline", "true".into()),
         ("XDG_CACHE_HOME", at("cache")),
         ("XDG_CONFIG_HOME", at("config")),
+        ("GIT_CONFIG_NOSYSTEM", "1".into()),
+        ("GIT_CONFIG_GLOBAL", "/dev/null".into()),
     ];
     if let Some(root) = toolchain {
         list.push(("RUSTC", root.join("bin/rustc").display().to_string()));

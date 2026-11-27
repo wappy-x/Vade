@@ -9,12 +9,14 @@
 //! 3. `PREFILL_OP_GEMM`: `PAIR_M = 128` (two paired route tiles of one expert) x `BN = 128` grouped MoE GEMM
 //!    using exact SM121a BF16 `mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32` in strictly ascending
 //!    `k = 0, 16, ..., K - 16` order from `+0.0`, producing bit-for-bit identical results to `PLAIN_PACKED_TC_ROWS`:
-//!    - `half_m` split (`m <= 64`): distributes odd tail tiles across BOTH `warp_m = 0` (`0..31`) and `warp_m = 1`
-//!      (`32..63`), eliminating idle M-warps on unpaired 64-row tiles and small batches.
+//!    - Balanced 16-row `m_step = m.div_ceil(32).max(1) * 16` split: distributes rows evenly across `warp_m = 0`
+//!      and `warp_m = 1` at 16-row MMA granularity, eliminating idle M-warps and barrier skew on unpaired/tail tiles.
 //!    - `mode == 2`: in-place `pack_expert_tagged` MMA-lane NVFP4 panels. `42,016 B` SMEM (`2 blk/SM`):
-//!      `3` A stages (`24,576 B`, `wait_group 1`) + `2` unpacked B stages (`16,384 B`) + `1 KB` `(V1*2^112, V3_half*2^112)`
-//!      LUT + `32 B` `META`. Cooperative 1x unpack via zero-IMAD 8-inst `shl+prmt 0xbb99` LUT unpack interleaved
-//!      inside `k_sub_0` HMMAs, `.L2::256B` codes + `.L2::128B` scales preserving `PREFILL_M_GROUP = 8` L2 reuse.
+//!      `3` streamed A stages (`24,576 B`, `copy16_stream`, `wait_group 1`) + `2` unpacked B stages (`16,384 B`) +
+//!      `1 KB` `(V1*2^112, V3_half*2^112)` LUT + `32 B` `META`. Raw B words of stage `s + 2` are fetched into
+//!      registers at the end of half 0 (3 halves before unpack), and each warp cooperatively unpacks 16x16 weights
+//!      via zero-IMAD 8-inst `shl+prmt 0xbb99` interleaved inside `slab_full!` HMMAs. `.L2::256B` codes +
+//!      `.L2::128B` scales with serpentine `tile_n` swizzle preserve `PREFILL_M_GROUP = 8` L2 weight reuse.
 //!    - `mode == 1`: shipped tiled MXFP8, coalesced. The A ring of `mode == 2` + `2` raw B stages of `64` columns
 //!      (`128 x 64 B`: the 4 row blocks of 32 rows copied whole, so a warp's `cp.async.cg` reads 512 contiguous
 //!      bytes, 4 full lines, in place of 16 half lines of the 32-column form) + the 4-byte scale copies in the
@@ -35,8 +37,8 @@ use crate::prefill_moe::{
 };
 use crate::tc_ptx::{
     cp_async_wait_one, cp_async_wait_zero, cvt_bf16x2, l2_evict_first, ld_global_nc_u32,
-    ld_global_nc_v4_u32_hint, ldmatrix_x4, load_u32, mma_m16n8k16_bf16, st_shared_v4, st_shared_zero16,
-    store_u16, store_u32,
+    ld_global_nc_v4_u32_hint, ldmatrix_x4, load_u32, mma_m16n8k16_bf16, shfl_xor_u32,
+    st_shared_v4, st_shared_zero16, store_u32,
 };
 use crate::tc_rows::TC_BM;
 
@@ -57,7 +59,7 @@ const MX_SCALE_BYTES: usize = PREFILL_BN * 4;
 const LUT_AT: usize = B_AT + B_STAGES * B_BYTES; // 40,960 B (16B aligned)
 const LUT_BYTES: usize = 256 * 4; // 1,024 B (`(V1*2^112, V3_half*2^112)` per scale)
 const META_AT: usize = LUT_AT + LUT_BYTES; // 41,984 B (16B aligned)
-const META_BYTES: usize = 32; // `base, m, tile_n, words_lo, words_hi, half_m`
+const META_BYTES: usize = 32; // `base, m, tile_n, words_lo, words_hi, m_step`
 const BLOCK_BYTES: usize = META_AT + META_BYTES; // 42,016 B
 
 const _: () = assert!(PREFILL_PAIR_M == 128 && PREFILL_BN == 128 && PREFILL_THREADS == 256);
@@ -284,7 +286,8 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
             core::arch::nvptx::trap();
         }
 
-        // 2D L2 CTA swizzling: `PREFILL_M_GROUP = 8` neighboring route tiles traverse each N-tile together.
+        // 2D L2 CTA swizzling: `PREFILL_M_GROUP = 8` neighboring route tiles traverse each N-tile together
+        // (serpentine `tile_n` order keeps trailing N-tiles hot in L2 across adjacent groups of hot experts).
         let n_tiles = rows.div_ceil(PREFILL_BN);
         if block >= n_tiles * max_m_tiles {
             return;
@@ -292,9 +295,10 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
         let group = block / (PREFILL_M_GROUP * n_tiles);
         let group_len = (max_m_tiles - PREFILL_M_GROUP * group).min(PREFILL_M_GROUP);
         let within = block % (PREFILL_M_GROUP * n_tiles);
-        let tile_n = within / group_len;
+        let n_raw = within / group_len;
+        let tile_n = if (group & 1) == 0 { n_raw } else { n_tiles - 1 - n_raw };
         let tm = group * PREFILL_M_GROUP + within % group_len;
-        let total_m_tiles = tile_meta.read() as usize;
+        let total_m_tiles = ld_global_nc_u32(tile_meta) as usize;
         if total_m_tiles > max_m_tiles {
             core::arch::nvptx::trap();
         }
@@ -303,18 +307,32 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
         }
 
         // Pair route tiles `2r` and `2r + 1` of the same expert into one `PAIR_M = 128` block.
+        let (warp, lane) = (tid >> 5, tid & 31);
         let meta = |t: usize| -> (usize, usize, usize) {
             let entry = tile_meta.add(1 + 3 * t);
-            (entry.read() as usize, entry.add(1).read() as usize, entry.add(2).read() as usize)
+            (
+                ld_global_nc_u32(entry) as usize,
+                ld_global_nc_u32(entry.add(1)) as usize,
+                ld_global_nc_u32(entry.add(2)) as usize,
+            )
         };
         let (expert, base, m_first) = meta(tm);
         if expert >= experts || m_first == 0 || m_first > TC_BM {
             core::arch::nvptx::trap();
         }
+        // 32-ary warp-parallel search (`<= 2` serial global loads for up to 1,024 tiles vs 10 serial loads).
         let (mut lo, mut hi) = (0usize, tm);
         while lo < hi {
-            let mid = (lo + hi) / 2;
-            if meta(mid).0 < expert { lo = mid + 1; } else { hi = mid; }
+            let step = (hi - lo).div_ceil(32);
+            let probe = lo + lane * step;
+            let ge = probe >= hi || ld_global_nc_u32(tile_meta.add(1 + 3 * probe)) as usize >= expert;
+            let first = crate::ptx::ballot(ge).trailing_zeros() as usize;
+            if first == 0 {
+                hi = lo;
+            } else {
+                hi = (lo + first * step).min(hi);
+                lo += (first - 1) * step + 1;
+            }
         }
         let nth = tm - lo;
         if meta(lo).0 != expert || meta(lo).1 + nth * TC_BM != base {
@@ -348,8 +366,8 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
         }
         let mode: u32 = if !wide && rows % 64 == 0 && k % 64 == 0 && {
             let t32 = unit.add(parts.table).cast::<u32>();
-            t32.add(0x7f * 8).read() == NVFP4_PANEL_MAGIC_LO
-                && t32.add(0x7f * 8 + 1).read() == NVFP4_PANEL_MAGIC_HI
+            ld_global_nc_u32(t32.add(0x7f * 8)) == NVFP4_PANEL_MAGIC_LO
+                && ld_global_nc_u32(t32.add(0x7f * 8 + 1)) == NVFP4_PANEL_MAGIC_HI
         } {
             2
         } else if wide {
@@ -359,18 +377,18 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
         };
 
         let place = |tbl: *const u32, count: usize, t: usize| -> usize {
-            let row = if tbl.is_null() { t } else { tbl.add(t).read() as usize };
+            let row = if tbl.is_null() { t } else { ld_global_nc_u32(tbl.add(t)) as usize };
             if row >= count { core::arch::nvptx::trap(); }
             row
         };
 
-        // 2 M-warps x 4 N-warps, with `half_m` split (`m <= 64` -> `warp_m * 32`, both M-warps active!).
-        let (warp, lane) = (tid >> 5, tid & 31);
+        // 2 M-warps x 4 N-warps balanced at 16-row MMA granularity:
+        // `m_step` in `{16, 32, 48, 64}` keeps both M-warps within 1 M-tile (cuts critical-path MMAs on `17..=32`
+        // and `65..=96` and removes barrier skew across M-warps).
         let (warp_m, warp_n) = (warp >> 2, warp & 3);
-        let half_m = m <= TC_BM;
-        let m_row_base = if half_m { warp_m * 32 } else { warp_m * 64 };
-        let m_row_cap = if half_m { 32 } else { 64 };
-        let subs = m.saturating_sub(m_row_base).min(m_row_cap).div_ceil(16) as u32;
+        let m_step = m.div_ceil(32).max(1) * 16;
+        let m_row_base = warp_m * m_step;
+        let subs = m.saturating_sub(m_row_base).min(m_step).div_ceil(16) as u32;
 
         // Save 24 B of tile metadata in `META_AT` (0 live regs in K-loop).
         if tid == 0 {
@@ -381,25 +399,15 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
             store_u32(meta_p + 8, tile_n as u32);
             store_u32(meta_p + 12, w_addr as u32);
             store_u32(meta_p + 16, (w_addr >> 32) as u32);
-            store_u32(meta_p + 20, u32::from(half_m));
+            store_u32(meta_p + 20, m_step as u32);
         }
 
-        // For NVFP4 (`mode == 2` or `mode == 0`), build the 1 KB `(V1 * 2^112, V3_half * 2^112)` LUT once per CTA.
-        if !wide {
-            let v_up: u32 = if tid == 0x7f || tid == 0xff {
-                0
-            } else {
-                let raw = ld_global_nc_u32(unit.add(parts.table + tid * 32 + 4).cast());
-                let scaled: u32;
-                core::arch::asm!(
-                    "mul.rn.bf16x2 {d}, {a}, {b};",
-                    d = out(reg32) scaled, a = in(reg32) raw, b = in(reg32) 0x7780_7780u32,
-                    options(pure, nomem, nostack),
-                );
-                scaled
-            };
-            store_u32(smem + LUT_AT as u32 + (tid * 4) as u32, v_up);
-        }
+        // Issue NVFP4 LUT global read BEFORE `in_table` reads so both global latencies overlap in the prologue.
+        let lut_raw: u32 = if !wide && tid != 0x7f && tid != 0xff {
+            ld_global_nc_u32(unit.add(parts.table + tid * 32 + 4).cast())
+        } else {
+            0
+        };
 
         // BF16 activation A indexing (`a_row` and `a_row + 64`, 16B `a_chunk` in 0..4).
         let row_words = k / 2;
@@ -409,6 +417,22 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
         let a_src1 = if a_row + 64 < m { (place(in_table, in_count, base + a_row + 64) * row_words + a_chunk * 4) as u32 } else { u32::MAX };
         let a_dst0 = swiz(a_row, a_chunk);
         let a_off = swiz(m_row_base + (lane & 15), lane >> 4);
+
+        // For NVFP4 (`mode == 2` or `mode == 0`), finish the 1 KB `(V1 * 2^112, V3_half * 2^112)` LUT in SMEM.
+        if !wide {
+            let v_up: u32 = if tid == 0x7f || tid == 0xff {
+                0
+            } else {
+                let scaled: u32;
+                core::arch::asm!(
+                    "mul.rn.bf16x2 {d}, {a}, {b};",
+                    d = out(reg32) scaled, a = in(reg32) lut_raw, b = in(reg32) 0x7780_7780u32,
+                    options(pure, nomem, nostack),
+                );
+                scaled
+            };
+            store_u32(smem + LUT_AT as u32 + (tid * 4) as u32, v_up);
+        }
 
         // 16 MMA accumulators (`4` M-tiles x `4` N-tiles = `64 x 32` per warp), strictly in registers.
         let (mut c00, mut c01, mut c02, mut c03) = ([0.0f32; 4], [0.0f32; 4], [0.0f32; 4], [0.0f32; 4]);
@@ -587,30 +611,36 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
             }
         } else if mode == 2 {
             // In-place MMA-lane NVFP4 panel path (`pack_expert_tagged`):
-            // - 3-stage `cp.async` A (`24,576 B`, `wait_group 1`) + 2-stage unpacked B (`16,384 B`) + 1 KB `shl+prmt` LUT!
-            // - `.L2::256B` codes + `.L2::128B` scales WITHOUT `evict_first` so `PREFILL_M_GROUP = 8` shares weights in L2!
-            // - Interleaved unpack inside `k_sub_0` HMMAs (fills SM121a HMMA shadow slots + launches `fetch_b64` early!).
+            // - 3-stage `cp.async.cg.L2::256B` streamed A (`24,576 B`, `wait_group 1`) + 2-stage unpacked B (`16,384 B`) + 1 KB LUT.
+            // - `.L2::256B` codes + `.L2::128B` scales WITHOUT `evict_first` so `PREFILL_M_GROUP = 8` shares weights in L2.
+            // - Raw words of stage `s + 2` are fetched into registers at the end of half 0 of stage `s` (three halves before unpack).
+            // - A warp unpacks one code word (`16 x 16` weights) to the other B stage inside each k16 slab of 16 MMAs.
             let stages = (k / 64) as u32;
-            let (b_code0, b_scale0) = if tile_n * PREFILL_BN + warp * 16 < rows {
+            let b_valid = tile_n * PREFILL_BN + warp * 16 < rows;
+            let (b_code0, b_scale0) = if b_valid {
                 let chunk0 = ((tile_n * 2 + (warp >> 2)) * (k >> 6)) * 4 + (warp & 3);
                 ((chunk0 * 512 + lane * 16) as u32, (parts.scales + chunk0 * 64 + (lane >> 2) * 8) as u32)
             } else {
-                (u32::MAX, 0)
+                (0, 0)
             };
             let b_wr0 = smem + B_AT as u32 + (warp * 1024 + lane * 16) as u32;
             let s0_b = smem + B_AT as u32 + (warp_n * 2 * 1024 + lane * 16) as u32;
-            if b_code0 == u32::MAX {
-                for b_st in 0..B_STAGES as u32 {
-                    let b_base = b_wr0 + b_st * B_BYTES as u32;
-                    st_shared_zero16(b_base);
-                    st_shared_zero16(b_base + 512);
-                }
+
+            macro_rules! issue_a_stream {
+                ($st:expr, $c_idx:expr) => {{
+                    let s = smem + ($st as u32) * A_BYTES as u32;
+                    let at = ($c_idx as u32) * 16;
+                    if a_src0 != u32::MAX { crate::ptx::copy16_stream(s + a_dst0, input.add((a_src0 + at) as usize)); }
+                    if a_src1 != u32::MAX { crate::ptx::copy16_stream(s + a_dst0 + 4096, input.add((a_src1 + at) as usize)); }
+                }};
             }
 
+            // The 16 code bytes and 8 scale bytes of this lane for stage `$s`. A panel past `rows` or a stage past
+            // `stages` gives codes 0 with scale byte `0x7f`, whose LUT word is 0: the unpacked weights are `+0.0`.
             macro_rules! fetch_b64 {
                 ($s:expr) => {{
                     let st_idx: u32 = $s;
-                    if b_code0 != u32::MAX {
+                    if b_valid && st_idx < stages {
                         let (q0, q1, q2, q3): (u32, u32, u32, u32);
                         let (sc0, sc1): (u32, u32);
                         core::arch::asm!(
@@ -624,46 +654,100 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
                         );
                         ([q0, q1, q2, q3], [sc0, sc1])
                     } else {
-                        ([0u32; 4], [0u32; 2])
+                        ([0u32; 4], [0x7f7f_7f7fu32; 2])
                     }
                 }};
             }
-            macro_rules! unpack_panel_k16 {
-                ($w:expr, $s_pair:expr) => {{
-                    let w: u32 = $w;
-                    let s_pair: u32 = $s_pair;
-                    let st_raw = load_u32(smem + LUT_AT as u32 + (s_pair & 255) * 4);
-                    let (vt1, vt3): (u32, u32);
+            // Expand a raw LUT word `(V1*2^112, V3_half*2^112)` into the two BF16x2 operands of `unpack_nv_byte!`.
+            macro_rules! expand_scale {
+                ($st_raw:expr) => {{
+                    let st_raw: u32 = $st_raw;
+                    let (v1, v3): (u32, u32);
                     core::arch::asm!(
-                        "prmt.b32 {vt1}, {st}, {st}, 0x1010; \
-                         prmt.b32 {vt3}, {st}, {st}, 0x3232;",
-                        vt1 = out(reg32) vt1, vt3 = out(reg32) vt3,
+                        "prmt.b32 {v1}, {st}, {st}, 0x1010; \
+                         prmt.b32 {v3}, {st}, {st}, 0x3232;",
+                        v1 = out(reg32) v1, v3 = out(reg32) v3,
                         st = in(reg32) st_raw,
                         options(pure, nomem, nostack),
                     );
-                    let b0 = unpack_nv_byte!(w, vt1, vt3);
-                    let b1 = unpack_nv_byte!(w >> 16, vt1, vt3);
-                    let sb_raw = load_u32(smem + LUT_AT as u32 + ((s_pair >> 8) & 255) * 4);
-                    let (vb1, vb3): (u32, u32);
-                    core::arch::asm!(
-                        "prmt.b32 {vb1}, {sb}, {sb}, 0x1010; \
-                         prmt.b32 {vb3}, {sb}, {sb}, 0x3232;",
-                        vb1 = out(reg32) vb1, vb3 = out(reg32) vb3,
-                        sb = in(reg32) sb_raw,
-                        options(pure, nomem, nostack),
-                    );
-                    let b2 = unpack_nv_byte!(w >> 8, vb1, vb3);
-                    let b3 = unpack_nv_byte!(w >> 24, vb1, vb3);
-                    [b0, b1, b2, b3]
+                    [v1, v3]
                 }};
             }
-            macro_rules! put_panel_half {
-                ($stage:expr, $sub_off:expr, $w:expr, $s_pair:expr) => {{
-                    if b_code0 != u32::MAX {
-                        st_shared_v4(
-                            b_wr0 + ($stage as u32) * B_BYTES as u32 + ($sub_off as u32),
-                            unpack_panel_k16!($w, $s_pair),
-                        );
+            // The LUT word of scale byte `$sc & 255` as the two operands of `unpack_nv_byte!`.
+            macro_rules! scale_x2 {
+                ($sc:expr) => {
+                    expand_scale!(load_u32(smem + LUT_AT as u32 + (($sc) & 255) * 4))
+                };
+            }
+            macro_rules! mma_row {
+                ($a:ident, $bp0:ident, $bp1:ident, $c0:ident, $c1:ident, $c2:ident, $c3:ident) => {{
+                    $c0 = mma_m16n8k16_bf16($a, [$bp0[0], $bp0[1]], $c0);
+                    $c1 = mma_m16n8k16_bf16($a, [$bp0[2], $bp0[3]], $c1);
+                    $c2 = mma_m16n8k16_bf16($a, [$bp1[0], $bp1[1]], $c2);
+                    $c3 = mma_m16n8k16_bf16($a, [$bp1[2], $bp1[3]], $c3);
+                }};
+            }
+            macro_rules! slab_full {
+                ($a_at:expr, $b_at:expr, $w:expr, $sc:expr, $dst:expr) => {{
+                    let (a_at, b_at, w, dst, sc): (u32, u32, u32, u32, u32) = ($a_at, $b_at, $w, $dst, $sc);
+                    let bp0 = crate::ptx::load4(b_at);
+                    let bp1 = crate::ptx::load4(b_at + 1024);
+                    let a0 = ldmatrix_x4(a_at);
+                    let a1 = ldmatrix_x4(a_at + TILE16);
+                    let st_raw = load_u32(smem + LUT_AT as u32 + (sc & 255) * 4);
+                    let sb_raw = load_u32(smem + LUT_AT as u32 + ((sc >> 8) & 255) * 4);
+                    mma_row!(a0, bp0, bp1, c00, c01, c02, c03);
+                    let pt = expand_scale!(st_raw);
+                    let o0 = unpack_nv_byte!(w, pt[0], pt[1]);
+                    let a2 = ldmatrix_x4(a_at + 2 * TILE16);
+                    mma_row!(a1, bp0, bp1, c10, c11, c12, c13);
+                    let o1 = unpack_nv_byte!(w >> 16, pt[0], pt[1]);
+                    let a3 = ldmatrix_x4(a_at + 3 * TILE16);
+                    let pb = expand_scale!(sb_raw);
+                    mma_row!(a2, bp0, bp1, c20, c21, c22, c23);
+                    let o2 = unpack_nv_byte!(w >> 8, pb[0], pb[1]);
+                    mma_row!(a3, bp0, bp1, c30, c31, c32, c33);
+                    let o3 = unpack_nv_byte!(w >> 24, pb[0], pb[1]);
+                    st_shared_v4(dst, [o0, o1, o2, o3]);
+                }};
+            }
+            macro_rules! slab_part {
+                ($a_at:expr, $b_at:expr, $w:expr, $sc:expr, $dst:expr) => {{
+                    let (a_at, b_at, w, dst, sc): (u32, u32, u32, u32, u32) = ($a_at, $b_at, $w, $dst, $sc);
+                    let st_raw = load_u32(smem + LUT_AT as u32 + (sc & 255) * 4);
+                    let sb_raw = load_u32(smem + LUT_AT as u32 + ((sc >> 8) & 255) * 4);
+                    if subs > 0 {
+                        let bp0 = crate::ptx::load4(b_at);
+                        let bp1 = crate::ptx::load4(b_at + 1024);
+                        let a0 = ldmatrix_x4(a_at);
+                        mma_row!(a0, bp0, bp1, c00, c01, c02, c03);
+                        if subs > 1 {
+                            let a1 = ldmatrix_x4(a_at + TILE16);
+                            mma_row!(a1, bp0, bp1, c10, c11, c12, c13);
+                            if subs > 2 {
+                                let a2 = ldmatrix_x4(a_at + 2 * TILE16);
+                                mma_row!(a2, bp0, bp1, c20, c21, c22, c23);
+                            }
+                        }
+                    }
+                    let pt = expand_scale!(st_raw);
+                    let o0 = unpack_nv_byte!(w, pt[0], pt[1]);
+                    let o1 = unpack_nv_byte!(w >> 16, pt[0], pt[1]);
+                    let pb = expand_scale!(sb_raw);
+                    let o2 = unpack_nv_byte!(w >> 8, pb[0], pb[1]);
+                    let o3 = unpack_nv_byte!(w >> 24, pb[0], pb[1]);
+                    st_shared_v4(dst, [o0, o1, o2, o3]);
+                }};
+            }
+            macro_rules! half_put {
+                ($a_stage:expr, $b_at:expr, $w0:expr, $sc0:expr, $w1:expr, $sc1:expr, $dst:expr) => {{
+                    let (a_stage, b_at, dst): (u32, u32, u32) = ($a_stage, $b_at, $dst);
+                    if subs == 4 {
+                        slab_full!(a_stage + a_off, b_at, $w0, $sc0, dst);
+                        slab_full!(a_stage + (a_off ^ 32), b_at + 512, $w1, $sc1, dst + 512);
+                    } else {
+                        slab_part!(a_stage + a_off, b_at, $w0, $sc0, dst);
+                        slab_part!(a_stage + (a_off ^ 32), b_at + 512, $w1, $sc1, dst + 512);
                     }
                 }};
             }
@@ -676,51 +760,63 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
                 }};
             }
 
-            // Prologue: A steps 0 and 1 in flight, fetch B stage 0, barrier for LUT, unpack B0.
-            issue_a!(0, 0);
+            // Prologue: fetch raw B stages 0 and 1 FIRST alongside A steps 0 and 1, barrier for LUT, then unpack B0.
+            let (c0_q, c0_sc) = fetch_b64!(0);
+            let (mut n_q, mut n_sc) = fetch_b64!(1);
+            issue_a_stream!(0, 0);
             crate::ptx::commit();
-            issue_a!(1, 1);
+            issue_a_stream!(1, 1);
             crate::ptx::commit();
-            let (mut b_q, mut b_sc) = fetch_b64!(0);
             core::arch::nvptx::_syncthreads();
-            put_panel_half!(0, 0, b_q[0], b_sc[0]);
-            put_panel_half!(0, 512, b_q[1], b_sc[0] >> 16);
+            {
+                let (t0, b0) = (scale_x2!(c0_sc[0]), scale_x2!(c0_sc[0] >> 8));
+                st_shared_v4(b_wr0, [
+                    unpack_nv_byte!(c0_q[0], t0[0], t0[1]), unpack_nv_byte!(c0_q[0] >> 16, t0[0], t0[1]),
+                    unpack_nv_byte!(c0_q[0] >> 8, b0[0], b0[1]), unpack_nv_byte!(c0_q[0] >> 24, b0[0], b0[1]),
+                ]);
+                let (t1, b1) = (scale_x2!(c0_sc[0] >> 16), scale_x2!(c0_sc[0] >> 24));
+                st_shared_v4(b_wr0 + 512, [
+                    unpack_nv_byte!(c0_q[1], t1[0], t1[1]), unpack_nv_byte!(c0_q[1] >> 16, t1[0], t1[1]),
+                    unpack_nv_byte!(c0_q[1] >> 8, b1[0], b1[1]), unpack_nv_byte!(c0_q[1] >> 24, b1[0], b1[1]),
+                ]);
+            }
+            let (mut c_q2, mut c_q3, mut c_sc1) = (c0_q[2], c0_q[3], c0_sc[1]);
 
+            let b1_rd = s0_b + B_BYTES as u32;
+            let b1_wr = b_wr0 + B_BYTES as u32;
             let mut a_cur = 0u32;
             let mut s = 0u32;
             while s < stages {
                 let more = s + 1 < stages;
-                // Half 0 (`k = 0..32` of `s`): wait for A[a_cur] + B0 visible!
+                // Half 0 (`k = 0..32` of `s`): A[a_cur] and B stage 0 are visible; unpack `c_q2/c_q3/c_sc1` -> B1,
+                // then immediately fetch `s + 2` (since `c_q2/c_q3/c_sc1` are dead, max 12 live raw regs!).
                 cp_async_wait_one();
                 core::arch::nvptx::_syncthreads();
                 let a_wr = if a_cur == 0 { 2 } else { a_cur - 1 };
-                if more { issue_a!(a_wr, 2 * s + 2); }
+                if more { issue_a_stream!(a_wr, 2 * s + 2); }
                 crate::ptx::commit();
                 let a_stage = smem + a_cur * A_BYTES as u32;
-                // Unpack B1 (`k = 32..64`) so `b_q/b_sc` are dead during `k_sub_0`, then early `fetch_b64!(s + 1)`!
-                put_panel_half!(1, 0, b_q[2], b_sc[1]);
-                put_panel_half!(1, 512, b_q[3], b_sc[1] >> 16);
-                k_sub_panel!(a_stage + a_off, s0_b);
-                if more {
-                    let nb = fetch_b64!(s + 1);
-                    b_q = nb.0;
-                    b_sc = nb.1;
-                }
-                k_sub_panel!(a_stage + (a_off ^ 32), s0_b + 512);
+                half_put!(a_stage, s0_b, c_q2, c_sc1, c_q3, c_sc1 >> 16, b1_wr);
+                let (f_q, f_sc) = if more { fetch_b64!(s + 2) } else { ([0u32; 4], [0x7f7f_7f7fu32; 2]) };
                 a_cur = if a_cur == 2 { 0 } else { a_cur + 1 };
 
-                // Half 1 (`k = 32..64` of `s`): wait for A[a_cur] + B1 visible!
+                // Half 1 (`k = 32..64` of `s`): A[a_cur] and B stage 1 are visible; unpack `n_q[0..2]` -> B0 of `s + 1`.
                 cp_async_wait_one();
                 core::arch::nvptx::_syncthreads();
                 let a_wr = if a_cur == 0 { 2 } else { a_cur - 1 };
-                if more { issue_a!(a_wr, 2 * s + 3); }
+                if more { issue_a_stream!(a_wr, 2 * s + 3); }
                 crate::ptx::commit();
                 let a_stage = smem + a_cur * A_BYTES as u32;
-                k_sub_panel!(a_stage + a_off, s0_b + B_BYTES as u32);
-                k_sub_panel!(a_stage + (a_off ^ 32), s0_b + (B_BYTES + 512) as u32);
                 if more {
-                    put_panel_half!(0, 0, b_q[0], b_sc[0]);
-                    put_panel_half!(0, 512, b_q[1], b_sc[0] >> 16);
+                    half_put!(a_stage, b1_rd, n_q[0], n_sc[0], n_q[1], n_sc[0] >> 16, b_wr0);
+                    c_q2 = n_q[2];
+                    c_q3 = n_q[3];
+                    c_sc1 = n_sc[1];
+                    n_q = f_q;
+                    n_sc = f_sc;
+                } else {
+                    k_sub_panel!(a_stage + a_off, b1_rd);
+                    k_sub_panel!(a_stage + (a_off ^ 32), b1_rd + 512);
                 }
                 a_cur = if a_cur == 2 { 0 } else { a_cur + 1 };
                 s += 1;
@@ -843,10 +939,9 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
         let tile_n = load_u32(meta_p + 8) as usize;
         let w_lo = load_u32(meta_p + 12) as u64;
         let w_hi = load_u32(meta_p + 16) as u64;
-        let half_m = load_u32(meta_p + 20) != 0;
-        let m_row_base = if half_m { warp_m * 32 } else { warp_m * 64 };
-        let m_row_cap = if half_m { 32 } else { 64 };
-        let subs = m.saturating_sub(m_row_base).min(m_row_cap).div_ceil(16);
+        let m_step = load_u32(meta_p + 20) as usize;
+        let m_row_base = warp_m * m_step;
+        let subs = m.saturating_sub(m_row_base).min(m_step).div_ceil(16);
         let words = ((w_lo | (w_hi << 32)) as usize) as *const u64;
         let output = words.add(2).read_volatile() as *mut f32;
         let rows = words.add(3).read_volatile() as usize;
@@ -879,32 +974,60 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
         }
 
         // Format 1: Exact gated `GateUp` -> coalesced 128-byte BF16 output via dead SMEM `0..18,432` (`128 x 72` u16).
+        // Pair adjacent BF16 columns via `shfl_xor_u32(..., 1)` -> bank-free 32-bit `store_u32` (0 conflicts, 1/2 stores)
+        // and start row 0's `coefficients` LUT reads before the barrier to hide global latency.
         if format == PREFILL_OUT_BF16_GATED {
-            core::arch::nvptx::_syncthreads();
             let col_w = warp_n * 16;
-            macro_rules! stage_gate_one {
-                ($r0:expr, $r1:expr, $ni:expr, $a:expr) => {{
+            macro_rules! pack_gate_one {
+                ($a:expr) => {{
                     let a = $a;
-                    let c_off = col_w + $ni * 4 + t;
-                    let h0 = (capped!(a[0], a[1]).to_bits() >> 16) as u16;
-                    let h1 = (capped!(a[2], a[3]).to_bits() >> 16) as u16;
-                    store_u16(smem + (($r0 * 72 + c_off) * 2) as u32, h0);
-                    store_u16(smem + (($r1 * 72 + c_off) * 2) as u32, h1);
+                    let h0 = capped!(a[0], a[1]).to_bits() >> 16;
+                    let h1 = capped!(a[2], a[3]).to_bits() >> 16;
+                    let p0 = h0 | (shfl_xor_u32(h0, 1) << 16);
+                    let p1 = h1 | (shfl_xor_u32(h1, 1) << 16);
+                    [p0, p1]
                 }};
+            }
+            let r0_p = if subs > 0 {
+                [pack_gate_one!(c00), pack_gate_one!(c01), pack_gate_one!(c02), pack_gate_one!(c03)]
+            } else {
+                [[0u32; 2]; 4]
+            };
+            core::arch::nvptx::_syncthreads();
+            macro_rules! store_gate_pair {
+                ($r0:expr, $r1:expr, $ni:expr, $p:expr) => {{
+                    let p = $p;
+                    if (t & 1) == 0 {
+                        let c_off = col_w + $ni * 4 + t;
+                        store_u32(smem + (($r0 * 72 + c_off) * 2) as u32, p[0]);
+                        store_u32(smem + (($r1 * 72 + c_off) * 2) as u32, p[1]);
+                    }
+                }};
+            }
+            if subs > 0 {
+                let r0 = m_row_base + g;
+                let r1 = r0 + 8;
+                store_gate_pair!(r0, r1, 0, r0_p[0]);
+                store_gate_pair!(r0, r1, 1, r0_p[1]);
+                store_gate_pair!(r0, r1, 2, r0_p[2]);
+                store_gate_pair!(r0, r1, 3, r0_p[3]);
             }
             macro_rules! stage_gate_row {
                 ($mi:expr, $d0:ident, $d1:ident, $d2:ident, $d3:ident) => {
                     if subs > $mi {
                         let r0 = m_row_base + $mi * 16 + g;
                         let r1 = r0 + 8;
-                        stage_gate_one!(r0, r1, 0, $d0);
-                        stage_gate_one!(r0, r1, 1, $d1);
-                        stage_gate_one!(r0, r1, 2, $d2);
-                        stage_gate_one!(r0, r1, 3, $d3);
+                        let p0 = pack_gate_one!($d0);
+                        let p1 = pack_gate_one!($d1);
+                        let p2 = pack_gate_one!($d2);
+                        let p3 = pack_gate_one!($d3);
+                        store_gate_pair!(r0, r1, 0, p0);
+                        store_gate_pair!(r0, r1, 1, p1);
+                        store_gate_pair!(r0, r1, 2, p2);
+                        store_gate_pair!(r0, r1, 3, p3);
                     }
                 };
             }
-            stage_gate_row!(0, c00, c01, c02, c03);
             stage_gate_row!(1, c10, c11, c12, c13);
             stage_gate_row!(2, c20, c21, c22, c23);
             stage_gate_row!(3, c30, c31, c32, c33);

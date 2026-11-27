@@ -483,14 +483,19 @@ impl<'a> Buffer<'a> {
     /// Pure memory reuse: its old bytes stay (cuMemAlloc's bytes are unspecified too), so
     /// every vector is written before it is read, as without the pool.
     fn pooled(context: &'a Context, bytes: usize) -> Result<Self, String> {
-        Self::pooled_inner(context, bytes, false)
+        Self::pooled_inner(context, bytes, false, false)
     }
     /// Pooled allocation that never takes from `stream_spares`: guaranteed not to alias any buffer
     /// dropped during the current unsubmitted resident piece, so a deferred HtoD upload cannot race.
     fn pooled_fresh(context: &'a Context, bytes: usize) -> Result<Self, String> {
-        Self::pooled_inner(context, bytes, true)
+        Self::pooled_inner(context, bytes, true, false)
     }
-    fn pooled_inner(context: &'a Context, bytes: usize, fresh_only: bool) -> Result<Self, String> {
+    /// Exact-byte pooled allocation for long-lived state planes (no sub-octave size-class rounding),
+    /// so planes allocated inside and outside a resident queue share the exact same pool bucket.
+    fn pooled_exact(context: &'a Context, bytes: usize) -> Result<Self, String> {
+        Self::pooled_inner(context, bytes, false, true)
+    }
+    fn pooled_inner(context: &'a Context, bytes: usize, fresh_only: bool, exact: bool) -> Result<Self, String> {
         let (bucketed, prompt_cohort) = {
             let pool = context.vector_pool.borrow();
             (context.resident_queued.get() && pool.configured(), pool.prompt_cohort_active())
@@ -498,8 +503,8 @@ impl<'a> Buffer<'a> {
         // A decode step takes from the decode reserve first, then from the pool, and whatever it
         // takes or allocates returns to the reserve. Prompt code sees the pool only.
         let decode=context.decoding.get() && context.decode_reserve.borrow().configured();let reuse=if decode {Reuse::Decode} else {Reuse::Vector};
-        let class_bucket = bucketed && !decode && !prompt_cohort;
-        let capacity=if class_bucket {resident_vector_class(bytes)} else if bucketed {crate::reserve_policy::vector_capacity(bytes,usize::MAX)} else {bytes};
+        let class_bucket = !exact && bucketed && !decode && !prompt_cohort;
+        let capacity=if exact {bytes} else if class_bucket {resident_vector_class(bytes)} else if bucketed {crate::reserve_policy::vector_capacity(bytes,usize::MAX)} else {bytes};
         if bytes != 0 && context.cleanup_errors.borrow().is_empty() {
             if decode {
                 let spare={let mut reserve=context.decode_reserve.borrow_mut();reserve.take(capacity).map(|address|(address,capacity))
@@ -557,7 +562,8 @@ impl<'a> Buffer<'a> {
             }
         }
         let available = context.budget.get().saturating_sub(context.accounted_bytes());
-        let capacity = if class_bucket && capacity <= available { capacity }
+        let capacity = if exact { bytes }
+            else if class_bucket && capacity <= available { capacity }
             else if bucketed { crate::reserve_policy::vector_capacity(bytes, available) }
             else { bytes };
         let mut buffer = Self::new(context, capacity)?;

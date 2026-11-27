@@ -226,7 +226,10 @@ impl App {
             match vade_harness::hooks::Hooks::load(&workspace, vade_home.as_deref()) {
                 Ok(hooks) => hooks,
                 Err(error) => {
-                    terminal.note(&format!("hooks.conf ignored for this chat: {error}"))?;
+                    terminal.note(&format!(
+                        "hooks.conf ignored for this chat: {}",
+                        vade_harness::terminal::sanitize(&error.to_string())
+                    ))?;
                     vade_harness::hooks::Hooks::default()
                 }
             }

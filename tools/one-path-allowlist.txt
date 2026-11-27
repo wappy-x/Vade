@@ -3,7 +3,7 @@
 # rule Cargo-package qualified-item exact-site-count
 # decode_fuse (config flag, ruling Q-FUSE-FLAG 2026-11-02): remove when the chain is the only path on every size it serves.
 # The resident diagnostic validates its declared pair size. It does not choose an arithmetic path.
-# step barrier form (environment switch VADE_TP_STEP_BARRIER, chief of staff order 2026-11-11 18:46): the way back to the control-stream barrier of a served step. It chooses a transport for one word, not an arithmetic path. Remove with the control-stream form once the mailbox form has served a release.
+# step barrier form (environment switch VADE_TP_STEP_BARRIER, maintainer order 2026-11-11 18:46): the way back to the control-stream barrier of a served step. It chooses a transport for one word, not an arithmetic path. Remove with the control-stream form once the mailbox form has served a release.
 # exchange trace (environment switch VADE_EXCHANGE_TRACE; lead's ruling 2026-11-15 13:59, seat READ3: a trace switch that costs nothing when off): host timers around each exchange of a prompt group. It chooses no execution path.
 topology-branch spark-tp bin::resident_decode_check::run_pair 1
 env-read engine-fabric profile::enabled 1

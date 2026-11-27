@@ -813,7 +813,7 @@ if start==0 && v.pending.as_ref().and_then(|p|p.borrow().state_prefix)==Some(len
         let out=self.backend.resident_join(&sources,&mut self.copies.borrow_mut(),reserve)?.into_resident_shared()?;
         let mut value=self.value(out.resident_range(0..len)?,len)?;value.lineage=Lineage::join(parts.iter().map(|v|&v.lineage))?;self.cost.record(||"join_copy".into(),stamp,self.backend,0);Ok(value)
     }
-    fn zeros(&self,len:usize)->Result<Value<'b,'d>> {let stamp=self.cost.start(self.backend);let mut v=self.backend.vector(len.max(1))?;self.backend.zero_vector(&mut v)?;let value=self.value(v,len)?;self.cost.record(||"zero".into(),stamp,self.backend,0);Ok(value)}
+    fn zeros(&self,len:usize)->Result<Value<'b,'d>> {let stamp=self.cost.start(self.backend);let mut v=self.backend.vector(len.max(1))?;if len>0 {self.backend.zero_vector(&mut v)?;}let value=self.value(v,len)?;self.cost.record(||"zero".into(),stamp,self.backend,0);Ok(value)}
     fn operation(&self,s:Shape,x:[Option<&Value<'b,'d>>;4],w:&[f32])->Result<Value<'b,'d>> {self.operation_bound(s,x,w,None,0)}
     fn gather_reserved(&self,s:Shape,x:[Option<&Value<'b,'d>>;4],reserve:usize)->Result<Value<'b,'d>> {
         need(s.op==Op::Gather,"reserved operation must be Gather")?;self.operation_bound(s,x,&[],None,reserve)
@@ -1005,10 +1005,10 @@ if start==0 && v.pending.as_ref().and_then(|p|p.borrow().state_prefix)==Some(len
     fn mix_prefill_normed(&self,rows:usize,dim:usize,scale:f32,eps:f32,queries:&[f32],list:&[&Value<'b,'d>])->Result<Option<(Value<'b,'d>,Value<'b,'d>)>> {
         self.try_mix_prefill_normed(rows,dim,scale,eps,queries,list)
     }
-    fn short_conv_prefill(&self,s:Shape,rows:usize,first:usize,x:[Option<&Value<'b,'d>>;4],w:&[f32])->Result<Option<Value<'b,'d>>> {
+    fn short_conv_prefill(&self,s:Shape,rows:usize,first:usize,x:[Option<&Value<'b,'d>>;4],w:&[f32])->Result<Option<(Value<'b,'d>,Option<Value<'b,'d>>)>> {
         self.try_short_conv_prefill(s,rows,first,x,w)
     }
-    fn prefill_kv(&self, conv: &super::PrefillKv<'_, Value<'b, 'd>>, plane: &mut Value<'b, 'd>) -> Result<bool> {
+    fn prefill_kv(&self, conv: &super::PrefillKv<'_, Value<'b, 'd>>, plane: &mut Value<'b, 'd>) -> Result<Option<Value<'b, 'd>>> {
         self.try_prefill_kv(conv, plane)
     }
     fn short_conv_keep(&self,s:Shape,rows:usize,first:spark_gpu_probe::fast_ops::ShortConvRing,x:[Option<&Value<'b,'d>>;4],w:&[f32])->Result<Option<(Value<'b,'d>,Value<'b,'d>)>> {
@@ -1349,7 +1349,7 @@ if start==0 && v.pending.as_ref().and_then(|p|p.borrow().state_prefix)==Some(len
         self.ready(new)?;let have=rows.checked_mul(width).ok_or("prompt expanded rows overflow")?;let needed=have.checked_add(new.words).ok_or("prompt expanded rows overflow")?;
         // Exactly the rows held, so old plus new stays within twice the prompt's charge
         // while the state that holds the old rows is still live.
-        let mut out=self.backend.vector(needed)?;
+        let mut out=if self.backend.resident_launches_active() {self.backend.vector(needed)?} else {self.backend.vector_exact(needed)?};
         if let Some(old)=held {need(old.words>=have,"prompt expanded rows differ")?;self.backend.copy_range(&old.vector,&mut out,0,0,have)?;}
         self.backend.copy_range(&new.vector,&mut out,0,have,new.words)?;
         self.value(out,needed)

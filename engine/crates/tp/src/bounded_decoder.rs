@@ -335,11 +335,11 @@ pub trait Compute {
     /// its rounded norm with no weight and epsilon `eps`, each row normed alone). Each word is the word of `mix_prefill`
     /// and of `operation` with arm `RoundedNorm` on it. None: no such launch here; the caller runs the two.
     fn mix_prefill_normed(&self, _: usize, _: usize, _: f32, _: f32, _: &[f32], _: &[&Self::Value]) -> Result<Option<(Self::Value, Self::Value)>> { Ok(None) }
-    /// Read a single chat's convolution directly from its old ring and the new rows.
-    fn short_conv_prefill(&self, _:Shape, _:usize, _:usize, _:[Option<&Self::Value>;4], _:&[f32]) -> Result<Option<Self::Value>> { Ok(None) }
+    /// Read a single chat's convolution directly from its old ring and the new rows (optionally returning `next_ring`).
+    fn short_conv_prefill(&self, _:Shape, _:usize, _:usize, _:[Option<&Self::Value>;4], _:&[f32]) -> Result<Option<(Self::Value, Option<Self::Value>)>> { Ok(None) }
     /// Convolve, clip or norm, and pack a prompt tile directly into its KV plane in one launch.
     /// Returns false before any writes when the operands do not fit the launch.
-    fn prefill_kv(&self, _: &PrefillKv<'_, Self::Value>, _: &mut Self::Value) -> Result<bool> { Ok(false) }
+    fn prefill_kv(&self, _: &PrefillKv<'_, Self::Value>, _: &mut Self::Value) -> Result<Option<Self::Value>> { Ok(None) }
     /// Arm `ShortConv` directly from `inputs` and `ring` (`[inputs, token, addend, ring]`), writing `every`; `None` falls back.
     fn short_conv_keep(&self, _:Shape, _:usize, _:spark_gpu_probe::fast_ops::ShortConvRing, _:[Option<&Self::Value>;4], _:&[f32]) -> Result<Option<(Self::Value,Self::Value)>> { Ok(None) }
     /// Direct multi-chat ring-pointer `short_conv_keep` (`[inputs, token, addend]`, per-chat `rings`), avoiding `join` copies.

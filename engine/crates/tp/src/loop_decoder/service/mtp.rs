@@ -6,6 +6,7 @@ use spark_engine::draft::{ModelProposal,Target};
 
 pub trait Model<C:Compute,W:Weights<C>> {
     fn config(&self)->&engine_model::mtp_draft::MtpConfig;
+    fn kv_bf16(&self)->bool {false}
     /// Maximum neural draft depth supported by `propose_confident` (defaults to `config().gamma()`;
     /// GPU-packed DFlash supports wide 3-tier block-causal proposals up to `MAX_POS = 15`).
     fn wide_depth(&self)->usize {self.config().gamma()}
@@ -33,6 +34,7 @@ pub trait Model<C:Compute,W:Weights<C>> {
 }
 impl<C:ResidentProduct<V>+super::super::draft::Lanes,W:Weights<C>,V> Model<C,W> for Drafter<'_,V,C::Value> {
     fn config(&self)->&engine_model::mtp_draft::MtpConfig {self.config()}
+    fn kv_bf16(&self)->bool {self.kv_bf16()}
     fn wide_depth(&self)->usize {self.wide_depth()}
     fn chat(&self)->DraftChat<C::Value> {self.chat()}
     fn push(&self,c:&C,chat:&mut DraftChat<C::Value>,taps:&[C::Value],rows:usize)->Result<()> {self.push_values(c,chat,taps,rows)}

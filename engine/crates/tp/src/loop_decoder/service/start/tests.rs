@@ -13,9 +13,17 @@ fn start(context:&str,bind:&str,options:&str)->Vec<String> {words(&format!("0 1 
 fn the_options_are_read_one_time_each_and_others_are_refused_with_the_list() {
     assert_eq!(options(&[]).unwrap(),Options::default());
     let all=options(&words("--mtp 0 --diagnostic-unqualified-text --no-prompt-keep --api-key-file key --diagnostic-host-arithmetic")).unwrap();
-    assert_eq!(all,Options {diagnostic:true,host:true,key:Some("key".into()),no_prompt_keep:true,depth:0});
+    assert_eq!(all,Options {diagnostic:true,host:true,key:Some("key".into()),no_prompt_keep:true,depth:0,disk_cache_dir:None,disk_cache_bytes:None});
+    let disk=options(&words("--diagnostic-unqualified-text --disk-cache-dir /tmp/vade-cache --disk-cache-bytes 1048576")).unwrap();
+    assert_eq!(disk,Options {diagnostic:true,host:false,key:None,no_prompt_keep:false,depth:0,disk_cache_dir:Some("/tmp/vade-cache".into()),disk_cache_bytes:Some(1_048_576)});
+    assert_eq!(options(&words("--disk-cache-bytes 1024")).unwrap_err(),"--disk-cache-bytes requires --disk-cache-dir");
+    assert_eq!(options(&words("--no-prompt-keep --disk-cache-dir /tmp/c")).unwrap_err(),"--disk-cache-dir cannot be combined with --no-prompt-keep");
+    assert!(options(&words("--disk-cache-dir /tmp/c --disk-cache-bytes 0")).unwrap_err().contains("--disk-cache-bytes needs a positive byte count"));
+    assert_eq!(options(&words("--disk-cache-dir")).unwrap_err(),"--disk-cache-dir needs a path");
+    assert_eq!(options(&words("--disk-cache-bytes")).unwrap_err(),"--disk-cache-bytes needs a byte count");
     for (given,named) in [("--unknown","--unknown"),("--diagnostic-unqualified-text --diagnostic-unqualified-text","--diagnostic-unqualified-text"),
         ("--diagnostic-host-arithmetic --diagnostic-host-arithmetic","--diagnostic-host-arithmetic"),("--no-prompt-keep --no-prompt-keep","--no-prompt-keep"),
+        ("--disk-cache-dir a --disk-cache-dir b","--disk-cache-dir"),("--disk-cache-bytes 1 --disk-cache-bytes 2","--disk-cache-bytes"),
         ("--mtp 0 --mtp 0","--mtp"),("--api-key-file a --api-key-file b","--api-key-file"),("--diagnostic-serving-trace","--diagnostic-serving-trace")] {
         let error=options(&words(given)).unwrap_err();
         assert!(error.starts_with(&format!("unsupported text service option: {named}; ")) && error.ends_with(OPTIONS),"{given}: {error}");
@@ -24,7 +32,7 @@ fn the_options_are_read_one_time_each_and_others_are_refused_with_the_list() {
     let keep=options(&words("--prompt-keep")).unwrap_err();assert!(keep.starts_with("unsupported text service option: --prompt-keep") && keep.ends_with(OPTIONS),"{keep}");
     assert_eq!(options(&words("--mtp 7")).unwrap().depth,7);
     assert_eq!(options(&words("--mtp")).unwrap_err(),"--mtp needs a depth");assert_eq!(options(&words("--api-key-file")).unwrap_err(),"--api-key-file needs a path");
-    for name in [DIAGNOSTIC,HOST_ARITHMETIC,"--mtp DEPTH","--no-prompt-keep","--api-key-file PATH"] {assert!(OPTIONS.contains(name),"{name}");}
+    for name in [DIAGNOSTIC,HOST_ARITHMETIC,"--mtp DEPTH","--no-prompt-keep","--disk-cache-dir PATH","--disk-cache-bytes BYTES","--api-key-file PATH"] {assert!(OPTIONS.contains(name),"{name}");}
 }
 #[test]
 fn the_places_are_read_and_a_start_that_cannot_be_served_is_refused() {

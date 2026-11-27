@@ -93,7 +93,7 @@ vade up inkling
 
 `vade pull inkling` downloads the pinned revision `thinkingmachines/Inkling-2-Mini@b85c3cfa615fc413cc9af3379f491b963f3b586a` (20.19 GB). `vade up inkling` checks `~/models/thinkingmachines/Inkling-2-Mini` first and also detects existing read-only Hugging Face Hub cache snapshots automatically.
 
-By default, `vade up inkling` starts with `--context 524288` (512K, configurable up to 1,048,576), `--output 16384`, `--mtp 7` bit-exact drafting on (`--mtp 0` disables drafting), and the prompt cache on (`--cache-bytes 0` disables it). A 2 MiB CUDA VMM paged KV cache keeps resident weights at 20.69 GB with an 883 MB entry reservation and about 79 GB of session and cache pool, admitting up to 89-90 concurrent chats at 512K or 1M context with zero token-ID differences across solo, batched, cached, and drafted runs.
+By default, `vade up inkling` starts with `--context 524288` (512K, configurable up to 1,048,576), `--output 16384`, `--mtp 7` bit-exact drafting on (`--mtp 0` disables drafting), and the prompt cache on (`--cache-bytes 0` disables it). A 2 MiB CUDA VMM paged KV cache keeps resident weights at 20.69 GB with an 883 MB entry reservation and about 79 GB of session and cache pool, admitting up to 89-90 concurrent chats at 512K or 1M context with zero token-ID differences across solo, batched, cached, and drafted runs; pass `--disk-cache-dir PATH` (and optional `--disk-cache-bytes BYTES`) to `flash-serve` for bit-exact NVMe prefix persistence across restarts.
 
 Connect external coding agents with one command via `vade connect <claude|codex|opencode|hermes|pi>`, or run `vade chat` (defaults to 300K auto-compact on 512K contexts and 8 concurrent 128K subagents; all limits are user-adjustable).
 

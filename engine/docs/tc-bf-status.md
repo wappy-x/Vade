@@ -3,7 +3,7 @@
 State: NOT READY FOR GATE. The twin is corrected and device-proven. The
 latent kernel improves prompt groups but fails the one-row decode limit.
 No served proof, token baseline change, rebase or merge was performed.
-Draft https://github.com/wappy-x/vade-next/pull/261 targets `tc-switch`.
+Targets `tc-switch`.
 Branch `tc-bf`; tested code `82b9c70c479ea8b58bc19b169a3f7dbe418ee8b0`.
 Base timing code `14021c361ce990386d3585339cad56e3da603e1c`.
 

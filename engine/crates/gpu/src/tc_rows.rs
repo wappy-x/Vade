@@ -137,6 +137,25 @@ pub const MOE_ROWS_MAX: usize = 4096;
 pub const MOE_PICKS_MAX: usize = 32;
 pub const MOE_ALL_MAX: usize = 32_768;
 pub const MOE_EXPERTS_MAX: usize = 512;
+/// Phase selectors (payload word 10) for single-block (`rows <= 256`) and deterministic 3-phase multi-block
+/// `MOE_GROUP_ROUTE` (`rows >= MOE_ROUTE_MULTI_ROWS_MIN`).
+pub const MOE_ROUTE_PHASE_SINGLE: u64 = 0;
+pub const MOE_ROUTE_PHASE_COUNT: u64 = 1;
+pub const MOE_ROUTE_PHASE_SCAN: u64 = 2;
+pub const MOE_ROUTE_PHASE_SCATTER: u64 = 3;
+pub const MOE_ROUTE_MULTI_ROWS_MIN: usize = 257;
+pub const MOE_ROUTE_BLOCKS_MAX: usize = 32;
+
+/// Number of CTAs for `MOE_GROUP_ROUTE`: 1 block for small batches (`rows <= 256`), up to 32 blocks for prefill.
+#[inline(always)]
+pub const fn moe_route_blocks(rows: usize) -> usize {
+    if rows < MOE_ROUTE_MULTI_ROWS_MIN {
+        1
+    } else {
+        let b = rows / 64;
+        if b < 2 { 2 } else if b > MOE_ROUTE_BLOCKS_MAX { MOE_ROUTE_BLOCKS_MAX } else { b }
+    }
+}
 
 /// True when `PLAIN_TC_ROWS` Mode 0 uses a small-batch tile (`inputs <= TC_SMALL_BM`).
 #[inline(always)]

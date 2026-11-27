@@ -26,7 +26,24 @@ impl Hooks {
     pub fn load(workspace: &Workspace, home: Option<&Path>) -> io::Result<Self> {
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
-            let dir = workspace.state_dir()?;
+            let dir = if let Some(state_home) = workspace.state_home() {
+                let root = crate::home_guard::Root::open(workspace.root())
+                    .map_err(io::Error::other)?;
+                match crate::home_guard::Home::open(state_home, &root, false) {
+                    Ok(Some(safe_home)) => workspace.safe_home_state_dir(&safe_home)?,
+                    Ok(None) => return Ok(Self::default()),
+                    Err(reason) => {
+                        if std::fs::symlink_metadata(workspace.state_path().join("hooks.conf"))
+                            .is_err_and(|e| e.kind() == io::ErrorKind::NotFound)
+                        {
+                            return Ok(Self::default());
+                        }
+                        return Err(io::Error::other(reason));
+                    }
+                }
+            } else {
+                workspace.state_dir()?
+            };
             match dir.workspace_file("hooks.conf")? {
                 Some(file) => {
                     private(&file, &dir)?;

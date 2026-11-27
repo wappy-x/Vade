@@ -42,7 +42,7 @@ pub(crate) const COMMANDS: &[Command] = &[
     Command::new("symbols", "PATH", "Inspect lexical symbol hints.", "Bounded local inspection; hints are not a compiler index.", "Workspace", "agent", false),
     Command::new("new", "", "Start a fresh conversation.", "Wait for cleanup. Native mode keeps the old journal; delegated mode starts a fresh external session.", "Sessions", "all", true),
     Command::new("clear", "", "Clear the conversation.", "Alias for /new. Keeps old native journals and waits for worker cleanup.", "Sessions", "all", false),
-    Command::new("memory", "", "Show memory support.", "Saved memory is not available in this build. Use project instructions for saved rules.", "Context", "all", false),
+    Command::new("memory", "", "Inspect project memory status and saved notes.", "Shows whether project memory (MEMORY.md) is enabled and lists saved notes. Managed in native agent mode via memory_save and memory_forget; disable with --no-memory or VADE_MEMORY=0.", "Context", "all", false),
     Command::new("quit", "", "Leave chat; the engine keeps running.", "Active native or delegated work is canceled and cleaned up before exit. With piped input, a message the provider has not started yet finishes first. Alias: /exit.", "Sessions", "all", true),
     Command::new("exit", "", "Leave chat; the engine keeps running.", "Alias for /quit.", "Sessions", "all", false),
     Command::new("undo", "", "Remove the last chat exchange.", "Direct/demo only; tool and delegated histories cannot be spliced.", "Sessions", "chat", false),
@@ -267,7 +267,26 @@ impl App {
                 "/help" => {
                     self.command_help(rest)?;
                 }
-                "/memory" if rest.is_empty() => self.notice("Saved memory is not available in this build. Use /instructions to inspect saved project rules.")?,
+                "/memory" if rest.is_empty() => {
+                    if self.config.mode != Mode::Agent {
+                        self.notice("Project memory (MEMORY.md) is active in native agent mode. Use /instructions to inspect saved project rules.")?;
+                    } else if !self.config.memory {
+                        self.notice("Project memory is disabled for this chat (--no-memory or VADE_MEMORY=0). Use /instructions to inspect saved project rules.")?;
+                    } else {
+                        match vade_harness::memory::Memory::load(&self.workspace) {
+                            Ok(memory) if memory.count() == 0 => {
+                                self.notice("Project memory is enabled (0 notes saved in MEMORY.md). Use memory_save or memory_forget in chat, or --no-memory to turn it off.")?;
+                            }
+                            Ok(memory) => {
+                                let content = vade_harness::terminal::sanitize(memory.content().trim_end());
+                                self.notice(&format!("Project memory is enabled ({} note(s) in MEMORY.md):\n{content}", memory.count()))?;
+                            }
+                            Err(error) => {
+                                self.notice(&format!("Project memory could not be read: {}", vade_harness::terminal::sanitize(&error.to_string())))?;
+                            }
+                        }
+                    }
+                }
                 "/status" if rest.is_empty() => self.status()?,
                 "/children" => self.children_command(rest)?,
                 "/sessions" if rest.is_empty() && self.config.mode == Mode::Agent => {

@@ -226,3 +226,39 @@ fn a_hooks_file_in_the_project_runs_only_with_a_trust_record() {
     assert_eq!(Hooks::load(&own, None).unwrap().entries.len(), 1);
     assert_eq!(Hooks::summary(config).unwrap(), ["before-tool: /bin/sh -c touch hook-ran"]);
 }
+
+#[test]
+#[cfg(unix)]
+fn a_vade_home_inside_the_workspace_cannot_run_hooks() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new();
+    let config = r#"{"hooks":[{"point":"before-tool","command":"touch pwned"}]}"#;
+    let inside_home = fixture.0.join("vade-home");
+    let ws_inside = Workspace::open(
+        &fixture.0,
+        crate::tools::StateLocation::home(inside_home.clone()).unwrap(),
+    )
+    .unwrap();
+    // Without a hooks.conf file, an inside VADE_HOME returns empty hooks without error.
+    assert!(Hooks::load(&ws_inside, Some(&inside_home)).unwrap().entries.is_empty());
+    // Plant a private 0600 hooks.conf inside the workspace VADE_HOME: must be refused.
+    ws_inside.state_dir().unwrap();
+    let planted = ws_inside.state_path().join("hooks.conf");
+    std::fs::write(&planted, config).unwrap();
+    std::fs::set_permissions(&planted, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let err = Hooks::load(&ws_inside, Some(&inside_home)).unwrap_err().to_string();
+    assert!(err.contains("inside this workspace"), "{err}");
+    assert!(Hooks::load(&ws_inside, None).unwrap_err().to_string().contains("inside this workspace"));
+    // An outside symlink pointing into the workspace must also be refused.
+    let outside = Fixture::new();
+    let link_home = outside.0.join("link-home");
+    std::os::unix::fs::symlink(&inside_home, &link_home).unwrap();
+    let ws_link = Workspace::open(
+        &fixture.0,
+        crate::tools::StateLocation::home(link_home.clone()).unwrap(),
+    )
+    .unwrap();
+    let err = Hooks::load(&ws_link, Some(&link_home)).unwrap_err().to_string();
+    assert!(err.contains("inside this workspace") || err.contains("real folder"), "{err}");
+    assert!(!fixture.0.join("pwned").exists());
+}

@@ -225,13 +225,35 @@ impl BoundedReader {
             self.buffer.drain(..self.start);
             self.start = 0;
         }
-        self.stream.set_read_timeout(Some(self.remaining()?))?;
         let mut chunk = [0u8; 8192];
-        let read = self.stream.read(&mut chunk)?;
-        if read == 0 {
-            return Ok(false);
+        loop {
+            self.stream.set_read_timeout(Some(self.remaining()?))?;
+            match self.stream.read(&mut chunk) {
+                Ok(0) => return Ok(false),
+                Ok(read) => {
+                    self.buffer.extend_from_slice(&chunk[..read]);
+                    return Ok(true);
+                }
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error),
+            }
         }
-        self.buffer.extend_from_slice(&chunk[..read]);
+    }
+    fn read_exact_bytes(&mut self, out: &mut [u8]) -> io::Result<bool> {
+        let mut filled = 0;
+        while filled < out.len() {
+            let available = self.buffer.len() - self.start;
+            if available == 0 {
+                if !self.fill()? {
+                    return Ok(false);
+                }
+                continue;
+            }
+            let take = available.min(out.len() - filled);
+            out[filled..filled + take].copy_from_slice(&self.buffer[self.start..self.start + take]);
+            self.start += take;
+            filled += take;
+        }
         Ok(true)
     }
     /// Read one line (with its ending) into `out`; 0 means end of stream.
@@ -267,6 +289,158 @@ impl BoundedReader {
     }
 }
 
+/// Chunked transfer-coding decoder over [`BoundedReader`]. Chunk boundaries
+/// may fall mid-line or mid-UTF-8 character; bytes are assembled first and
+/// UTF-8 checked only per complete SSE line.
+struct ChunkedReader {
+    inner: BoundedReader,
+    remaining: usize,
+    needs_crlf: bool,
+    done: bool,
+    chunks: usize,
+    decoded: Vec<u8>,
+    decoded_start: usize,
+}
+impl ChunkedReader {
+    fn new(inner: BoundedReader) -> Self {
+        Self {
+            inner,
+            remaining: 0,
+            needs_crlf: false,
+            done: false,
+            chunks: 0,
+            decoded: Vec::new(),
+            decoded_start: 0,
+        }
+    }
+    fn read_line(&mut self, out: &mut String, max: usize) -> io::Result<usize> {
+        loop {
+            if let Some(at) = self.decoded[self.decoded_start..].iter().position(|b| *b == b'\n') {
+                let len = at + 1;
+                if len > max {
+                    return Err(json::invalid("upstream reply line is too long"));
+                }
+                let text = std::str::from_utf8(&self.decoded[self.decoded_start..self.decoded_start + len])
+                    .map_err(|_| json::invalid("upstream reply is not UTF-8"))?
+                    .to_owned();
+                out.push_str(&text);
+                self.decoded_start += len;
+                return Ok(len);
+            }
+            if self.decoded.len() - self.decoded_start > max {
+                return Err(json::invalid("upstream reply line is too long"));
+            }
+            if self.done {
+                let len = self.decoded.len() - self.decoded_start;
+                if len > 0 {
+                    let text = std::str::from_utf8(&self.decoded[self.decoded_start..])
+                        .map_err(|_| json::invalid("upstream reply is not UTF-8"))?
+                        .to_owned();
+                    out.push_str(&text);
+                    self.decoded_start += len;
+                }
+                return Ok(len);
+            }
+            if self.decoded_start > 0 {
+                self.decoded.drain(..self.decoded_start);
+                self.decoded_start = 0;
+            }
+            if self.remaining == 0 {
+                if self.needs_crlf {
+                    let mut crlf = [0u8; 2];
+                    if !self.inner.read_exact_bytes(&mut crlf)? {
+                        return Err(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "incomplete chunked upstream reply",
+                        ));
+                    }
+                    if crlf != *b"\r\n" {
+                        return Err(json::invalid("invalid HTTP chunk terminator"));
+                    }
+                }
+                self.chunks += 1;
+                if self.chunks > 1_000_000 {
+                    return Err(json::invalid("HTTP chunk count exceeds limit"));
+                }
+                let mut size_line = String::new();
+                if self.inner.read_line(&mut size_line, 16 * 1024)? == 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "incomplete chunked upstream reply",
+                    ));
+                }
+                let Some(size_line) = size_line.strip_suffix("\r\n") else {
+                    return Err(json::invalid("invalid HTTP chunk size"));
+                };
+                let (number, extension) = size_line
+                    .split_once(';')
+                    .map_or((size_line, None), |(a, b)| (a, Some(b)));
+                let number = number.trim_end_matches([' ', '\t']);
+                if number.is_empty()
+                    || !number.bytes().all(|b| b.is_ascii_hexdigit())
+                    || extension
+                        .is_some_and(|e| e.bytes().any(|b| (b < 0x20 && b != b'\t') || b == 0x7f))
+                {
+                    return Err(json::invalid("invalid HTTP chunk size"));
+                }
+                self.remaining = usize::from_str_radix(number, 16)
+                    .map_err(|_| json::invalid("invalid HTTP chunk size"))?;
+                if self.remaining == 0 {
+                    let mut trailers = 0usize;
+                    loop {
+                        let mut trailer = String::new();
+                        if self.inner.read_line(&mut trailer, 16 * 1024)? == 0 {
+                            return Err(io::Error::new(
+                                io::ErrorKind::UnexpectedEof,
+                                "incomplete chunked upstream trailers",
+                            ));
+                        }
+                        if trailer == "\r\n" {
+                            break;
+                        }
+                        trailers += 1;
+                        if trailers > 128 {
+                            return Err(json::invalid("upstream sent too many chunk trailers"));
+                        }
+                    }
+                    self.done = true;
+                    continue;
+                }
+                self.needs_crlf = true;
+            }
+            let available = self.inner.buffer.len() - self.inner.start;
+            if available == 0 {
+                if !self.inner.fill()? {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "incomplete chunked upstream reply",
+                    ));
+                }
+                continue;
+            }
+            let room = (max + 1).saturating_sub(self.decoded.len()).max(1);
+            let take = available.min(self.remaining).min(room);
+            self.decoded
+                .extend_from_slice(&self.inner.buffer[self.inner.start..self.inner.start + take]);
+            self.inner.start += take;
+            self.remaining -= take;
+        }
+    }
+}
+
+enum StreamLines {
+    Plain(BoundedReader),
+    Chunked(ChunkedReader),
+}
+impl StreamLines {
+    fn read_line(&mut self, out: &mut String, max: usize) -> io::Result<usize> {
+        match self {
+            Self::Plain(reader) => reader.read_line(out, max),
+            Self::Chunked(reader) => reader.read_line(out, max),
+        }
+    }
+}
+
 fn remaining(started: Instant, deadline: Duration) -> io::Result<Duration> {
     deadline
         .checked_sub(started.elapsed())
@@ -276,11 +450,11 @@ fn remaining(started: Instant, deadline: Duration) -> io::Result<Duration> {
         })
 }
 
-/// Send one streamed chat request and collect the whole reply. The Vade
-/// server streams with `Connection: close` and no chunked framing; a reply
-/// that uses chunked framing is refused rather than misread. Reading stops
-/// at the `[DONE]` event. Resolution, the write sequence and every read
-/// share the one `deadline` budget from the start of the request.
+/// Send one streamed chat request and collect the whole reply, supporting both
+/// `Connection: close` and `Transfer-Encoding: chunked` SSE responses (such as
+/// Vade's own gateways). Reading stops at the `[DONE]` event. Resolution, the
+/// write sequence and every read share the one `deadline` budget from the start
+/// of the request.
 pub fn send(
     endpoint: &Endpoint,
     body: &str,
@@ -304,7 +478,17 @@ pub fn send(
     let mut written = 0;
     while written < bytes.len() {
         stream.set_write_timeout(Some(remaining(started, deadline)?))?;
-        written += stream.write(&bytes[written..])?;
+        match stream.write(&bytes[written..]) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "upstream closed while receiving request",
+                ));
+            }
+            Ok(n) => written += n,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        }
     }
     stream.flush()?;
     let mut reader = BoundedReader { stream, buffer: Vec::new(), start: 0, started, deadline };
@@ -319,6 +503,7 @@ pub fn send(
         )));
     }
     let mut content_type = String::new();
+    let mut chunked = false;
     let mut headers = 0usize;
     loop {
         headers += 1;
@@ -334,10 +519,11 @@ pub fn send(
             break;
         }
         if let Some((name, value)) = trimmed.split_once(':') {
-            if name.eq_ignore_ascii_case("transfer-encoding")
-                && value.to_ascii_lowercase().contains("chunked")
-            {
-                return Err(json::invalid("chunked upstream replies are unsupported"));
+            if name.eq_ignore_ascii_case("transfer-encoding") {
+                if !value.trim().eq_ignore_ascii_case("chunked") {
+                    return Err(json::invalid("unsupported HTTP transfer encoding"));
+                }
+                chunked = true;
             }
             if name.eq_ignore_ascii_case("content-type") {
                 content_type = value.trim().to_ascii_lowercase();
@@ -347,12 +533,17 @@ pub fn send(
     if !content_type.starts_with("text/event-stream") {
         return Err(json::invalid("upstream reply is not an SSE stream"));
     }
+    let mut stream_lines = if chunked {
+        StreamLines::Chunked(ChunkedReader::new(reader))
+    } else {
+        StreamLines::Plain(reader)
+    };
     let mut reply = Reply::default();
     let mut done = false;
     let mut line = String::new();
     while !done {
         line.clear();
-        if reader.read_line(&mut line, 1024 * 1024)? == 0 {
+        if stream_lines.read_line(&mut line, 1024 * 1024)? == 0 {
             break;
         }
         let Some(data) = line.trim_end().strip_prefix("data:") else {

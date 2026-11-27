@@ -622,3 +622,83 @@ fn verify_cost_needs_one_unique_receipt_per_completion_id() {
     assert_eq!(cost.receipts, 0);
     assert!(basis.contains("server log unreadable"), "{basis}");
 }
+
+#[test]
+fn stream_send_decodes_chunked_sse_with_mid_utf8_and_mid_line_splits() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        let mut req = [0u8; 4096];
+        let _ = socket.read(&mut req);
+        let event1 = "data: {\"model\":\"served\",\"choices\":[{\"delta\":{\"content\":\"hi ─ ok\"},\"token_id\":42}]}\n\n";
+        let event2 = "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":1}}\n\n";
+        let done = "data: [DONE]\n\n";
+        let payload = format!("{event1}{event2}{done}");
+        let bytes = payload.as_bytes();
+        // Split right in the middle of the 3-byte UTF-8 `─` (`0xE2 0x94 0x80`)
+        // and in the middle of JSON / SSE lines.
+        let dash_at = bytes.windows(3).position(|w| w == "─".as_bytes()).unwrap();
+        let splits = [
+            &bytes[..11],
+            &bytes[11..dash_at + 1],
+            &bytes[dash_at + 1..dash_at + 2],
+            &bytes[dash_at + 2..event1.len() + 17],
+            &bytes[event1.len() + 17..],
+        ];
+        let mut raw = Vec::new();
+        raw.extend_from_slice(
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+        );
+        for (idx, part) in splits.iter().enumerate() {
+            let ext = if idx == 0 { ";ext=1" } else { "" };
+            raw.extend_from_slice(format!("{:x}{ext}\r\n", part.len()).as_bytes());
+            raw.extend_from_slice(part);
+            raw.extend_from_slice(b"\r\n");
+        }
+        raw.extend_from_slice(b"0\r\nX-Trailer: ok\r\n\r\n");
+        socket.write_all(&raw).unwrap();
+        socket.flush().unwrap();
+    });
+
+    let endpoint = parse_endpoint(&format!("http://{addr}")).unwrap();
+    let reply = send(&endpoint, "{}", None, Duration::from_secs(5)).unwrap();
+    server.join().unwrap();
+    assert_eq!(reply.text, "hi ─ ok");
+    assert_eq!(reply.token_ids, vec![42]);
+    assert_eq!(reply.served_model.as_deref(), Some("served"));
+    assert_eq!(reply.finish_reason.as_deref(), Some("stop"));
+    assert_eq!(reply.prompt_tokens, Some(3));
+    assert_eq!(reply.completion_tokens, Some(1));
+    assert!(reply.saw_done);
+}
+
+#[test]
+fn stream_send_rejects_malformed_chunked_and_unsupported_transfer_encoding() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    for raw in [
+        b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: gzip, chunked\r\n\r\n".as_slice(),
+        b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\nZZ\r\ndata: [DONE]\n\n\r\n0\r\n\r\n".as_slice(),
+        b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nabcdXX0\r\n\r\n".as_slice(),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let response = raw.to_vec();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut req = [0u8; 4096];
+            let _ = socket.read(&mut req);
+            let _ = socket.write_all(&response);
+            let _ = socket.flush();
+        });
+        let endpoint = parse_endpoint(&format!("http://{addr}")).unwrap();
+        let err = send(&endpoint, "{}", None, Duration::from_secs(5)).unwrap_err();
+        server.join().unwrap();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData, "unexpected error: {err:?}");
+    }
+}

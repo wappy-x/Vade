@@ -1,7 +1,6 @@
 # TCGATE final report
 
-Updated 2026-11-15 22:28. Branch `tc-switch`, draft PR 256:
-https://github.com/wappy-x/vade-next/pull/256
+Updated 2026-11-15 22:28. Branch `tc-switch`.
 No format source has merged. No old baseline or golden changed; no new
 baseline was written. This is not READY TRAIN or a complete landing gate.
 
@@ -67,9 +66,7 @@ values TCGATE_TILE_CONTROL and TCGATE_SMALL_CONTROL name smoke-control run
 folders. Missing evidence prevents a complete pass. Allow about an hour
 plus queue time (ESTIMATE). All three format inboxes received usage.
 The runner is not authorized to exceed tonight's seat-specific turn limit.
-Source copies are versioned at `tools/tc-gate/` on tc-switch. Seventeen
-checker tests pass, including a stub-only seven-call runner test on Bash 3;
-seven Python clients/checkers and the shell wrappers pass syntax checks.
+Internal gate driver scripts from the `tc-switch` sprint were retired after rebase verification completed.
 No complete end-to-end format gate or quality run is claimed.
 
 ## Contract and integration

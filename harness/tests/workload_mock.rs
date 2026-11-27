@@ -20,17 +20,20 @@ fn integer(value: &json::Value) -> u64 {
 }
 #[test]
 fn workload_concurrent_native_sessions_grow_and_report_per_role() {
-    use std::sync::{Arc, Mutex, atomic::AtomicUsize};
+    use std::sync::{Arc, Barrier, Mutex, atomic::AtomicUsize};
     let (listener, endpoint) = listen();
     let active = Arc::new(AtomicUsize::new(0));
+    let measured_turns = Arc::new([Barrier::new(6), Barrier::new(6)]);
     let keys = Arc::new(Mutex::new(std::collections::HashSet::new()));
     let server_active = Arc::clone(&active);
+    let server_turns = Arc::clone(&measured_turns);
     let server_keys = Arc::clone(&keys);
     let server = thread::spawn(move || {
         let mut workers = Vec::new();
         for _ in 0..6 {
             let mut reader = accept(&listener);
             let active = Arc::clone(&server_active);
+            let measured_turns = Arc::clone(&server_turns);
             let keys = Arc::clone(&server_keys);
             workers.push(thread::spawn(move || {
                 let mut prefix = String::new();
@@ -109,10 +112,14 @@ fn workload_concurrent_native_sessions_grow_and_report_per_role() {
                             );
                             thread::sleep(Duration::from_millis(1));
                         }
+                        thread::sleep(Duration::from_millis(10));
+                    } else {
+                        // Align all six measured turns and hold a clear overlapping
+                        // delay so macOS CI scheduling jitter cannot collapse the
+                        // aggregate-vs-per-session wall-window ratio below 2x.
+                        measured_turns[turn - 2].wait();
+                        thread::sleep(Duration::from_millis(80));
                     }
-                    // Delay all turns so wall-window aggregate can be compared
-                    // with per-session output rates without sub-ms noise.
-                    thread::sleep(Duration::from_millis(10));
                     let u = prompt - 100 + 3;
                     let cached = if turn == 1 {
                         0

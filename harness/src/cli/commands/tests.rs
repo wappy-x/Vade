@@ -59,6 +59,11 @@ fn bare_compact_uses_the_automatic_plan_and_refuses_an_empty_history() {
     app.line_input("/compact-preview".into()).unwrap();
     // Nothing closed is eligible yet: history and journal stay as they were.
     assert_eq!(app.native.as_ref().unwrap().messages().len(), before);
+    // /memory help and execution reflect active project memory support.
+    let help = crate::cli::help::lookup("memory").expect("/memory help exists");
+    assert!(!help.detail.contains("not available in this build"), "{}", help.detail);
+    vade_harness::memory::change(&app.workspace, "pref-style", Some("keep replies short")).unwrap();
+    app.line_input("/memory".into()).unwrap();
     drop(app);
     std::fs::remove_dir_all(workspace).unwrap();
 }

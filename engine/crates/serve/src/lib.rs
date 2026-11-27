@@ -396,6 +396,26 @@ pub trait Engine {
     /// Bytes the startup plan sets aside for retained prefixes alone: admission does not
     /// use them, so neither admission nor host memory pressure reclaims them.
     fn cache_room_bytes(&self) -> usize { 0 }
+    /// Persist a committed prompt-end prefix snapshot to disk (optional; default no-op).
+    fn persist_prefix_snapshot<'s>(
+        &'s self,
+        _scope: Option<&str>,
+        _session: &Self::Session<'s>,
+        _tokens: &[u32],
+        _next_logits: &[f32],
+    ) -> Result<(), String> {
+        Ok(())
+    }
+    /// Restore the longest matching committed prefix from disk on a RAM cache miss.
+    /// Returns `Ok(None)` when disabled, on miss, or after safely removing a corrupt file.
+    fn restore_prefix_from_disk<'s>(
+        &'s self,
+        _scope: Option<&str>,
+        _prompt: &[u32],
+        _target_tokens: usize,
+    ) -> Result<Option<cache::CachedSession<Self::Session<'s>>>, String> {
+        Ok(None)
+    }
 }
 
 pub struct DraftRows<'s, S> {

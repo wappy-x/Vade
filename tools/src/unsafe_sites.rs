@@ -294,7 +294,7 @@ pub fn inventory(root: &Path) -> Result<Vec<Site>> {
         if fs::symlink_metadata(&path)?.file_type().is_symlink() { return Err(format!("{name}: Rust source must not be a symbolic link").into()); }
         let owner = path.ancestors().skip(1).take_while(|p| p.starts_with(root)).find(|p| p.join("Cargo.toml").is_file());
         let crate_path = owner.map(|p| p.strip_prefix(root).unwrap().to_string_lossy().replace('\\',"/")).unwrap_or_else(|| "<root>".into());
-        let gpu = matches!(crate_path.as_str(),"engine/crates/gpu"|"engine/crates/gpu/kernels"|"engine/crates/gpu/kernels-tc");
+        let gpu = matches!(crate_path.as_str(),"engine/crates/gpu"|"engine/crates/gpu/kernels"|"engine/crates/gpu/kernels-tc"|"engine/crates/gpu/kernels-inkling");
         out.extend(sites(&crate_path,name,&fs::read_to_string(&path)?,gpu).map_err(|e| format!("{name}: {e}"))?);
     } Ok(out)
 }

@@ -5,7 +5,7 @@ use spark_gpu_probe::fast_ops;
 impl<'b, 'd> Device<'b, 'd> {
     pub(super) fn try_short_conv_prefill(
         &self, s: Shape, rows: usize, first: usize, x: [Option<&Value<'b, 'd>>; 4], w: &[f32],
-    ) -> Result<Option<Value<'b, 'd>>> {
+    ) -> Result<Option<(Value<'b, 'd>, Option<Value<'b, 'd>>)>> {
         let (heads, dim, taps) = (s.heads as usize, s.dim as usize, s.taps as usize);
         let width = heads.checked_mul(dim).ok_or("prefill convolution width overflow")?;
         if !self.loop_prefill.get() || !self.backend.resident_launches_active()
@@ -21,16 +21,21 @@ impl<'b, 'd> Device<'b, 'd> {
             .ok_or("prefill convolution is missing taps")?;
         let words = rows * width;
         let mut out = self.backend.vector(words)?;
-        self.backend.fast_short_conv_win_into(rows, heads, dim, taps, s.cols, s.bound, &input.vector,
-            token.map(|v| &*v.vector), addend.map(|v| &*v.vector), &fixed, Some((&ring.vector, first)), &mut out, None)?;
+        let fuse_ring = heads == 1 && token.is_none()
+            && (s.cols & spark_gpu_probe::block_stream::CONV_TOKEN_TAPS) == 0
+            && (2..=fast_ops::ROUTE_FOLD_CONV_TAPS_MAX).contains(&taps) && rows >= taps;
+        let mut next_ring = if fuse_ring { Some(self.backend.vector(taps * width)?) } else { None };
+        self.backend.fast_short_conv_win_ring_into(rows, heads, dim, taps, s.cols, s.bound, &input.vector,
+            token.map(|v| &*v.vector), addend.map(|v| &*v.vector), &fixed, Some((&ring.vector, first)), &mut out, next_ring.as_mut())?;
         let value = self.value(out, words)?;
+        let next_ring = match next_ring { Some(nr) => Some(self.value(nr, taps * width)?), None => None };
         self.cost.record(|| "fast_short_conv_prefill".into(), stamp, self.backend, w.len() * 4);
-        Ok(Some(value))
+        Ok(Some((value, next_ring)))
     }
 
     pub(super) fn try_prefill_kv(
         &self, conv: &crate::bounded_decoder::PrefillKv<'_, Value<'b, 'd>>, plane: &mut Value<'b, 'd>,
-    ) -> Result<bool> {
+    ) -> Result<Option<Value<'b, 'd>>> {
         let s = conv.shape;
         let width = s.heads as usize * s.dim as usize;
         let taps = s.taps as usize;
@@ -43,22 +48,26 @@ impl<'b, 'd> Device<'b, 'd> {
         let need_words = conv.write.plane_rows * (width / 2);
         if !self.loop_prefill.get() || !self.backend.resident_launches_active()
             || s.dim as usize != fast_ops::CONV_KV_DIM
+            || !(2..=fast_ops::ROUTE_FOLD_CONV_TAPS_MAX).contains(&taps) || conv.rows < taps
             || !fast_ops::stream_ops_admitted(fast_ops::STREAM_OP_SHORT_CONV_WIN, conv.rows, width, taps, fast_ops::STREAM_OPS_THREADS)
             || !(conv.write.param.is_finite() && conv.write.param > 0.0)
             || reads.iter().flatten().any(|v| v.vector.is_segmented() || v.vector.len() != v.words)
             || plane.words < need_words || plane.vector.len() < need_words || !plane.vector.writable_from(write_start)
         {
-            return Ok(false);
+            return Ok(None);
         }
-        let Some(target) = std::rc::Rc::get_mut(&mut plane.vector) else { return Ok(false); };
+        let Some(target) = std::rc::Rc::get_mut(&mut plane.vector) else { return Ok(None); };
         for v in reads.iter().flatten() { self.ready(v)?; }
         let stamp = self.cost.start(self.backend);
         let fixed = self.parameters.borrow_mut().resolve(conv.fixed, None, |v| self.backend.upload_vector(v)?.into_resident_shared())?
             .ok_or("prefill KV convolution is missing taps")?;
-        self.backend.fast_short_conv_kv_into(s, conv.rows, &conv.input.vector,
-            conv.made.map(|v| &*v.vector), &fixed, (&conv.ring.vector, conv.ring_first), target, conv.write)?;
+        let ring_words = taps * width;
+        let mut next_ring = self.backend.vector(ring_words)?;
+        self.backend.fast_short_conv_kv_ring_into(s, conv.rows, &conv.input.vector,
+            conv.made.map(|v| &*v.vector), &fixed, (&conv.ring.vector, conv.ring_first), target, conv.write, Some(&mut next_ring))?;
+        let next_ring = self.value(next_ring, ring_words)?;
         self.cost.record(|| "fast_prefill_kv".into(), stamp, self.backend, conv.fixed.len() * 4);
-        Ok(true)
+        Ok(Some(next_ring))
     }
 
     /// `Compute::short_conv_keep`: runs `ShortConv` directly from `inputs` and `ring` without a `window` copy,

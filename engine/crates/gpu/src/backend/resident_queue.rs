@@ -8,10 +8,24 @@ impl<'a> Backend<'a> {
     /// A vector's buffer. With fewer stream waits a step, more freed buffers stay charged until a
     /// drain, so the budget must not refuse what a drain would free. A refused try leaves no state.
     pub(super) fn funded_buffer(&self,bytes:usize,managed:bool)->Result<Buffer<'a>,String> {
-        self.funded_buffer_inner(bytes,managed,false)
+        self.funded_buffer_inner(bytes,managed,false,false)
     }
     pub(super) fn funded_buffer_fresh(&self,bytes:usize)->Result<Buffer<'a>,String> {
-        self.funded_buffer_inner(bytes,false,true)
+        self.funded_buffer_inner(bytes,false,true,false)
+    }
+    pub(super) fn funded_buffer_exact(&self,bytes:usize)->Result<Buffer<'a>,String> {
+        self.funded_buffer_inner(bytes,false,false,true)
+    }
+    /// Exact-size pooled device vector for permanent state planes (avoids sub-octave size-class bloat and pool misses).
+    pub fn vector_exact(&self, len: usize) -> Result<DeviceVector<'a>, String> {
+        if len == 0 || len > u32::MAX as usize { return Err("vector outside kernel ABI".into()); }
+        let timer = Some(Instant::now());
+        let bytes = byte_count(len, 4)?;
+        if self.context.accounted_bytes().saturating_add(bytes) > self.context.budget.get() { self.flush_resident_launches()?; }
+        let buffer = self.funded_buffer_exact(bytes)?;
+        if !buffer.stream_reused { self.note_fresh_allocation(buffer.address, bytes); }
+        self.stats.borrow_mut().allocation_ns += elapsed(timer);
+        Ok(DeviceVector { buffer, len, managed: false, #[cfg(debug_assertions)] projection_scratch: Default::default() })
     }
     fn allocate_fresh_vector(&self, len: usize) -> Result<DeviceVector<'a>, String> {
         if len == 0 || len > u32::MAX as usize { return Err("vector outside kernel ABI".into()); }
@@ -40,10 +54,10 @@ impl<'a> Backend<'a> {
         self.context.pending.set(true);
         Ok(Some(vector))
     }
-    fn funded_buffer_inner(&self,bytes:usize,managed:bool,fresh_only:bool)->Result<Buffer<'a>,String> {
+    fn funded_buffer_inner(&self,bytes:usize,managed:bool,fresh_only:bool,exact:bool)->Result<Buffer<'a>,String> {
         let context=self.context;
         crate::allocation_budget::drain_and_retry(
-            ||if managed {Buffer::allocate(context,bytes,true)} else if fresh_only {Buffer::pooled_fresh(context,bytes)} else {Buffer::pooled(context,bytes)},
+            ||if managed {Buffer::allocate(context,bytes,true)} else if fresh_only {Buffer::pooled_fresh(context,bytes)} else if exact {Buffer::pooled_exact(context,bytes)} else {Buffer::pooled(context,bytes)},
             ||context.has_deferred() && context.accounted_bytes().saturating_add(bytes)>context.budget.get(),
             ||{self.stats.borrow_mut().budget_drains+=1;self.synchronize()})
     }

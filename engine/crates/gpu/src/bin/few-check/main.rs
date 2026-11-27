@@ -195,7 +195,7 @@ mod check {
                     let base_dev=b.upload_vector(&base_vals)?.into_resident_shared()?;
                     let tile_count=rows.div_ceil(16);
                     let blocks=2usize.min(tile_count);
-                    let b_tiles=b.draft_lanes(FoldPickBatch{rows,columns:cols,batch,epsilon:0.03125,bound:32.0,confidence:true},[Some(&fold),Some(&lat_packed),Some(&base_dev)])?;
+                    let b_tiles=b.draft_lanes(FoldPickBatch{rows,columns:cols,batch,epsilon:0.03125,bound:32.0,confidence:true,bf16_base:false},[Some(&fold),Some(&lat_packed),Some(&base_dev)])?;
                     let b_red=b.draft_lanes(FoldReduceBatch{batch,tiles:tile_count,blocks,confidence:true},[Some(&b_tiles),None,None])?;
                     let b_fin=b.read_vector_values(&b.draft_lanes(FoldFinishBatch{batch,tiles:blocks,confidence:true},[Some(&b_red),None,None])?)?;
                     let stride=20+blocks;
@@ -203,7 +203,7 @@ mod check {
                     for bi in 0..batch {
                         let lat_b=lat_packed.resident_range(bi*col_pack..(bi+1)*col_pack)?;
                         let base_b=base_dev.resident_range(bi*rows..(bi+1)*rows)?;
-                        let s_tiles=b.draft_lanes(FoldPick{rows,columns:cols,epsilon:0.03125,bound:32.0,confidence:true,gated:false},[Some(&fold),Some(&lat_b),Some(&base_b)])?;
+                        let s_tiles=b.draft_lanes(FoldPick{rows,columns:cols,epsilon:0.03125,bound:32.0,confidence:true,gated:false,bf16_base:false},[Some(&fold),Some(&lat_b),Some(&base_b)])?;
                         let s_red=b.draft_lanes(FoldReduce{tiles:tile_count,blocks,confidence:true,gated:false},[Some(&s_tiles),None,None])?;
                         let s_fin=b.read_vector_values(&b.draft_lanes(FoldFinish{tiles:blocks,confidence:true,stop_above_sum:0.0,gated:false},[Some(&s_red),None,None])?)?;
                         let got=&b_fin[bi*stride..bi*stride+4];
@@ -241,7 +241,7 @@ mod check {
                         let base_dev=b.upload_vector(&base_vals)?.into_resident_shared()?;
                         let tile_count=rows.div_ceil(16);
                         let blocks=2usize.min(tile_count);
-                        let b_tiles=b.draft_lanes(FoldPickBatch{rows,columns:cols256,batch,epsilon:0.03125,bound:32.0,confidence:true},[Some(&fold256),Some(&lat_packed),Some(&base_dev)])?;
+                        let b_tiles=b.draft_lanes(FoldPickBatch{rows,columns:cols256,batch,epsilon:0.03125,bound:32.0,confidence:true,bf16_base:false},[Some(&fold256),Some(&lat_packed),Some(&base_dev)])?;
                         let b_red=b.draft_lanes(FoldReduceBatch{batch,tiles:tile_count,blocks,confidence:true},[Some(&b_tiles),None,None])?;
                         let b_fin=b.read_vector_values(&b.draft_lanes(FoldFinishBatch{batch,tiles:blocks,confidence:true},[Some(&b_red),None,None])?)?;
                         let stride=20+blocks;
@@ -249,7 +249,7 @@ mod check {
                         for bi in 0..batch {
                             let lat_b=lat_packed.resident_range(bi*col_pack..(bi+1)*col_pack)?;
                             let base_b=base_dev.resident_range(bi*rows..(bi+1)*rows)?;
-                            let s_tiles=b.draft_lanes(FoldPick{rows,columns:cols256,epsilon:0.03125,bound:32.0,confidence:true,gated:false},[Some(&fold256),Some(&lat_b),Some(&base_b)])?;
+                            let s_tiles=b.draft_lanes(FoldPick{rows,columns:cols256,epsilon:0.03125,bound:32.0,confidence:true,gated:false,bf16_base:false},[Some(&fold256),Some(&lat_b),Some(&base_b)])?;
                             let s_red=b.draft_lanes(FoldReduce{tiles:tile_count,blocks,confidence:true,gated:false},[Some(&s_tiles),None,None])?;
                             let s_fin=b.read_vector_values(&b.draft_lanes(FoldFinish{tiles:blocks,confidence:true,stop_above_sum:0.0,gated:false},[Some(&s_red),None,None])?)?;
                             let got=&b_fin[bi*stride..bi*stride+4];
@@ -264,7 +264,7 @@ mod check {
                 let mut logits=vec![0.0;rows];
                 logits[rows-2]=1.0;logits[rows-1]=1.0;
                 let base=b.upload_vector(&logits)?;
-                let tiles=b.draft_lanes(FoldPick{rows,columns:cols,epsilon:0.03125,bound:32.0,confidence:true,gated:false},[Some(&fold),Some(&zero),Some(&base)])?;
+                let tiles=b.draft_lanes(FoldPick{rows,columns:cols,epsilon:0.03125,bound:32.0,confidence:true,gated:false,bf16_base:false},[Some(&fold),Some(&zero),Some(&base)])?;
                 let result=b.draft_lanes(FoldFinish{tiles:rows.div_ceil(16),confidence:true,stop_above_sum:0.0,gated:false},[Some(&tiles),None,None])?;
                 let got=b.read_vector_values(&result)?;
                 let best=spark_gpu_probe::fixed_math::tanh(0.03125)*32.0;
@@ -281,7 +281,7 @@ mod check {
                 let pg_run=b.read_vector_values(&b.draft_lanes(PanelGated{rows,columns:cols,inputs:1},[Some(&weight),Some(&zero),Some(&zero_flag)])?)?;
                 if pg_run[rows]!=0.0 {return Err("PanelGated did not propagate stop=0.0".into());}
                 let zero_plus_stop=b.upload_vector(&vec![0.0f32;cols/64*18].into_iter().chain([1.0f32]).collect::<Vec<_>>())?;
-                let gated_tiles=b.draft_lanes(FoldPick{rows,columns:cols,epsilon:0.03125,bound:32.0,confidence:true,gated:true},[Some(&fold),Some(&zero_plus_stop),Some(&base)])?;
+                let gated_tiles=b.draft_lanes(FoldPick{rows,columns:cols,epsilon:0.03125,bound:32.0,confidence:true,gated:true,bf16_base:false},[Some(&fold),Some(&zero_plus_stop),Some(&base)])?;
                 let gated_fin=b.read_vector_values(&b.draft_lanes(FoldFinish{tiles:rows.div_ceil(16),confidence:true,stop_above_sum:0.0,gated:true},[Some(&gated_tiles),Some(&stop_flag),None])?)?;
                 if gated_fin[..5]!=[0.0,0.0,0.0,0.0,1.0] {return Err("gated FoldFinish did not emit stopped record".into());}
                 for inputs in [1,3,8,9,12,15,16] {
@@ -297,11 +297,49 @@ mod check {
                     let latent=upload(&values[inputs*cols..])?;
                     let all=upload(&values)?;
                     for confidence in [false,true] {
-                        let tiles=b.draft_lanes(FoldPick{rows,columns:cols,epsilon:0.03125,bound:32.0,confidence,gated:false},[Some(&fold),Some(&latent),Some(&first)])?;
-                        let got=b.draft_lanes(HeadFold{rows,hidden:cols,latent:cols,inputs,epsilon:0.03125,bound:32.0,confidence},[Some(&weight),Some(&fold),Some(&all)])?;
+                        let tiles=b.draft_lanes(FoldPick{rows,columns:cols,epsilon:0.03125,bound:32.0,confidence,gated:false,bf16_base:false},[Some(&fold),Some(&latent),Some(&first)])?;
+                        let got=b.draft_lanes(HeadFold{rows,hidden:cols,latent:cols,inputs,epsilon:0.03125,bound:32.0,confidence,bf16_base:false},[Some(&weight),Some(&fold),Some(&all)])?;
                         let mut expected=b.read_vector_values(&base)?[rows..].to_vec();
                         expected.extend(b.read_vector_values(&tiles)?);
                         if b.read_vector_values(&got)?!=expected {return Err("combined head/fold differs from separate projections".into());}
+                        // Bit-exact BF16 base path: HeadFold(bf16_base=true) + FoldPick(bf16_base=true) matches FP32 bit for bit.
+                        let got_bf16=b.draft_lanes(HeadFold{rows,hidden:cols,latent:cols,inputs,epsilon:0.03125,bound:32.0,confidence,bf16_base:true},[Some(&weight),Some(&fold),Some(&all)])?.into_resident_shared()?;
+                        let bw=(inputs-1)*rows.div_ceil(2);
+                        let got_t0=b.read_vector_values(&got_bf16.resident_range(bw..bw+rows.div_ceil(16)*4)?)?;
+                        let want_t0=b.read_vector_values(&tiles)?;
+                        if got_t0.iter().map(|v|v.to_bits()).ne(want_t0.iter().map(|v|v.to_bits())) {
+                            return Err(format!("HeadFold bf16_base step0 differs at inputs={inputs} conf={confidence}"));
+                        }
+                        if inputs>1 {
+                            let s1_bf16=got_bf16.resident_range(0..rows.div_ceil(2))?;
+                            let s1_fp32=base.resident_range(rows..2*rows)?;
+                            let t1_bf16=b.read_vector_values(&b.draft_lanes(FoldPick{rows,columns:cols,epsilon:0.03125,bound:32.0,confidence,gated:false,bf16_base:true},[Some(&fold),Some(&latent),Some(&s1_bf16)])?)?;
+                            let t1_fp32=b.read_vector_values(&b.draft_lanes(FoldPick{rows,columns:cols,epsilon:0.03125,bound:32.0,confidence,gated:false,bf16_base:false},[Some(&fold),Some(&latent),Some(&s1_fp32)])?)?;
+                            if t1_bf16.iter().map(|v|v.to_bits()).ne(t1_fp32.iter().map(|v|v.to_bits())) {
+                                return Err(format!("FoldPick bf16_base step1 differs at inputs={inputs} conf={confidence}"));
+                            }
+                        }
+                    }
+                }
+                // PanelBf16 + BF16 FoldPickBatch vs Panel + FP32 FoldPickBatch (odd rows=79, narrow & wide warps, batches 2..=32).
+                for (batch,depth) in [(2usize,3usize),(4,7),(8,7),(16,3),(32,7)] {
+                    let total=batch*depth;
+                    let h_vals=(0..total*cols).map(|i|((i*17+i/cols*5)%37) as f32/64.0-0.25).collect::<Vec<_>>();
+                    let l_vals=(0..batch*cols).map(|i|((i*13+i/cols*7)%41) as f32/64.0-0.2).collect::<Vec<_>>();
+                    let raw_h=b.upload_vector(&h_vals)?;
+                    let raw_l=b.upload_vector(&l_vals)?;
+                    let packed_h=b.draft_lanes(PackActivations(h_vals.len()),[Some(&raw_h),None,None])?;
+                    let packed_l=b.draft_lanes(PackActivations(l_vals.len()),[Some(&raw_l),None,None])?;
+                    let ref_base=b.draft_lanes(Panel{rows,columns:cols,inputs:total},[Some(&weight),Some(&packed_h),None])?.into_resident_shared()?;
+                    let bf_base=b.draft_lanes(PanelBf16{rows,columns:cols,inputs:total},[Some(&weight),Some(&packed_h),None])?.into_resident_shared()?;
+                    for s in [0usize, depth - 1] {
+                        let ref_bs=ref_base.resident_range(s*batch*rows..(s+1)*batch*rows)?;
+                        let bf_bs=bf_base.resident_range(s*batch*rows.div_ceil(2)..(s+1)*batch*rows.div_ceil(2))?;
+                        let ref_ts=b.read_vector_values(&b.draft_lanes(FoldPickBatch{rows,columns:cols,batch,epsilon:0.03125,bound:32.0,confidence:true,bf16_base:false},[Some(&fold),Some(&packed_l),Some(&ref_bs)])?)?;
+                        let got_ts=b.read_vector_values(&b.draft_lanes(FoldPickBatch{rows,columns:cols,batch,epsilon:0.03125,bound:32.0,confidence:true,bf16_base:true},[Some(&fold),Some(&packed_l),Some(&bf_bs)])?)?;
+                        if got_ts.iter().map(|v|v.to_bits()).ne(ref_ts.iter().map(|v|v.to_bits())) {
+                            return Err(format!("PanelBf16+FoldPickBatch step {s} differs at batch={batch} depth={depth}"));
+                        }
                     }
                 }
             }

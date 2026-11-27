@@ -41,8 +41,20 @@ jobs:
           persist-credentials: false
       - name: Install pinned host Rust
         run: rustup toolchain install 1.99.0 --profile minimal --no-self-update
+      - name: Zero Python files (Rule 6)
+        run: |
+          py_files=$(find . -name '*.py' -not -path './.git/*')
+          if [ -n "$py_files" ]; then
+            echo "Found forbidden Python files:"
+            echo "$py_files"
+            exit 1
+          fi
       - name: Documentation links
         run: cargo +1.99.0 run --offline --locked --manifest-path tools/Cargo.toml -p vade-tools -- check-doc-links
+      - name: Unsafe source site gate
+        run: cargo +1.99.0 run --offline --locked --manifest-path tools/Cargo.toml -p vade-tools -- check-unsafe-sites
+      - name: One-path gate
+        run: cargo +1.99.0 run --offline --locked --manifest-path tools/Cargo.toml -p vade-tools -- check-one-path
       - name: Release ref checks
         run: |
           rustc +1.99.0 -D warnings --test .github/workflows/release-ref-tests.rs -o "$RUNNER_TEMP/release-ref-tests"

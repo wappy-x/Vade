@@ -88,14 +88,14 @@ fn new_unsafe_function_needs_a_ruling_even_when_the_allowlist_matches() {
 const KERNEL: &str = "// SAFETY: The caller keeps the device buffer live for the launch.\n#[no_mangle]\npub unsafe extern \"ptx-kernel\" fn launch() {\n    // SAFETY: The launch owns the buffer and this thread stays within its bounds.\n    unsafe { call(); }\n}\n";
 fn listed_kernel(crate_path: &str, source: &str) -> (Vec<Site>,Allowlist) {
     let path = format!("{crate_path}/src/fixture.rs");
-    let gpu = matches!(crate_path,"engine/crates/gpu"|"engine/crates/gpu/kernels");
+    let gpu = matches!(crate_path,"engine/crates/gpu"|"engine/crates/gpu/kernels"|"engine/crates/gpu/kernels-tc"|"engine/crates/gpu/kernels-inkling");
     let found = unsafe_sites::sites(crate_path,&path,source,gpu).unwrap();
     let allowed = allowlist(&unsafe_sites::render(&found,&BTreeMap::new())).unwrap();
     assert!(unsafe_sites::drift(&found,&allowed).is_empty()); (found,allowed)
 }
 #[test]
 fn new_ptx_kernel_with_safety_notes_passes_in_each_gpu_crate() {
-    for crate_path in ["engine/crates/gpu","engine/crates/gpu/kernels"] {
+    for crate_path in ["engine/crates/gpu","engine/crates/gpu/kernels","engine/crates/gpu/kernels-tc","engine/crates/gpu/kernels-inkling"] {
         for source in [KERNEL.into(),KERNEL.replace("#[no_mangle]","#[unsafe(no_mangle)]"),
             KERNEL.replace("pub unsafe","pub(crate) unsafe"),format!("mod entries {{\n{KERNEL}}}")] {
             let (found,allowed) = listed_kernel(crate_path,&source);
@@ -127,7 +127,7 @@ fn new_ptx_kernel_without_an_entry_or_block_note_fails() {
 #[test]
 fn two_new_blocks_in_one_ptx_kernel_fail_even_when_listed() {
     let source = KERNEL.replace("    unsafe { call(); }","    unsafe { call(); }\n    // SAFETY: The same buffer stays live.\n    unsafe { other(); }");
-    for crate_path in ["engine/crates/gpu","engine/crates/gpu/kernels"] {
+    for crate_path in ["engine/crates/gpu","engine/crates/gpu/kernels","engine/crates/gpu/kernels-tc","engine/crates/gpu/kernels-inkling"] {
         let (found,allowed) = listed_kernel(crate_path,&source);
         fails_with(&violations(&found,&allowed),"more than one new unsafe block");
         let ruled: Allowlist = found.iter().map(|s| (s.key.clone(),RULING.into())).collect();
@@ -349,9 +349,19 @@ fn inventory_checks_new_files_and_uses_the_nearest_crate() {
     common::write(&t.0.join("host source.rs"),GOOD);
     common::write(&t.0.join("engine/crates/gpu/kernels/Cargo.toml"),"[package]\nname = \"kernels\"\n");
     common::write(&t.0.join("engine/crates/gpu/kernels/src/fixture.rs"),GOOD);
-    let found = inventory(&t.0).unwrap(); assert_eq!(found.len(),3);
+    for crate_path in ["engine/crates/gpu/kernels-tc","engine/crates/gpu/kernels-inkling"] {
+        common::write(&t.0.join(crate_path).join("Cargo.toml"),"[package]\nname = \"gpu-extra\"\n");
+        common::write(&t.0.join(crate_path).join("src/fixture.rs"),KERNEL);
+    }
+    let found = inventory(&t.0).unwrap(); assert_eq!(found.len(),7);
     let issues = violations(&found,&BTreeMap::new()); assert_eq!(issues.len(),1);
     fails_with(&issues,"host source.rs");
+    // Missing SAFETY: on a ptx-kernel entry in kernels-inkling must fail even with a ruling.
+    let bad_kernel = KERNEL.replacen("SAFETY:","Reason:",1);
+    common::write(&t.0.join("engine/crates/gpu/kernels-inkling/src/fixture.rs"),&bad_kernel);
+    let bad_found = inventory(&t.0).unwrap();
+    fails_with(&violations(&bad_found,&BTreeMap::new()),"ptx-kernel entry needs a SAFETY:");
+    common::write(&t.0.join("engine/crates/gpu/kernels-inkling/src/fixture.rs"),KERNEL);
     for crate_path in ["engine/crates/gpu/build-kernels","engine/crates/tp/kernels","engine/crates/gpu/kernels/nested"] {
         common::write(&t.0.join(crate_path).join("Cargo.toml"),"[package]\nname = \"other\"\n");
         common::write(&t.0.join(crate_path).join("src/fixture.rs"),GOOD);

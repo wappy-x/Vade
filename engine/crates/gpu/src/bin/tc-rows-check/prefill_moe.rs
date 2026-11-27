@@ -291,6 +291,8 @@ pub fn run(b: &Backend<'_>) -> Result<usize, String> {
         (128, 24, 8, 1200, 1024, 1024, 4096, false, "win-gqa3-r128-f32"),
         (64, 8, 4, 256, 64, 0, 0, true, "full-gqa2-r64-half"),
         (65, 4, 4, 256, 64, 0, 5, false, "full-gqa1-r65-f32"),
+        (128, 24, 8, 512, 64, 0, 256, true, "full-gqa3-pingpong-half"),
+        (128, 24, 8, 512, 64, 0, 128, false, "full-gqa3-pingpong-1iter-f32"),
     ] {
         let (hd, rd) = (128usize, 16usize);
         let q_v: Vec<f32> = (0..rows * heads * hd).map(|i| input(i + rows * 7 + first_pos)).collect();

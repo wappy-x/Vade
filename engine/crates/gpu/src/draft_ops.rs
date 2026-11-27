@@ -3,31 +3,57 @@
 pub const PANEL_INPUTS_MAX:usize=256;
 /// Maximum concurrent chats per batched draft Markov step (`FoldPickBatch`, `MarkovPrepBatch`, `MarkovStepBatch`).
 pub const DRAFT_BATCH_MAX:usize=32;
-/// Rows (all sibling panels together) up to which `9..=32` inputs split each 16-row panel into warps of 8 inputs.
-/// One warp a panel gives such a matrix at most 512 warps, under half of one wave of resident warps on GB10
-/// (48 SMs x 6 blocks x 4 warps = 1,152), so its few warps' latency sets its time; the larger matrices (`gate_up`,
-/// the vocabulary head) already fill a wave, and a second warp a panel only adds a second wave there.
+/// Rows (all sibling panels together) of a small matrix: its panels get one warp for each 8 or 16 inputs, so every
+/// warp makes one pass over its panel. One warp a panel gives such a matrix at most 512 warps, under half of one
+/// wave of resident warps on GB10 (48 SMs x 6 blocks x 4 warps = 1,152), so its few warps' latency sets its time
+/// (measured: a warp that walks the inputs in 4 waves stalls on its loads 86 percent of its cycles). The CTAs that
+/// share a panel read its weights at the same time, from L2 after the first read. The larger matrices (`gate_up`,
+/// the vocabulary head) already fill a wave and read from DRAM: their warps stay in the panel's CTA.
 pub const PANEL_SPLIT_ROWS_MAX:usize=8192;
-/// Power-of-2 warp slabs sharing one 16-row NVFP4 panel inside a 128-thread CTA (`1`, `2`, or `4`).
-/// Keeps every panel's slabs in the same CTA so its warps read each weight byte from DRAM once and from L1 after.
-/// - `1..=8` inputs: one warp, the pipelined 1..=8-input product.
-/// - `9..=32` inputs and at most `PANEL_SPLIT_ROWS_MAX` rows: 2 or 4 warps of 8 inputs, each the same pipelined
-///   1..=8-input product (the `o` and `down` panels of a 12- or 16-row draft block get twice the warps).
-/// - otherwise: warps of 16 inputs (two MMA tiles a warp), up to 4 warps over up to 64 inputs a pass.
-#[inline(always)]
-pub const fn panel_slabs(rows:usize,inputs:usize)->usize {
-    if inputs<=8 {1}
-    else if inputs<=32 && rows<=PANEL_SPLIT_ROWS_MAX {if inputs<=16 {2} else {4}}
-    else if inputs<=16 {1} else if inputs<=32 {2} else {4}
+/// Inputs of a small matrix up to which a warp takes 8 inputs (the pipelined 1..=8-input product); above it a warp
+/// takes 16 inputs (two MMA tiles), which halves the CTAs of the launch.
+pub const PANEL_NARROW_INPUTS_MAX:usize=64;
+/// How the warps of a launch share a 16-row panel of `inputs` activation rows (`Panel`, `PanelGated`, `Panels`).
+/// The kernel reads it from the bits above the input count of the command; the host sizes the grid with it.
+#[derive(Clone,Copy,PartialEq,Eq,Debug)]
+pub struct PanelShape {
+    /// Shift of the warps a panel (`1 << shift` warps, a power of 2, so a panel's warps are neighbours in the grid).
+    pub shift:u32,
+    /// Warps of 8 inputs (the pipelined 1..=8-input product, one pass); else warps of 16 inputs (two MMA tiles).
+    pub narrow:bool,
 }
+impl PanelShape {
+    pub const fn warps(self)->usize {1<<self.shift}
+    /// The bits the command carries above the input count.
+    pub const fn code(self)->usize {(self.shift as usize)|((self.narrow as usize)<<3)}
+}
+/// - `1..=8` inputs: one warp, the pipelined 1..=8-input product.
+/// - a small matrix (at most `PANEL_SPLIT_ROWS_MAX` rows): one warp for each 8 inputs up to
+///   `PANEL_NARROW_INPUTS_MAX` inputs (2, 4 or 8 warps a panel), one warp for each 16 inputs above (8 or 16 warps).
+/// - a larger matrix: warps of 16 inputs, up to 4 warps a panel (one CTA) that walk the inputs in waves of 64.
+#[inline(always)]
+pub const fn panel_shape(rows:usize,inputs:usize)->PanelShape {
+    if inputs<=8 {return PanelShape{shift:0,narrow:true};}
+    if rows<=PANEL_SPLIT_ROWS_MAX {
+        let narrow=inputs<=PANEL_NARROW_INPUTS_MAX;
+        let warps=inputs.div_ceil(if narrow {8} else {16});
+        return PanelShape{shift:warps.next_power_of_two().trailing_zeros(),narrow};
+    }
+    PanelShape{shift:if inputs<=16 {0} else if inputs<=32 {1} else {2},narrow:false}
+}
+/// Warps a 16-row panel in the launch grid.
+#[inline(always)]
+pub const fn panel_slabs(rows:usize,inputs:usize)->usize {panel_shape(rows,inputs).warps()}
 #[derive(Clone,Copy)]
 pub enum DraftOp {
     /// Multiply lane-interleaved NVFP4 panels by up to `PANEL_INPUTS_MAX` activation rows.
     PackActivations(usize),
     /// Rounded residual followed by one finite-status triple per warp.
     CheckedSum(usize),
-    HeadFold{rows:usize,hidden:usize,latent:usize,inputs:usize,epsilon:f32,bound:f32,confidence:bool},
+    HeadFold{rows:usize,hidden:usize,latent:usize,inputs:usize,epsilon:f32,bound:f32,confidence:bool,bf16_base:bool},
     Panel {rows:usize, columns:usize, inputs:usize},
+    /// Like `Panel`, writing packed BF16 pairs (`inputs * rows.div_ceil(2)` words) streamed with `L2::evict_first`.
+    PanelBf16 {rows:usize, columns:usize, inputs:usize},
     /// Like `Panel`, gated by a 1-word device stop flag in input 2; appends a 1-word propagated stop flag after the output.
     PanelGated {rows:usize, columns:usize, inputs:usize},
     /// Two or three sibling panels of one input, stored back to back (rows in whole 64-row blocks, an unused
@@ -35,9 +61,10 @@ pub enum DraftOp {
     Panels {rows:[usize;3], columns:usize, inputs:usize},
     /// Add the bias stored after the panel and the base row, then reduce each 16-token tile.
     /// When `gated`, input 1 appends a 1-word device stop flag and non-zero exits immediately with zero panel reads.
-    FoldPick {rows:usize, columns:usize, epsilon:f32, bound:f32, confidence:bool, gated:bool},
+    /// When `bf16_base`, input 2 holds packed BF16 base logits (`rows.div_ceil(2)` words per row).
+    FoldPick {rows:usize, columns:usize, epsilon:f32, bound:f32, confidence:bool, gated:bool, bf16_base:bool},
     /// Batched `FoldPick` across `batch` chats (`1..=DRAFT_BATCH_MAX`) sharing one read of the fold panel and bias.
-    FoldPickBatch {rows:usize, columns:usize, batch:usize, epsilon:f32, bound:f32, confidence:bool},
+    FoldPickBatch {rows:usize, columns:usize, batch:usize, epsilon:f32, bound:f32, confidence:bool, bf16_base:bool},
     /// Finish tile reduction; if `stop_above_sum > 0.0`, writes `1.0` to word 4 when invalid or `sum > stop_above_sum`.
     /// When `gated`, input 1 is a 1-word device stop flag; non-zero writes `[0, 0, 0, 0, 1]` and exits.
     FoldFinish {tiles:usize, confidence:bool, stop_above_sum:f32, gated:bool},
@@ -77,6 +104,10 @@ pub enum DraftOp {
     /// Merge `splits` online-softmax partials from `FlashAttn` into the finalized BF16-rounded output `[rows, heads, 128]`.
     FlashAttnMerge {rows:usize, heads:usize, width:usize, splits:usize},
     Gate(usize), Rope{rows:usize,heads:usize,width:usize},
+    /// Like `Rope`, writing packed BF16 pairs (`rows * heads * (width / 2)` words, `width % 4 == 0`).
+    RopeBf16{rows:usize,heads:usize,width:usize},
+    /// Pack `n` BF16-rounded FP32 words into `n / 2` packed BF16 `u32` words (`n % 2 == 0`).
+    PackBf16(usize),
     Scores{rows:usize,heads:usize,kv:usize,width:usize,keys:usize},
     Normalizer{queries:usize,keys:usize},
     Values{rows:usize,heads:usize,kv:usize,width:usize,keys:usize},
@@ -104,30 +135,38 @@ impl DraftOp {
         let (lens,out,lanes,fields)=match self {
             CheckedSum(n) if n>0 && n<=1<<19=>{
                 let warps=n.div_ceil(32);([n,n,0],n+warps*3,warps*32,[18,n,0,0,0,0])}
-            HeadFold{rows,hidden,latent,inputs,epsilon,bound,confidence} if (1..=16).contains(&inputs) && epsilon>0.0 && bound>0.0=>{
+            HeadFold{rows,hidden,latent,inputs,epsilon,bound,confidence,bf16_base} if (1..=16).contains(&inputs) && latent<(1<<24) && epsilon>0.0 && bound>0.0=>{
                 let packed=(hidden.checked_mul(inputs)?.checked_add(latent)?/64).checked_mul(18)?;
-                let out=rows.checked_mul(inputs-1)?.checked_add(rows.div_ceil(16)*4)?;
+                let base_row=if bf16_base {rows.div_ceil(2)} else {rows};
+                let out=base_row.checked_mul(inputs-1)?.checked_add(rows.div_ceil(16)*4)?;
+                let c=latent.checked_mul(64)?+inputs*2+usize::from(confidence)+(usize::from(bf16_base)<<31);
                 ([panel_words(rows,hidden)?,panel_words(rows,latent)?.checked_add(rows)?,packed],out,rows.next_multiple_of(16)*2,
-                    [17,rows,hidden,latent.checked_mul(64)?+inputs*2+usize::from(confidence),epsilon.to_bits() as usize,bound.to_bits() as usize])}
+                    [17,rows,hidden,c,epsilon.to_bits() as usize,bound.to_bits() as usize])}
             PackActivations(n) if n>0 && n.is_multiple_of(64)=>([n,0,0],n/64*18,n/16,[16,n/64,0,0,0,0]),
             Panel{rows,columns,inputs} if panel_words(rows,columns).is_some() && (1..=PANEL_INPUTS_MAX).contains(&inputs)=>{
-                let slabs=panel_slabs(rows,inputs);
-                ([panel_words(rows,columns)?,(columns/64*18).checked_mul(inputs)?,0],rows.checked_mul(inputs)?,rows.next_multiple_of(16).checked_mul(2)?.checked_mul(slabs)?,[13,rows,columns,inputs,0,0])}
+                let shape=panel_shape(rows,inputs);
+                ([panel_words(rows,columns)?,(columns/64*18).checked_mul(inputs)?,0],rows.checked_mul(inputs)?,rows.next_multiple_of(16).checked_mul(2)?.checked_mul(shape.warps())?,[13,rows,columns,inputs|shape.code()<<16,0,0])}
+            PanelBf16{rows,columns,inputs} if panel_words(rows,columns).is_some() && (1..=PANEL_INPUTS_MAX).contains(&inputs)=>{
+                let shape=panel_shape(rows,inputs);
+                ([panel_words(rows,columns)?,(columns/64*18).checked_mul(inputs)?,0],rows.div_ceil(2).checked_mul(inputs)?,rows.next_multiple_of(16).checked_mul(2)?.checked_mul(shape.warps())?,[28,rows,columns,inputs|shape.code()<<16,0,0])}
             PanelGated{rows,columns,inputs} if panel_words(rows,columns).is_some() && (1..=16).contains(&inputs)=>{
-                ([panel_words(rows,columns)?,(columns/64*18).checked_mul(inputs)?,1],rows.checked_mul(inputs)?.checked_add(1)?,rows.next_multiple_of(16)*2*panel_slabs(rows,inputs),[13,rows,columns,inputs,1,0])}
+                let shape=panel_shape(rows,inputs);
+                ([panel_words(rows,columns)?,(columns/64*18).checked_mul(inputs)?,1],rows.checked_mul(inputs)?.checked_add(1)?,rows.next_multiple_of(16)*2*shape.warps(),[13,rows,columns,inputs|shape.code()<<16,1,0])}
             Panels{rows,columns,inputs} if (1..=PANEL_INPUTS_MAX).contains(&inputs) && rows[0]>0 && rows[1]>0 && rows.iter().all(|r|r.is_multiple_of(64))=>{
                 let mut words=0usize;
                 for r in rows.into_iter().filter(|&r|r>0) {words=words.checked_add(panel_words(r,columns)?)?;}
                 let total=rows[0].checked_add(rows[1])?.checked_add(rows[2])?;
-                let slabs=panel_slabs(total,inputs);
-                ([words,(columns/64*18).checked_mul(inputs)?,0],total.checked_mul(inputs)?,total.checked_mul(2)?.checked_mul(slabs)?,[19,rows[0],columns,inputs,rows[1],rows[2]])}
-            FoldPick{rows,columns,epsilon,bound,confidence,gated} if epsilon>0.0 && bound>0.0=>{
-                let flags=usize::from(confidence)|(usize::from(gated)<<1);
-                ([panel_words(rows,columns)?.checked_add(rows)?,columns/64*18+usize::from(gated),rows],rows.div_ceil(16)*4,rows.next_multiple_of(16)*2,[14,rows,columns,flags,epsilon.to_bits() as usize,bound.to_bits() as usize])}
-            FoldPickBatch{rows,columns,batch,epsilon,bound,confidence} if (1..=DRAFT_BATCH_MAX).contains(&batch) && epsilon>0.0 && bound>0.0=>{
-                let flags=usize::from(confidence)|((batch-1)<<2);
+                let shape=panel_shape(total,inputs);
+                ([words,(columns/64*18).checked_mul(inputs)?,0],total.checked_mul(inputs)?,total.checked_mul(2)?.checked_mul(shape.warps())?,[19,rows[0],columns,inputs|shape.code()<<16,rows[1],rows[2]])}
+            FoldPick{rows,columns,epsilon,bound,confidence,gated,bf16_base} if epsilon>0.0 && bound>0.0=>{
+                let flags=usize::from(confidence)|(usize::from(gated)<<1)|(usize::from(bf16_base)<<8);
+                let base_words=if bf16_base {rows.div_ceil(2)} else {rows};
+                ([panel_words(rows,columns)?.checked_add(rows)?,columns/64*18+usize::from(gated),base_words],rows.div_ceil(16)*4,rows.next_multiple_of(16)*2,[14,rows,columns,flags,epsilon.to_bits() as usize,bound.to_bits() as usize])}
+            FoldPickBatch{rows,columns,batch,epsilon,bound,confidence,bf16_base} if (1..=DRAFT_BATCH_MAX).contains(&batch) && epsilon>0.0 && bound>0.0=>{
+                let flags=usize::from(confidence)|((batch-1)<<2)|(usize::from(bf16_base)<<8);
                 let slabs=batch.div_ceil(8);
-                ([panel_words(rows,columns)?.checked_add(rows)?,(columns/64*18).checked_mul(batch)?,rows.checked_mul(batch)?],
+                let base_words=(if bf16_base {rows.div_ceil(2)} else {rows}).checked_mul(batch)?;
+                ([panel_words(rows,columns)?.checked_add(rows)?,(columns/64*18).checked_mul(batch)?,base_words],
                     batch.checked_mul(rows.div_ceil(16))?.checked_mul(4)?,rows.next_multiple_of(16).checked_mul(2)?.checked_mul(slabs)?,[14,rows,columns,flags,epsilon.to_bits() as usize,bound.to_bits() as usize])}
             FoldFinish{tiles,confidence,stop_above_sum,gated} if tiles>0 && tiles<=(1<<24)/16 && stop_above_sum>=0.0=>{
                 // One block: the pick, four warp picks, then the exponential of each tile when it sums.
@@ -170,10 +209,14 @@ impl DraftOp {
             FlashAttnMerge{rows,heads,width,splits} if width==128 && rows>0 && heads>0 && (2..=32).contains(&splits)=>{
                 let queries=rows.checked_mul(heads)?;let parts=queries.checked_mul(splits)?.checked_mul(132)?;
                 ([parts,0,0],queries.checked_mul(width)?,queries.checked_mul(32)?,[21,heads,rows,splits,0,0])}
-            Gate(n)=>([n,n,0],n,n,[0,0,0,0,0,0]),
+            Gate(n) if n>0 && n<=1<<24=>([n,n,0],n,n.div_ceil(4),[0,n,0,0,0,0]),
             Rope{rows,heads,width} if width>0 && width%2==0 && heads>0=>{
                 let trig=rows.checked_mul(width)?;let n=trig.checked_mul(heads)?;
                 ([n,trig,0],n,n,[1,width,heads,0,0,0])}
+            RopeBf16{rows,heads,width} if width>0 && width%4==0 && heads>0=>{
+                let trig=rows.checked_mul(width)?;let n=trig.checked_mul(heads)?;let half=n/2;
+                ([n,trig,0],half,half,[29,width,heads,0,0,0])}
+            PackBf16(n) if n>0 && n%2==0 && n<=1<<24=>([n,0,0],n/2,n.div_ceil(4),[30,n,0,0,0,0]),
             Scores{rows,heads,kv,width,keys}|Values{rows,heads,kv,width,keys} if kv>0 && heads>0 && heads%kv==0 && width>0 && keys>0=>{
                 let queries=rows.checked_mul(heads)?;let q=queries.checked_mul(width)?;
                 let k=keys.checked_mul(kv)?.checked_mul(width)?;let scores=queries.checked_mul(keys)?;
@@ -205,28 +248,68 @@ pub fn panel_words(rows:usize,columns:usize)->Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    /// The kernel (`draft_panel.rs`, `run`) gives a 16-row panel 1 warp for 1..=8 inputs; 2 or 4 warps of 8 inputs
-    /// for 9..=32 inputs when all sibling rows together are at most `PANEL_SPLIT_ROWS_MAX`; else warps of 16 inputs.
-    /// Every launch grid must hold all of those warps.
+    /// The kernel (`draft_panel.rs`, `run`) reads the warps a panel and their width from the command. A warp of 8
+    /// inputs makes one pass, so its launch must hold a warp for each 8 inputs; a small matrix gets one pass at
+    /// every width; a larger matrix keeps at most 4 warps a panel. Every launch grid must hold all of those warps.
     #[test]
     fn panel_grids_hold_every_warp_slab() {
         for inputs in 1..=PANEL_INPUTS_MAX {
-            for (rows,split) in [(100usize,true),(PANEL_SPLIT_ROWS_MAX,true),(PANEL_SPLIT_ROWS_MAX+64,false)] {
-                let warps=if inputs<=8 {1} else if inputs<=32 && split {inputs.div_ceil(16)*2} else if inputs<=16 {1} else if inputs<=32 {2} else {4};
-                assert_eq!(panel_slabs(rows,inputs),warps,"rows={rows} inputs={inputs}");
-                let (_,_,lanes,_)=DraftOp::Panel{rows,columns:128,inputs}.layout().unwrap();
+            for (rows,small) in [(100usize,true),(PANEL_SPLIT_ROWS_MAX,true),(PANEL_SPLIT_ROWS_MAX+64,false)] {
+                let shape=panel_shape(rows,inputs);
+                let warps=if inputs<=8 {1} else if small {
+                    if inputs<=PANEL_NARROW_INPUTS_MAX {inputs.div_ceil(8).next_power_of_two()} else {inputs.div_ceil(16).next_power_of_two()}
+                } else if inputs<=16 {1} else if inputs<=32 {2} else {4};
+                assert_eq!((shape.warps(),shape.narrow),(warps,inputs<=8 || (small && inputs<=PANEL_NARROW_INPUTS_MAX)),"rows={rows} inputs={inputs}");
+                assert!(!shape.narrow || shape.warps()*8>=inputs,"a warp of 8 inputs makes one pass: rows={rows} inputs={inputs}");
+                assert!(!small || shape.warps()*if shape.narrow {8} else {16}>=inputs,"a small matrix gets one pass: rows={rows} inputs={inputs}");
+                assert!(shape.shift<8 && shape.code()<16,"the shape is 4 bits above the input count");
+                assert_eq!(panel_slabs(rows,inputs),warps);
+                let (_,_,lanes,fields)=DraftOp::Panel{rows,columns:128,inputs}.layout().unwrap();
                 assert_eq!(lanes,rows.next_multiple_of(16)*2*warps,"Panel rows={rows} inputs={inputs}");
+                assert_eq!(fields[3],(inputs|shape.code()<<16) as u64,"Panel command rows={rows} inputs={inputs}");
                 if inputs<=16 {
-                    let (_,_,gated,_)=DraftOp::PanelGated{rows,columns:128,inputs}.layout().unwrap();
-                    assert_eq!(gated,lanes,"PanelGated rows={rows} inputs={inputs}");
+                    let (_,_,gated,gated_fields)=DraftOp::PanelGated{rows,columns:128,inputs}.layout().unwrap();
+                    assert_eq!((gated,gated_fields[3]),(lanes,fields[3]),"PanelGated rows={rows} inputs={inputs}");
                 }
             }
-            // Siblings split by their rows together: 4096 + 4096 splits, 4096 + 4160 does not.
-            for (sib,split) in [([4096usize,4096,0],true),([4096,4160,0],false)] {
-                let warps=if inputs<=8 {1} else if inputs<=32 && split {inputs.div_ceil(16)*2} else if inputs<=16 {1} else if inputs<=32 {2} else {4};
-                let (_,_,lanes,_)=DraftOp::Panels{rows:sib,columns:128,inputs}.layout().unwrap();
-                assert_eq!(lanes,sib.iter().sum::<usize>()*2*warps,"Panels {sib:?} inputs={inputs}");
+            // Siblings take the shape of their rows together: 4096 + 4096 is a small matrix, 4096 + 4160 is not.
+            for sib in [[4096usize,4096,0],[4096,4160,0]] {
+                let total=sib.iter().sum::<usize>();
+                let shape=panel_shape(total,inputs);
+                let (_,_,lanes,fields)=DraftOp::Panels{rows:sib,columns:128,inputs}.layout().unwrap();
+                assert_eq!(lanes,total*2*shape.warps(),"Panels {sib:?} inputs={inputs}");
+                assert_eq!(fields[3],(inputs|shape.code()<<16) as u64,"Panels command {sib:?} inputs={inputs}");
             }
         }
+    }
+    #[test]
+    fn bf16_base_and_vectorized_draft_layouts_match_extents() {
+        for rows in [79usize, 201_024] {
+            for inputs in [1usize, 8, 16, 64, 224] {
+                let (fp_l, fp_o, fp_lanes, fp_f) = DraftOp::Panel { rows, columns: 2304, inputs }.layout().unwrap();
+                let (bf_l, bf_o, bf_lanes, bf_f) = DraftOp::PanelBf16 { rows, columns: 2304, inputs }.layout().unwrap();
+                assert_eq!((fp_l, fp_lanes, fp_f[3], fp_f[4]), (bf_l, bf_lanes, bf_f[3], bf_f[4]));
+                assert_eq!((fp_o, bf_o, bf_f[0]), (rows * inputs, rows.div_ceil(2) * inputs, 28));
+            }
+            for batch in [1usize, 8, 32] {
+                let (fp_lens, _, fp_lanes, fp_f) = DraftOp::FoldPickBatch {
+                    rows, columns: 256, batch, epsilon: 1.0 / 30.0, bound: 30.0, confidence: true, bf16_base: false,
+                }.layout().unwrap();
+                let (bf_lens, _, bf_lanes, bf_f) = DraftOp::FoldPickBatch {
+                    rows, columns: 256, batch, epsilon: 1.0 / 30.0, bound: 30.0, confidence: true, bf16_base: true,
+                }.layout().unwrap();
+                assert_eq!(fp_lanes, bf_lanes);
+                assert_eq!(fp_lens[2], rows * batch);
+                assert_eq!(bf_lens[2], rows.div_ceil(2) * batch);
+                assert_eq!(bf_f[3] ^ fp_f[3], 1 << 8);
+            }
+        }
+        assert!(DraftOp::PanelBf16 { rows: 64, columns: 2304, inputs: PANEL_INPUTS_MAX + 1 }.layout().is_none());
+        let (gl, go, glanes, gf) = DraftOp::Gate(19).layout().unwrap();
+        assert_eq!((gl, go, glanes, gf[0]), ([19, 19, 0], 19, 5, 0));
+        let (rl, ro, rlanes, rf) = DraftOp::RopeBf16 { rows: 7, heads: 8, width: 128 }.layout().unwrap();
+        assert_eq!((rl, ro, rlanes, rf[0]), ([7 * 8 * 128, 7 * 128, 0], 7 * 8 * 64, 7 * 8 * 64, 29));
+        let (pl, po, planes, pf) = DraftOp::PackBf16(18).layout().unwrap();
+        assert_eq!((pl, po, planes, pf[0]), ([18, 0, 0], 9, 5, 30));
     }
 }

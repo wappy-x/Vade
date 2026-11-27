@@ -118,6 +118,8 @@ pub struct Service<'a,C:Compute,W:Weights<C>> {
     token_steps:Cell<u64>,
     /// Multi-chat cohort step timings and fallback policy (`C2..=C8`).
     cohort:RefCell<mtp_batch::CohortPricing>,
+    /// Optional persistent NVMe disk prefix cache (`--disk-cache-dir`).
+    disk_cache:Option<RefCell<super::disk_cache::DiskPrefixCache>>,
     #[cfg(test)]
     batch_steps:Cell<usize>,
 }
@@ -170,6 +172,7 @@ impl<'a,C:Compute,W:Weights<C>> Service<'a,C,W> {
         let (step,chat_bytes,extra_rings)=(step(chats),min_hold(chats),if chats>1 {rings} else {0});
         Ok(Self {model:None,depth:0,driver,compute,rows,context,eos,fixed_base,extra_rings,chat_bytes,step,pool:seats.room-step,chats,keep:true,live:Cell::new(0),next:Cell::new(0),slots:RefCell::new(Vec::new()),detached:Cell::new(0),token_steps:Cell::new(0),
             cohort:RefCell::new(mtp_batch::CohortPricing::default()),
+            disk_cache:None,
             #[cfg(test)] batch_steps:Cell::new(0)})
     }
     /// Waiting chats that were given rings of their own, over the life of the service.
@@ -239,6 +242,8 @@ impl<'a,C:Compute,W:Weights<C>> Service<'a,C,W> {
     /// What the chats can use: the room less the values of one step.
     pub fn pool(&self)->usize {self.pool}
     pub fn with_prompt_keep(mut self,keep:bool)->Self {self.keep=keep;self}
+    /// Attach a persistent NVMe disk prefix cache for cross-restart prefix reuse.
+    pub fn with_disk_cache(mut self,cache:super::disk_cache::DiskPrefixCache)->Self {self.disk_cache=Some(RefCell::new(cache));self}
     /// Retention shares the session pool. The scheduler evicts idle snapshots before it admits more live bytes.
     pub fn schedule(&self)->(CacheLimits,Config) {
         let pool=self.pool;
@@ -707,10 +712,11 @@ impl<'a,C:Compute,W:Weights<C>> Service<'a,C,W> {
     fn fresh_for(&self,initial_tokens:usize)->Result<State<C::Value>> {
         let c=self.compute;
         let page_bytes=c.plane_page_bytes();
+        let empty=c.zeros(0)?;
         let visits=self.driver.layouts().iter().map(|l| {
             let (max_words,kv,after)=(l.rows*l.row_words,l.kv_taps*l.kv_channels,l.taps*l.channels);
             let init_words=l.plane_rows_for(initial_tokens,page_bytes)*l.row_words;
-            let room=||if l.ring {c.zeros(max_words)} else {c.plane_alloc(max_words,init_words)};
+            let room=||if l.ring {c.state_restore(&empty,max_words)} else {c.plane_alloc(max_words,init_words)};
             Ok(state::VisitState {keys:room()?,values:room()?,rings:[c.zeros(kv)?,c.zeros(kv)?,c.zeros(after)?,c.zeros(after)?],
                 next:std::array::from_fn(|_|None),planes:None,every:std::array::from_fn(|_|None),written:None})
         }).collect::<Result<Vec<_>>>()?;
@@ -814,6 +820,30 @@ impl<'a,C:Compute,W:Weights<C>> spark_serve::Engine for Service<'a,C,W> {
     fn lone_chat_rows(&self)->usize {if self.depth>0 {16.min(self.driver.limits().step_rows)} else {1}}
     fn step_batch<'s>(&'s self,rows:&mut [BatchRows<'_,Self::Session<'s>>])->std::result::Result<Vec<Predictions>,BatchError> {
         self.batch(rows,super::experts::Phase::Decode).map_err(|message|BatchError {request:None,message})
+    }
+    fn persist_prefix_snapshot<'s>(&'s self,scope:Option<&str>,session:&Self::Session<'s>,tokens:&[u32],next_logits:&[f32])->Result<()> {
+        let Some(disk)=self.disk_cache.as_ref() else {return Ok(());};
+        if !self.keep || !spark_serve::Session::can_fork(session) || session.position() as usize!=tokens.len() {return Ok(());}
+        let ChatState::Active(slot_idx)=session.state else {return Ok(());};
+        let slots=self.slots.borrow();
+        let Some(slot)=slots.get(slot_idx).and_then(Option::as_ref) else {return Ok(());};
+        let draft_src=session.draft.as_ref().map(|d|&d.chat)
+            .or_else(||session.restored_draft.as_ref().filter(|d|d.len() as u64==slot.state.position));
+        let draft=match (draft_src,self.model) {
+            (Some(chat),Some(model))=>Some((chat,model.config())),
+            _=>None,
+        };
+        disk.borrow_mut().save(self.compute,self.driver.layouts(),&slot.state,draft,scope,tokens,next_logits)
+    }
+    fn restore_prefix_from_disk<'s>(&'s self,scope:Option<&str>,prompt:&[u32],target_tokens:usize)->Result<Option<spark_serve::cache::CachedSession<Self::Session<'s>>>> {
+        let Some(disk)=self.disk_cache.as_ref() else {return Ok(None);};
+        if !self.keep || self.live.get()>=self.chats {return Ok(None);}
+        let draft_cfg=self.model.map(|m|m.config());
+        let Some(restored)=disk.borrow_mut().restore(self.compute,self.driver.layouts(),draft_cfg,scope,prompt,target_tokens)? else {return Ok(None);};
+        let super::disk_cache::DiskRestored {state,draft,tokens,next_logits,..}=restored;
+        let session=self.open_with(||Ok((state,draft)))?;
+        let reserved_session_bytes=spark_serve::Session::retained_bytes(&session).unwrap_or(self.chat_bytes);
+        Ok(Some(spark_serve::cache::CachedSession {checkpoint_lease:None,session,tokens,next_logits,reserved_session_bytes}))
     }
 }
 #[cfg(test)]

@@ -98,6 +98,7 @@ impl<'a> Backend<'a> {
             normed.as_ref().map(span), output.as_ref().map(span), post_out.as_ref().map(span),
             post_weight.map(span), post_weight_per_query,
         )?;
+        let fused_q = fast_ops::mix_one_fused_q(rows, asked, post_eps.is_some());
         let mut command = Command::new(Kind::FastMixBlend);
         let mut flags = fast_ops::MIX_ONE | u64::from(transpose);
         if post_eps.is_some() {
@@ -105,6 +106,7 @@ impl<'a> Backend<'a> {
             if !keep_mixed { flags |= fast_ops::MIX_ONE_SKIP_MIXED; }
             if post_weight_per_query { flags |= fast_ops::MIX_ONE_POST_WEIGHTS_PER_QUERY; }
             if post_half { flags |= fast_ops::MIX_ONE_POST_HALF_OUT; }
+            if fused_q { flags |= fast_ops::MIX_ONE_FUSED_Q; }
         }
         for (i, w) in [
             queries.device_address(), 0, output.as_ref().map_or(0, DeviceVector::device_address),
@@ -123,7 +125,11 @@ impl<'a> Backend<'a> {
             command.word(fast_ops::MIX_ONE_POST_EPS_AT, u64::from(pe.to_bits()));
         }
         let parts = fast_ops::mix_one_parts(rows, asked, dim);
-        let blocks = u32::try_from(asked * parts).map_err(|_| "fast mix one: grid overflow")?;
+        let blocks = if fused_q {
+            1
+        } else {
+            u32::try_from(asked * parts).map_err(|_| "fast mix one: grid overflow")?
+        };
         let grid = [blocks, rows as u32, 1, fast_ops::MIX_BLEND_THREADS as u32, 0];
         self.resident_completion()?;
         if !self.record_resident_block(Kind::FastMixBlend, command, grid)? {
@@ -539,7 +545,19 @@ impl<'a> Backend<'a> {
         fixed_taps: &DeviceVector<'_>, ring: Option<(&DeviceVector<'_>, usize)>, output: &mut DeviceVector<'_>,
         every: Option<(&mut DeviceVector<'_>, usize)>,
     ) -> Result<(), String> {
-        self.record_short_conv(rows, heads, dim, taps, form, bound, window, token_taps, addend, fixed_taps, ring, output, every, None, None)
+        self.record_short_conv(rows, heads, dim, taps, form, bound, window, token_taps, addend, fixed_taps, ring, output, every, None, None, None)
+    }
+
+    /// 2D tiled prefill `ShortConv` (`heads == 1`, no token taps, `taps in 2..=4`, `rows >= taps`)
+    /// writing both `output` and optional `next_ring` (`[taps][width]` FP32) in one launch.
+    #[allow(clippy::too_many_arguments, reason = "shape, form, device operands, and optional next ring")]
+    pub fn fast_short_conv_win_ring_into(
+        &self, rows: usize, heads: usize, dim: usize, taps: usize, form: u32, bound: f32,
+        window: &DeviceVector<'_>, token_taps: Option<&DeviceVector<'_>>, addend: Option<&DeviceVector<'_>>,
+        fixed_taps: &DeviceVector<'_>, ring: Option<(&DeviceVector<'_>, usize)>, output: &mut DeviceVector<'_>,
+        next_ring: Option<&mut DeviceVector<'_>>,
+    ) -> Result<(), String> {
+        self.record_short_conv(rows, heads, dim, taps, form, bound, window, token_taps, addend, fixed_taps, ring, output, None, None, None, next_ring)
     }
 
     #[allow(clippy::too_many_arguments, reason = "shape, multi-chat descriptor and device operands")]
@@ -549,7 +567,7 @@ impl<'a> Backend<'a> {
         fixed_taps: &DeviceVector<'_>, ring: &DeviceVector<'_>, output: &mut DeviceVector<'_>,
         every: &mut DeviceVector<'_>, multi: fast_ops::ShortConvMulti,
     ) -> Result<(), String> {
-        self.record_short_conv(rows, heads, dim, taps, form, bound, window, token_taps, addend, fixed_taps, Some((ring, 0)), output, Some((every, 0)), None, Some(multi))
+        self.record_short_conv(rows, heads, dim, taps, form, bound, window, token_taps, addend, fixed_taps, Some((ring, 0)), output, Some((every, 0)), None, Some(multi), None)
     }
 
     /// Direct per-chat ring pointer form of `fast_short_conv_multi_into`: passes up to `SHORT_CONV_MULTI_CHATS_MAX`
@@ -679,7 +697,18 @@ impl<'a> Backend<'a> {
         fixed_taps: &DeviceVector<'_>, ring: (&DeviceVector<'_>, usize), plane: &mut DeviceVector<'_>, kv: fast_ops::KvWrite,
     ) -> Result<(), String> {
         self.record_short_conv(rows, shape.heads as usize, shape.dim as usize, shape.taps as usize, shape.cols, shape.bound,
-            window, token_taps, None, fixed_taps, Some(ring), plane, None, Some(kv), None)
+            window, token_taps, None, fixed_taps, Some(ring), plane, None, Some(kv), None, None)
+    }
+
+    /// Convolve prompt keys or values, finish each head into the KV plane, and write `next_ring` in the same launch.
+    #[allow(clippy::too_many_arguments, reason = "shape, taps, KV plane, and optional next ring")]
+    pub fn fast_short_conv_kv_ring_into(
+        &self, shape: crate::block_ops::Shape, rows: usize, window: &DeviceVector<'_>, token_taps: Option<&DeviceVector<'_>>,
+        fixed_taps: &DeviceVector<'_>, ring: (&DeviceVector<'_>, usize), plane: &mut DeviceVector<'_>, kv: fast_ops::KvWrite,
+        next_ring: Option<&mut DeviceVector<'_>>,
+    ) -> Result<(), String> {
+        self.record_short_conv(rows, shape.heads as usize, shape.dim as usize, shape.taps as usize, shape.cols, shape.bound,
+            window, token_taps, None, fixed_taps, Some(ring), plane, None, Some(kv), None, next_ring)
     }
 
     #[allow(clippy::too_many_arguments, reason = "shape, form and device operands")]
@@ -688,6 +717,7 @@ impl<'a> Backend<'a> {
         window: &DeviceVector<'_>, token_taps: Option<&DeviceVector<'_>>, addend: Option<&DeviceVector<'_>>,
         fixed_taps: &DeviceVector<'_>, ring: Option<(&DeviceVector<'_>, usize)>, output: &mut DeviceVector<'_>,
         every: Option<(&mut DeviceVector<'_>, usize)>, kv: Option<fast_ops::KvWrite>, multi: Option<fast_ops::ShortConvMulti>,
+        next_ring: Option<&mut DeviceVector<'_>>,
     ) -> Result<(), String> {
         if self.arm_capture() { return Err("fast short conv: refused inside a stream capture".into()); }
         self.require_resident_stream()?;
@@ -731,6 +761,24 @@ impl<'a> Backend<'a> {
             self.check_vector(v, rows * taps * width)?;
             if v.is_segmented() || !v.writable_from(0) { return Err("fast short conv: kept rings require private contiguous storage".into()); }
         }
+        let tiled = kv.is_none() && ring.is_some() && every.is_none()
+            && heads == 1 && (form & crate::block_stream::CONV_TOKEN_TAPS) == 0
+            && (2..=fast_ops::ROUTE_FOLD_CONV_TAPS_MAX).contains(&taps) && rows >= 2;
+        let kv_tiled = kv.is_some() && (2..=fast_ops::ROUTE_FOLD_CONV_TAPS_MAX).contains(&taps) && rows >= taps;
+        if let Some(nr) = next_ring.as_deref() {
+            if !(kv_tiled || (tiled && rows >= taps)) {
+                return Err("fast short conv: next_ring requires tiled prefill launch".into());
+            }
+            self.check_vector(nr, taps * width)?;
+            if nr.is_segmented() || !nr.writable_from(0) {
+                return Err("fast short conv: next_ring requires private contiguous storage".into());
+            }
+            let nr_span = span(nr);
+            let other = [Some(span(window)), token_taps.map(span), addend.map(span), Some(span(fixed_taps)), ring.map(|(v, _)| span(v)), Some(span(output))];
+            if other.iter().flatten().any(|s| nr_span.meets(*s)) {
+                return Err("fast short conv: next_ring overlaps operand".into());
+            }
+        }
         let kind = if kv.is_some() { Kind::FastRowDots } else { Kind::FastStreamOps };
         self.require_arm_kernels(&[kind.kernel()])?;
         self.resident_completion()?;
@@ -758,22 +806,31 @@ impl<'a> Backend<'a> {
             command.word(fast_ops::SHORT_CONV_MULTI_MASK_3, m.start_mask[3]);
         }
         let threads = if kv.is_some() { fast_ops::ROW_DOTS_THREADS } else { fast_ops::STREAM_OPS_THREADS };
-        let tiled = kv.is_none() && ring.is_some() && every.is_none()
-            && heads == 1 && (form & crate::block_stream::CONV_TOKEN_TAPS) == 0
-            && (2..=fast_ops::ROUTE_FOLD_CONV_TAPS_MAX).contains(&taps) && rows >= 2;
         let grid = if tiled {
-            command.word(15, fast_ops::SHORT_CONV_PREFILL_TILE as u64);
+            let tile = fast_ops::SHORT_CONV_PREFILL_TILE;
+            command.word(15, tile as u64);
+            command.word(fast_ops::SHORT_CONV_NEXT_RING_WORD, next_ring.as_ref().map_or(0, |v| v.device_address()));
             let gx = u32::try_from(width.div_ceil(threads)).map_err(|_| "fast short conv: grid overflow")?;
-            let gy = u32::try_from(rows.div_ceil(fast_ops::SHORT_CONV_PREFILL_TILE)).map_err(|_| "fast short conv: grid overflow")?;
+            let gy = u32::try_from(rows.div_ceil(tile)).map_err(|_| "fast short conv: grid overflow")?;
             [gx, gy, 1, threads as u32, 0]
+        } else if let Some(kv) = kv {
+            command.word(fast_ops::KV_FINISH_WORD, if kv.clip { fast_ops::CONV_KV_CLIP } else { fast_ops::CONV_KV_NORM });
+            command.word(17, u64::from(kv.param.to_bits()));
+            command.word(18, kv.first as u64);
+            command.word(19, kv.plane_rows as u64);
+            if kv_tiled {
+                let tile = fast_ops::kv_prefill_tile(rows);
+                command.word(fast_ops::KV_NEXT_RING_WORD, next_ring.as_ref().map_or(0, |v| v.device_address()));
+                command.word(fast_ops::KV_PREFILL_TILE_WORD, tile as u64);
+                let gx = u32::try_from(heads).map_err(|_| "fast short conv: grid overflow")?;
+                let gy = u32::try_from(fast_ops::conv_kv_tiled_blocks_y(rows, tile)).map_err(|_| "fast short conv: grid overflow")?;
+                [gx, gy, 1, threads as u32, 0]
+            } else {
+                let blocks = fast_ops::conv_kv_blocks(rows, heads);
+                [u32::try_from(blocks).map_err(|_| "fast short conv: grid overflow")?, 1, 1, threads as u32, 0]
+            }
         } else {
-            let blocks = if let Some(kv) = kv {
-                command.word(fast_ops::KV_FINISH_WORD, if kv.clip { fast_ops::CONV_KV_CLIP } else { fast_ops::CONV_KV_NORM });
-                command.word(17, u64::from(kv.param.to_bits()));
-                command.word(18, kv.first as u64);
-                command.word(19, kv.plane_rows as u64);
-                fast_ops::conv_kv_blocks(rows, heads)
-            } else if ring.is_some() && every.is_none() {
+            let blocks = if ring.is_some() && every.is_none() {
                 rows
             } else {
                 fast_ops::stream_ops_blocks(rows, width)
@@ -976,17 +1033,18 @@ impl<'a> Backend<'a> {
         self.require_arm_kernels(&[Kind::FastStreamOps.kernel()])?;
         self.resident_completion()?;
         let mut command = Command::new(Kind::FastStreamOps);
+        let tile = fast_ops::route_fold_prefill_tile(rows);
         let words = [
             fast_ops::STREAM_OP_ROUTE_FOLD_CONV_PREFILL,
             weights.device_address(), downs_half.device_address(), residual.device_address(),
             fixed.device_address(), output.device_address(),
             rows as u64, dim as u64, picks as u64, taps as u64, first_slot as u64, u64::from(bound.to_bits()),
-            ring.device_address(), next_ring.device_address(),
+            ring.device_address(), next_ring.device_address(), tile as u64,
         ];
         for (i, w) in words.into_iter().enumerate() { command.word(i, w); }
-        let gx = u32::try_from(dim.div_ceil(fast_ops::STREAM_OPS_THREADS)).map_err(|_| "fast route fold conv prefill: grid overflow")?;
-        let gy = u32::try_from(rows.div_ceil(fast_ops::SHORT_CONV_PREFILL_TILE)).map_err(|_| "fast route fold conv prefill: grid overflow")?;
-        let grid = [gx, gy, 1, fast_ops::STREAM_OPS_THREADS as u32, 0];
+        let gx = u32::try_from((dim / 2).div_ceil(fast_ops::ROUTE_FOLD_PREFILL_THREADS)).map_err(|_| "fast route fold conv prefill: grid overflow")?;
+        let gy = u32::try_from(rows.div_ceil(tile)).map_err(|_| "fast route fold conv prefill: grid overflow")?;
+        let grid = [gx, gy, 1, fast_ops::ROUTE_FOLD_PREFILL_THREADS as u32, 0];
         if !self.record_resident_block(Kind::FastStreamOps, command, grid)? {
             return Err("fast route fold conv prefill: launches are not recorded now".into());
         }

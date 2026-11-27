@@ -15,7 +15,11 @@
 //! Launch: 1 block of 256 threads. Static shared memory = 77,824 bytes.
 
 use crate::tc_ptx::{load_u32, match_any_u32, store_u16, store_u32};
-use crate::tc_rows::{MOE_ALL_MAX, MOE_EXPERTS_MAX, MOE_ROUTE_THREADS, TC_BM, moe_route_admitted};
+use crate::tc_rows::{
+    MOE_ALL_MAX, MOE_EXPERTS_MAX, MOE_ROUTE_BLOCKS_MAX, MOE_ROUTE_PHASE_COUNT,
+    MOE_ROUTE_PHASE_SCAN, MOE_ROUTE_PHASE_SCATTER, MOE_ROUTE_PHASE_SINGLE, MOE_ROUTE_THREADS,
+    TC_BM, moe_route_admitted,
+};
 
 const SLICES: usize = 8;
 const IDS_BYTES: usize = MOE_ALL_MAX * 2; // 65,536 bytes (u16 per pick)
@@ -53,61 +57,40 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
         let c = &*table.add(index as usize);
         if c.kind != crate::inkling_launch::MOE_GROUP_ROUTE { core::arch::nvptx::trap(); }
         let words = c.payload.as_ptr().cast::<u64>();
-        let route = *words as *const f32;
-        let weights_out = *words.add(1) as *mut f32;
-        let in_rows_out = *words.add(2) as *mut u32;
-        let out_slots_out = *words.add(3) as *mut u32;
-        let tile_meta_out = *words.add(4) as *mut u32;
         let rows = *words.add(5) as usize;
         let each = *words.add(6) as usize;
         let picks = *words.add(7) as usize;
         let experts = *words.add(8) as usize;
         let max_m_tiles = *words.add(9) as usize;
+        let phase = *words.add(10);
 
         let threads = core::arch::nvptx::_block_dim_x() as usize;
-        if core::arch::nvptx::_block_idx_x() != 0 || core::arch::nvptx::_grid_dim_x() != 1 { core::arch::nvptx::trap(); }
         if !moe_route_admitted(rows, each, picks, experts, max_m_tiles, threads) { core::arch::nvptx::trap(); }
-        if ((route as usize) | (weights_out as usize) | (in_rows_out as usize) | (out_slots_out as usize) | (tile_meta_out as usize)) & 3 != 0 {
+        if ((*words as usize) | (*words.add(1) as usize) | (*words.add(2) as usize) | (*words.add(3) as usize) | (*words.add(4) as usize)) & 3 != 0 {
             core::arch::nvptx::trap();
         }
 
         let all = rows * picks;
         let tid = core::arch::nvptx::_thread_idx_x() as usize;
+        let (warp, lane) = (tid / LANES, tid % LANES);
         let smem = crate::ptx::shared::<BLOCK_BYTES>();
         let ids_base = smem;
         let hist_base = smem + IDS_BYTES as u32;
         let off_base = hist_base + HIST_BYTES as u32;
         let toff_base = off_base + OFF_BYTES as u32;
 
-        // Pass 1: Zero `hist` (only `SLICES * experts` u16s) and extract+validate `route` -> `ids_smem` & `weights_out`.
-        let hist_u32 = (SLICES * experts).div_ceil(2);
-        let mut i = tid;
-        while i < hist_u32 {
-            store_u32(hist_base + (i * 4) as u32, 0);
-            i += MOE_ROUTE_THREADS;
-        }
-        let mut p = tid;
-        while p < all {
-            let row = p / picks;
-            let slot = p % picks;
-            let id_f = *route.add(row * each + slot);
-            if !(id_f >= 0.0 && id_f < experts as f32) || (id_f as u32) as f32 != id_f || id_f as u32 >= experts as u32 {
-                core::arch::nvptx::trap();
+        macro_rules! zero_hist {() => {{
+            let hist_u32 = (SLICES * experts).div_ceil(2);
+            let mut i = tid;
+            while i < hist_u32 {
+                store_u32(hist_base + (i * 4) as u32, 0);
+                i += MOE_ROUTE_THREADS;
             }
-            store_u16(ids_base + (p * 2) as u32, id_f as u16);
-            *weights_out.add(p) = *route.add(row * each + picks + slot);
-            p += MOE_ROUTE_THREADS;
-        }
-        core::arch::nvptx::_syncthreads();
-
-        // Pass 2: 8 slices count picks per expert in parallel (zero atomics, fixed partition), warp `s` slice `s`, 32
-        // picks a group: the lanes of one expert in a group find each other (`match.any.sync`), and the highest of them
-        // adds their count. A `bar.warp.sync` orders each group's updates before the next group's.
-        let (warp, lane) = (tid / LANES, tid % LANES);
-        let below = (1u32 << lane) - 1;
-        let slice = |s: usize| ((all * s) / SLICES, (all * (s + 1)) / SLICES);
-        {
-            let (start, end) = slice(warp);
+        }};}
+        macro_rules! count_slices {($n_items:expr) => {{
+            let n = $n_items;
+            let start = (n * warp) / SLICES;
+            let end = (n * (warp + 1)) / SLICES;
             let row_hist = hist_base + (warp * experts * 2) as u32;
             let mut k0 = start;
             while k0 < end {
@@ -121,7 +104,217 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
                 crate::ptx::warp_sync();
                 k0 += LANES;
             }
+        }};}
+        macro_rules! scan_experts_and_meta {($tile_meta_out:expr) => {{
+            if tid == 0 {
+                let mut off = 0u32;
+                let mut toff = 0u32;
+                let mut ex = 0usize;
+                while ex < experts {
+                    let cnt = load_u32(off_base + (ex * 4) as u32);
+                    store_u32(off_base + (ex * 4) as u32, off);
+                    store_u32(toff_base + (ex * 4) as u32, toff);
+                    off += cnt;
+                    toff += cnt.div_ceil(TC_BM as u32);
+                    ex += 1;
+                }
+                if off != all as u32 || toff > max_m_tiles as u32 { core::arch::nvptx::trap(); }
+                *$tile_meta_out = toff;
+            }
+            core::arch::nvptx::_syncthreads();
+        }};}
+        macro_rules! emit_meta_for {($tile_meta_out:expr, $e:expr, $base:expr) => {{
+            let e = $e;
+            let base = $base;
+            let next = if e + 1 < experts { load_u32(off_base + ((e + 1) * 4) as u32) } else { all as u32 };
+            let cnt = next - base;
+            let tbase = load_u32(toff_base + (e * 4) as u32);
+            let ntiles = cnt.div_ceil(TC_BM as u32);
+            let mut t = 0u32;
+            while t < ntiles {
+                let rem = cnt - t * TC_BM as u32;
+                let m_cnt = if rem > TC_BM as u32 { TC_BM as u32 } else { rem };
+                let out = $tile_meta_out.add(1 + 3 * (tbase + t) as usize);
+                *out = e as u32;
+                *out.add(1) = base + t * TC_BM as u32;
+                *out.add(2) = m_cnt;
+                t += 1;
+            }
+        }};}
+        macro_rules! scatter_slices {($p_start:expr, $n_items:expr) => {{
+            let in_rows_out = *words.add(2) as *mut u32;
+            let out_slots_out = *words.add(3) as *mut u32;
+            let below = (1u32 << lane) - 1;
+            let p_start = $p_start;
+            let n = $n_items;
+            let start = (n * warp) / SLICES;
+            let end = (n * (warp + 1)) / SLICES;
+            let row_hist = hist_base + (warp * experts * 2) as u32;
+            let pu = picks as u32;
+            let mut k0 = start;
+            while k0 < end {
+                let k = k0 + lane;
+                let e = if k < end { crate::ptx::load_u16(ids_base + (k * 2) as u32) } else { NO_EXPERT };
+                let same = match_any_u32(e);
+                let addr = row_hist + e.wrapping_mul(2);
+                let pos = if e != NO_EXPERT { crate::ptx::load_u16(addr) + (same & below).count_ones() } else { 0 };
+                crate::ptx::warp_sync();
+                if e != NO_EXPERT {
+                    if (same >> lane) == 1 { store_u16(addr, (pos + 1) as u16); }
+                    let gk = (p_start + k) as u32;
+                    *in_rows_out.add(pos as usize) = gk / pu;
+                    *out_slots_out.add(pos as usize) = gk;
+                }
+                crate::ptx::warp_sync();
+                k0 += LANES;
+            }
+        }};}
+
+        if phase != MOE_ROUTE_PHASE_SINGLE {
+            let block_hist = *words.add(11) as *mut u32;
+            let ids_buf = *words.add(12) as *mut u16;
+            let blocks = *words.add(13) as usize;
+            if blocks < 2 || blocks > MOE_ROUTE_BLOCKS_MAX
+                || block_hist.is_null() || ids_buf.is_null()
+                || ((block_hist as usize) | (ids_buf as usize)) & 3 != 0
+            {
+                core::arch::nvptx::trap();
+            }
+            let b = core::arch::nvptx::_block_idx_x() as usize;
+            let gdx = core::arch::nvptx::_grid_dim_x() as usize;
+            if phase == MOE_ROUTE_PHASE_COUNT {
+                if gdx != blocks || b >= blocks { core::arch::nvptx::trap(); }
+                let route = *words as *const f32;
+                let weights_out = *words.add(1) as *mut f32;
+                let r_start = (rows * b) / blocks;
+                let r_end = (rows * (b + 1)) / blocks;
+                let p_start = r_start * picks;
+                let n_picks = (r_end - r_start) * picks;
+                let pu = picks as u32;
+                zero_hist!();
+                let mut i = tid;
+                while i < n_picks {
+                    let iu = i as u32;
+                    let r = r_start + (iu / pu) as usize;
+                    let slot = (iu % pu) as usize;
+                    let id_f = *route.add(r * each + slot);
+                    if !(id_f >= 0.0 && id_f < experts as f32) || (id_f as u32) as f32 != id_f || id_f as u32 >= experts as u32 {
+                        core::arch::nvptx::trap();
+                    }
+                    let id_u16 = id_f as u16;
+                    store_u16(ids_base + (i * 2) as u32, id_u16);
+                    *ids_buf.add(p_start + i) = id_u16;
+                    *weights_out.add(p_start + i) = *route.add(r * each + picks + slot);
+                    i += MOE_ROUTE_THREADS;
+                }
+                core::arch::nvptx::_syncthreads();
+                count_slices!(n_picks);
+                core::arch::nvptx::_syncthreads();
+                let mut e = tid;
+                while e < experts {
+                    let mut sum = 0u32;
+                    let mut s = 0usize;
+                    while s < SLICES {
+                        sum += crate::ptx::load_u16(hist_base + ((s * experts + e) * 2) as u32);
+                        s += 1;
+                    }
+                    *block_hist.add(b * experts + e) = sum;
+                    e += MOE_ROUTE_THREADS;
+                }
+                return;
+            }
+            if phase == MOE_ROUTE_PHASE_SCAN {
+                if gdx != 1 || b != 0 { core::arch::nvptx::trap(); }
+                let tile_meta_out = *words.add(4) as *mut u32;
+                let mut e = tid;
+                while e < experts {
+                    let mut sum = 0u32;
+                    let mut blk = 0usize;
+                    while blk < blocks {
+                        let ptr = block_hist.add(blk * experts + e);
+                        let cnt = *ptr;
+                        *ptr = sum;
+                        sum += cnt;
+                        blk += 1;
+                    }
+                    store_u32(off_base + (e * 4) as u32, sum);
+                    e += MOE_ROUTE_THREADS;
+                }
+                core::arch::nvptx::_syncthreads();
+                scan_experts_and_meta!(tile_meta_out);
+                let mut e = tid;
+                while e < experts {
+                    let base = load_u32(off_base + (e * 4) as u32);
+                    emit_meta_for!(tile_meta_out, e, base);
+                    let mut blk = 0usize;
+                    while blk < blocks {
+                        let ptr = block_hist.add(blk * experts + e);
+                        *ptr += base;
+                        blk += 1;
+                    }
+                    e += MOE_ROUTE_THREADS;
+                }
+                return;
+            }
+            if phase == MOE_ROUTE_PHASE_SCATTER {
+                if gdx != blocks || b >= blocks { core::arch::nvptx::trap(); }
+                let r_start = (rows * b) / blocks;
+                let r_end = (rows * (b + 1)) / blocks;
+                let p_start = r_start * picks;
+                let n_picks = (r_end - r_start) * picks;
+                zero_hist!();
+                let mut i = tid;
+                while i < n_picks {
+                    store_u16(ids_base + (i * 2) as u32, *ids_buf.add(p_start + i));
+                    i += MOE_ROUTE_THREADS;
+                }
+                core::arch::nvptx::_syncthreads();
+                count_slices!(n_picks);
+                core::arch::nvptx::_syncthreads();
+                let mut e = tid;
+                while e < experts {
+                    let mut sum = *block_hist.add(b * experts + e);
+                    let mut s = 0usize;
+                    while s < SLICES {
+                        let addr = hist_base + ((s * experts + e) * 2) as u32;
+                        let cnt = crate::ptx::load_u16(addr);
+                        store_u16(addr, sum as u16);
+                        sum += cnt;
+                        s += 1;
+                    }
+                    e += MOE_ROUTE_THREADS;
+                }
+                core::arch::nvptx::_syncthreads();
+                scatter_slices!(p_start, n_picks);
+                return;
+            }
+            core::arch::nvptx::trap();
         }
+
+        if core::arch::nvptx::_block_idx_x() != 0 || core::arch::nvptx::_grid_dim_x() != 1 { core::arch::nvptx::trap(); }
+
+        // Pass 1: Zero `hist` (only `SLICES * experts` u16s) and extract+validate `route` -> `ids_smem` & `weights_out`.
+        zero_hist!();
+        let route = *words as *const f32;
+        let weights_out = *words.add(1) as *mut f32;
+        let pu = picks as u32;
+        let mut p = tid;
+        while p < all {
+            let pu_p = p as u32;
+            let row = (pu_p / pu) as usize;
+            let slot = (pu_p % pu) as usize;
+            let id_f = *route.add(row * each + slot);
+            if !(id_f >= 0.0 && id_f < experts as f32) || (id_f as u32) as f32 != id_f || id_f as u32 >= experts as u32 {
+                core::arch::nvptx::trap();
+            }
+            store_u16(ids_base + (p * 2) as u32, id_f as u16);
+            *weights_out.add(p) = *route.add(row * each + picks + slot);
+            p += MOE_ROUTE_THREADS;
+        }
+        core::arch::nvptx::_syncthreads();
+
+        // Pass 2: 8 slices count picks per expert in parallel (zero atomics, fixed partition).
+        count_slices!(all);
         core::arch::nvptx::_syncthreads();
 
         // Pass 3a: Per-expert exclusive prefix sum across the 8 slices; store total count in `off_base[e]`.
@@ -142,41 +335,14 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
         core::arch::nvptx::_syncthreads();
 
         // Pass 3b: Exclusive prefix sum across experts for pick offsets and M-tile offsets (thread 0, <= 512 iters).
-        if tid == 0 {
-            let mut off = 0u32;
-            let mut toff = 0u32;
-            let mut ex = 0usize;
-            while ex < experts {
-                let cnt = load_u32(off_base + (ex * 4) as u32);
-                store_u32(off_base + (ex * 4) as u32, off);
-                store_u32(toff_base + (ex * 4) as u32, toff);
-                off += cnt;
-                toff += cnt.div_ceil(TC_BM as u32);
-                ex += 1;
-            }
-            if off != all as u32 || toff > max_m_tiles as u32 { core::arch::nvptx::trap(); }
-            *tile_meta_out = toff;
-        }
-        core::arch::nvptx::_syncthreads();
+        let tile_meta_out = *words.add(4) as *mut u32;
+        scan_experts_and_meta!(tile_meta_out);
 
         // Pass 3c: Add `expert_offset[e]` into every `hist[s][e]` and emit `tile_meta_out` for expert `e`.
         let mut e = tid;
         while e < experts {
             let base = load_u32(off_base + (e * 4) as u32);
-            let next = if e + 1 < experts { load_u32(off_base + ((e + 1) * 4) as u32) } else { all as u32 };
-            let cnt = next - base;
-            let tbase = load_u32(toff_base + (e * 4) as u32);
-            let ntiles = cnt.div_ceil(TC_BM as u32);
-            let mut t = 0u32;
-            while t < ntiles {
-                let rem = cnt - t * TC_BM as u32;
-                let m_cnt = if rem > TC_BM as u32 { TC_BM as u32 } else { rem };
-                let out = tile_meta_out.add(1 + 3 * (tbase + t) as usize);
-                *out = e as u32;
-                *out.add(1) = base + t * TC_BM as u32;
-                *out.add(2) = m_cnt;
-                t += 1;
-            }
+            emit_meta_for!(tile_meta_out, e, base);
             let mut s = 0usize;
             while s < SLICES {
                 let addr = hist_base + ((s * experts + e) * 2) as u32;
@@ -188,28 +354,7 @@ pub(crate) unsafe fn replay(table: *const crate::inkling_launch::Command, index:
         }
         core::arch::nvptx::_syncthreads();
 
-        // Pass 4: 8 slices scatter `in_rows_out` and `out_slots_out` in strictly ascending pick order per expert, warp
-        // `s` slice `s`, 32 picks a group: a lane's place is its expert's next place plus the count of the lanes below
-        // it with the same expert, and the highest of those lanes moves the next place past all of them.
-        {
-            let (start, end) = slice(warp);
-            let row_hist = hist_base + (warp * experts * 2) as u32;
-            let mut k0 = start;
-            while k0 < end {
-                let k = k0 + lane;
-                let e = if k < end { crate::ptx::load_u16(ids_base + (k * 2) as u32) } else { NO_EXPERT };
-                let same = match_any_u32(e);
-                let addr = row_hist + e.wrapping_mul(2);
-                let pos = if e != NO_EXPERT { crate::ptx::load_u16(addr) + (same & below).count_ones() } else { 0 };
-                crate::ptx::warp_sync();
-                if e != NO_EXPERT {
-                    if (same >> lane) == 1 { store_u16(addr, (pos + 1) as u16); }
-                    *in_rows_out.add(pos as usize) = (k / picks) as u32;
-                    *out_slots_out.add(pos as usize) = k as u32;
-                }
-                crate::ptx::warp_sync();
-                k0 += LANES;
-            }
-        }
+        // Pass 4: 8 slices scatter `in_rows_out` and `out_slots_out` in strictly ascending pick order per expert.
+        scatter_slices!(0usize, all);
     }
 }

@@ -1,7 +1,7 @@
 //! Load-time product of a BF16 vocabulary head and the hidden projection, including its bias column.
 //! Each lane accumulates one output in ascending hidden index, in FP64, then converts once to FP32.
 /// # Safety
-/// Launch from Backend::fold_markov with its validated shape and live disjoint output.
+/// SAFETY: Launch from Backend::fold_markov with its validated shape and live disjoint output.
 #[no_mangle]
 pub unsafe extern "ptx-kernel" fn inkling_markov_fold(args:[u64;6]) {
     let [head,hidden_out,output,rows,hidden,columns]=args;

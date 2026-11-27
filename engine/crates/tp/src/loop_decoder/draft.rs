@@ -14,6 +14,23 @@ pub trait Lanes:Compute {
     fn draft_norm(&self,x:&Self::Value,rows:usize,width:usize,eps:f32,weight:&Self::Value)->Result<Self::Value>;
     /// Leave the greedy pick `[best, id, flag]` on the device for the next draft step.
     fn greedy_on_device(&self,logits:&Self::Value)->Result<Self::Value>;
+    /// Batched virtual-KV draft flash attention across `1..=32` chats (falls back when unsupported).
+    #[allow(clippy::too_many_arguments)]
+    fn flash_attn_batch(
+        &self,_q:&Self::Value,_k_new:&Self::Value,_v_new:&Self::Value,
+        _chats:&[(&Self::Value,&Self::Value,usize,usize,usize)],
+        _heads:usize,_kv:usize,_width:usize,_q_rows:usize,_new_rows:usize,
+        _kv_bf16:bool,_k_new_bf16:bool,_causal_base:usize,_row_off:usize,
+    )->Result<Self::Value> {Err("loop draft: flash_attn_batch unavailable".into())}
+    /// Batched split-K merge across `1..=32` chats.
+    fn flash_attn_merge_batch(
+        &self,_part:&Self::Value,_splits:&[usize],_heads:usize,_q_rows:usize,_max_splits:usize,
+    )->Result<Self::Value> {Err("loop draft: flash_attn_merge_batch unavailable".into())}
+    /// Batched KV scatter across `1..=32` chats; returns `Ok(false)` to fall back to per-chat `state_fill`.
+    fn scatter_kv_batch(
+        &self,_k_src:&Self::Value,_v_src:&Self::Value,_total_rows:usize,_kv_u32_stride:usize,_v_is_fp32:bool,
+        _chats:&mut [(&mut Self::Value,&mut Self::Value,usize,usize,usize)],
+    )->Result<bool> {Ok(false)}
 }
 /// Bound the shared immutable phase table independently of the advertised
 /// context. Later positions keep the original calculation.
@@ -111,8 +128,30 @@ impl<V> Matrix<V> {
     }
 }
 struct Layer<V> {q:Matrix<V>,k:Matrix<V>,v:Matrix<V>,k_ctx:Matrix<V>,v_ctx:Matrix<V>,o:Matrix<V>,gate:Matrix<V>,up:Matrix<V>,down:Matrix<V>,
-    qkv:Option<packed::Siblings<V>>,gate_up:Option<packed::Siblings<V>>}
+    qkv:Option<packed::Siblings<V>>,kv_ctx:Option<packed::Siblings<V>>,gate_up:Option<packed::Siblings<V>>}
 impl<V> Layer<V> {
+    /// The rounded k_ctx and v_ctx rows of one normalized context block: one launch when `n <= PANEL_INPUTS_MAX`.
+    fn kv_ctx<C:ResidentProduct<V>+Lanes>(&self,c:&C,x:&C::Value,n:usize)->Result<[C::Value;2]> {
+        const MAX:usize=spark_gpu_probe::draft_ops::PANEL_INPUTS_MAX;
+        if let Some(fused)=&self.kv_ctx {
+            let [k,v,_]=fused.rows();
+            if n<=MAX {
+                let out=fused.project(c,x,n)?;
+                return Ok([c.range(&out,0,k*n)?,c.range(&out,k*n,v*n)?]);
+            }
+            let cols=fused.columns();
+            let (mut ks,mut vs)=(Vec::new(),Vec::new());
+            for start in (0..n).step_by(MAX) {
+                let count=(n-start).min(MAX);
+                let out=fused.project(c,&c.range(x,start*cols,count*cols)?,count)?;
+                ks.push(c.range(&out,0,k*count)?);
+                vs.push(c.range(&out,k*count,v*count)?);
+            }
+            return Ok([c.join(&ks.iter().collect::<Vec<_>>())?,c.join(&vs.iter().collect::<Vec<_>>())?]);
+        }
+        let input=self.k_ctx.prepare(c,x,n)?;
+        Ok([self.k_ctx.rounded_shared(c,x,n,input.as_ref())?,self.v_ctx.rounded_shared(c,x,n,input.as_ref())?])
+    }
     /// The rounded q, k and v rows of one normalized block: one launch when `n <= PANEL_INPUTS_MAX`, else 32-row slabs.
     fn qkv<C:ResidentProduct<V>+Lanes>(&self,c:&C,x:&C::Value,n:usize)->Result<[C::Value;3]> {
         const MAX:usize=spark_gpu_probe::draft_ops::PANEL_INPUTS_MAX;
@@ -174,7 +213,15 @@ pub struct Drafter<'a,V,A> {
     w1:A,rnn_bias:A,fold_bias:Option<A>,mask:A,alpha:Vec<A>,
     norms:Vec<Norms<A>>,markov_norm:A,final_norm:A,phases:A,
 }
-pub struct DraftChat<A> {kv:Vec<Option<(A,A)>>,local_base:Vec<usize>,feature:Option<A>,len:usize,limit:usize}
+pub struct DraftChat<A> {kv:Vec<Option<(A,A)>>,local_base:Vec<usize>,feature:Option<A>,len:usize,limit:usize,kv_bf16:bool}
+/// Stored words per draft KV row (`kv_width / 2` when BF16-packed, `kv_width` when FP32).
+pub(super) fn kv_row_words(cfg:&MtpConfig,bf16:bool)->usize {if bf16 {cfg.kv_width()/2} else {cfg.kv_width()}}
+/// Committed tensor slices of a `DraftChat` for bit-exact disk persistence.
+pub(super) struct DraftExport<'a,A> {
+    /// Per draft layer: `(keys, values, start_word_offset, word_count)`.
+    pub layers:Vec<(&'a A,&'a A,usize,usize)>,
+    pub feature:Option<&'a A>,
+}
 /// Grow committed rows geometrically. Temporary proposal rows need only their
 /// own tail, including when the committed prefix fills a power of two exactly.
 fn kv_capacity(committed:usize,temporary:usize,limit:usize)->usize {
@@ -187,15 +234,19 @@ pub(crate) fn local_kv_cap(cfg:&MtpConfig,limit:usize)->usize {
     let temp=cfg.block_size.saturating_mul(2);
     keep.saturating_add(temp).saturating_add(keep.max(64)).next_multiple_of(64).min(limit).max(1)
 }
-/// Paged capacity (in rows) for a global draft attention layer at `needed` rows and `page_bytes` granularity.
-pub(crate) fn global_kv_rows(cfg:&MtpConfig,needed:usize,limit:usize,page_bytes:usize)->usize {
+/// Paged capacity (in rows) for a global draft attention layer with `kv_words` words per row.
+fn global_kv_rows_words(kv_words:usize,needed:usize,limit:usize,page_bytes:usize)->usize {
     let needed=needed.max(1).min(limit);
-    let row_bytes=cfg.kv_width().saturating_mul(4);
+    let row_bytes=kv_words.saturating_mul(4);
     if page_bytes==0 || row_bytes==0 || limit.saturating_mul(row_bytes)<page_bytes {
         return kv_capacity(needed,0,limit);
     }
     let page_rows=page_bytes.div_ceil(row_bytes).max(1);
     needed.div_ceil(page_rows).saturating_mul(page_rows).min(limit)
+}
+/// Paged capacity (in rows) for a global draft attention layer at `needed` rows and `page_bytes` granularity.
+pub(crate) fn global_kv_rows(cfg:&MtpConfig,needed:usize,limit:usize,page_bytes:usize)->usize {
+    global_kv_rows_words(cfg.kv_width(),needed,limit,page_bytes)
 }
 /// Total draft KV bytes (K + V across all draft layers) reserved for a chat at `tokens` tokens.
 pub(crate) fn draft_kv_bytes(cfg:&MtpConfig,tokens:usize,limit:usize,page_bytes:usize)->usize {
@@ -243,7 +294,7 @@ fn draft_kv_bytes_bounds_local_layers_and_pages_global_layer_without_256k_cliff(
     assert!(at_256k<2_300*1024*1024,"256K draft KV uses only 1 global layer (~2.1 GB), not 3x (~6.4 GB)");
 }
 fn push_layer_kv_for<C:Compute>(cfg:&MtpConfig,c:&C,chat:&mut DraftChat<C::Value>,layer:usize,k:&C::Value,v:&C::Value,rows:usize)->Result<()> {
-    let kv=cfg.kv_width();
+    let kv=kv_row_words(cfg,chat.kv_bf16);
     let end=chat.len.checked_add(rows).ok_or("draft context overflow")?;
     let temp=cfg.block_size.saturating_mul(2);
     let need_tail=temp.min(chat.limit.saturating_sub(end));
@@ -300,7 +351,7 @@ fn push_layer_kv_for<C:Compute>(cfg:&MtpConfig,c:&C,chat:&mut DraftChat<C::Value
     }
     let page_bytes=c.plane_page_bytes();
     let need_rows=end.saturating_add(temp).min(chat.limit);
-    let want_rows=global_kv_rows(cfg,need_rows,chat.limit,page_bytes);
+    let want_rows=global_kv_rows_words(kv,need_rows,chat.limit,page_bytes);
     let want_words=want_rows.checked_mul(kv).ok_or("draft cache shape overflow")?;
     let max_words=chat.limit.checked_mul(kv).ok_or("draft cache shape overflow")?;
     if chat.kv[layer].is_none() {
@@ -315,6 +366,68 @@ fn push_layer_kv_for<C:Compute>(cfg:&MtpConfig,c:&C,chat:&mut DraftChat<C::Value
     let (keys,vals)=chat.kv[layer].as_mut().ok_or("missing draft cache")?;
     c.state_fill(keys,chat.len*kv,k)?;c.state_fill(vals,chat.len*kv,v)?;
     Ok(())
+}
+/// Ensure `chat.kv[layer]` has room to write `rows` rows at the returned destination row offset (without writing them).
+/// Returns `Ok(None)` only when a local slide advances past `chat.len` so only a suffix of the new rows is kept.
+pub(super) fn prepare_layer_kv_room<C:Compute>(cfg:&MtpConfig,c:&C,chat:&mut DraftChat<C::Value>,layer:usize,rows:usize)->Result<Option<usize>> {
+    let kv=kv_row_words(cfg,chat.kv_bf16);
+    let end=chat.len.checked_add(rows).ok_or("draft context overflow")?;
+    let temp=cfg.block_size.saturating_mul(2);
+    let need_tail=temp.min(chat.limit.saturating_sub(end));
+    if cfg.is_local(layer) {
+        let keep_window=cfg.sliding_window_size.saturating_sub(1);
+        let cap=local_kv_cap(cfg,chat.limit);
+        let cap_words=cap.checked_mul(kv).ok_or("draft cache shape overflow")?;
+        if chat.kv[layer].is_none() {
+            let init_rows=if end.saturating_add(need_tail)>=cap {cap} else {kv_capacity(end,need_tail,cap)};
+            let w=init_rows.checked_mul(kv).ok_or("draft cache shape overflow")?;
+            chat.kv[layer]=Some((c.zeros(w)?,c.zeros(w)?));
+        }
+        let cur_cap=c.words(&chat.kv[layer].as_ref().ok_or("missing draft cache")?.0)/kv;
+        let base=chat.local_base[layer];
+        if end.saturating_sub(base).saturating_add(need_tail)<=cur_cap {
+            return Ok(Some(chat.len-base));
+        } else if cur_cap<cap && end.saturating_sub(base).saturating_add(need_tail)<=cap {
+            let grow_rows=kv_capacity(end-base,need_tail,cap);
+            let w=grow_rows.checked_mul(kv).ok_or("draft cache shape overflow")?;
+            let (mut keys,mut vals)=(c.zeros(w)?,c.zeros(w)?);
+            let live=chat.len-base;
+            if live>0 {
+                let (old_k,old_v)=chat.kv[layer].as_ref().ok_or("missing draft cache")?;
+                c.state_fill(&mut keys,0,&c.range(old_k,0,live*kv)?)?;
+                c.state_fill(&mut vals,0,&c.range(old_v,0,live*kv)?)?;
+            }
+            chat.kv[layer]=Some((keys,vals));
+            return Ok(Some(live));
+        } else {
+            let new_base=end.saturating_sub(keep_window);
+            if new_base>=chat.len {return Ok(None);}
+            let (mut keys,mut vals)=(c.zeros(cap_words)?,c.zeros(cap_words)?);
+            let keep_old=chat.len-new_base;
+            let old_off=(new_base-base)*kv;
+            let (old_k,old_v)=chat.kv[layer].as_ref().ok_or("missing draft cache")?;
+            c.state_fill(&mut keys,0,&c.range(old_k,old_off,keep_old*kv)?)?;
+            c.state_fill(&mut vals,0,&c.range(old_v,old_off,keep_old*kv)?)?;
+            chat.kv[layer]=Some((keys,vals));
+            chat.local_base[layer]=new_base;
+            return Ok(Some(keep_old));
+        }
+    }
+    let page_bytes=c.plane_page_bytes();
+    let need_rows=end.saturating_add(temp).min(chat.limit);
+    let want_rows=global_kv_rows_words(kv,need_rows,chat.limit,page_bytes);
+    let want_words=want_rows.checked_mul(kv).ok_or("draft cache shape overflow")?;
+    let max_words=chat.limit.checked_mul(kv).ok_or("draft cache shape overflow")?;
+    if chat.kv[layer].is_none() {
+        let keys=c.plane_alloc(max_words,want_words)?;
+        let vals=c.plane_alloc(max_words,want_words)?;
+        chat.kv[layer]=Some((keys,vals));
+    } else {
+        let (keys,vals)=chat.kv[layer].as_mut().ok_or("missing draft cache")?;
+        if c.words(keys)<want_words {c.plane_grow(keys,want_words,max_words)?;}
+        if c.words(vals)<want_words {c.plane_grow(vals,want_words,max_words)?;}
+    }
+    Ok(Some(chat.len))
 }
 #[test]
 fn draft_chat_sliding_local_and_paged_global_preserve_exact_history_words() {
@@ -359,8 +472,10 @@ fn draft_chat_sliding_local_and_paged_global_preserve_exact_history_words() {
     }
 }
 impl<A> DraftChat<A> {
-    pub(super) fn new(layers:usize,limit:usize)->Self {
-        Self {kv:(0..layers).map(|_|None).collect(),local_base:vec![0;layers],feature:None,len:0,limit}
+    #[cfg(test)]
+    pub(super) fn new(layers:usize,limit:usize)->Self {Self::new_with_bf16(layers,limit,false)}
+    fn new_with_bf16(layers:usize,limit:usize,kv_bf16:bool)->Self {
+        Self {kv:(0..layers).map(|_|None).collect(),local_base:vec![0;layers],feature:None,len:0,limit,kv_bf16}
     }
     pub fn len(&self)->usize {self.len}
     pub fn is_empty(&self)->bool {self.len==0}
@@ -397,7 +512,7 @@ impl<A> DraftChat<A> {
     }
     /// Enumerate global paged draft KV allocations for CoW deduplication in `SessionCache`.
     pub fn collect_allocations<C:Compute<Value=A>>(&self,c:&C,cfg:&MtpConfig,committed_tokens:Option<usize>,out:&mut Vec<(usize,usize)>)->bool {
-        let kv_w=cfg.kv_width();
+        let kv_w=kv_row_words(cfg,self.kv_bf16);
         for (i,slot) in self.kv.iter().enumerate() {
             if cfg.is_local(i) {continue;}
             let Some((keys,vals))=slot else {continue;};
@@ -417,7 +532,7 @@ impl<A> DraftChat<A> {
     /// zero-copy CoW `plane_fork` on complete VMM pages. No returned buffer mutably aliases the source.
     pub fn copy_prefix<C:Compute<Value=A>>(&self,c:&C,cfg:&MtpConfig,restore:bool)->Result<Self> {
         need(self.len>0 && self.len<=self.limit && self.kv.len()==cfg.num_layers && self.local_base.len()==cfg.num_layers,"invalid draft prefix state")?;
-        let kv_width=cfg.kv_width();
+        let kv_width=kv_row_words(cfg,self.kv_bf16);
         let temp=cfg.block_size.saturating_mul(2);
         let page_bytes=c.plane_page_bytes();
         let max_words=self.limit.checked_mul(kv_width).ok_or("draft prefix capacity overflow")?;
@@ -450,7 +565,7 @@ impl<A> DraftChat<A> {
                 let committed=self.len.checked_mul(kv_width).ok_or("draft prefix size overflow")?;
                 need(c.words(keys)>=committed && c.words(vals)>=committed,"draft global KV shorter than len")?;
                 let want_tokens=if restore {self.len.saturating_add(temp).min(self.limit)} else {self.len};
-                let want_words=global_kv_rows(cfg,want_tokens,self.limit,page_bytes).checked_mul(kv_width).ok_or("draft global capacity overflow")?;
+                let want_words=global_kv_rows_words(kv_width,want_tokens,self.limit,page_bytes).checked_mul(kv_width).ok_or("draft global capacity overflow")?;
                 kv.push(Some((
                     c.plane_fork(keys,committed,want_words,max_words)?,
                     c.plane_fork(vals,committed,want_words,max_words)?,
@@ -465,15 +580,15 @@ impl<A> DraftChat<A> {
             None if cfg.num_layers==0=>None,
             None=>return Err("loop draft: missing draft feature for non-empty prefix".into()),
         };
-        Ok(Self {kv,local_base,feature,len:self.len,limit:self.limit})
+        Ok(Self {kv,local_base,feature,len:self.len,limit:self.limit,kv_bf16:self.kv_bf16})
     }
     /// Pre-grow global paged draft KV planes to cover `needed_tokens` tokens (call outside `compute.work`).
     pub fn ensure_global_capacity<C:Compute<Value=A>>(&mut self,c:&C,cfg:&MtpConfig,needed_tokens:usize)->Result<()> {
-        let kv=cfg.kv_width();
+        let kv=kv_row_words(cfg,self.kv_bf16);
         let temp=cfg.block_size.saturating_mul(2);
         let need_rows=needed_tokens.max(self.len).saturating_add(temp).min(self.limit);
         let page_bytes=c.plane_page_bytes();
-        let want_rows=global_kv_rows(cfg,need_rows,self.limit,page_bytes);
+        let want_rows=global_kv_rows_words(kv,need_rows,self.limit,page_bytes);
         let want_words=want_rows.checked_mul(kv).ok_or("draft cache shape overflow")?;
         let max_words=self.limit.checked_mul(kv).ok_or("draft cache shape overflow")?;
         for i in 0..self.kv.len() {
@@ -488,6 +603,66 @@ impl<A> DraftChat<A> {
             }
         }
         Ok(())
+    }
+    pub(super) fn is_kv_bf16(&self)->bool {self.kv_bf16}
+    /// Borrow the exact committed word ranges of every layer and the recurrent feature for disk persistence.
+    pub(super) fn export_parts<C:Compute<Value=A>>(&self,c:&C,cfg:&MtpConfig)->Result<DraftExport<'_,A>> {
+        need(self.len>0 && self.len<=self.limit && self.kv.len()==cfg.num_layers && self.local_base.len()==cfg.num_layers,"invalid draft prefix state")?;
+        let kv_width=kv_row_words(cfg,self.kv_bf16);
+        let mut layers=Vec::with_capacity(cfg.num_layers);
+        for (i,slot) in self.kv.iter().enumerate() {
+            let Some((keys,vals))=slot else {return Err("loop draft: missing draft KV for non-empty prefix".into());};
+            if cfg.is_local(i) {
+                let start=self.len.saturating_sub(cfg.sliding_window_size.saturating_sub(1));
+                let base=self.local_base[i];
+                need(base<=start,"draft local window base passed read start")?;
+                let rel_off=(start-base).checked_mul(kv_width).ok_or("draft prefix offset overflow")?;
+                let keep_words=(self.len-start).checked_mul(kv_width).ok_or("draft prefix size overflow")?;
+                need(c.words(keys)>=rel_off+keep_words && c.words(vals)>=rel_off+keep_words,"draft local KV shorter than window")?;
+                layers.push((keys,vals,rel_off,keep_words));
+            } else {
+                let committed=self.len.checked_mul(kv_width).ok_or("draft prefix size overflow")?;
+                need(c.words(keys)>=committed && c.words(vals)>=committed,"draft global KV shorter than len")?;
+                layers.push((keys,vals,0,committed));
+            }
+        }
+        let feature=match &self.feature {
+            Some(feat)=>{need(c.words(feat)==cfg.hidden_size,"draft feature width differs")?;Some(feat)}
+            None if cfg.num_layers==0=>None,
+            None=>return Err("loop draft: missing draft feature for non-empty prefix".into()),
+        };
+        Ok(DraftExport {layers,feature})
+    }
+    /// Allocate a fresh `DraftChat` sized to receive a disk-restored prefix at `len` rows (call outside `compute.work`).
+    pub(super) fn alloc_for_restore<C:Compute<Value=A>>(c:&C,cfg:&MtpConfig,kv_bf16:bool,len:usize,target_tokens:usize,limit:usize)->Result<Self> {
+        need(len>0 && len<=limit,"invalid draft restore length")?;
+        let kv_width=kv_row_words(cfg,kv_bf16);
+        let temp=cfg.block_size.saturating_mul(2);
+        let page_bytes=c.plane_page_bytes();
+        let max_words=limit.checked_mul(kv_width).ok_or("draft restore capacity overflow")?;
+        let mut kv=Vec::with_capacity(cfg.num_layers);
+        let mut local_base=vec![0usize;cfg.num_layers];
+        for (i,base_slot) in local_base.iter_mut().enumerate() {
+            if cfg.is_local(i) {
+                let start=len.saturating_sub(cfg.sliding_window_size.saturating_sub(1));
+                let keep_rows=len-start;
+                let cap=local_kv_cap(cfg,limit);
+                let restore_rows=kv_capacity(keep_rows.max(1),temp,cap);
+                let restore_words=restore_rows.checked_mul(kv_width).ok_or("draft local restore overflow")?;
+                kv.push(Some((c.zeros(restore_words)?,c.zeros(restore_words)?)));
+                *base_slot=start;
+            } else {
+                let want_tokens=target_tokens.max(len).saturating_add(temp).min(limit);
+                let want_words=global_kv_rows_words(kv_width,want_tokens,limit,page_bytes).checked_mul(kv_width).ok_or("draft global restore overflow")?;
+                kv.push(Some((c.plane_alloc(max_words,want_words)?,c.plane_alloc(max_words,want_words)?)));
+            }
+        }
+        let feature=if cfg.num_layers>0 {Some(c.zeros(cfg.hidden_size)?)} else {None};
+        Ok(Self {kv,local_base,feature,len,limit,kv_bf16})
+    }
+    /// Mutable references to the allocated restore destinations in exact payload order.
+    pub(super) fn restore_targets_mut(&mut self)->(&mut [Option<(A,A)>],Option<&mut A>) {
+        (&mut self.kv,self.feature.as_mut())
     }
     #[cfg(test)]
     pub(super) fn advance_len(&mut self,rows:usize) {self.len+=rows;}
@@ -516,12 +691,13 @@ impl<'a,V,A> Drafter<'a,V,A> {
         let mut layers=Vec::with_capacity(model.layers().len());
         for l in model.layers() {
             let qkv=packed::siblings(store,&[(&l.q_proj,q),(&l.k_proj,kv),(&l.v_proj,kv)],h,layer_format)?;
+            let kv_ctx=packed::siblings(store,&[(&l.k_proj_ctx,kv),(&l.v_proj_ctx,kv)],h,layer_format)?;
             let gate_up=packed::siblings(store,&[(&l.gate_proj,inter),(&l.up_proj,inter)],h,layer_format)?;
             let own=|store:&mut S,fused:bool,bits:&[u16],rows,columns| if fused {Ok(Matrix {weight:Projection::Fused,rows,columns})} else {layer_matrix(store,bits,rows,columns)};
-            let (a,b)=(qkv.is_some(),gate_up.is_some());
+            let (a,kvc,b)=(qkv.is_some(),kv_ctx.is_some(),gate_up.is_some());
             layers.push(Layer {q:own(store,a,&l.q_proj,q,h)?,k:own(store,a,&l.k_proj,kv,h)?,v:own(store,a,&l.v_proj,kv,h)?,
-                k_ctx:layer_matrix(store,&l.k_proj_ctx,kv,h)?,v_ctx:layer_matrix(store,&l.v_proj_ctx,kv,h)?,o:layer_matrix(store,&l.o_proj,h,q)?,
-                gate:own(store,b,&l.gate_proj,inter,h)?,up:own(store,b,&l.up_proj,inter,h)?,down:layer_matrix(store,&l.down_proj,h,inter)?,qkv,gate_up});
+                k_ctx:own(store,kvc,&l.k_proj_ctx,kv,h)?,v_ctx:own(store,kvc,&l.v_proj_ctx,kv,h)?,o:layer_matrix(store,&l.o_proj,h,q)?,
+                gate:own(store,b,&l.gate_proj,inter,h)?,up:own(store,b,&l.up_proj,inter,h)?,down:layer_matrix(store,&l.down_proj,h,inter)?,qkv,kv_ctx,gate_up});
         }
         let norms=model.layers().iter().map(|l|Ok(Norms {input:c.upload(&l.input_layernorm)?,post:c.upload(&l.post_attention_layernorm)?,
             q:c.upload(&l.q_norm)?,k:c.upload(&l.k_norm)?,k_ctx:c.upload(&l.k_norm_ctx)?,dflare:c.upload(&l.dflare_norm)?})).collect::<Result<Vec<_>>>()?;
@@ -567,7 +743,8 @@ impl<'a,V,A> Drafter<'a,V,A> {
             c.upload(&self.model.rope_phases(start,rows))
         }
     }
-    pub fn chat(&self)->DraftChat<A> {DraftChat::new(self.layers.len(),self.config().max_position_embeddings)}
+    pub(super) fn kv_bf16(&self)->bool {self.head.is_some() && self.config().head_dim==128}
+    pub fn chat(&self)->DraftChat<A> {DraftChat::new_with_bf16(self.layers.len(),self.config().max_position_embeddings,self.kv_bf16())}
     pub fn push<C:ResidentProduct<V,Value=A>+Lanes>(&self,c:&C,chat:&mut DraftChat<A>,rows:&[Vec<Vec<f32>>])->Result<()> {
         if rows.is_empty() {return Ok(());}
         let cfg=self.config();let width=cfg.hidden_size;let taps=cfg.target_layer_ids.len();
@@ -590,10 +767,16 @@ impl<'a,V,A> Drafter<'a,V,A> {
         };
         for (i,l) in self.layers.iter().enumerate() {
             let w=&self.norms[i];let x=mix(i,&w.dflare)?;
-            let input=l.k_ctx.prepare(c,&x,rows)?;
-            let k=l.k_ctx.rounded_shared(c,&x,rows,input.as_ref())?;let v=l.v_ctx.rounded_shared(c,&x,rows,input.as_ref())?;
+            let [k,v]=l.kv_ctx(c,&x,rows)?;
             let k=c.draft_norm(&k,rows*heads,hd,cfg.rms_norm_eps,&w.k_ctx)?;
-            let k=c.lanes(DraftOp::Rope{rows,heads,width:hd},&k,Some(&phases))?;
+            let (k,v)=if chat.kv_bf16 {
+                let k=c.lanes(DraftOp::RopeBf16{rows,heads,width:hd},&k,Some(&phases))?;
+                let v=c.lanes(DraftOp::PackBf16(c.words(&v)),&v,None)?;
+                (k,v)
+            } else {
+                let k=c.lanes(DraftOp::Rope{rows,heads,width:hd},&k,Some(&phases))?;
+                (k,v)
+            };
             self.push_layer_kv(c,chat,i,&k,&v,rows)?;
         }
         // Only the final committed row becomes the next recurrent feature.
@@ -632,19 +815,21 @@ impl<'a,V,A> Drafter<'a,V,A> {
             let q=norm(&q_in,q_rows*heads,hd,&weights.q)?;
             let q=c.lanes(DraftOp::Rope{rows:q_rows,heads,width:hd},&q,Some(&q_phases))?;
             let k=norm(&k,rows*kvheads,hd,&weights.k)?;
-            let k=c.lanes(DraftOp::Rope{rows,heads:kvheads,width:hd},&k,Some(&phases))?;
             let start=if cfg.is_local(i) {chat.len.saturating_sub(cfg.sliding_window_size.saturating_sub(1))} else {0};
             let base=chat.local_base[i];
             need(base<=start,"draft local window base passed read start")?;
             let rel_start=start-base;
-            let keys=chat.len-start+rows;let (ck,cv)=chat.kv[i].as_ref().ok_or("draft keys missing")?;
-            let append=|ctx:&A,new:&A|c.join(&[&c.range(ctx,rel_start*kv,(chat.len-start)*kv)?,new]);
-            let k=append(ck,&k)?;let v=append(cv,&v_new)?;
+            let hist_keys=chat.len-start;
+            let keys=hist_keys+rows;let (ck,cv)=chat.kv[i].as_ref().ok_or("draft keys missing")?;
             let a=if flash_attn {
+                let k=c.lanes(DraftOp::RopeBf16{rows,heads:kvheads,width:hd},&k,Some(&phases))?;
                 let splits=if keys>=256 {16} else if keys>=64 {8} else {1};
-                let part=c.lanes3(DraftOp::FlashAttn{rows:q_rows,heads,kv:kvheads,width:hd,keys,splits,causal_base:0,row_off:0},&q,&k,&v)?;
+                let part=c.flash_attn_batch(&q,&k,&v_new,&[(ck,cv,rel_start,hist_keys,splits)],heads,kvheads,hd,q_rows,rows,chat.kv_bf16,true,0,0)?;
                 if splits>1 {c.lanes(DraftOp::FlashAttnMerge{rows:q_rows,heads,width:hd,splits},&part,None)?} else {part}
             } else {
+                let k=c.lanes(DraftOp::Rope{rows,heads:kvheads,width:hd},&k,Some(&phases))?;
+                let append=|ctx:&A,new:&A|c.join(&[&c.range(ctx,rel_start*kv,hist_keys*kv)?,new]);
+                let k=append(ck,&k)?;let v=append(cv,&v_new)?;
                 let scores=c.lanes(DraftOp::Scores{rows:q_rows,heads,kv:kvheads,width:hd,keys},&q,Some(&k))?;
                 let probs=c.lanes(DraftOp::Normalizer{queries:q_rows*heads,keys},&scores,None)?;
                 c.lanes(DraftOp::Values{rows:q_rows,heads,kv:kvheads,width:hd,keys},&probs,Some(&v))?
@@ -701,26 +886,30 @@ impl<'a,V,A> Drafter<'a,V,A> {
             let q=norm(&q_in,q_rows*heads,hd,&weights.q)?;
             let q=c.lanes(DraftOp::Rope{rows:q_rows,heads,width:hd},&q,Some(&q_phases))?;
             let k=norm(&k,rows*kvheads,hd,&weights.k)?;
-            let k=c.lanes(DraftOp::Rope{rows,heads:kvheads,width:hd},&k,Some(&phases))?;
             let start=if cfg.is_local(i) {kv_pos.saturating_sub(cfg.sliding_window_size.saturating_sub(1))} else {0};
             let base=chat.local_base[i];
             need(base<=start,"draft local window base passed read start")?;
             let (rel_start,rel_pos)=(start-base,kv_pos-base);
-            let keys=kv_pos-start+rows;let (ck,cv)=chat.kv[i].as_mut().ok_or("draft keys missing")?;
-            let (k,v)=if c.words(ck)/kv>=rel_pos+rows {
-                c.state_fill(ck,rel_pos*kv,&k)?;c.state_fill(cv,rel_pos*kv,&v_new)?;
-                (c.range(ck,rel_start*kv,keys*kv)?,c.range(cv,rel_start*kv,keys*kv)?)
-            } else {
-                let append=|ctx:&A,new:&A|c.join(&[&c.range(ctx,rel_start*kv,(kv_pos-start)*kv)?,new]);
-                (append(ck,&k)?,append(cv,&v_new)?)
-            };
+            let hist_keys=kv_pos-start;
+            let keys=hist_keys+rows;
             let a=if flash_attn {
+                let k=c.lanes(DraftOp::RopeBf16{rows,heads:kvheads,width:hd},&k,Some(&phases))?;
+                let (ck,cv)=chat.kv[i].as_ref().ok_or("draft keys missing")?;
                 let splits=if keys>=256 {16} else if keys>=64 {8} else {1};
-                let causal_base=if rows>cfg.block_size {(kv_pos-start)+cfg.block_size} else {0};
+                let causal_base=if rows>cfg.block_size {hist_keys+cfg.block_size} else {0};
                 let row_off=usize::from(last_layer);
-                let part=c.lanes3(DraftOp::FlashAttn{rows:q_rows,heads,kv:kvheads,width:hd,keys,splits,causal_base,row_off},&q,&k,&v)?;
+                let part=c.flash_attn_batch(&q,&k,&v_new,&[(ck,cv,rel_start,hist_keys,splits)],heads,kvheads,hd,q_rows,rows,chat.kv_bf16,true,causal_base,row_off)?;
                 if splits>1 {c.lanes(DraftOp::FlashAttnMerge{rows:q_rows,heads,width:hd,splits},&part,None)?} else {part}
             } else {
+                let k=c.lanes(DraftOp::Rope{rows,heads:kvheads,width:hd},&k,Some(&phases))?;
+                let (ck,cv)=chat.kv[i].as_mut().ok_or("draft keys missing")?;
+                let (k,v)=if c.words(ck)/kv>=rel_pos+rows {
+                    c.state_fill(ck,rel_pos*kv,&k)?;c.state_fill(cv,rel_pos*kv,&v_new)?;
+                    (c.range(ck,rel_start*kv,keys*kv)?,c.range(cv,rel_start*kv,keys*kv)?)
+                } else {
+                    let append=|ctx:&A,new:&A|c.join(&[&c.range(ctx,rel_start*kv,hist_keys*kv)?,new]);
+                    (append(ck,&k)?,append(cv,&v_new)?)
+                };
                 let scores=c.lanes(DraftOp::Scores{rows:q_rows,heads,kv:kvheads,width:hd,keys},&q,Some(&k))?;
                 let probs=c.lanes(DraftOp::Normalizer{queries:q_rows*heads,keys},&scores,None)?;
                 c.lanes(DraftOp::Values{rows:q_rows,heads,kv:kvheads,width:hd,keys},&probs,Some(&v))?
@@ -782,9 +971,11 @@ impl<'a,V,A> Drafter<'a,V,A> {
         let mut stop0:Option<A>=None;
         let stop_above_sum=if early_check {((1.0f64/f64::from(abort_below)) as f32).next_up()} else {0.0};
         for s in 0..depth {
+            let bf16_base=combined.is_some();
+            let base_row_words=if bf16_base {vocab.div_ceil(2)} else {vocab};
             let head_row=|base:&Option<A>|->Result<A> {
                 let first=usize::from(combined.is_some());
-                c.range(base.as_ref().ok_or("missing draft head rows")?,(s-first)*vocab,vocab)
+                c.range(base.as_ref().ok_or("missing draft head rows")?,(s-first)*base_row_words,base_row_words)
             };
             let pick=if let Some((split,packed_drafted,static_base))=&factored {
                 let gated=stop0.is_some();
@@ -807,13 +998,13 @@ impl<'a,V,A> Drafter<'a,V,A> {
                 let tile_count=vocab.div_ceil(16);
                 let tiles=if let Some(head)=combined.filter(|_|s==0) {
                     let head_in=c.join(&[packed_drafted,&packed_latent])?;
-                    let op=DraftOp::HeadFold{rows:vocab,hidden:h,latent:rank,inputs:depth,epsilon,bound,confidence};
+                    let op=DraftOp::HeadFold{rows:vocab,hidden:h,latent:rank,inputs:depth,epsilon,bound,confidence,bf16_base:true};
                     let output=c.draft_head_fold(op,head,&self.fold,&head_in)?;
-                    let row_words=(depth-1)*vocab;
+                    let row_words=(depth-1)*base_row_words;
                     if row_words>0 {base=Some(c.range(&output,0,row_words)?);}
                     c.range(&output,row_words,tile_count*4)?
                 } else {
-                    c.draft_panel(DraftOp::FoldPick{rows:vocab,columns:rank,epsilon,bound,confidence,gated},&self.fold,&packed_latent,Some(&head_row(&base)?))?
+                    c.draft_panel(DraftOp::FoldPick{rows:vocab,columns:rank,epsilon,bound,confidence,gated,bf16_base},&self.fold,&packed_latent,Some(&head_row(&base)?))?
                 };
                 let step_stop=if s==0 {stop_above_sum} else {0.0};
                 let result=if tile_count>128 {
@@ -849,14 +1040,14 @@ impl<'a,V,A> Drafter<'a,V,A> {
                     let tiles=if let Some(head)=combined.filter(|_|s==0) {
                         let input=c.join(&[drafted,&latent])?;
                         let packed=c.lanes(DraftOp::PackActivations(c.words(&input)),&input,None)?;
-                        let op=DraftOp::HeadFold{rows:vocab,hidden:h,latent:rank,inputs:depth,epsilon,bound,confidence};
+                        let op=DraftOp::HeadFold{rows:vocab,hidden:h,latent:rank,inputs:depth,epsilon,bound,confidence,bf16_base:true};
                         let output=c.draft_head_fold(op,head,&self.fold,&packed)?;
-                        let row_words=(depth-1)*vocab;
+                        let row_words=(depth-1)*base_row_words;
                         if row_words>0 {base=Some(c.range(&output,0,row_words)?);}
                         c.range(&output,row_words,vocab.div_ceil(16)*4)?
                     } else {
                         let input=c.lanes(DraftOp::PackActivations(rank),&latent,None)?;
-                        c.draft_panel(DraftOp::FoldPick{rows:vocab,columns:rank,epsilon,bound,confidence,gated:false},&self.fold,&input,Some(&head_row(&base)?))?
+                        c.draft_panel(DraftOp::FoldPick{rows:vocab,columns:rank,epsilon,bound,confidence,gated:false,bf16_base},&self.fold,&input,Some(&head_row(&base)?))?
                     };
                     let tile_count=vocab.div_ceil(16);
                     let result=if tile_count>128 {

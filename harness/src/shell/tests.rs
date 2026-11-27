@@ -1135,3 +1135,143 @@ printf allowed > source.txt
         assert_eq!(out.outcome, Outcome::Exited(Some(0)), "{}", out.render());
         assert!(changed && out.stdout.contains("done") && out.stderr.contains("20,000"), "{}", out.render());
     }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn sandbox_sets_macos_rlimits_unswapped_and_respects_lower_hard_limit() {
+        const LOWER_MARKER: &str = "VADE_RLIMIT_LOWER_TEST";
+        if std::env::var_os(LOWER_MARKER).is_some() {
+            let f = Fixture::new();
+            let out = run(
+                &f.workspace(),
+                &spec(&["/bin/sh", "-c", "printf 'nofile=%s\\n' \"$(ulimit -Hn)\""], 3000),
+                1024,
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+            assert_eq!(out.outcome, Outcome::Exited(Some(0)), "{}", out.render());
+            let nofile: u64 = out.stdout.trim().strip_prefix("nofile=").unwrap().parse().unwrap();
+            assert!(nofile <= 64, "expected clamped hard nofile <= 64, got {nofile}");
+            return;
+        }
+        let f = Fixture::new();
+        let out = run(
+            &f.workspace(),
+            &spec(&["/bin/sh", "-c", "printf 'sn=%s hn=%s su=%s hu=%s\\n' \"$(ulimit -Sn)\" \"$(ulimit -Hn)\" \"$(ulimit -Su)\" \"$(ulimit -Hu)\""], 3000),
+            1024,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(out.outcome, Outcome::Exited(Some(0)), "{}", out.render());
+        let mut map = std::collections::BTreeMap::new();
+        for pair in out.stdout.split_whitespace() {
+            let (k, v) = pair.split_once('=').unwrap();
+            map.insert(k, v.parse::<u64>().unwrap());
+        }
+        assert!(map["hn"] <= 1024 && map["hn"] > 128, "expected macOS RLIMIT_NOFILE=1024 (not swapped 128): {map:?}");
+        assert_eq!(map["sn"], map["hn"], "soft NOFILE should match clamped hard NOFILE: {map:?}");
+        assert!(map["hu"] <= 1024 && map["su"] <= 1024 && map["su"] > 128, "expected macOS per-UID RLIMIT_NPROC=1024: {map:?}");
+        // Re-run under a lower parent hard RLIMIT_NOFILE=64 to prove getrlimit clamping avoids EPERM.
+        let exe = std::env::current_exe().unwrap();
+        let lower = Command::new("/bin/sh")
+            .args([
+                "-c",
+                "ulimit -Sn 64 && ulimit -Hn 64 && exec \"$1\" --exact shell::tests::sandbox_sets_macos_rlimits_unswapped_and_respects_lower_hard_limit --nocapture",
+                "rlimit-test",
+                exe.to_str().unwrap(),
+            ])
+            .env(LOWER_MARKER, "1")
+            .output()
+            .unwrap();
+        assert!(
+            lower.status.success(),
+            "lowered hard limit failed:\n{}\n{}",
+            String::from_utf8_lossy(&lower.stdout),
+            String::from_utf8_lossy(&lower.stderr)
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn sandbox_works_under_dot_prefixed_ancestor_and_denies_xattr_and_gitconfig_poisoning() {
+        let base = Fixture::new();
+        let ws_root = base.0.join(".t3-ancestor/workspace");
+        std::fs::create_dir_all(ws_root.join("sub")).unwrap();
+        std::fs::write(ws_root.join("visible.txt"), "hello-from-dot-ancestor\n").unwrap();
+        std::fs::write(ws_root.join(".env"), "SECRET_ENV=top-secret\n").unwrap();
+        std::fs::write(ws_root.join("sub/.hidden"), "HIDDEN_VAL\n").unwrap();
+        std::fs::write(ws_root.join("secrets.yaml"), "api_key: super-secret\n").unwrap();
+        // Attach xattrs to protected files; Seatbelt must deny file-read-xattr on both dotfiles and secret files.
+        for name in [".env", "secrets.yaml"] {
+            let status = Command::new("/usr/bin/xattr")
+                .args(["-w", "user.vade_test_secret", "xattr-secret-value"])
+                .arg(ws_root.join(name))
+                .status()
+                .unwrap();
+            assert!(status.success(), "setting xattr on {name} failed");
+        }
+        let ws = Workspace::new(&ws_root).unwrap();
+        let script = r#"
+cat visible.txt
+printf 'written-ok\n' > out.txt
+cat .env sub/.hidden secrets.yaml 2>/dev/null || true
+printf 'bad' > .env 2>/dev/null || true
+/usr/bin/xattr -p user.vade_test_secret .env 2>/dev/null || true
+/usr/bin/xattr -p user.vade_test_secret secrets.yaml 2>/dev/null || true
+"#;
+        let out = run(&ws, &spec(&["/bin/sh", "-c", script], 5000), 8192, &AtomicBool::new(false)).unwrap();
+        assert_eq!(out.outcome, Outcome::Exited(Some(0)), "{}", out.render());
+        assert_eq!(out.stdout, "hello-from-dot-ancestor\n", "{}", out.render());
+        assert_eq!(std::fs::read_to_string(ws_root.join("out.txt")).unwrap(), "written-ok\n");
+        assert_eq!(std::fs::read_to_string(ws_root.join(".env")).unwrap(), "SECRET_ENV=top-secret\n");
+        assert!(!out.stdout.contains("xattr-secret-value"), "{}", out.render());
+
+        // Cross-command {build}/home/.gitconfig poisoning must not affect later git runs in the same session.
+        let git_f = git_fixture();
+        let session = BuildSession::default();
+        let poison = run_in_session(
+            &git_f.workspace(),
+            &spec(&["/bin/sh", "-c", "printf '[alias]\\nstatus = !echo POISONED\\n[user]\\nname = Poisoned\\n' > \"$HOME/.gitconfig\""], 3000),
+            4096,
+            &AtomicBool::new(false),
+            &Exclusions::default(),
+            &session,
+        )
+        .unwrap();
+        assert_eq!(poison.outcome, Outcome::Exited(Some(0)), "{}", poison.render());
+        let cfg = run_in_session(
+            &git_f.workspace(),
+            &spec(&["/usr/bin/git", "config", "--list"], 3000),
+            4096,
+            &AtomicBool::new(false),
+            &Exclusions::default(),
+            &session,
+        )
+        .unwrap();
+        assert_eq!(cfg.outcome, Outcome::Exited(Some(0)), "{}", cfg.render());
+        assert!(!cfg.stdout.contains("Poisoned") && !cfg.stdout.contains("POISONED"), "{}", cfg.render());
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn exiting_child_kills_background_group_before_reap_and_keeps_exit_code() {
+        let f = Fixture::new();
+        let out = run(
+            &f.workspace(),
+            &spec(&["/bin/sh", "-c", "/bin/sleep 30 >/dev/null 2>&1 & echo $!; exit 7"], 3000),
+            4096,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(out.outcome, Outcome::Exited(Some(7)), "{}", out.render());
+        let bg_pid: u32 = out.stdout.trim().parse().expect("background pid printed");
+        assert!(
+            !Command::new("/bin/kill")
+                .args(["-0", &bg_pid.to_string()])
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success(),
+            "background grandchild {bg_pid} survived parent exit"
+        );
+    }

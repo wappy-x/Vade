@@ -113,8 +113,18 @@ pub const fn softcap_argmax_parts(rows: usize, cols: usize) -> usize {
     let p = if target < by_cols { target } else { by_cols };
     if p < 1 { 1 } else if p > SOFTCAP_ARGMAX_PARTS_MAX { SOFTCAP_ARGMAX_PARTS_MAX } else { p }
 }
-/// Rows processed per CTA in 2D channel-tiled prefill `ShortConv` and `STREAM_OP_ROUTE_FOLD_CONV_PREFILL`.
+/// Default rows processed per CTA in 2D channel-tiled prefill `ShortConv` and `STREAM_OP_ROUTE_FOLD_CONV_PREFILL`.
 pub const SHORT_CONV_PREFILL_TILE: usize = 64;
+/// Payload word offset of optional fused `next_ring` (`[taps][width]` FP32) in 2D tiled `STREAM_OP_SHORT_CONV_WIN`.
+pub const SHORT_CONV_NEXT_RING_WORD: usize = 16;
+/// Threads per CTA for 2-channel paired-BF16 `STREAM_OP_ROUTE_FOLD_CONV_PREFILL` (128 threads x 2 ch = 256 ch/CTA).
+pub const ROUTE_FOLD_PREFILL_THREADS: usize = 128;
+/// Row-tile height for `STREAM_OP_ROUTE_FOLD_CONV_PREFILL`: 128 rows/CTA for `rows >= 1024` (halves halo reads
+/// while keeping 288 CTAs across 48 SMs at 4096x2304), 64 otherwise.
+#[inline(always)]
+pub const fn route_fold_prefill_tile(rows: usize) -> usize {
+    if rows >= 1024 { 128 } else { SHORT_CONV_PREFILL_TILE }
+}
 /// Maximum number of gates batched in one `STREAM_OP_GATE_BLEND_NORM` launch (`grid.y`).
 pub const GATE_BLEND_NORM_GATES_MAX: usize = 3;
 /// Payload word offset of the `GATE_BLEND_NORM` gate table (5 words per gate: gates, kept, msg, weight, out).
@@ -147,6 +157,9 @@ pub const CONV_KV_NORM: u64 = 2;
 pub const CONV_KV_DIM: usize = 128;
 /// FAST_ROW_DOTS payload flag for the KV finish. The list-form pointers occupy words 7 through 70.
 pub const KV_FINISH_WORD: usize = 80;
+/// Optional fused `next_ring` output pointer (`[taps][width]` FP32) and row-tile height for 2D tiled prefill KV finish.
+pub const KV_NEXT_RING_WORD: usize = 20;
+pub const KV_PREFILL_TILE_WORD: usize = 21;
 const _: () = assert!(7 + MIX_KEPT_MAX <= KV_FINISH_WORD && 8 * (KV_FINISH_WORD + 1) <= 1024);
 
 #[cfg(not(target_arch = "nvptx64"))]
@@ -161,6 +174,18 @@ pub struct KvWrite {
 /// One warp per head, four whole heads per block except for the last block.
 pub const fn conv_kv_blocks(rows: usize, heads: usize) -> usize {
     (rows * heads).div_ceil(ROW_DOTS_THREADS / 32)
+}
+
+/// Rows per warp in 2D row-tiled prefill `KV_FINISH_WORD` (`4` warps per CTA on one head).
+#[inline(always)]
+pub const fn kv_prefill_tile(rows: usize) -> usize {
+    if rows >= 512 { 32 } else if rows >= 128 { 16 } else { 8 }
+}
+
+/// Grid Y blocks for 2D row-tiled prefill `KV_FINISH_WORD` (`4 * tile` rows per CTA).
+#[inline(always)]
+pub const fn conv_kv_tiled_blocks_y(rows: usize, tile: usize) -> usize {
+    rows.div_ceil(4 * tile)
 }
 
 /// Threads per block of each fast kernel.
@@ -268,6 +293,16 @@ pub const MIX_ONE_POST_WEIGHTS_PER_QUERY: u64 = 64;
 pub const MIX_ONE_POST_HALF_OUT: u64 = 128;
 /// With `MIX_LIST_NORM`, write `normed` as packed BF16 (`rows * asked * dim / 2` u32 words, bit 8).
 pub const MIX_LIST_NORM_HALF: u64 = 256;
+/// With `MIX_ONE_POST_NORM`, fuse `2..=MIX_ONE_FUSED_Q_MAX` queries into 1 CTA/row (`grid.x == 1`, bit 9),
+/// reading `stream` and `list[0..kept-1]` once per row instead of `asked` times.
+pub const MIX_ONE_FUSED_Q: u64 = 512;
+pub const MIX_ONE_FUSED_Q_MAX: usize = 4;
+pub const MIX_ONE_FUSED_Q_ROWS_MIN: usize = 48;
+/// Whether `MIX_ONE` fuses multiple queries into one CTA per row (keeps decode `rows < 48` at `grid.x == asked`).
+#[inline(always)]
+pub const fn mix_one_fused_q(rows: usize, asked: usize, post_norm: bool) -> bool {
+    post_norm && asked >= 2 && asked <= MIX_ONE_FUSED_Q_MAX && rows >= MIX_ONE_FUSED_Q_ROWS_MIN
+}
 /// Payload words for fused post-blend `RoundedNorm` in `MIX_ONE`: output, optional weight, epsilon bits.
 pub const MIX_ONE_POST_OUT_AT: usize = 42;
 pub const MIX_ONE_POST_WEIGHT_AT: usize = 43;
@@ -413,7 +448,7 @@ pub const fn stream_ops_admitted(subop: u64, rows: usize, dim: usize, aux: usize
                 && aux >= 2 && aux <= ROUTE_FOLD_CONV_TAPS_MAX
         }
         STREAM_OP_ROUTE_FOLD_CONV_PREFILL => {
-            threads == STREAM_OPS_THREADS
+            threads == ROUTE_FOLD_PREFILL_THREADS
                 && dim % 2 == 0
                 && aux >= 1 && aux <= ROUTER_PICKS_MAX
         }
@@ -901,7 +936,7 @@ pub fn check_route_fold_conv_prefill(
     rows: usize, picks: usize, dim: usize, taps: usize, first_slot: usize, bound: f32,
     weights: Span, downs_half: Span, residual: Span, fixed: Span, ring: Span, output: Span, next_ring: Span,
 ) -> Result<(), &'static str> {
-    if !stream_ops_admitted(STREAM_OP_ROUTE_FOLD_CONV_PREFILL, rows, dim, picks, STREAM_OPS_THREADS)
+    if !stream_ops_admitted(STREAM_OP_ROUTE_FOLD_CONV_PREFILL, rows, dim, picks, ROUTE_FOLD_PREFILL_THREADS)
         || !(2..=ROUTE_FOLD_CONV_TAPS_MAX).contains(&taps) || rows < taps || first_slot >= taps
         || !(bound > 0.0 && bound.is_finite())
     {

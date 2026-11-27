@@ -13,7 +13,8 @@ use crate::fast_ops::{
     ROUTER_PICK_COMPACT_WORD, ROUTER_PICKS_MAX, SHORT_CONV_MULTI_MASK_0, SHORT_CONV_MULTI_MASK_1,
     SHORT_CONV_MULTI_MASK_2, SHORT_CONV_MULTI_MASK_3, SHORT_CONV_MULTI_RINGS_AT,
     SHORT_CONV_MULTI_SLOTS_HI, SHORT_CONV_MULTI_SLOTS_LO, SHORT_CONV_MULTI_TAG,
-    SHORT_CONV_PREFILL_TILE, STREAM_OP_GATE_BLEND_NORM, STREAM_OP_RING_CONV_ONE,
+    SHORT_CONV_NEXT_RING_WORD, SHORT_CONV_PREFILL_TILE, STREAM_OP_GATE_BLEND_NORM,
+    STREAM_OP_RING_CONV_ONE,
     STREAM_OP_ROUTE_FOLD, STREAM_OP_ROUTE_FOLD_CONV, STREAM_OP_ROUTE_FOLD_CONV_PREFILL,
     STREAM_OP_SHORT_CONV_WIN, STREAM_OP_SOFTCAP_ARGMAX, capped_gate_admitted, router_pick_admitted,
     router_pick_compact_admitted, short_conv_multi_valid, stream_ops_admitted, stream_ops_parts,
@@ -893,10 +894,10 @@ pub(crate) unsafe fn replay_stream_ops(table: *const crate::inkling_launch::Comm
         let heads = *w.add(9) as usize;
         let form = *w.add(10) as u32;
         if subop == STREAM_OP_ROUTE_FOLD_CONV_PREFILL {
-            // Prefill fused `RouteFold (FOLD_HALF)` + `AfterExperts ShortConv` + `next_ring` over
-            // `SHORT_CONV_PREFILL_TILE` (64)-row channel tiles (`grid = (dim.div_ceil(256), rows.div_ceil(64), 1)`).
-            // Eliminates the `[rows, dim]` intermediate `folded` buffer (37.7 MB write + 4x read) and
-            // `prefill_ring_after` gather launch while keeping all 4 fixed taps and 4-row ring in registers.
+            // Prefill fused `RouteFold (FOLD_HALF)` + `AfterExperts ShortConv` + `next_ring` over 2-channel
+            // paired-BF16 tiles (`128` threads x 2 ch = 256 ch/CTA, `tile_h` in `{64, 128}`).
+            // Each thread loads packed BF16 pairs (`ld.global.nc.u32` = 128 B/warp full cache line),
+            // halves router-weight broadcasts, and packs `p1..p4` BF16 ring history into 4 `u32` registers.
             // SAFETY: host checked via `fast_ops::check_route_fold_conv_prefill` that all extents, alignments,
             // and disjointness hold (`rows >= taps`, `taps in 2..=4`, `dim` even). Each `(row, ch)` of `output`
             // and each `(slot, ch)` of `next_ring` (written only by the last row tile `r_end == rows`) has one writer.
@@ -905,9 +906,13 @@ pub(crate) unsafe fn replay_stream_ops(table: *const crate::inkling_launch::Comm
             let first_slot = form as usize;
             let p_ring = *w.add(12) as *const f32;
             let next_ring = *w.add(13) as *mut f32;
-            let parts = dim.div_ceil(threads);
-            let row_tiles = rows.div_ceil(SHORT_CONV_PREFILL_TILE);
+            let tile_h = *w.add(14) as usize;
+            let tile_h = if tile_h == 0 { SHORT_CONV_PREFILL_TILE } else { tile_h };
+            let half_dim = dim >> 1;
+            let parts = half_dim.div_ceil(threads);
+            let row_tiles = rows.div_ceil(tile_h);
             if !stream_ops_admitted(subop, rows, dim, picks, threads)
+                || !matches!(tile_h, 64 | 128)
                 || !(2..=ROUTE_FOLD_CONV_TAPS_MAX).contains(&taps) || rows < taps || first_slot >= taps
                 || core::arch::nvptx::_grid_dim_x() as usize != parts
                 || core::arch::nvptx::_grid_dim_y() as usize != row_tiles
@@ -919,86 +924,137 @@ pub(crate) unsafe fn replay_stream_ops(table: *const crate::inkling_launch::Comm
             }
             core::arch::asm!("griddepcontrol.wait;", options(nostack));
             core::arch::asm!("griddepcontrol.launch_dependents;", options(nostack));
-            let ch = (core::arch::nvptx::_block_idx_x() as usize) * threads + (core::arch::nvptx::_thread_idx_x() as usize);
-            if ch >= dim { return; }
+            let pair = (core::arch::nvptx::_block_idx_x() as usize) * threads + (core::arch::nvptx::_thread_idx_x() as usize);
+            if pair >= half_dim { return; }
             let tile = core::arch::nvptx::_block_idx_y() as usize;
-            let r0 = tile * SHORT_CONV_PREFILL_TILE;
+            let r0 = tile * tile_h;
             if r0 >= rows { return; }
-            let r_end = (r0 + SHORT_CONV_PREFILL_TILE).min(rows);
+            let r_end = (r0 + tile_h).min(rows);
+            let ch0 = pair << 1;
+            let ch1 = ch0 + 1;
             macro_rules! ldf {($p:expr)=>{{let v: f32; core::arch::asm!("ld.global.nc.f32 {v}, [{p}];", v = out(reg32) v, p = in(reg64) $p, options(readonly, nostack)); v}}}
-            macro_rules! ldh {($p:expr)=>{{let v: u16; core::arch::asm!("ld.global.nc.u16 {v}, [{p}];", v = out(reg16) v, p = in(reg64) $p, options(readonly, nostack)); f32::from_bits(u32::from(v) << 16)}}}
-            let h_base = in1.cast::<u16>();
-            let (mut p1, mut p2, mut p3, mut p4) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
-            // `r0` is a multiple of 64 >= `taps - 1`, so either `r0 == 0` (all history from `p_ring`, zero division)
-            // or `r0 >= 64` (all history from rows `r0 - (taps - 1) .. r0`).
+            let h_u32 = in1.cast::<u32>();
+            let aligned8 = (((in2 as usize) | (output as usize)) & 7) == 0;
+            let (mut p1, mut p2, mut p3, mut p4) = (0u32, 0u32, 0u32, 0u32);
+            // `r0` is a multiple of `tile_h` >= `taps - 1`, so either `r0 == 0` (all history from `p_ring`, zero division)
+            // or `r0 >= 64` (all history from rows `r0 - (taps - 1) .. r0`). `p1..p4` store BF16-rounded `(ch0, ch1)`
+            // pairs: `rn(p)` is already applied before tap multiply, and `rows >= taps` guarantees `next_ring` only
+            // ever writes `folded = rn(fsum)` values.
             if r0 == 0 {
                 let mut slot = if first_slot == 0 { taps - 1 } else { first_slot - 1 };
-                p1 = ldf!(p_ring.add(slot * dim + ch));
+                p1 = (rn(ldf!(p_ring.add(slot * dim + ch0))).to_bits() >> 16)
+                    | (rn(ldf!(p_ring.add(slot * dim + ch1))).to_bits() & 0xffff_0000);
                 if taps >= 3 {
                     slot = if slot == 0 { taps - 1 } else { slot - 1 };
-                    p2 = ldf!(p_ring.add(slot * dim + ch));
+                    p2 = (rn(ldf!(p_ring.add(slot * dim + ch0))).to_bits() >> 16)
+                        | (rn(ldf!(p_ring.add(slot * dim + ch1))).to_bits() & 0xffff_0000);
                 }
                 if taps >= 4 {
                     slot = if slot == 0 { taps - 1 } else { slot - 1 };
-                    p3 = ldf!(p_ring.add(slot * dim + ch));
+                    p3 = (rn(ldf!(p_ring.add(slot * dim + ch0))).to_bits() >> 16)
+                        | (rn(ldf!(p_ring.add(slot * dim + ch1))).to_bits() & 0xffff_0000);
                 }
             } else {
                 let mut r = r0 + 1 - taps;
                 while r < r0 {
                     let wp = in0.add(r * picks);
-                    let hp = h_base.add(r * picks * dim + ch);
-                    let mut fsum = 0.0f32;
+                    let hp = h_u32.add(r * picks * half_dim + pair);
+                    let (mut f0, mut f1) = (0.0f32, 0.0f32);
                     let mut p = 0usize;
                     while p < picks {
-                        fsum += ldh!(hp.add(p * dim)) * ldf!(wp.add(p));
+                        let bits = ld_global_nc_u32(hp.add(p * half_dim));
+                        let wt = ldf!(wp.add(p));
+                        f0 += f32::from_bits(bits << 16) * wt;
+                        f1 += f32::from_bits(bits & 0xffff_0000) * wt;
                         p += 1;
                     }
                     p3 = p2;
                     p2 = p1;
-                    p1 = rn(fsum);
+                    p1 = (rn(f0).to_bits() >> 16) | (rn(f1).to_bits() & 0xffff_0000);
                     r += 1;
                 }
             }
-            let t0 = ldf!(weight.add(ch * taps));
-            let t1 = ldf!(weight.add(ch * taps + 1));
-            let t2 = if taps >= 3 { ldf!(weight.add(ch * taps + 2)) } else { 0.0f32 };
-            let t3 = if taps >= 4 { ldf!(weight.add(ch * taps + 3)) } else { 0.0f32 };
+            let t0a = ldf!(weight.add(ch0 * taps));
+            let t1a = ldf!(weight.add(ch0 * taps + 1));
+            let t2a = if taps >= 3 { ldf!(weight.add(ch0 * taps + 2)) } else { 0.0f32 };
+            let t3a = if taps >= 4 { ldf!(weight.add(ch0 * taps + 3)) } else { 0.0f32 };
+            let t0b = ldf!(weight.add(ch1 * taps));
+            let t1b = ldf!(weight.add(ch1 * taps + 1));
+            let t2b = if taps >= 3 { ldf!(weight.add(ch1 * taps + 2)) } else { 0.0f32 };
+            let t3b = if taps >= 4 { ldf!(weight.add(ch1 * taps + 3)) } else { 0.0f32 };
             let mut r = r0;
             while r < r_end {
                 let wp = in0.add(r * picks);
-                let hp = h_base.add(r * picks * dim + ch);
-                let mut fsum = 0.0f32;
+                let hp = h_u32.add(r * picks * half_dim + pair);
+                let (mut f0, mut f1) = (0.0f32, 0.0f32);
                 let mut p = 0usize;
                 while p < picks {
-                    fsum += ldh!(hp.add(p * dim)) * ldf!(wp.add(p));
+                    let bits = ld_global_nc_u32(hp.add(p * half_dim));
+                    let wt = ldf!(wp.add(p));
+                    f0 += f32::from_bits(bits << 16) * wt;
+                    f1 += f32::from_bits(bits & 0xffff_0000) * wt;
                     p += 1;
                 }
-                let folded = rn(fsum);
-                let mut csum = 0.0f32;
-                if taps >= 4 { csum += t3 * rn(p3); }
-                if taps >= 3 { csum += t2 * rn(p2); }
-                csum += t1 * rn(p1);
-                csum += t0 * rn(folded);
-                let y = rn((csum + rn(folded)) * bound);
-                *output.add(r * dim + ch) = rn(ldf!(in2.add(r * dim + ch)) + y);
+                let fld0 = rn(f0);
+                let fld1 = rn(f1);
+                let (mut c0, mut c1) = (0.0f32, 0.0f32);
+                if taps >= 4 {
+                    c0 += t3a * f32::from_bits(p3 << 16);
+                    c1 += t3b * f32::from_bits(p3 & 0xffff_0000);
+                }
+                if taps >= 3 {
+                    c0 += t2a * f32::from_bits(p2 << 16);
+                    c1 += t2b * f32::from_bits(p2 & 0xffff_0000);
+                }
+                c0 += t1a * f32::from_bits(p1 << 16);
+                c1 += t1b * f32::from_bits(p1 & 0xffff_0000);
+                c0 += t0a * fld0;
+                c1 += t0b * fld1;
+                let y0 = rn((c0 + fld0) * bound);
+                let y1 = rn((c1 + fld1) * bound);
+                let row_ch = r * dim + ch0;
+                if aligned8 {
+                    let (a0, a1): (f32, f32);
+                    core::arch::asm!(
+                        "ld.global.nc.v2.f32 {{{a}, {b}}}, [{p}];",
+                        a = out(reg32) a0, b = out(reg32) a1,
+                        p = in(reg64) in2.add(row_ch),
+                        options(readonly, nostack),
+                    );
+                    let o0 = rn(a0 + y0);
+                    let o1 = rn(a1 + y1);
+                    core::arch::asm!(
+                        "st.global.v2.f32 [{p}], {{{a}, {b}}};",
+                        p = in(reg64) output.add(row_ch),
+                        a = in(reg32) o0, b = in(reg32) o1,
+                        options(nostack),
+                    );
+                } else {
+                    *output.add(row_ch) = rn(ldf!(in2.add(row_ch)) + y0);
+                    *output.add(row_ch + 1) = rn(ldf!(in2.add(row_ch + 1)) + y1);
+                }
                 p4 = p3;
                 p3 = p2;
                 p2 = p1;
-                p1 = folded;
+                p1 = (fld0.to_bits() >> 16) | (fld1.to_bits() & 0xffff_0000);
                 r += 1;
             }
             if r_end == rows {
                 let mut slot = ((first_slot as u32 + rows as u32 - 1) % (taps as u32)) as usize;
-                *next_ring.add(slot * dim + ch) = p1;
+                *next_ring.add(slot * dim + ch0) = f32::from_bits(p1 << 16);
+                *next_ring.add(slot * dim + ch1) = f32::from_bits(p1 & 0xffff_0000);
                 slot = if slot == 0 { taps - 1 } else { slot - 1 };
-                *next_ring.add(slot * dim + ch) = p2;
+                *next_ring.add(slot * dim + ch0) = f32::from_bits(p2 << 16);
+                *next_ring.add(slot * dim + ch1) = f32::from_bits(p2 & 0xffff_0000);
                 if taps >= 3 {
                     slot = if slot == 0 { taps - 1 } else { slot - 1 };
-                    *next_ring.add(slot * dim + ch) = p3;
+                    *next_ring.add(slot * dim + ch0) = f32::from_bits(p3 << 16);
+                    *next_ring.add(slot * dim + ch1) = f32::from_bits(p3 & 0xffff_0000);
                 }
                 if taps >= 4 {
                     slot = if slot == 0 { taps - 1 } else { slot - 1 };
-                    *next_ring.add(slot * dim + ch) = p4;
+                    *next_ring.add(slot * dim + ch0) = f32::from_bits(p4 << 16);
+                    *next_ring.add(slot * dim + ch1) = f32::from_bits(p4 & 0xffff_0000);
                 }
             }
             return;
@@ -1006,22 +1062,24 @@ pub(crate) unsafe fn replay_stream_ops(table: *const crate::inkling_launch::Comm
         let ring = if subop == STREAM_OP_SHORT_CONV_WIN { *w.add(12) as *const f32 } else { core::ptr::null() };
         let every_ptr = if subop == STREAM_OP_SHORT_CONV_WIN { *w.add(14) as *mut f32 } else { core::ptr::null_mut() };
         // 2D channel-tiled prefill `ShortConv` (`heads == 1`, no token taps, `taps in 2..=4`, `ring` present,
-        // `every` null, word 15 == `SHORT_CONV_PREFILL_TILE`): reads each input row once instead of `taps` times
-        // and hoists fixed taps into registers once per 64-row tile.
+        // `every` null, word 15 == `SHORT_CONV_PREFILL_TILE`): reads each input row once instead of `taps` times,
+        // hoists fixed taps into registers, and optionally writes `next_ring` on the last row tile.
         if subop == STREAM_OP_SHORT_CONV_WIN && !ring.is_null() && every_ptr.is_null()
             && *w.add(15) as usize == SHORT_CONV_PREFILL_TILE
         {
             let taps = aux;
             let width = dim;
             let first_slot = *w.add(13) as usize;
+            let next_ring = *w.add(SHORT_CONV_NEXT_RING_WORD) as *mut f32;
             let parts = width.div_ceil(threads);
             let row_tiles = rows.div_ceil(SHORT_CONV_PREFILL_TILE);
             if !stream_ops_admitted(subop, rows, width, taps, threads)
                 || heads != 1 || (form & CONV_TOKEN_TAPS) != 0
                 || !(2..=ROUTE_FOLD_CONV_TAPS_MAX).contains(&taps) || first_slot >= taps
+                || (!next_ring.is_null() && rows < taps)
                 || core::arch::nvptx::_grid_dim_x() as usize != parts
                 || core::arch::nvptx::_grid_dim_y() as usize != row_tiles
-                || ((in0 as usize) | (in2 as usize) | (weight as usize) | (output as usize) | (ring as usize)) & 3 != 0
+                || ((in0 as usize) | (in2 as usize) | (weight as usize) | (output as usize) | (ring as usize) | (next_ring as usize)) & 3 != 0
             {
                 core::arch::nvptx::trap();
             }
@@ -1073,6 +1131,15 @@ pub(crate) unsafe fn replay_stream_ops(table: *const crate::inkling_launch::Comm
                 p2 = p1;
                 p1 = cur;
                 row += 1;
+            }
+            if r_end == rows && !next_ring.is_null() {
+                let mut slot = ((first_slot as u32 + rows as u32 - 1) % (taps as u32)) as usize;
+                let mut back = 0usize;
+                while back < taps {
+                    *next_ring.add(slot * width + ch) = *in0.add((rows - 1 - back) * width + ch);
+                    slot = if slot == 0 { taps - 1 } else { slot - 1 };
+                    back += 1;
+                }
             }
             return;
         }

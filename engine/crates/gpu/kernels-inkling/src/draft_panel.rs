@@ -6,8 +6,6 @@ use crate::tc_ptx::{shfl_xor_f32, shfl_xor_u32};
 /// stay L2-resident across consecutive Markov steps on GB10's 24 MiB L2; pinning the tail panels that
 /// `HeadFold` finishes last keeps them warm in L2 right into Markov step 1 (`FoldPick` #1).
 const PIN_FOLD_PANELS: u32 = 9_600;
-/// `draft_ops::PANEL_SPLIT_ROWS_MAX`: rows up to which 9..=32 inputs split a 16-row panel into warps of 8 inputs.
-const PANEL_SPLIT_ROWS_MAX: u32 = 8192;
 
 macro_rules! l2_evict_first {
     () => {{
@@ -67,6 +65,91 @@ macro_rules! ld_f32_hint {
             a = out(reg32) a, p = in(reg64) $p, q = in(reg64) $policy, options(readonly, nostack)
         );
         a
+    }};
+}
+
+macro_rules! ld_u16_hint {
+    ($p:expr, $policy:expr) => {{
+        let a: u32;
+        core::arch::asm!(
+            "{{ .reg .u16 t; ld.global.nc.L2::cache_hint.u16 t, [{p}], {q}; cvt.u32.u16 {a}, t; }}",
+            a = out(reg32) a, p = in(reg64) $p, q = in(reg64) $policy, options(readonly, nostack)
+        );
+        a
+    }};
+}
+
+macro_rules! st_u32_hint {
+    ($p:expr, $v:expr, $policy:expr) => {{
+        core::arch::asm!(
+            "st.global.L2::cache_hint.u32 [{p}], {v}, {q};",
+            p = in(reg64) $p, v = in(reg32) $v, q = in(reg64) $policy, options(nostack)
+        );
+    }};
+}
+
+/// Pack and stream one 16x8 BF16-rounded tile to `[limit - skip, row_words]` packed `u32` BF16 pairs.
+/// All 32 lanes of the warp must enter unconditionally (`shfl_xor_u32(..., 4)` pairs `group` with `group ^ 1`).
+macro_rules! store_bf16_tile {
+    (no_skip, $t_base:expr, $limit:expr, $h:expr, $row:expr, $a:expr, $row_words:expr, $pair:expr, $group:expr, $out:expr, $evict:expr) => {{
+        let lo0 = rn(($h)[0]).to_bits() >> 16;
+        let hi0 = shfl_xor_u32(lo0, 4);
+        let lo2 = rn(($h)[2]).to_bits() >> 16;
+        let hi2 = shfl_xor_u32(lo2, 4);
+        let t0 = ($t_base) + ($pair) * 2;
+        if (($group) & 1) == 0 && t0 < ($limit) && ($row) < ($a) {
+            let dst = (($out) as *mut u32).add((t0 as usize) * ($row_words) + (($row) >> 1) as usize);
+            let w0 = lo0 | (if ($row) + 1 < ($a) { hi0 << 16 } else { 0 });
+            st_u32_hint!(dst, w0, $evict);
+            if ($row) + 8 < ($a) {
+                let w2 = lo2 | (if ($row) + 9 < ($a) { hi2 << 16 } else { 0 });
+                st_u32_hint!(dst.add(4), w2, $evict);
+            }
+        }
+        let lo1 = rn(($h)[1]).to_bits() >> 16;
+        let hi1 = shfl_xor_u32(lo1, 4);
+        let lo3 = rn(($h)[3]).to_bits() >> 16;
+        let hi3 = shfl_xor_u32(lo3, 4);
+        let t1 = t0 + 1;
+        if (($group) & 1) == 0 && t1 < ($limit) && ($row) < ($a) {
+            let dst = (($out) as *mut u32).add((t1 as usize) * ($row_words) + (($row) >> 1) as usize);
+            let w1 = lo1 | (if ($row) + 1 < ($a) { hi1 << 16 } else { 0 });
+            st_u32_hint!(dst, w1, $evict);
+            if ($row) + 8 < ($a) {
+                let w3 = lo3 | (if ($row) + 9 < ($a) { hi3 << 16 } else { 0 });
+                st_u32_hint!(dst.add(4), w3, $evict);
+            }
+        }
+    }};
+    ($t_base:expr, $skip:expr, $limit:expr, $h:expr, $row:expr, $a:expr, $row_words:expr, $pair:expr, $group:expr, $out:expr, $evict:expr) => {{
+        let lo0 = rn(($h)[0]).to_bits() >> 16;
+        let hi0 = shfl_xor_u32(lo0, 4);
+        let lo2 = rn(($h)[2]).to_bits() >> 16;
+        let hi2 = shfl_xor_u32(lo2, 4);
+        let t0 = ($t_base) + ($pair) * 2;
+        if (($group) & 1) == 0 && t0 >= ($skip) && t0 < ($limit) && ($row) < ($a) {
+            let dst = (($out) as *mut u32).add(((t0 - ($skip)) as usize) * ($row_words) + (($row) >> 1) as usize);
+            let w0 = lo0 | (if ($row) + 1 < ($a) { hi0 << 16 } else { 0 });
+            st_u32_hint!(dst, w0, $evict);
+            if ($row) + 8 < ($a) {
+                let w2 = lo2 | (if ($row) + 9 < ($a) { hi2 << 16 } else { 0 });
+                st_u32_hint!(dst.add(4), w2, $evict);
+            }
+        }
+        let lo1 = rn(($h)[1]).to_bits() >> 16;
+        let hi1 = shfl_xor_u32(lo1, 4);
+        let lo3 = rn(($h)[3]).to_bits() >> 16;
+        let hi3 = shfl_xor_u32(lo3, 4);
+        let t1 = t0 + 1;
+        if (($group) & 1) == 0 && t1 >= ($skip) && t1 < ($limit) && ($row) < ($a) {
+            let dst = (($out) as *mut u32).add(((t1 - ($skip)) as usize) * ($row_words) + (($row) >> 1) as usize);
+            let w1 = lo1 | (if ($row) + 1 < ($a) { hi1 << 16 } else { 0 });
+            st_u32_hint!(dst, w1, $evict);
+            if ($row) + 8 < ($a) {
+                let w3 = lo3 | (if ($row) + 9 < ($a) { hi3 << 16 } else { 0 });
+                st_u32_hint!(dst.add(4), w3, $evict);
+            }
+        }
     }};
 }
 
@@ -286,11 +369,11 @@ macro_rules! project_panel_two {
     }};
 }
 
-/// Project one 16-row NVFP4 panel against `9..=PANEL_INPUTS_MAX` packed activation rows using `slabs` (`1`, `2`,
-/// or `4`) lockstep warps inside the same 128-thread CTA (each warp handling 16-input waves strided by `slabs * 16`)
-/// with a 2-chunk software-pipelined scalar ring (`w0, w1, sa01`, 0 stack, 0 spill): covers up to 64 inputs in ONE
-/// L1-shared DRAM read of every weight byte (`4x` less DRAM traffic on `C8..C32` batched draft panels).
-/// `9..=32` inputs on at most `PANEL_SPLIT_ROWS_MAX` rows take 2 or 4 warps of 8 inputs through `project_panel!`.
+/// Project one 16-row NVFP4 panel against `9..=PANEL_INPUTS_MAX` packed activation rows using `slabs` (a power of
+/// 2 up to 16) warps a panel, neighbours in the grid (each warp handling 16-input waves strided by `slabs * 16`).
+/// Up to 4 warps a panel sit in one 128-thread CTA, so they read each weight byte from DRAM once and from L1 after;
+/// the host gives a small matrix a warp for each 16 inputs (one wave, 2 or 4 CTAs a panel that share L2).
+/// Up to `PANEL_NARROW_INPUTS_MAX` inputs of a small matrix take warps of 8 inputs through `project_panel!`.
 macro_rules! project_panel_wide {
     ($x:expr, $y:expr, $a:expr, $b:expr, $inputs:expr, $panel:expr, $slab:expr, $slabs:expr, $lane:expr, $group:expr, $pair:expr, $pin_l2:expr, $out:expr) => {{
         let (x, y, a, b, inputs, panel, slab, slabs, lane, group, pair, pin_l2, out) = ($x, $y, $a, $b, $inputs, $panel, $slab, $slabs, $lane, $group, $pair, $pin_l2, $out);
@@ -351,7 +434,7 @@ macro_rules! project_panel_wide {
 }
 
 /// # Safety
-/// The checked host launch supplies a live command and aligned, contiguous
+/// SAFETY: The checked host launch supplies a live command and aligned, contiguous
 /// panel, input and output extents from DraftOp::layout.
 #[no_mangle]
 pub unsafe extern "ptx-kernel" fn inkling_draft_panel(table: *const crate::Command, index: u64) {
@@ -360,7 +443,7 @@ pub unsafe extern "ptx-kernel" fn inkling_draft_panel(table: *const crate::Comma
 }
 
 /// # Safety
-/// The checked HeadFold command supplies both live panels and their packed input spans.
+/// SAFETY: The checked HeadFold command supplies both live panels and their packed input spans.
 #[no_mangle]
 pub unsafe extern "ptx-kernel" fn inkling_draft_head_fold(table: *const crate::Command, index: u64) {
     // SAFETY: only the checked HeadFold launch names this entry.
@@ -380,23 +463,91 @@ unsafe fn run<const COMBINED: bool>(table: *const crate::Command, index: u64) {
         let n = *cmd.add(5) as u32;
         let i = core::arch::nvptx::_block_idx_x() as u32 * 128 + core::arch::nvptx::_thread_idx_x() as u32;
         if i >= n { return; }
+        if COMBINED && kind == 28 {
+            let x = *cmd.add(1) as *const f32;
+            let y = *cmd.add(2) as *const f32;
+            let out = *cmd.add(4);
+            let a = *cmd.add(6) as u32;
+            let b = *cmd.add(7) as u32;
+            let c0 = *cmd.add(8) as u32;
+            let c = c0 & 0xffff;
+            let shape = c0 >> 16;
+            let slab_shift = shape & 7;
+            let panel_slabs = 1u32 << slab_shift;
+            let panel = i >> 5;
+            let lane = i & 31;
+            let group = lane >> 2;
+            let pair = lane & 3;
+            let p_idx = panel >> slab_shift;
+            let s_idx = panel & (panel_slabs - 1);
+            let pin_w = (a as usize).next_multiple_of(64) * (b as usize) <= (1 << 20);
+            let row = p_idx * 16 + group;
+            let row_words = (a as usize).div_ceil(2);
+            let ev = l2_evict_first!();
+            if c <= 8 || (shape & 8) != 0 {
+                let first = s_idx * 8;
+                if first < c {
+                    let inputs = (c - first).min(8);
+                    let h = project_panel!(x, y.add((first * (b >> 6) * 18) as usize), a, b, inputs, p_idx, lane, group, pair, pin_w);
+                    let out_sub = (out as *mut u32).add((first as usize) * row_words) as u64;
+                    store_bf16_tile!(no_skip, 0u32, inputs, h, row, a, row_words, pair, group, out_sub, ev);
+                }
+            } else {
+                let elements = (a as usize).next_multiple_of(64) * (b as usize);
+                let scales = x.cast::<u8>().add(elements / 2);
+                let chunks = b >> 6;
+                let last = chunks - 1;
+                let base_stripe = ((p_idx >> 2) * chunks) * 4 + (p_idx & 3);
+                let code_base = x.cast::<u32>().add((base_stripe as usize) * 128 + (lane as usize) * 4);
+                let scale_base = scales.cast::<u32>().add((base_stripe as usize) * 16 + ((group * 2 + (pair & 1)) as usize));
+                let policy = if pin_w || c > panel_slabs * 16 { l2_evict_last!() } else { ev };
+                let hi_pair = (pair >> 1) & 1;
+                let stride_in = panel_slabs * 16;
+                let mut base_in = s_idx * 16;
+                while base_in < c {
+                    let in0 = y.cast::<u32>().add(((base_in + group).min(c - 1) * chunks * 18) as usize);
+                    let in1 = y.cast::<u32>().add(((base_in + 8 + group).min(c - 1) * chunks * 18) as usize);
+                    let mut acc0 = [0.0f32; 4];
+                    let mut acc1 = [0.0f32; 4];
+                    let mut ch = 0u32;
+                    while ch < chunks {
+                        let sa = ld_scale_u32!(scale_base.add((last.min(ch + hi_pair) as usize) * 64), policy);
+                        let w = ld_code_v4!(code_base.add((ch as usize) * 512), policy);
+                        acc0 = consume_chunk!(0, in0, ch, pair, w, sa, acc0);
+                        acc1 = consume_chunk!(0, in1, ch, pair, w, sa, acc1);
+                        if ch + 1 < chunks {
+                            let w = ld_code_v4!(code_base.add(((ch + 1) as usize) * 512), policy);
+                            acc0 = consume_chunk!(1, in0, ch + 1, pair, w, sa, acc0);
+                            acc1 = consume_chunk!(1, in1, ch + 1, pair, w, sa, acc1);
+                        }
+                        ch += 2;
+                    }
+                    let factor = *scales.add(elements / 16).cast::<f32>();
+                    let h0 = [acc0[0] * factor, acc0[1] * factor, acc0[2] * factor, acc0[3] * factor];
+                    store_bf16_tile!(no_skip, base_in, c, h0, row, a, row_words, pair, group, out, ev);
+                    if base_in + 8 < c {
+                        let h1 = [acc1[0] * factor, acc1[1] * factor, acc1[2] * factor, acc1[3] * factor];
+                        store_bf16_tile!(no_skip, base_in + 8, c, h1, row, a, row_words, pair, group, out, ev);
+                    }
+                    base_in += stride_in;
+                }
+            }
+            return;
+        }
         let x0 = *cmd.add(1) as *const f32;
         let y = *cmd.add(2) as *const f32;
         let out0 = *cmd.add(4);
         let a0 = *cmd.add(6) as u32;
         let b = *cmd.add(7) as u32;
-        let c = *cmd.add(8) as u32;
+        let c0 = *cmd.add(8) as u32;
         // SAFETY: operation 19 holds two or three panels of whole 64-row blocks back to back (rows a0, d, e)
         // and writes their outputs back to back without a stack-allocated indexable array.
-        // Warps a 16-row panel, as `draft_ops::panel_slabs`: 9..=32 inputs on at most `PANEL_SPLIT_ROWS_MAX` rows
-        // (all siblings together) split into warps of 8 inputs; other widths take warps of up to 16 inputs.
-        let split = !COMBINED && (kind == 13 || kind == 19) && c > 8 && c <= 32
-            && (if kind == 19 { a0 + *cmd.add(9) as u32 + *cmd.add(10) as u32 } else { a0 }) <= PANEL_SPLIT_ROWS_MAX;
-        let panel_slabs = if !COMBINED && (kind == 13 || kind == 19) {
-            if c <= 8 { 1u32 } else if split { if c <= 16 { 2u32 } else { 4u32 } } else if c <= 16 { 1u32 } else if c <= 32 { 2u32 } else { 4u32 }
-        } else {
-            1u32
-        };
+        // The host (`draft_ops::PanelShape`) picks how warps share a 16-row panel and sends it above the input
+        // count: bits 16..=18 the shift of the warps a panel, bit 19 warps of 8 inputs (else 16).
+        let panels = !COMBINED && (kind == 13 || kind == 19);
+        let (c, shape) = if panels { (c0 & 0xffff, c0 >> 16) } else { (c0, 0) };
+        let slab_shift = shape & 7;
+        let panel_slabs = 1u32 << slab_shift;
         let (kind, x, a, out, i) = if !COMBINED && kind == 19 {
             let d = *cmd.add(9) as u32;
             let e = *cmd.add(10) as u32;
@@ -438,17 +589,15 @@ unsafe fn run<const COMBINED: bool>(table: *const crate::Command, index: u64) {
             let group = lane >> 2;
             let pair = lane & 3;
             if !COMBINED && kind == 13 && c > 8 {
-                let slab_shift = if panel_slabs == 1 { 0u32 } else if panel_slabs == 2 { 1u32 } else { 2u32 };
                 let p_idx = panel >> slab_shift;
                 let s_idx = panel & (panel_slabs - 1);
                 let pin_w = (a as usize).next_multiple_of(64) * (b as usize) <= (1 << 20);
-                if !split {
+                if shape & 8 == 0 {
                     project_panel_wide!(x, y, a, b, c, p_idx, s_idx, panel_slabs, lane, group, pair, pin_w, out);
                 } else if s_idx * 8 < c {
-                    // Split: each of the panel's 2 or 4 warps (one CTA, so the weight bytes come from DRAM once and
-                    // from L1 for the other warps) runs the 6-chunk pipelined 1..=8-input product on its own 8
-                    // inputs. Each output is the same chunk-ordered MMA chain as in the two-tile product, so every
-                    // bit matches, with twice the warps on the 144- and 320-panel draft layer matrices.
+                    // Warps of 8 inputs (the host gives a panel a warp for each 8 inputs): each warp runs the 6-chunk
+                    // pipelined 1..=8-input product on its own 8 inputs. Each output is the same chunk-ordered MMA
+                    // chain as in the two-tile product, so every bit matches.
                     let first = s_idx * 8;
                     let inputs = (c - first).min(8);
                     let h = project_panel!(x, y.add((first * (b >> 6) * 18) as usize), a, b, inputs, p_idx, lane, group, pair, pin_w);
@@ -483,29 +632,58 @@ unsafe fn run<const COMBINED: bool>(table: *const crate::Command, index: u64) {
             } else {
                 y
             };
-            let total_panels = a.div_ceil(16);
-            let pin_from = total_panels.saturating_sub(PIN_FOLD_PANELS);
-            let pin_first = if !COMBINED && kind == 14 {
-                slabs > 1 || panel >= pin_from
+            let pin_first = if COMBINED {
+                false
+            } else if kind == 14 {
+                slabs > 1 || panel >= a.div_ceil(16).saturating_sub(PIN_FOLD_PANELS)
             } else {
-                !COMBINED && kind == 13 && (a as usize).next_multiple_of(64) * (b as usize) <= (1 << 20)
+                kind == 13 && (a as usize).next_multiple_of(64) * (b as usize) <= (1 << 20)
             };
             let row = panel * 16 + group;
-            // Prefetch `base_ptr` and `bias` DRAM loads for solo FoldPick before the weight MMAs so their
-            // ~300-cycle DRAM miss latency overlaps 100% with the 4 NVFP4 chunks + MMAs.
-            let (pref_base_lo, pref_base_hi, pref_bias_lo, pref_bias_hi) = if !COMBINED && kind == 14 && batch == 1 && pair == 0 {
+            let bf16_base = if COMBINED { (c >> 31) != 0 } else { kind == 14 && (c & 256) != 0 };
+            // Prefetch `base_ptr` and `bias` DRAM loads for FoldPick and BF16 FoldPickBatch before the weight MMAs so
+            // their ~300-cycle DRAM miss latency overlaps 100% with the 4 NVFP4 chunks + MMAs.
+            let (pref_base0, pref_base1, pref_bias_lo, pref_bias_hi) = if !COMBINED && kind == 14 && ((batch == 1 && pair == 0) || (batch > 1 && bf16_base)) {
                 let elements = (a as usize).next_multiple_of(64) * (b as usize);
                 let bias = x.cast::<u8>().add(elements / 2 + elements / 16 + 8192).cast::<f32>();
                 let base_ptr = *cmd.add(3) as *const f32;
                 let evict_first = l2_evict_first!();
                 let b_pol = if pin_first { l2_evict_last!() } else { evict_first };
-                let blo = if row < a { ld_f32_hint!(base_ptr.add(row as usize), evict_first) } else { 0.0 };
-                let bhi = if row + 8 < a { ld_f32_hint!(base_ptr.add((row + 8) as usize), evict_first) } else { 0.0 };
                 let slo = if row < a { ld_f32_hint!(bias.add(row as usize), b_pol) } else { 0.0 };
                 let shi = if row + 8 < a { ld_f32_hint!(bias.add((row + 8) as usize), b_pol) } else { 0.0 };
-                (blo, bhi, slo, shi)
+                if batch == 1 {
+                    let (blo, bhi) = if bf16_base {
+                        let bu16 = base_ptr as *const u16;
+                        let lo = if row < a { ld_u16_hint!(bu16.add(row as usize), evict_first) << 16 } else { 0 };
+                        let hi = if row + 8 < a { ld_u16_hint!(bu16.add((row + 8) as usize), evict_first) << 16 } else { 0 };
+                        (lo, hi)
+                    } else {
+                        let lo = if row < a { ld_f32_hint!(base_ptr.add(row as usize), evict_first).to_bits() } else { 0 };
+                        let hi = if row + 8 < a { ld_f32_hint!(base_ptr.add((row + 8) as usize), evict_first).to_bits() } else { 0 };
+                        (lo, hi)
+                    };
+                    (blo, bhi, slo, shi)
+                } else {
+                    let bu16 = base_ptr as *const u16;
+                    let stride_u16 = (a as usize).next_multiple_of(2);
+                    let s0 = base_b + pair * 2;
+                    let s1 = s0 + 1;
+                    let p0 = if s0 < batch {
+                        let off = (s0 as usize) * stride_u16;
+                        let lo = if row < a { ld_u16_hint!(bu16.add(off + row as usize), evict_first) } else { 0 };
+                        let hi = if row + 8 < a { ld_u16_hint!(bu16.add(off + (row + 8) as usize), evict_first) } else { 0 };
+                        lo | (hi << 16)
+                    } else { 0 };
+                    let p1 = if s1 < batch {
+                        let off = (s1 as usize) * stride_u16;
+                        let lo = if row < a { ld_u16_hint!(bu16.add(off + row as usize), evict_first) } else { 0 };
+                        let hi = if row + 8 < a { ld_u16_hint!(bu16.add(off + (row + 8) as usize), evict_first) } else { 0 };
+                        lo | (hi << 16)
+                    } else { 0 };
+                    (p0, p1, slo, shi)
+                }
             } else {
-                (0.0f32, 0.0f32, 0.0f32, 0.0f32)
+                (0u32, 0u32, 0.0f32, 0.0f32)
             };
             let (head, head1) = if COMBINED && inputs > 8 {
                 project_panel_two!(x, head_input, a, b, inputs, panel, lane, group, pair, pin_first)
@@ -516,44 +694,54 @@ unsafe fn run<const COMBINED: bool>(table: *const crate::Command, index: u64) {
             if COMBINED || kind == 13 {
                 let skip = u32::from(COMBINED);
                 let evict_first = l2_evict_first!();
-                macro_rules! store_tile {
-                    ($t_base:expr, $h:expr) => {{
-                        let t0 = $t_base + pair * 2;
-                        if t0 >= skip && t0 < inputs && row < a {
-                            let dst = (out as *mut f32).add(((t0 - skip) as usize) * (a as usize) + (row as usize));
-                            if COMBINED {
-                                st_global_f32_hint(dst, rn($h[0]), evict_first);
-                                if row + 8 < a { st_global_f32_hint(dst.add(8), rn($h[2]), evict_first); }
-                            } else {
-                                *dst = rn($h[0]);
-                                if row + 8 < a { *dst.add(8) = rn($h[2]); }
+                if COMBINED && bf16_base {
+                    let row_words = (a as usize).div_ceil(2);
+                    if inputs > 8 {
+                        store_bf16_tile!(8u32, skip, inputs, head1, row, a, row_words, pair, group, out, evict_first);
+                    }
+                    store_bf16_tile!(0u32, skip, inputs, head, row, a, row_words, pair, group, out, evict_first);
+                } else {
+                    macro_rules! store_tile {
+                        ($t_base:expr, $h:expr) => {{
+                            let t0 = $t_base + pair * 2;
+                            if t0 >= skip && t0 < inputs && row < a {
+                                let dst = (out as *mut f32).add(((t0 - skip) as usize) * (a as usize) + (row as usize));
+                                if COMBINED {
+                                    st_global_f32_hint(dst, rn($h[0]), evict_first);
+                                    if row + 8 < a { st_global_f32_hint(dst.add(8), rn($h[2]), evict_first); }
+                                } else {
+                                    *dst = rn($h[0]);
+                                    if row + 8 < a { *dst.add(8) = rn($h[2]); }
+                                }
                             }
-                        }
-                        let t1 = t0 + 1;
-                        if t1 >= skip && t1 < inputs && row < a {
-                            let dst = (out as *mut f32).add(((t1 - skip) as usize) * (a as usize) + (row as usize));
-                            if COMBINED {
-                                st_global_f32_hint(dst, rn($h[1]), evict_first);
-                                if row + 8 < a { st_global_f32_hint(dst.add(8), rn($h[3]), evict_first); }
-                            } else {
-                                *dst = rn($h[1]);
-                                if row + 8 < a { *dst.add(8) = rn($h[3]); }
+                            let t1 = t0 + 1;
+                            if t1 >= skip && t1 < inputs && row < a {
+                                let dst = (out as *mut f32).add(((t1 - skip) as usize) * (a as usize) + (row as usize));
+                                if COMBINED {
+                                    st_global_f32_hint(dst, rn($h[1]), evict_first);
+                                    if row + 8 < a { st_global_f32_hint(dst.add(8), rn($h[3]), evict_first); }
+                                } else {
+                                    *dst = rn($h[1]);
+                                    if row + 8 < a { *dst.add(8) = rn($h[3]); }
+                                }
                             }
-                        }
-                    }};
-                }
-                store_tile!(0u32, head);
-                if COMBINED && inputs > 8 {
-                    store_tile!(8u32, head1);
-                }
-                if !COMBINED && i == 0 && (*cmd as u32) == 13 && *cmd.add(9) as u32 != 0 {
-                    *(out as *mut f32).add((a as usize) * (c as usize)) = 0.0;
+                        }};
+                    }
+                    if COMBINED && inputs > 8 {
+                        store_tile!(8u32, head1);
+                    }
+                    store_tile!(0u32, head);
+                    if !COMBINED && i == 0 && (*cmd as u32) == 13 && *cmd.add(9) as u32 != 0 {
+                        *(out as *mut f32).add((a as usize) * (c as usize)) = 0.0;
+                    }
                 }
             }
 
             if COMBINED || kind == 14 {
+                let total_panels = a.div_ceil(16);
+                let pin_from = total_panels.saturating_sub(PIN_FOLD_PANELS);
                 let (fold, columns, acc) = if COMBINED {
-                    let width = c >> 6;
+                    let width = (c & 0x7fff_ffff) >> 6;
                     let latent = head_input.add((inputs * (b >> 6) * 18) as usize);
                     (y, width, project_panel!(y, latent, a, width, 1, panel, lane, group, pair, panel >= pin_from))
                 } else {
@@ -565,17 +753,27 @@ unsafe fn run<const COMBINED: bool>(table: *const crate::Command, index: u64) {
                 let eps = f32::from_bits(*cmd.add(9) as u32);
                 let bound = f32::from_bits(*cmd.add(10) as u32);
                 let evict_first = l2_evict_first!();
-                let b_lo = if !COMBINED && batch == 1 { pref_bias_lo } else if row < a { *bias.add(row as usize) } else { 0.0 };
-                let b_hi = if !COMBINED && batch == 1 { pref_bias_hi } else if row + 8 < a { *bias.add((row + 8) as usize) } else { 0.0 };
+                let prefetched_bias = !COMBINED && (batch == 1 || bf16_base);
+                let b_lo = if prefetched_bias { pref_bias_lo } else if row < a { *bias.add(row as usize) } else { 0.0 };
+                let b_hi = if prefetched_bias { pref_bias_hi } else if row + 8 < a { *bias.add((row + 8) as usize) } else { 0.0 };
                 let subs = if !COMBINED && batch > 1 { 2u32 } else { 1u32 };
                 let mut sub = 0u32;
                 while sub < subs {
                     let slot = base_b + pair * 2 + sub;
                     let active = if !COMBINED && batch > 1 { slot < batch } else { pair == 0 };
                     let (v_lo, v_hi) = if sub == 0 { (acc[0], acc[2]) } else { (acc[1], acc[3]) };
-                    let base_b = if !COMBINED && batch > 1 { base_ptr.add((slot as usize) * (a as usize)) } else { base_ptr };
+                    let base_b = if !COMBINED && batch > 1 && !bf16_base { base_ptr.add((slot as usize) * (a as usize)) } else { base_ptr };
+                    let p_bf16 = if sub == 0 { pref_base0 } else { pref_base1 };
                     let lo = if active && row < a {
-                        let base = if COMBINED { rn(head[0]) } else if batch == 1 { pref_base_lo } else { ld_f32_hint!(base_b.add(row as usize), evict_first) };
+                        let base = if COMBINED {
+                            rn(head[0])
+                        } else if batch == 1 {
+                            f32::from_bits(pref_base0)
+                        } else if bf16_base {
+                            f32::from_bits(p_bf16 << 16)
+                        } else {
+                            ld_f32_hint!(base_b.add(row as usize), evict_first)
+                        };
                         let biased = rn(v_lo + b_lo);
                         let sum = rn(biased + base);
                         if biased.is_finite() && sum.is_finite() { tanh(sum * eps) * bound } else { f32::NAN }
@@ -583,7 +781,15 @@ unsafe fn run<const COMBINED: bool>(table: *const crate::Command, index: u64) {
                         f32::NEG_INFINITY
                     };
                     let hi = if active && row + 8 < a {
-                        let base = if COMBINED { rn(head[2]) } else if batch == 1 { pref_base_hi } else { ld_f32_hint!(base_b.add((row + 8) as usize), evict_first) };
+                        let base = if COMBINED {
+                            rn(head[2])
+                        } else if batch == 1 {
+                            f32::from_bits(pref_base1)
+                        } else if bf16_base {
+                            f32::from_bits(p_bf16 & 0xffff_0000)
+                        } else {
+                            ld_f32_hint!(base_b.add((row + 8) as usize), evict_first)
+                        };
                         let biased = rn(v_hi + b_hi);
                         let sum = rn(biased + base);
                         if biased.is_finite() && sum.is_finite() { tanh(sum * eps) * bound } else { f32::NAN }
@@ -616,7 +822,8 @@ unsafe fn run<const COMBINED: bool>(table: *const crate::Command, index: u64) {
                     }
                     if group == 0 && active {
                         let offset = if COMBINED {
-                            ((inputs - 1) as usize) * (a as usize) + (panel as usize) * 4
+                            let base_row = if bf16_base { (a as usize).div_ceil(2) } else { a as usize };
+                            ((inputs - 1) as usize) * base_row + (panel as usize) * 4
                         } else if batch > 1 {
                             ((slot as usize) * (total_panels as usize) + (panel as usize)) * 4
                         } else {

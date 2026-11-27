@@ -231,7 +231,7 @@ impl<'b, 'd> Device<'b, 'd> {
         self.ready(live)?;
         need(live.words <= full, "state restore prefix exceeds capacity")?;
         let stamp = self.cost.start(self.backend);
-        let mut out = self.backend.vector(full.max(1))?;
+        let mut out = self.backend.vector_exact(full.max(1))?;
         self.backend.skip_fill(&mut out)?;
         self.backend.copy_range(&live.vector, &mut out, 0, 0, live.words)?;
         let value = self.value(out, full)?;

@@ -144,7 +144,7 @@ Every speed that we have published for Vade is on one of these pages or sections
 
 | Section | What it is for |
 | :---: | :---: |
-| [Inkling 2 Mini on live main and rc.26](results.md#inkling-2-mini-one-spark-rc26) | One Spark at live `main` (`542a2186ea`) and `rc.26`, plus unmerged private-branch receipts |
+| [Inkling 2 Mini on v0.2.0-rc.27 and live main](results.md#inkling-2-mini-one-spark-rc26) | One Spark at `v0.2.0-rc.27` (`b2a3507` / `1d921580e3`, Rows 108–109, Extras matrix, and 2 MiB VMM Paged KV up to `1M` context), `rc.26`, and unmerged private-branch receipts |
 | [GLM 5.3 Flash at rc.24](results.md#glm-53-flash-two-sparks-rc24) | Two Sparks at `v0.2.0-rc.24` against `rc.23`, drafting on and off |
 | [2026-11-02 morning FP4-Local cards](#current-2026-11-02-morning-main-8976c4f) | One, two and four Sparks at main `8976c4f`, FP4-Local, drafting on and off, with public receipts |
 | [2026-11-01 afternoon FP8 cards](results.md#current-fp8-main-acb49bc-2026-11-01-afternoon) | Two and four Sparks at main `acb49bc`, FP8, drafting on and off, with public receipts |
@@ -156,6 +156,15 @@ Every speed that we have published for Vade is on one of these pages or sections
 </div>
 
 Every result names the build and settings that we measured, and its timings hold for that build only.
+
+## Inkling 2 Mini on v0.2.0-rc.27 (current)
+
+On `v0.2.0-rc.27` (public `b2a3507` / `main` `1d921580e3`, 2026-11-26, one Spark, 0 PTX diffs), official RigMark cards and matched Extras measured:
+
+- **One chat (Rows 108–109, `32K` context, effort 0):** `51.8 / 93.1 / 144.1 tok/s` adaptive (`--mtp 7`, Row 108 `ink-20261126-1659-1d921580e-main-auto`) and `43.5 / 42.6 / 43.8 tok/s` plain (`--mtp 0`, Row 109 `ink-20261126-1707-1d921580e-main-plain`).
+- **Multi-chat scaling (Extras, `256`-token effort-0 code, plain / drafted):** `C2` `66.1 / 106.9`, `C4` `110.3 / 139.8`, `C8` `186.4 / 217.7` (cards `187.1 / 216.9`), `C16` `272.5 / 330.6`, `C32` `382.9 / 480.2 tok/s`; `C32` staggered `50 ms` `330.9 / 439.3 tok/s` and `120 ms` `288.2 / 392.3 tok/s`; `2,000`-token-prompt drafted decode `330.7 / 227.3 / 159.6 tok/s` (`32 / 16 / 8` chats).
+- **Prefill and warm cache:** Cold `8K` `1.92 s` on both cards (`1.88 s` / `4,366.8 tok/s` at `64K` context), warm `8K` replay `0.014–0.015 s`; cold `32K` `8.15 s` (`4,019.2 tok/s`), warm `32K` replay `0.046 s`.
+- **2 MiB CUDA VMM Paged KV & long-context receipts:** **89–90** admitted chats at `512K` (`89` at `1M`, `89–90` drafted / `95` plain at `32K`) with a constant **883 MB** entry reservation; **`0.534 s`** `300K` warm drafted prefix replay (`100%` reuse); **`55.54 GB`** long-lived `512K` peak CUDA RAM (down from `111.70 GB`); and **18/18 PASS** long-context quality through **501K** tokens (`0` token-ID diffs across both cards and all `1,224` Extras streams / `288,864` token IDs). See [Results and receipts](results.md#inkling-2-mini-one-spark-rc26) for every cell and receipt digest.
 
 <a id="a-long-chat-and-its-second-question"></a>
 <a id="card-at-main-250fb49-after-the-change-to-memory-reservation"></a>

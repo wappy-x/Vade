@@ -623,6 +623,10 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
                     }
                 }
             }
+            let disk_restored = if state.is_none() && automatic_cache && kv.is_none_or(|kv| kv.reuse != "hit") {
+                state = super::disk_prefix::restore_on_miss(engine, ready.scope.as_deref(), &ready.prompt, tokens);
+                state.is_some()
+            } else { false };
             let reused = state.as_ref().map_or(0, |s| s.tokens.len()); if automatic_cache || ready.request.cache && ready.request.session.is_some() { cache.count_lookup(reused); }
             if reused == 0 && (automatic_cache || ready.request.cache && ready.request.session.is_some()) {
                 let (reason, scoped) = cache.miss_reason(ready.scope.as_deref());
@@ -650,6 +654,7 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
             let state = match state {
                 Some(mut state) => {
                     state.reserved_session_bytes = request_bytes;
+                    if disk_restored { super::disk_prefix::promote_and_trim(&mut cache, key, ready.scope.as_deref(), retain_prefix(&ready), ready.prompt.len(), &mut state, clock_now()); }
                     Ok(state)
                 }
                 None => engine.session_for_admission(&ready.request, tokens).map(|session| CachedSession {

@@ -86,7 +86,7 @@ impl<C:Compute> Compute for Timed<'_,C> {
     fn upload(&self,v:&[f32])->Result<C::Value> {self.timed(||format!("upload of {} words",v.len()),||self.inner.upload(v))}
     fn read(&self,v:&C::Value)->Result<Vec<f32>> {self.timed(||format!("read of {} words",self.inner.words(v)),||self.inner.read(v))}
     fn select_known(&self,ids:&C::Value,count:&C::Value,row:&[f32])->Result<()> {self.inner.select_known(ids,count,row)}
-    fn prefill_kv(&self, conv: &spark_tp::bounded_decoder::PrefillKv<'_, C::Value>, plane: &mut C::Value) -> Result<bool> {
+    fn prefill_kv(&self, conv: &spark_tp::bounded_decoder::PrefillKv<'_, C::Value>, plane: &mut C::Value) -> Result<Option<C::Value>> {
         self.timed(||"prefill_kv".into(), ||self.inner.prefill_kv(conv, plane))
     }
     fn prompt_end(&self)->Result<()> {self.inner.prompt_end()}

@@ -337,6 +337,101 @@ fn resolve_program(spec: &ServerSpec, root: &Path) -> Result<(PathBuf, PathBuf, 
     Ok((directory, path, target))
 }
 
+/// Whether an interpreter invocation runs inline, stdin, module, or preloaded
+/// code that cannot be bound by hashing a trailing decoy script file
+/// (e.g. `sh -c "evil" decoy.sh`, `python3 -c "..." decoy.py`, `node -e "..." decoy.js`).
+fn runs_unbound_code(path: &Path, target: &Path, args: &[String]) -> bool {
+    let is = |names: &[&str]| named(path, names) || named(target, names);
+    let shell = is(&["sh", "bash", "dash", "zsh"]);
+    let python = is(&["python"]);
+    let node = is(&["node", "tsx", "ts-node"]);
+    let deno_or_bun = is(&["deno", "bun"]);
+    let ruby = is(&["ruby"]);
+    let perl = is(&["perl"]);
+    let lua = is(&["lua"]);
+    let php = is(&["php"]);
+    let mut i = 0;
+    while let Some(arg) = args.get(i) {
+        if arg == "--" {
+            break;
+        }
+        if !arg.starts_with('-') || arg == "-" {
+            if deno_or_bun && matches!(arg.as_str(), "eval" | "repl") {
+                return true;
+            }
+            break;
+        }
+        if shell {
+            if matches!(arg.as_str(), "--command" | "--rcfile" | "--init-file")
+                || arg.starts_with("--command=")
+                || arg.starts_with("--rcfile=")
+                || arg.starts_with("--init-file=")
+            {
+                return true;
+            }
+            if !arg.starts_with("--") {
+                let letters = &arg[1..];
+                if letters.contains('c') || letters.contains('s') {
+                    return true;
+                }
+                if letters.ends_with('o') || letters.ends_with('O') {
+                    i += 2;
+                    continue;
+                }
+            }
+        } else if python {
+            if !arg.starts_with("--") {
+                let letters = &arg[1..];
+                if letters.contains('c') || letters.contains('m') {
+                    return true;
+                }
+                if matches!(arg.as_str(), "-W" | "-X" | "-Q") {
+                    i += 2;
+                    continue;
+                }
+            }
+        } else if node || deno_or_bun {
+            if matches!(
+                arg.as_str(),
+                "-e" | "-p" | "-r" | "--eval" | "--print" | "--require" | "--import" | "--loader"
+            ) || arg.starts_with("--eval=")
+                || arg.starts_with("--print=")
+                || arg.starts_with("--require=")
+                || arg.starts_with("--import=")
+                || arg.starts_with("--loader=")
+            {
+                return true;
+            }
+            if node && !arg.starts_with("--") && arg[1..].chars().any(|c| matches!(c, 'e' | 'p' | 'r')) {
+                return true;
+            }
+        } else if ruby || perl || lua {
+            if arg == "--eval" || arg.starts_with("--eval=") {
+                return true;
+            }
+            if !arg.starts_with("--") {
+                let letters = &arg[1..];
+                if letters.contains('e')
+                    || (perl && (letters.contains('E') || letters.contains('M') || letters.contains('m')))
+                    || (ruby && letters.contains('r'))
+                {
+                    return true;
+                }
+            }
+        } else if php {
+            if matches!(arg.as_str(), "--run" | "--process-code")
+                || arg.starts_with("--run=")
+                || arg.starts_with("--process-code=")
+                || (!arg.starts_with("--") && arg[1..].chars().any(|c| matches!(c, 'r' | 'B' | 'R' | 'F' | 'E')))
+            {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
 /// Resolve the same program that `Command` would find for this server, and
 /// read what a yes binds besides the exact config entry: the program path and
 /// bytes, and each script argument's path and bytes. Other arguments are
@@ -385,7 +480,9 @@ pub fn program_identity(spec: &ServerSpec, root: &Path, known: Option<KnownProgr
             scripts.push(ScriptIdentity { index, path: resolved, sha256 });
         }
     }
-    let code_unchecked = scripts.is_empty() && (interpreter || named(&path, &LAUNCHERS) || named(&target, &LAUNCHERS));
+    let launcher = named(&path, &LAUNCHERS) || named(&target, &LAUNCHERS);
+    let code_unchecked = launcher
+        || (interpreter && (scripts.is_empty() || runs_unbound_code(&path, &target, &spec.args)));
     if code_unchecked && unbound_code() == UnboundCode::Refuse {
         return Err(Refusal::UnboundCode);
     }

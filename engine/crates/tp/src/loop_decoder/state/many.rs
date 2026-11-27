@@ -154,8 +154,11 @@ pub fn convolve<C:Compute>(
         if let ([span], [state])=(step.chats(),&mut *states) {
             let first=(span.first%taps as u64) as usize;
             let ring=&state.rings[which as usize];
-            if let Some(output)=compute.short_conv_prefill(shape,rows,first,[Some(inputs),token,addend,Some(ring)],fixed)? {
-                state.next[which as usize]=Some(prefill_ring_after(compute,inputs,rows,channels,taps,first)?);
+            if let Some((output,next_ring))=compute.short_conv_prefill(shape,rows,first,[Some(inputs),token,addend,Some(ring)],fixed)? {
+                state.next[which as usize]=Some(match next_ring {
+                    Some(nr)=>nr,
+                    None=>prefill_ring_after(compute,inputs,rows,channels,taps,first)?,
+                });
                 return Ok(output);
             }
         } else if step.chats().len()==states.len() && compute.words(inputs)==rows*channels {
@@ -169,13 +172,16 @@ pub fn convolve<C:Compute>(
                 let tok_c=token.map(|t|compute.range(t,off*heads*taps,count*heads*taps)).transpose()?;
                 let add_c=addend.map(|a|compute.range(a,off*channels,count*channels)).transpose()?;
                 match compute.short_conv_prefill(shape,count,first,[Some(&in_c),tok_c.as_ref(),add_c.as_ref(),Some(&state.rings[which as usize])],fixed)? {
-                    Some(out)=>{outputs.push(out);chat_inputs.push((in_c,count,first));}
+                    Some((out,nr))=>{outputs.push(out);chat_inputs.push((in_c,count,first,nr));}
                     None=>{ok=false;break;}
                 }
             }
             if ok {
-                for (state,(in_c,count,first)) in states.iter_mut().zip(&chat_inputs) {
-                    state.next[which as usize]=Some(prefill_ring_after(compute,in_c,*count,channels,taps,*first)?);
+                for (state,(in_c,count,first,nr)) in states.iter_mut().zip(chat_inputs) {
+                    state.next[which as usize]=Some(match nr {
+                        Some(nr)=>nr,
+                        None=>prefill_ring_after(compute,&in_c,count,channels,taps,first)?,
+                    });
                 }
                 return compute.join(&outputs.iter().collect::<Vec<_>>());
             }
@@ -284,9 +290,8 @@ pub(in super::super) fn convolve_kv<C: Compute>(
     let ring_first = (span.first % taps as u64) as usize;
     let conv = PrefillKv {shape, rows, ring_first, ring: &state.rings[which as usize], input, made, fixed, write};
     let plane = wide.unwrap_or(if which == Ring::Key { &mut state.keys } else { &mut state.values });
-    if !compute.prefill_kv(&conv, plane)? { return Ok(false); }
-    let channels = shape.heads as usize * shape.dim as usize;
-    state.next[which as usize] = Some(prefill_ring_after(compute,input,rows,channels,taps,ring_first)?);
+    let Some(next_ring) = compute.prefill_kv(&conv, plane)? else { return Ok(false); };
+    state.next[which as usize] = Some(next_ring);
     Ok(true)
 }
 
@@ -412,7 +417,8 @@ fn carry<C:Compute>(compute:&C,source:&C::Value,target:&mut C::Value,runs:&[(usi
 pub fn widen<C:Compute>(compute:&C,layout:&Layout,plane:&C::Value,first:u64)->Result<C::Value> {
     let (wide,words)=(layout.wide(),layout.row_words);
     need(layout.ring && compute.words(plane)==layout.rows*words,"a plane to widen differs from the layout")?;
-    let mut out=compute.zeros(wide.rows*words)?;
+    let empty=compute.range(plane,0,0)?;
+    let mut out=compute.state_restore(&empty,wide.rows*words)?;
     carry(compute,plane,&mut out,&moves(first.saturating_sub(layout.window as u64-1),first,layout.rows,wide.rows),words)?;Ok(out)
 }
 /// The window ring of a wide plane after a step whose last position is `end - 1`: the keys of positions `end - window`
@@ -420,7 +426,8 @@ pub fn widen<C:Compute>(compute:&C,layout:&Layout,plane:&C::Value,first:u64)->Re
 pub fn narrow<C:Compute>(compute:&C,layout:&Layout,wide_plane:&C::Value,end:u64)->Result<C::Value> {
     let (wide,words)=(layout.wide(),layout.row_words);
     need(layout.ring && compute.words(wide_plane)==wide.rows*words,"a wide plane differs from the layout")?;
-    let mut out=compute.zeros(layout.rows*words)?;
+    let empty=compute.range(wide_plane,0,0)?;
+    let mut out=compute.state_restore(&empty,layout.rows*words)?;
     carry(compute,wide_plane,&mut out,&moves(end.saturating_sub(layout.window as u64),end,wide.rows,layout.rows),words)?;Ok(out)
 }
 #[cfg(test)]

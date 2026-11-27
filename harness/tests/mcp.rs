@@ -854,10 +854,14 @@ fn inline_shell_entries_are_trusted_and_changed_inner_scripts_are_not_detected()
             std::fs::write(p.join(".vade/mcp.json"), config).unwrap();
             let (ok, out, err) = harness(h, p, &["mcp", "trust", name], None);
             assert!(ok && err.is_empty(), "{out}{err}");
-            // The anchor file is the shell's first file argument, so its bytes
-            // are bound. The inner script is named only inside the command string.
-            assert!(out.contains(&format!("\n  script: {}\n  {NOT_CHECKED}\n", p.join(format!("anchor-{name}.txt")).display()))
-                && out.contains("Your yes covers this exact config entry, the program's path and bytes, and each script's path and bytes.")
+            // The anchor file is bound as a script argument, while the inline `-c`
+            // shell string is still flagged as unchecked code (`CODE_NOT_CHECKED`)
+            // so `UnboundCode::Refuse` cannot be bypassed with a trailing decoy file.
+            assert!(out.contains(&format!(
+                    "\n  script: {}\n  {}\n  {NOT_CHECKED}\n",
+                    p.join(format!("anchor-{name}.txt")).display(),
+                    config::CODE_NOT_CHECKED,
+                ))
                 && !out.contains(&format!("inner-{name}.sh\n")), "{out}");
             let (ok, out, err) = harness(h, p, &["tools"], None);
             assert!(ok && out.contains(&format!("{name}__echo")), "{out}{err}");

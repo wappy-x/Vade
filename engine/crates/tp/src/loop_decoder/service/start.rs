@@ -21,7 +21,7 @@ pub const DIAGNOSTIC:&str=engine_model::plan::inkling_index::PREVIEW_OPTION;
 /// The option that selects the driver's host run: 32-bit host arithmetic on the CPU, and no GPU.
 pub const HOST_ARITHMETIC:&str="--diagnostic-host-arithmetic";
 /// What the service takes after REQUESTS. Its refusals print this list.
-pub const OPTIONS:&str="this text service takes --diagnostic-unqualified-text, --diagnostic-host-arithmetic (the decoder on the CPU, no GPU), --mtp DEPTH, --no-prompt-keep and --api-key-file PATH, each one time";
+pub const OPTIONS:&str="this text service takes --diagnostic-unqualified-text, --diagnostic-host-arithmetic (the decoder on the CPU, no GPU), --mtp DEPTH, --no-prompt-keep, --disk-cache-dir PATH, --disk-cache-bytes BYTES and --api-key-file PATH, each one time";
 /// The places of a start before its options.
 pub const PLACES:&str="this text service needs RANK WORLD LISTEN NEXT PTX MODEL CONTEXT BIND REQUESTS";
 
@@ -33,7 +33,7 @@ pub const NO_KERNEL_IMAGE:&str="the start stops: this build has no Inkling kerne
 /// the backend's own image check). Else it stops with one line, before the weights are loaded.
 pub fn need_kernel_image(present:bool)->Result<()> {need(present,||NO_KERNEL_IMAGE.to_owned())}
 #[derive(Debug,Clone,PartialEq,Eq,Default)]
-pub struct Options {pub diagnostic:bool,pub host:bool,pub key:Option<PathBuf>,pub no_prompt_keep:bool,pub depth:usize}
+pub struct Options {pub diagnostic:bool,pub host:bool,pub key:Option<PathBuf>,pub no_prompt_keep:bool,pub depth:usize,pub disk_cache_dir:Option<PathBuf>,pub disk_cache_bytes:Option<u64>}
 /// Read the options after REQUESTS. Unsupported and duplicate options are refused with the list.
 pub fn options(args:&[String])->Result<Options> {
     let (mut options,mut mtp)=(Options::default(),false);let mut args=args.iter();
@@ -42,12 +42,20 @@ pub fn options(args:&[String])->Result<Options> {
         HOST_ARITHMETIC if !options.host=>options.host=true,
         "--no-prompt-keep" if !options.no_prompt_keep=>options.no_prompt_keep=true,
         "--api-key-file" if options.key.is_none()=>options.key=Some(PathBuf::from(args.next().ok_or("--api-key-file needs a path")?)),
+        "--disk-cache-dir" if options.disk_cache_dir.is_none()=>options.disk_cache_dir=Some(PathBuf::from(args.next().ok_or("--disk-cache-dir needs a path")?)),
+        "--disk-cache-bytes" if options.disk_cache_bytes.is_none()=>{
+            let bytes:u64=args.next().ok_or("--disk-cache-bytes needs a byte count")?.parse().map_err(|_|format!("--disk-cache-bytes needs a positive byte count; {OPTIONS}"))?;
+            need(bytes>0,||format!("--disk-cache-bytes needs a positive byte count; {OPTIONS}"))?;
+            options.disk_cache_bytes=Some(bytes);
+        },
         "--mtp" if !mtp=>{
             options.depth=args.next().ok_or("--mtp needs a depth")?.parse().map_err(|_|format!("--mtp needs a nonnegative depth; {OPTIONS}"))?;mtp=true;
         },
         _=>return Err(format!("unsupported text service option: {option}; {OPTIONS}")),
     }}
     need(!options.host || options.depth==0,||"drafting requires the GPU backend".into())?;
+    need(options.disk_cache_bytes.is_none() || options.disk_cache_dir.is_some(),||"--disk-cache-bytes requires --disk-cache-dir".into())?;
+    need(!(options.no_prompt_keep && options.disk_cache_dir.is_some()),||"--disk-cache-dir cannot be combined with --no-prompt-keep".into())?;
     Ok(options)
 }
 /// The settings of one start: the places CONTEXT, BIND and REQUESTS, the options, and the output cap.
@@ -146,6 +154,13 @@ pub fn serve_with_draft<C:Compute,W:Weights<C>>(compute:&C,weights:&W,descriptio
     }
     let mut service=Service::new(compute,weights,description,settings.context,eos,seats)?.with_prompt_keep(!settings.options.no_prompt_keep);
     service.model=model;service.depth=settings.options.depth;
+    let checkpoint_fp=identity.fingerprint();
+    if let Some(dir)=settings.options.disk_cache_dir.clone() {
+        let disk=super::super::disk_cache::DiskPrefixCache::open_with_kv_bf16(
+            dir,settings.options.disk_cache_bytes,checkpoint_fp,service.driver.layouts(),service.rows,service.context,model.map(|m|m.config()),model.is_some_and(|m|m.kv_bf16()),
+        )?;
+        service=service.with_disk_cache(disk);
+    }
     compute.step_spares(spares(service.step_bytes(),service.fixed_chat_bytes(),service.chats(),service.pool()));
     compute.fund_kv_pages(service.pool());
     let mut limits=limits(settings.context,settings.output)?;

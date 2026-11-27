@@ -17,6 +17,9 @@ pub fn run(b: &Backend<'_>) -> Result<usize, String> {
         (24, 3, 5, 2304, true, true),
         (32, 1, 4, 2304, false, true),
         (32, 3, 4, 2304, true, false),
+        (64, 3, 4, 2304, true, true),
+        (64, 3, 2, 2304, true, false),
+        (64, 2, 5, 2304, true, true),
     ] {
         let scale = (1.0f64 / (dim as f64).sqrt()) as f32;
         let eps = 1.0e-6f32;
@@ -69,8 +72,15 @@ pub fn run(b: &Backend<'_>) -> Result<usize, String> {
         if asked == 3 && transpose {
             let pw_host: Vec<f32> = (0..3 * dim).map(|i| input(i + 419) + 1.25).collect();
             let pw_dev = b.upload_vector(&pw_host)?.into_resident_shared()?;
-            let (_, gm3, got_p_w) = b.fast_mix_rows_normed(rows, dim, scale, eps, post_eps, true, false, false, &q_dev, &refs, &stream_dev, Some(&pw_dev), true)?;
+            let (gn3, gm3, got_p_w) = b.fast_mix_rows_normed(rows, dim, scale, eps, post_eps, true, keep_normed, false, &q_dev, &refs, &stream_dev, Some(&pw_dev), true)?;
             if gm3.is_some() { return Err("mix_one_normed skip_mixed returned mixed".into()); }
+            if let Some(gn3) = gn3 {
+                let got_n = b.read_vector_values(&gn3)?;
+                let want_n = b.read_vector_values(&ref_normed)?;
+                if let Some(i) = (0..want_n.len()).find(|&i| got_n[i].to_bits() != want_n[i].to_bits()) {
+                    return Err(format!("mix_one_normed per_q normed r={rows} d={dim}: word {i}"));
+                }
+            }
             let got_pw = b.read_vector_values(&got_p_w)?;
             for q in 0..3 {
                 let wq = b.upload_vector(&pw_host[q * dim..(q + 1) * dim])?;
@@ -80,6 +90,16 @@ pub fn run(b: &Backend<'_>) -> Result<usize, String> {
                 let got_q = &got_pw[q * rows * dim..(q + 1) * rows * dim];
                 if let Some(i) = (0..want_q.len()).find(|&i| got_q[i].to_bits() != want_q[i].to_bits()) {
                     return Err(format!("mix_one_normed per_q q={q} r={rows} d={dim}: word {i} got {:#x} want {:#x}", got_q[i].to_bits(), want_q[i].to_bits()));
+                }
+            }
+            if rows >= 48 {
+                let (_, _, got_half) = b.fast_mix_rows_normed_half(rows, dim, scale, eps, post_eps, true, false, false, &q_dev, &refs, &stream_dev, Some(&pw_dev), true)?;
+                let got_h = b.read_vector_values(&got_half)?;
+                let want_h: Vec<f32> = got_pw.as_chunks::<2>().0.iter().map(|[lo, hi]| {
+                    f32::from_bits((lo.to_bits() >> 16) | (hi.to_bits() & 0xffff_0000))
+                }).collect();
+                if let Some(i) = (0..want_h.len()).find(|&i| got_h[i].to_bits() != want_h[i].to_bits()) {
+                    return Err(format!("mix_one_normed_half fused_q r={rows} d={dim}: word {i} got {:#x} want {:#x}", got_h[i].to_bits(), want_h[i].to_bits()));
                 }
             }
         } else if asked == 1 {
@@ -462,7 +482,11 @@ pub fn run(b: &Backend<'_>) -> Result<usize, String> {
     }
     // 5j. 2D tiled prefill `ShortConv` (`rows = 135`, crosses 64-row tile boundary!) + fused prefill
     // `STREAM_OP_ROUTE_FOLD_CONV_PREFILL` (`FOLD_HALF` + `AfterExperts ShortConv` + `next_ring`) bit-exact vs reference.
-    for &(rows, picks, dim, taps, first_slot) in &[(135usize, 8usize, 2304usize, 4usize, 2usize), (65, 8, 2304, 4, 3)] {
+    for &(rows, picks, dim, taps, first_slot) in &[
+        (135usize, 8usize, 2304usize, 4usize, 2usize),
+        (65, 8, 2304, 4, 3),
+        (1029, 4, 512, 4, 1),
+    ] {
         let bound = (1.0f64 / ((taps + 1) as f64).sqrt()) as f32;
         let to_bf16 = |v: f32| -> u16 {
             let bits = v.to_bits();
@@ -658,6 +682,47 @@ pub fn run(b: &Backend<'_>) -> Result<usize, String> {
             total_words += want.len();
         }
         println!("TC NARROW_HALF + DENSE/SPLIT HALF_IN inputs={inputs} BIT-EXACT PASS");
+    }
+    // 5n. 2D channel-tiled prefill `ShortConv` (`rows = 65` tile=64, `rows = 1029` tile=256) with fused `next_ring`,
+    // bit-exact against untiled window `fast_short_conv_win_into`.
+    for &(rows, dim, taps, first_slot, form) in &[
+        (65usize, 2304usize, 4usize, 1usize, 6u32),
+        (1029, 2304, 4, 3, 2),
+        (67, 512, 3, 2, 0),
+    ] {
+        let bound = (1.0f64 / ((taps + 1) as f64).sqrt()) as f32;
+        let inp_h: Vec<f32> = (0..rows * dim).map(|i| input(i + rows * 17 + 3) * 1.5).collect();
+        let rng_h: Vec<f32> = (0..taps * dim).map(|i| input(i + first_slot * 41 + 9) * 1.5).collect();
+        let add_h: Vec<f32> = (0..rows * dim).map(|i| input(i + rows * 7 + 19) * 1.2).collect();
+        let fix_h: Vec<f32> = (0..dim * taps).map(|i| input(i + 83) * 0.4).collect();
+        let mut win_h = Vec::with_capacity((rows + taps - 1) * dim);
+        for j in 0..taps - 1 {
+            let s = (first_slot + 1 + j) % taps;
+            win_h.extend_from_slice(&rng_h[s * dim..(s + 1) * dim]);
+        }
+        win_h.extend_from_slice(&inp_h);
+        let up = |v: &[f32]| b.upload_vector(v).and_then(|d| d.into_resident_shared());
+        let (inp_d, rng_d, add_d, fix_d, win_d) = (up(&inp_h)?, up(&rng_h)?, up(&add_h)?, up(&fix_h)?, up(&win_h)?);
+        let has_add = (form & 2) != 0;
+        let (mut got_o, mut got_nr, mut ref_o) = (b.vector(rows * dim)?, b.vector(taps * dim)?, b.vector(rows * dim)?);
+        b.fast_short_conv_win_ring_into(rows, 1, dim, taps, form, bound, &inp_d, None, has_add.then_some(&add_d), &fix_d, Some((&rng_d, first_slot)), &mut got_o, Some(&mut got_nr))?;
+        b.fast_short_conv_win_into(rows, 1, dim, taps, form, bound, &win_d, None, has_add.then_some(&add_d), &fix_d, None, &mut ref_o, None)?;
+        b.synchronize()?;
+        let (go, ro, gnr) = (b.read_vector_values(&got_o)?, b.read_vector_values(&ref_o)?, b.read_vector_values(&got_nr)?);
+        if let Some(i) = (0..ro.len()).find(|&i| go[i].to_bits() != ro[i].to_bits()) {
+            return Err(format!("short_conv_win_ring out r={rows}: word {i} got {:#x} want {:#x}", go[i].to_bits(), ro[i].to_bits()));
+        }
+        let last = (first_slot + rows - 1) % taps;
+        for slot in 0..taps {
+            let src_row = rows - 1 - (last + taps - slot) % taps;
+            let want_r = &inp_h[src_row * dim..(src_row + 1) * dim];
+            let got_r = &gnr[slot * dim..(slot + 1) * dim];
+            if let Some(i) = (0..dim).find(|&i| got_r[i].to_bits() != want_r[i].to_bits()) {
+                return Err(format!("short_conv_win_ring next_ring r={rows} slot={slot}: word {i} got {:#x} want {:#x}", got_r[i].to_bits(), want_r[i].to_bits()));
+            }
+        }
+        println!("SHORT CONV WIN RING r={rows} d={dim} taps={taps} BIT-EXACT PASS words={}", rows * dim + taps * dim);
+        total_words += rows * dim + taps * dim;
     }
     Ok(total_words)
 }

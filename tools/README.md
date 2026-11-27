@@ -93,7 +93,8 @@ diff. A new kernel still needs its safety notes and block limit when its rows
 carry a ruling.
 
 Except for an ordinary unsafe function with a ruling, a new unsafe site
-fails outside `engine/crates/gpu` and `engine/crates/gpu/kernels`.
+fails outside `engine/crates/gpu`, `engine/crates/gpu/kernels`,
+`engine/crates/gpu/kernels-tc`, and `engine/crates/gpu/kernels-inkling`.
 These crates allow a new block in a named kernel wrapper. They also allow an
 unsafe `extern "ptx-kernel"` entry with a body, including its
 `#[unsafe(no_mangle)]` attribute. Each function may add at most one new block.

@@ -35,7 +35,7 @@ dependencies = [
 
 [[package]]
 name = "vade-cli"
-version = "0.2.0-rc.27"
+version = "0.2.0-rc.28"
 dependencies = [
  "engine-model",
  "engine-tokenizer",

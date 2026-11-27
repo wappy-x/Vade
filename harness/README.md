@@ -569,7 +569,7 @@ Use [slash command templates](docs/slash-commands.md) for named prompts.
 | `/children` | Show native child IDs and states; `on`/`off` before the first prompt; `cancel ID`/`cancel all` during work |
 | `/status` | Show mode, request state, queues, history bytes/turns, and metadata status |
 | `/new`, `/clear` | Create a new native journal, reset direct/demo history, or start a fresh external session; waits for cleanup |
-| `/memory` | Report that saved memory is unavailable in this build; use `/instructions` for saved rules |
+| `/memory` | Show project memory (`MEMORY.md`) status and saved notes |
 | `/sessions`, `/resume NAME`, `/switch NAME` | List or explicitly select native journals |
 | `/fork NAME [TASK_LABEL]`, `/branch` | Fork a transcript, or inspect ancestry and file changes |
 | `/context` | Show the token budget after each turn, native full-request estimates, margin, reserve and bytes, plus parent/child admission and reported cache usage |

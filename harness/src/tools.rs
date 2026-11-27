@@ -109,6 +109,10 @@ impl Workspace {
     pub(crate) fn state_in_project(&self) -> bool {
         self.state == StateLocation::Project
     }
+    /// The Vade home holding private chat state when state is not in the project.
+    pub(crate) fn state_home(&self) -> Option<&Path> {
+        match &self.state { StateLocation::Home(home) => Some(home.as_path()), StateLocation::Project => None }
+    }
     /// Private session journals and input recall; created on first use.
     pub fn state_path(&self) -> PathBuf {
         self.state.path(&self.root)
@@ -500,6 +504,11 @@ impl Workspace {
                 Ok(dir)
             }
         }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    pub(crate) fn safe_home_state_dir(&self, home: &crate::home_guard::Home) -> io::Result<anchored::Dir> {
+        state::open_safe_home(home, &self.root)
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]

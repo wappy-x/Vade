@@ -16,7 +16,7 @@ fn round_checked(raw:f32)->f32 {
 }
 
 /// # Safety
-/// Only the checked host wrapper may launch this entry. The operands and geometry
+/// SAFETY: Only the checked host wrapper may launch this entry. The operands and geometry
 /// must satisfy the selected operation's layout for the full lifetime of the launch.
 #[no_mangle]
 /// `table[index]` must be an aligned, live command with 12 initialized payload words.
@@ -32,11 +32,318 @@ pub unsafe extern "ptx-kernel" fn inkling_draft_lanes(table:*const crate::Comman
     // Operation 12 uses whole warps: warp `p` reads words `p * b` to `min(p * b + b, a)` of x (a words) and the three
     // words of the pick in y, and lane 0 writes word p of the output (`a.div_ceil(b)` words, one a warp).
     unsafe {
-        let [kind,x,y,z,out,n,a,b,c,d,e,_]=(*table.add(index as usize)).payload.as_ptr().cast::<[u64;12]>().read();
+        let cmd=(*table.add(index as usize)).payload.as_ptr().cast::<u64>();
+        let [kind,x,y,z,out,n,a,b,c,d,e,_]=cmd.cast::<[u64;12]>().read();
         let (a,b,c,d,e)=(a as usize,b as usize,c as usize,d as usize,e as usize);
         let i=core::arch::nvptx::_block_idx_x() as usize*128+core::arch::nvptx::_thread_idx_x() as usize;
         if i>=n as usize {return;}
         let (x,y)=(x as *const f32,y as *const f32);
+        // SAFETY: operation 0 (`Gate`) is vectorized 4 words/lane (`n == a.div_ceil(4)`); `v4` loads/stores run only
+        // when all three spans are 16-byte aligned and all 4 words lie below `a`.
+        if kind==0 {
+            let base=i*4;
+            if base>=a {return;}
+            let dst=out as *mut f32;
+            if base+4<=a && ((x as usize|y as usize|dst as usize)&15)==0 {
+                let gv=crate::tc_ptx::ld_global_nc_v4(x.add(base));
+                let uv=crate::tc_ptx::ld_global_nc_v4(y.add(base));
+                let r0=rn(rn(gv[0]*sigmoid(gv[0]))*uv[0]);
+                let r1=rn(rn(gv[1]*sigmoid(gv[1]))*uv[1]);
+                let r2=rn(rn(gv[2]*sigmoid(gv[2]))*uv[2]);
+                let r3=rn(rn(gv[3]*sigmoid(gv[3]))*uv[3]);
+                core::arch::asm!(
+                    "st.global.v4.f32 [{p}], {{{r0}, {r1}, {r2}, {r3}}};",
+                    p=in(reg64) dst.add(base), r0=in(reg32) r0, r1=in(reg32) r1, r2=in(reg32) r2, r3=in(reg32) r3, options(nostack)
+                );
+            } else {
+                let end=(base+4).min(a);
+                let mut k=base;
+                while k<end {
+                    let g=*x.add(k);
+                    *dst.add(k)=rn(rn(g*sigmoid(g))**y.add(k));
+                    k+=1;
+                }
+            }
+            return;
+        }
+        // SAFETY: operation 29 (`RopeBf16`) writes one packed BF16 `u32` pair per lane (`width % 4 == 0`); each pair
+        // shares the same half `< width/2` or `>= width/2`, matching `Rope` (`kind == 1`) bit for bit.
+        if kind==29 {
+            let half=a/2;
+            let quarter=a/4;
+            let p=i%half;
+            let h=i/half;
+            let row=h/b;
+            let m=(p%quarter)*2;
+            let trig=y.add(row*a);
+            let lo0=*x.add(h*a+m);let lo1=*x.add(h*a+m+1);
+            let hi0=*x.add(h*a+half+m);let hi1=*x.add(h*a+half+m+1);
+            let cos0=*trig.add(m);let cos1=*trig.add(m+1);
+            let sin0=*trig.add(half+m);let sin1=*trig.add(half+m+1);
+            let v0=rn(if p<quarter {lo0*cos0-hi0*sin0} else {hi0*cos0+lo0*sin0});
+            let v1=rn(if p<quarter {lo1*cos1-hi1*sin1} else {hi1*cos1+lo1*sin1});
+            *(out as *mut u32).add(i)=(v0.to_bits()>>16)|(v1.to_bits()&0xffff_0000);
+            return;
+        }
+        // SAFETY: operation 30 (`PackBf16`) packs `a` BF16-rounded FP32 words into `a / 2` packed BF16 `u32` words.
+        if kind==30 {
+            let base=i*4;
+            if base>=a {return;}
+            let dst=out as *mut u32;
+            if base+4<=a && ((x as usize)&15)==0 && ((dst as usize)&7)==0 {
+                let v=crate::tc_ptx::ld_global_nc_v4(x.add(base));
+                let p0=(v[0].to_bits()>>16)|(v[1].to_bits()&0xffff_0000);
+                let p1=(v[2].to_bits()>>16)|(v[3].to_bits()&0xffff_0000);
+                core::arch::asm!(
+                    "st.global.v2.u32 [{p}], {{{p0}, {p1}}};",
+                    p=in(reg64) dst.add(i*2), p0=in(reg32) p0, p1=in(reg32) p1, options(nostack)
+                );
+            } else {
+                let mut k=base;
+                let end=(base+4).min(a);
+                while k+1<end {
+                    let p0=((*x.add(k)).to_bits()>>16)|((*x.add(k+1)).to_bits()&0xffff_0000);
+                    *dst.add(k/2)=p0;
+                    k+=2;
+                }
+            }
+            return;
+        }
+        // SAFETY: operation 31 (`ScatterKvBatch`) copies packed K and copies/BF16-packs V across `b <= 32` chats into
+        // host-checked writable destination planes encoded at `cmd[12..12 + 3*b]`; each lane owns 2 `u32`s of one row.
+        if kind==31 {
+            let half_stride=a/2;
+            let row=i/half_stride;
+            let col2=i%half_stride;
+            let mut bi=0usize;
+            let mut dk=0u64;
+            let mut dv=0u64;
+            let mut src_off=0usize;
+            while bi<b {
+                let meta=*cmd.add(12+bi*3+2);
+                let off=(meta as u32) as usize;
+                let cnt=(meta>>32) as usize;
+                if row>=off && row<off+cnt {
+                    dk=*cmd.add(12+bi*3);
+                    dv=*cmd.add(12+bi*3+1);
+                    src_off=off;
+                    break;
+                }
+                bi+=1;
+            }
+            if dk==0 {return;}
+            let local_row=row-src_off;
+            let dst_off=local_row*a+col2*2;
+            let src_u32=row*a+col2*2;
+            let kv=crate::tc_ptx::ld_global_nc_v2_u32((x as *const u32).add(src_u32));
+            core::arch::asm!(
+                "st.global.v2.u32 [{p}], {{{v0}, {v1}}};",
+                p=in(reg64) (dk as *mut u32).add(dst_off), v0=in(reg32) kv[0], v1=in(reg32) kv[1], options(nostack)
+            );
+            let (vp0,vp1)=if c!=0 {
+                let vf=crate::tc_ptx::ld_global_nc_v4(y.add(row*a*2+col2*4));
+                ((vf[0].to_bits()>>16)|(vf[1].to_bits()&0xffff_0000),(vf[2].to_bits()>>16)|(vf[3].to_bits()&0xffff_0000))
+            } else {
+                let vv=crate::tc_ptx::ld_global_nc_v2_u32((y as *const u32).add(src_u32));
+                (vv[0],vv[1])
+            };
+            core::arch::asm!(
+                "st.global.v2.u32 [{p}], {{{v0}, {v1}}};",
+                p=in(reg64) (dv as *mut u32).add(dst_off), v0=in(reg32) vp0, v1=in(reg32) vp1, options(nostack)
+            );
+            return;
+        }
+        // SAFETY: operation 27 (`FlashAttnBatch`) runs whole warps across `batch <= 32` chats with host-verified
+        // committed `(ck, cv)` pointers at `cmd[12..12 + 3*batch]` plus contiguous `(k_new, v_new)`. Warps are
+        // grouped by `(bi, kv_head, split)` so all query heads and query rows sharing a KV head sit adjacent in the
+        // same CTA and hit L1 from the single lead warp's prefetches while keeping `inkling_draft_lanes <= 64` regs.
+        if kind==27 {
+            let scale=f32::from_bits(a as u32);
+            let i32=i as u32;
+            let lane=i32&31;
+            let (q0,hist_n,new_packed,k_h_ptr0,v_h_ptr0,hist_stride,lead,kv_bf16)={
+                let max_splits=((a>>40)&0xff) as u32;
+                let kv_bf16=((a>>48)&1)!=0;
+                let heads=(b&0xffff) as u32;
+                let kv=((b>>16)&0xffff) as u32;
+                let q_rows=((b>>32)&0xffff) as u32;
+                let new_rows=((b>>48)&0xffff) as u32;
+                let causal_base=c as u32;
+                let row_off=(c>>32) as u32;
+                let warp=i32>>5;
+                let group=heads/kv;
+                let per_split=q_rows*group;
+                let per_kv=max_splits*per_split;
+                let per_chat=kv*per_kv;
+                let bi=warp/per_chat;let rem0=warp%per_chat;
+                let kh=rem0/per_kv;let rem1=rem0%per_kv;
+                let split=rem1/per_split;let rem2=rem1%per_split;
+                let row=rem2/group;let sub=rem2%group;
+                let head=kh*group+sub;
+                let cmeta=*cmd.add(12+(bi as usize)*3+2);
+                let hist_keys=cmeta as u32;
+                let splits_b=(cmeta>>32) as u32;
+                if split>=splits_b {return;}
+                let keys=hist_keys+new_rows;
+                let row_keys=if causal_base>0 {
+                    let r_abs=row+row_off;
+                    if r_abs<8 {causal_base} else if r_abs<12 {(causal_base+4).min(keys)} else {keys}
+                } else {keys};
+                let chunk=keys.div_ceil(splits_b);
+                let start=split*chunk;
+                let end=(start+chunk).min(row_keys);
+                let hist_end=end.min(hist_keys);
+                let hist_n=hist_end.saturating_sub(start);
+                let new_start=start.max(hist_keys);
+                let new_n=end.saturating_sub(new_start);
+                let new_off=new_start.saturating_sub(hist_keys);
+                let q_id=((bi*q_rows+row)*heads+head) as usize;
+                let q0=crate::tc_ptx::ld_global_nc_v4(x.add(q_id*128+(lane as usize)*4));
+                let ck_addr=*cmd.add(12+(bi as usize)*3);
+                let cv_addr=*cmd.add(12+(bi as usize)*3+1);
+                let hs=kv*if kv_bf16 {64} else {128};
+                let hlo=kh*if kv_bf16 {64} else {128}+lane*if kv_bf16 {2} else {4};
+                let off=(start as usize)*(hs as usize)+(hlo as usize);
+                let kp=if hist_n>0 {(ck_addr as *const u32).add(off)} else {ck_addr as *const u32};
+                let vp=if hist_n>0 {(cv_addr as *const u32).add(off)} else {cv_addr as *const u32};
+                let lead=causal_base>0 || (warp&3)==0 || (warp-1)/per_split!=warp/per_split;
+                (q0,hist_n,(new_off<<16)|new_n,kp,vp,hs,lead,kv_bf16)
+            };
+            let mut m=f32::NEG_INFINITY;let mut l=0.0f32;let mut o=[0.0f32;4];
+            // Loop 1: committed history keys (`0..hist_n`), hot L1-prefetched path with u32 counters.
+            if hist_n>0 {
+                let mut k_h_ptr=k_h_ptr0;
+                let mut v_h_ptr=v_h_ptr0;
+                let hs=hist_stride as usize;
+                let ahead=ATTN_PREFETCH_KEYS*hs;
+                let mut warm=0u32;
+                let warm_end=hist_n.min(ATTN_PREFETCH_KEYS as u32);
+                while lead && warm<warm_end {
+                    let at=(warm as usize)*hs;
+                    core::arch::asm!("prefetch.global.L1 [{k}];","prefetch.global.L1 [{v}];",k=in(reg64) k_h_ptr.add(at),v=in(reg64) v_h_ptr.add(at),options(readonly,nostack));
+                    warm+=1;
+                }
+                let mut rem_k=hist_n;
+                while rem_k>0 {
+                    if lead && rem_k>ATTN_PREFETCH_KEYS as u32 {
+                        core::arch::asm!("prefetch.global.L1 [{k}];","prefetch.global.L1 [{v}];",k=in(reg64) k_h_ptr.add(ahead),v=in(reg64) v_h_ptr.add(ahead),options(readonly,nostack));
+                    }
+                    let k0=if kv_bf16 {
+                        let pk=crate::tc_ptx::ld_global_nc_v2_u32(k_h_ptr);
+                        [f32::from_bits(pk[0]<<16),f32::from_bits(pk[0]&0xffff_0000),f32::from_bits(pk[1]<<16),f32::from_bits(pk[1]&0xffff_0000)]
+                    } else {
+                        crate::tc_ptx::ld_global_nc_v4(k_h_ptr as *const f32)
+                    };
+                    let mut dot=q0[0]*k0[0]+q0[1]*k0[1]+q0[2]*k0[2]+q0[3]*k0[3];
+                    dot+=shfl_xor_f32(dot,16);dot+=shfl_xor_f32(dot,8);dot+=shfl_xor_f32(dot,4);dot+=shfl_xor_f32(dot,2);dot+=shfl_xor_f32(dot,1);
+                    let sc=dot*scale;
+                    let v0=if kv_bf16 {
+                        let pv=crate::tc_ptx::ld_global_nc_v2_u32(v_h_ptr);
+                        [f32::from_bits(pv[0]<<16),f32::from_bits(pv[0]&0xffff_0000),f32::from_bits(pv[1]<<16),f32::from_bits(pv[1]&0xffff_0000)]
+                    } else {
+                        crate::tc_ptx::ld_global_nc_v4(v_h_ptr as *const f32)
+                    };
+                    let p=if sc>m {
+                        let alpha=if l==0.0 {0.0} else {exp(m-sc)};
+                        l*=alpha;o[0]*=alpha;o[1]*=alpha;o[2]*=alpha;o[3]*=alpha;m=sc;1.0f32
+                    } else {exp(sc-m)};
+                    l+=p;o[0]+=p*v0[0];o[1]+=p*v0[1];o[2]+=p*v0[2];o[3]+=p*v0[3];
+                    k_h_ptr=k_h_ptr.add(hs);
+                    v_h_ptr=v_h_ptr.add(hs);
+                    rem_k-=1;
+                }
+            }
+            let a_re=*cmd.add(6);
+            let b_re=*cmd.add(7);
+            let max_splits=((a_re>>40)&0xff) as u32;
+            let k_new_bf16=((a_re>>49)&1)!=0;
+            let heads=(b_re&0xffff) as u32;
+            let kv=((b_re>>16)&0xffff) as u32;
+            let q_rows=((b_re>>32)&0xffff) as u32;
+            let new_rows=((b_re>>48)&0xffff) as u32;
+            let warp=i32>>5;
+            let group=heads/kv;
+            let per_split=q_rows*group;
+            let per_kv=max_splits*per_split;
+            let per_chat=kv*per_kv;
+            let bi=warp/per_chat;let rem0=warp%per_chat;
+            let kh=rem0/per_kv;let rem1=rem0%per_kv;
+            let split=rem1/per_split;let rem2=rem1%per_split;
+            let row=rem2/group;let sub=rem2%group;
+            let head=kh*group+sub;
+            let q_id=((bi*q_rows+row)*heads+head) as usize;
+            let new_n=new_packed&0xffff;
+            if new_n>0 {
+                let yn=*cmd.add(2) as *const f32;
+                let zn=*cmd.add(3) as *const f32;
+                let mut r_local=new_packed>>16;
+                let r_end=r_local+new_n;
+                while r_local<r_end {
+                    let r=(bi*new_rows+r_local) as usize;
+                    let k0=if k_new_bf16 {
+                        let p=crate::tc_ptx::ld_global_nc_v2_u32((yn as *const u32).add((r*(kv as usize)+(kh as usize))*64+(lane as usize)*2));
+                        [f32::from_bits(p[0]<<16),f32::from_bits(p[0]&0xffff_0000),f32::from_bits(p[1]<<16),f32::from_bits(p[1]&0xffff_0000)]
+                    } else {
+                        crate::tc_ptx::ld_global_nc_v4(yn.add((r*(kv as usize)+(kh as usize))*128+(lane as usize)*4))
+                    };
+                    let mut dot=q0[0]*k0[0]+q0[1]*k0[1]+q0[2]*k0[2]+q0[3]*k0[3];
+                    dot+=shfl_xor_f32(dot,16);dot+=shfl_xor_f32(dot,8);dot+=shfl_xor_f32(dot,4);dot+=shfl_xor_f32(dot,2);dot+=shfl_xor_f32(dot,1);
+                    let sc=dot*scale;
+                    let v0=crate::tc_ptx::ld_global_nc_v4(zn.add((r*(kv as usize)+(kh as usize))*128+(lane as usize)*4));
+                    let p=if sc>m {
+                        let alpha=if l==0.0 {0.0} else {exp(m-sc)};
+                        l*=alpha;o[0]*=alpha;o[1]*=alpha;o[2]*=alpha;o[3]*=alpha;m=sc;1.0f32
+                    } else {exp(sc-m)};
+                    l+=p;o[0]+=p*v0[0];o[1]+=p*v0[1];o[2]+=p*v0[2];o[3]+=p*v0[3];
+                    r_local+=1;
+                }
+            }
+            let out_p=*cmd.add(4) as *mut f32;
+            if max_splits==1 {
+                let inv=1.0/l;
+                let dst=out_p.add(q_id*128+(lane as usize)*4);
+                *dst=rn(o[0]*inv);*dst.add(1)=rn(o[1]*inv);*dst.add(2)=rn(o[2]*inv);*dst.add(3)=rn(o[3]*inv);
+            } else {
+                let ob=(q_id*(max_splits as usize)+(split as usize))*132;
+                let dst=out_p.add(ob+(lane as usize)*4);
+                *dst=o[0];*dst.add(1)=o[1];*dst.add(2)=o[2];*dst.add(3)=o[3];
+                if lane==0 {*out_p.add(ob+128)=m;*out_p.add(ob+129)=l;}
+            }
+            return;
+        }
+        // SAFETY: operation 28 (`FlashAttnMergeBatch`) merges each chat's `splits_b` partials (packed as `u8` bytes at
+        // payload offset 96..96+batch) across `max_splits = c` stride into contiguous `[batch, q_rows, heads, 128]`.
+        if kind==28 {
+            let (warp,lane)=(i/32,i%32);
+            let (heads,q_rows,max_splits)=(a,b,c);
+            let bi=warp/(q_rows*heads);
+            let splits_b=*(cmd.cast::<u8>().add(96+bi)) as usize;
+            let mut m=f32::NEG_INFINITY;let mut l=0.0f32;let mut o=[0.0f32;4];
+            let mut s=0usize;
+            while s<splits_b {
+                let base=(warp*max_splits+s)*132;
+                let ls=*x.add(base+129);
+                if ls!=0.0 {
+                    let ms=*x.add(base+128);
+                    let os=crate::tc_ptx::ld_global_nc_v4(x.add(base+lane*4));
+                    if l==0.0 {m=ms;l=ls;o=os;}
+                    else if ms>m {
+                        let alpha=exp(m-ms);
+                        o[0]=o[0]*alpha+os[0];o[1]=o[1]*alpha+os[1];o[2]=o[2]*alpha+os[2];o[3]=o[3]*alpha+os[3];
+                        l=l*alpha+ls;m=ms;
+                    } else {
+                        let alpha=exp(ms-m);
+                        o[0]+=os[0]*alpha;o[1]+=os[1]*alpha;o[2]+=os[2]*alpha;o[3]+=os[3]*alpha;
+                        l+=ls*alpha;
+                    }
+                }
+                s+=1;
+            }
+            let inv=1.0/l;
+            let dst=(out as *mut f32).add(warp*128+lane*4);
+            *dst=rn(o[0]*inv);*dst.add(1)=rn(o[1]*inv);*dst.add(2)=rn(o[2]*inv);*dst.add(3)=rn(o[3]*inv);
+            return;
+        }
         if kind==12 {
             // The softmax denominator of a slice against the greedy pick `[best, id, flag]`: `exp(logit - best)` summed
             // by each lane in ascending order, then across the warp. A pick whose flag is not 1 gives 0.
@@ -260,15 +567,20 @@ pub unsafe extern "ptx-kernel" fn inkling_draft_lanes(table:*const crate::Comman
             // read of K and then V. Each lane asks L1 for its 16 bytes of K and V `ATTN_PREFETCH_KEYS` keys ahead
             // (keys below `end` only, inside the checked spans); a prefetch moves no value, so every bit is unchanged.
             let ahead=ATTN_PREFETCH_KEYS*kv_stride;
+            // The warps of a block that share `(kv_head, split)` walk the same K and V rows in step, and L1 does not
+            // join their misses on one sector: each prefetch of each warp is its own L2 read (measured: 39 MB of L2
+            // reads for 1.2 MB of K and V). Only the first such warp of the block prefetches; the others find the
+            // rows in L1. With block-causal rows the warps of a block end at different keys, so each one prefetches.
+            let lead=causal_base>0 || warp%4==0 || (warp-warp%4)/per_split!=warp/per_split;
             let mut warm=start;
-            while warm<end && warm<start+ATTN_PREFETCH_KEYS {
+            while lead && warm<end && warm<start+ATTN_PREFETCH_KEYS {
                 let at=(warm-start)*kv_stride;
                 core::arch::asm!("prefetch.global.L1 [{k}];","prefetch.global.L1 [{v}];",k=in(reg64) k_ptr.add(at),v=in(reg64) v_ptr.add(at),options(readonly,nostack));
                 warm+=1;
             }
             let mut step=start;
             while step<end {
-                if step+ATTN_PREFETCH_KEYS<end {
+                if lead && step+ATTN_PREFETCH_KEYS<end {
                     core::arch::asm!("prefetch.global.L1 [{k}];","prefetch.global.L1 [{v}];",k=in(reg64) k_ptr.add(ahead),v=in(reg64) v_ptr.add(ahead),options(readonly,nostack));
                 }
                 let k0=crate::tc_ptx::ld_global_nc_v4(k_ptr);
@@ -552,7 +864,6 @@ pub unsafe extern "ptx-kernel" fn inkling_draft_lanes(table:*const crate::Comman
             return;
         }
         let v=match kind {
-            0=>{let g=*x.add(i);rn(rn(g*sigmoid(g)) * *y.add(i))}
             1=>{let j=i%a;let h=i/a;let m=j%(a/2);let row=h/b;
                 let trig=y.add(row*a);let lo=*x.add(h*a+m);let hi=*x.add(h*a+a/2+m);
                 let cos=*trig.add(m);let sin=*trig.add(a/2+m);

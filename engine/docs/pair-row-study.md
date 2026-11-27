@@ -4,7 +4,7 @@ Next step: second-model review and the lead's merged-head four-load/golden/k32 g
 
 # PAIR first shot
 
-Branch `day-pair-1`, draft [PR 228](https://github.com/wappy-x/vade-next/pull/228). Measured candidate `566adaeb8f4a724db7c34dfdacf092a0cd4c3924`; measured main `64cd96e586485aa2bcbfdb9cc2c3560aafd764b9`. Current main `42c6b6096e1f551b51968f4fc1a74013b82cf651` merged cleanly at `be2552fe616e2019ba537627173a02fac5255371`. Merged source validation head: `d9dd1aeaa341ee84c071cfb46652361e5563f329`; later commits contain receipts only.
+Branch `day-pair-1`. Measured candidate `566adaeb8f4a724db7c34dfdacf092a0cd4c3924`; measured main `64cd96e586485aa2bcbfdb9cc2c3560aafd764b9`. Current main `42c6b6096e1f551b51968f4fc1a74013b82cf651` merged cleanly at `be2552fe616e2019ba537627173a02fac5255371`. Merged source validation head: `d9dd1aeaa341ee84c071cfb46652361e5563f329`; later commits contain receipts only.
 
 ## Change and proof
 

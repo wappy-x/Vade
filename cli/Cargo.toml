@@ -1,6 +1,6 @@
 [package]
 name = "vade-cli"
-version = "0.2.0-rc.27"
+version = "0.2.0-rc.28"
 edition = "2024"
 license = "Apache-2.0"
 publish = false

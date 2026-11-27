@@ -257,7 +257,7 @@ mod check {
 
             // 3c. MOE_GROUP_ROUTE tables against the CPU order: picks grouped by expert in ascending pick order, route
             // tiles of TC_BM picks. Slices that end inside a 32-pick group (4093 rows) and the model shape (128 experts).
-            for &(rows, picks, experts) in &[(4093usize, 8usize, 128usize), (130, 8, 16), (37, 4, 9)] {
+            for &(rows, picks, experts) in &[(4093usize, 8usize, 128usize), (388, 8, 128), (130, 8, 16), (37, 4, 9)] {
                 let (all, each) = (rows * picks, 2 * picks);
                 let mut route_host = vec![0.0f32; rows * each];
                 for r in 0..rows {
@@ -886,9 +886,20 @@ mod check {
                                 }
                             }
                             let kv = spark_gpu_probe::fast_ops::KvWrite { first: plane_first, plane_rows, clip, param };
-                            b.fast_short_conv_kv_into(shape, rows, &new_inputs, (form == 1).then_some(&tok_dev), &fix_dev,
-                                (&old_ring, first), &mut out.resident_range(GUARD..GUARD + plane_words)?, kv)?;
+                            let ring_words = taps * width;
+                            let next_ring = poisoned(b, ring_words)?;
+                            b.fast_short_conv_kv_ring_into(shape, rows, &new_inputs, (form == 1).then_some(&tok_dev), &fix_dev,
+                                (&old_ring, first), &mut out.resident_range(GUARD..GUARD + plane_words)?, kv,
+                                Some(&mut next_ring.resident_range(GUARD..GUARD + ring_words)?))?;
                             total_words += check_buf(b, &out, &expected, &format!("prefill KV finish clip={clip} form={form}"))?;
+                            let last = (first + rows - 1) % taps;
+                            let mut expected_ring = vec![0.0f32; ring_words];
+                            for slot in 0..taps {
+                                let src_row = rows - 1 - (last + taps - slot) % taps;
+                                expected_ring[slot * width..(slot + 1) * width]
+                                    .copy_from_slice(&win[(taps - 1 + src_row) * width..(taps + src_row) * width]);
+                            }
+                            total_words += check_buf(b, &next_ring, &expected_ring, &format!("prefill KV next_ring clip={clip} form={form}"))?;
                             println!("FAST OPS PREFILL KV BIT-EXACT PASS clip={clip} form={form} plane_words={plane_words}");
                         }
                     }

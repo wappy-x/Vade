@@ -346,5 +346,249 @@ pub fn run(b: &Backend<'_>, recorded: &dyn Fn(Kind) -> u128) -> Result<(), Strin
         }
         println!("FEW CHECK KV_DIRECT + SHORT_CONV_DIRECT cases=4 bit-exact and guards unchanged");
     }
+    // Vectorized Gate, RopeBf16, PackBf16, ScatterKvBatch, and FlashAttnBatch + FlashAttnMergeBatch bit-exactness.
+    {
+        use spark_gpu_probe::draft_ops::DraftOp::*;
+        let rn = spark_gpu_probe::bf16::rounded;
+        for n in [1usize, 3, 7, 16, 19, 128] {
+            let g_vals = (0..n).map(|k| input(k + 11) * 2.0).collect::<Vec<_>>();
+            let u_vals = (0..n).map(|k| input(k + 37) * 2.0).collect::<Vec<_>>();
+            let (gd, ud) = (b.upload_vector(&g_vals)?, b.upload_vector(&u_vals)?);
+            let got = b.read_vector_values(&b.draft_lanes(Gate(n), [Some(&gd), Some(&ud), None])?)?;
+            for k in 0..n {
+                let want = rn(rn(g_vals[k] * spark_gpu_probe::fixed_math::sigmoid(g_vals[k])) * u_vals[k]);
+                if got[k].to_bits() != want.to_bits() {
+                    return Err(format!("Gate vectorized n={n} k={k} differs"));
+                }
+            }
+        }
+        for (rows, heads, width) in [(1usize, 8usize, 128usize), (7, 8, 128), (19, 8, 128)] {
+            let x_vals = (0..rows * heads * width).map(|k| rn(input(k + 53) * 2.0)).collect::<Vec<_>>();
+            let t_vals = (0..rows * width).map(|k| input(k + 89)).collect::<Vec<_>>();
+            let (xd, td) = (b.upload_vector(&x_vals)?, b.upload_vector(&t_vals)?);
+            let rope_fp = b.draft_lanes(Rope { rows, heads, width }, [Some(&xd), Some(&td), None])?;
+            let rope_bf = b.draft_lanes(RopeBf16 { rows, heads, width }, [Some(&xd), Some(&td), None])?;
+            let packed_fp = b.draft_lanes(PackBf16(rows * heads * width), [Some(&rope_fp), None, None])?;
+            let fp_vals = b.read_vector_values(&rope_fp)?;
+            let bf_words: Vec<u32> = b.read_vector_values(&rope_bf)?.into_iter().map(f32::to_bits).collect();
+            let pk_words: Vec<u32> = b.read_vector_values(&packed_fp)?.into_iter().map(f32::to_bits).collect();
+            if bf_words != pk_words {
+                return Err(format!("RopeBf16 != PackBf16(Rope) at rows={rows}"));
+            }
+            for p in 0..bf_words.len() {
+                let want = (fp_vals[2 * p].to_bits() >> 16) | (fp_vals[2 * p + 1].to_bits() & 0xffff_0000);
+                if bf_words[p] != want {
+                    return Err(format!("RopeBf16 pair {p} differs at rows={rows}"));
+                }
+            }
+        }
+        for n in [6usize, 34] {
+            let v = (0..n).map(|k| rn(input(k + 131))).collect::<Vec<_>>();
+            let vd = b.upload_vector(&v)?;
+            let got: Vec<u32> = b.read_vector_values(&b.draft_lanes(PackBf16(n), [Some(&vd), None, None])?)?.into_iter().map(f32::to_bits).collect();
+            for p in 0..n / 2 {
+                let want = (v[2 * p].to_bits() >> 16) | (v[2 * p + 1].to_bits() & 0xffff_0000);
+                if got[p] != want {
+                    return Err(format!("PackBf16 tail n={n} p={p} differs"));
+                }
+            }
+        }
+        for v_is_fp32 in [true, false] {
+            let kv_u32_stride = if v_is_fp32 { 8 * 64 } else { 8 * 128 };
+            let counts = [1usize, 3, 2, 5];
+            let total_rows: usize = counts.iter().sum();
+            let k_host = (0..total_rows * kv_u32_stride).map(|i| {
+                if v_is_fp32 {
+                    let lo = rn(input(2 * i + 7)).to_bits() >> 16;
+                    let hi = rn(input(2 * i + 8)).to_bits() & 0xffff_0000;
+                    f32::from_bits(lo | hi)
+                } else {
+                    rn(input(i + 7))
+                }
+            }).collect::<Vec<_>>();
+            let v_host = (0..total_rows * kv_u32_stride * if v_is_fp32 { 2 } else { 1 }).map(|i| rn(input(i + 211))).collect::<Vec<_>>();
+            let (ks, vs) = (b.upload_vector(&k_host)?, b.upload_vector(&v_host)?);
+            let mut planes: Vec<(DeviceVector<'_>, DeviceVector<'_>, usize, usize, usize)> = Vec::new();
+            let mut off = 0usize;
+            for (bi, &cnt) in counts.iter().enumerate() {
+                let dst_row = bi + 1;
+                let cap_rows = dst_row + cnt + 2;
+                let dk = b.upload_vector(&vec![f32::from_bits(POISON); cap_rows * kv_u32_stride])?;
+                let dv = b.upload_vector(&vec![f32::from_bits(POISON); cap_rows * kv_u32_stride])?;
+                planes.push((dk, dv, dst_row, off, cnt));
+                off += cnt;
+            }
+            let mut refs: Vec<(&mut DeviceVector<'_>, &mut DeviceVector<'_>, usize, usize, usize)> =
+                planes.iter_mut().map(|(dk, dv, dr, sr, c)| (dk, dv, *dr, *sr, *c)).collect();
+            if !b.draft_scatter_kv_batch(&ks, &vs, total_rows, kv_u32_stride, v_is_fp32, &mut refs)? {
+                return Err(format!("ScatterKvBatch returned false for writable planes v_is_fp32={v_is_fp32}"));
+            }
+            for (bi, (dk, dv, dst_row, src_row, cnt)) in planes.iter().enumerate() {
+                let got_k: Vec<u32> = b.read_vector_values(dk)?.into_iter().map(f32::to_bits).collect();
+                let got_v: Vec<u32> = b.read_vector_values(dv)?.into_iter().map(f32::to_bits).collect();
+                let prefix = dst_row * kv_u32_stride;
+                let span = cnt * kv_u32_stride;
+                if got_k[..prefix].iter().chain(&got_k[prefix + span..]).any(|&w| w != POISON)
+                    || got_v[..prefix].iter().chain(&got_v[prefix + span..]).any(|&w| w != POISON)
+                {
+                    return Err(format!("ScatterKvBatch overwrote guard row bi={bi} v_is_fp32={v_is_fp32}"));
+                }
+                for r in 0..*cnt {
+                    for w in 0..kv_u32_stride {
+                        let want_k = k_host[(src_row + r) * kv_u32_stride + w].to_bits();
+                        let want_v = if v_is_fp32 {
+                            let base = ((src_row + r) * kv_u32_stride + w) * 2;
+                            (v_host[base].to_bits() >> 16) | (v_host[base + 1].to_bits() & 0xffff_0000)
+                        } else {
+                            v_host[(src_row + r) * kv_u32_stride + w].to_bits()
+                        };
+                        if got_k[(dst_row + r) * kv_u32_stride + w] != want_k || got_v[(dst_row + r) * kv_u32_stride + w] != want_v {
+                            return Err(format!("ScatterKvBatch mismatch bi={bi} r={r} w={w} v_is_fp32={v_is_fp32}"));
+                        }
+                    }
+                }
+            }
+        }
+        let pack_bf16_host = |vals: &[f32]| -> Vec<f32> {
+            vals.as_chunks::<2>().0.iter().map(|p| f32::from_bits((p[0].to_bits() >> 16) | (p[1].to_bits() & 0xffff_0000))).collect()
+        };
+        for (name, heads, kv, q_rows, new_rows, kv_bf16, k_new_bf16, causal_base, row_off, spec) in [
+            ("gqa3_bf16_mixed", 24usize, 8usize, 7usize, 7usize, true, true, 0usize, 0usize, &[(0usize, 0usize, 1usize), (3, 31, 1), (5, 95, 8), (2, 260, 16)][..]),
+            ("gqa3_fp32_s1", 24, 8, 3, 3, false, false, 0, 0, &[(0, 12, 1), (4, 20, 1)][..]),
+            ("nongqa3_bf16", 16, 8, 4, 4, true, true, 0, 0, &[(1, 70, 8), (0, 260, 16)][..]),
+            ("gqa3_bf16_causal", 24, 8, 15, 15, true, true, 135, 1, &[(2, 128, 8), (0, 128, 8)][..]),
+        ] {
+            let batch = spec.len();
+            let q_host = (0..batch * q_rows * heads * 128).map(|i| rn(input(i + 17) * 0.5)).collect::<Vec<_>>();
+            let kn_fp = (0..batch * new_rows * kv * 128).map(|i| rn(input(i + 41) * 0.5)).collect::<Vec<_>>();
+            let vn_fp = (0..batch * new_rows * kv * 128).map(|i| rn(input(i + 67) * 0.5)).collect::<Vec<_>>();
+            let q_dev = b.upload_vector(&q_host)?;
+            let kn_dev = if k_new_bf16 { b.upload_vector(&pack_bf16_host(&kn_fp))? } else { b.upload_vector(&kn_fp)? };
+            let vn_dev = b.upload_vector(&vn_fp)?;
+            let mut cks = Vec::with_capacity(batch);
+            let mut cvs = Vec::with_capacity(batch);
+            let mut want_all = Vec::with_capacity(q_host.len());
+            for (bi, &(rel_start, hist_keys, splits_b)) in spec.iter().enumerate() {
+                let plane_rows = (rel_start + hist_keys).max(1);
+                let hk_fp = (0..plane_rows * kv * 128).map(|i| rn(input(i + bi * 7919 + 101) * 0.5)).collect::<Vec<_>>();
+                let hv_fp = (0..plane_rows * kv * 128).map(|i| rn(input(i + bi * 7927 + 149) * 0.5)).collect::<Vec<_>>();
+                cks.push(if kv_bf16 { b.upload_vector(&pack_bf16_host(&hk_fp))? } else { b.upload_vector(&hk_fp)? });
+                cvs.push(if kv_bf16 { b.upload_vector(&pack_bf16_host(&hv_fp))? } else { b.upload_vector(&hv_fp)? });
+                let mut k_cat = hk_fp[rel_start * kv * 128..(rel_start + hist_keys) * kv * 128].to_vec();
+                k_cat.extend_from_slice(&kn_fp[bi * new_rows * kv * 128..(bi + 1) * new_rows * kv * 128]);
+                let mut v_cat = hv_fp[rel_start * kv * 128..(rel_start + hist_keys) * kv * 128].to_vec();
+                v_cat.extend_from_slice(&vn_fp[bi * new_rows * kv * 128..(bi + 1) * new_rows * kv * 128]);
+                let q_sub = b.upload_vector(&q_host[bi * q_rows * heads * 128..(bi + 1) * q_rows * heads * 128])?;
+                let (kc, vc) = (b.upload_vector(&k_cat)?, b.upload_vector(&v_cat)?);
+                let keys = hist_keys + new_rows;
+                let part = b.draft_lanes(FlashAttn { rows: q_rows, heads, kv, width: 128, keys, splits: splits_b, causal_base, row_off }, [Some(&q_sub), Some(&kc), Some(&vc)])?;
+                let out = if splits_b > 1 { b.draft_lanes(FlashAttnMerge { rows: q_rows, heads, width: 128, splits: splits_b }, [Some(&part), None, None])? } else { part };
+                want_all.extend(b.read_vector_values(&out)?);
+            }
+            let chat_descs: Vec<_> = spec.iter().enumerate().map(|(bi, &(rs, hk, sp))| (&cks[bi], &cvs[bi], rs, hk, sp)).collect();
+            let splits_vec: Vec<usize> = spec.iter().map(|&(_, _, sp)| sp).collect();
+            let max_splits = splits_vec.iter().copied().max().unwrap();
+            let part = b.draft_flash_attn_batch(&q_dev, &kn_dev, &vn_dev, &chat_descs, heads, kv, 128, q_rows, new_rows, kv_bf16, k_new_bf16, causal_base, row_off)?;
+            let got_dev = if max_splits > 1 { b.draft_flash_attn_merge_batch(&part, &splits_vec, heads, q_rows, max_splits)? } else { part };
+            let got_all = b.read_vector_values(&got_dev)?;
+            if let Some(at) = got_all.iter().zip(&want_all).position(|(a, w)| a.to_bits() != w.to_bits()) {
+                return Err(format!("FlashAttnBatch {name} bit mismatch at word {at}: got={} want={}", got_all[at], want_all[at]));
+            }
+        }
+        println!("FEW CHECK DRAFT BATCH BF16 KV + FLASH_ATTN_BATCH + SCATTER_KV PASS");
+    }
+    // Pipelined wide `Panel` / `PanelBf16` across odd/even chunk counts (cols=64, 192, 256, 384) and multi-wave
+    // large matrix (`rows=8256 > PANEL_SPLIT_ROWS_MAX`, `inputs=9, 32, 96, 224`) bit-exact vs `Panel` + `PackBf16`.
+    {
+        use spark_gpu_probe::{decode_panels, draft_ops::DraftOp::*, packed_product};
+        let rn = spark_gpu_probe::bf16::rounded;
+        for &(rows, cols, inputs) in &[
+            (79usize, 64usize, 16usize),
+            (79, 192, 32),
+            (79, 256, 96),
+            (8256, 192, 16),
+            (8256, 256, 96),
+            (8256, 256, 224),
+        ] {
+            let phys = rows.next_multiple_of(64);
+            let layout = packed_product::layout(phys, cols, false);
+            let mut bytes = vec![0u8; layout.bytes];
+            for r in 0..rows {
+                for c in (0..cols).step_by(2) {
+                    let at = packed_product::code_copy(r, c / 64, 0, cols, false) + (c % 64) / 2;
+                    let c0 = (r * 3 + c / 3 + c * r) % 8;
+                    let c1 = (r * 3 + (c + 1) / 3 + (c + 1) * r) % 8;
+                    bytes[at] = (c0 | (c1 << 4)) as u8;
+                }
+            }
+            bytes[layout.scales..layout.table].fill(56);
+            let panel = decode_panels::pack_draft(&bytes, phys, cols, 1.0);
+            let mut weight = b.vector(panel.len() / 4)?;
+            b.write_vector_bytes(&mut weight, &panel)?;
+            let x = (0..inputs * cols).map(|at| [0.0, 1.5, -3.0, 4.0, 6.0][(at / cols + 3 * (at % cols)) % 5]).collect::<Vec<_>>();
+            let x_dev = b.upload_vector(&x)?;
+            let packed = b.draft_lanes(PackActivations(x.len()), [Some(&x_dev), None, None])?;
+            let fp_out = b.draft_lanes(Panel { rows, columns: cols, inputs }, [Some(&weight), Some(&packed), None])?;
+            let bf_out = b.draft_lanes(PanelBf16 { rows, columns: cols, inputs }, [Some(&weight), Some(&packed), None])?;
+            let fp_vals = b.read_vector_values(&fp_out)?;
+            let bf_words: Vec<u32> = b.read_vector_values(&bf_out)?.into_iter().map(f32::to_bits).collect();
+            let row_words = rows.div_ceil(2);
+            for t in 0..inputs {
+                for r in (0..rows).step_by(2) {
+                    let lo = rn(fp_vals[t * rows + r]).to_bits() >> 16;
+                    let hi = if r + 1 < rows { rn(fp_vals[t * rows + r + 1]).to_bits() & 0xffff_0000 } else { 0 };
+                    let got = bf_words[t * row_words + r / 2];
+                    if got != (lo | hi) {
+                        return Err(format!("PanelBf16 {rows}x{cols} inputs={inputs} t={t} r={r} mismatch: got={got:#x} want={:#x}", lo | hi));
+                    }
+                }
+            }
+        }
+        println!("FEW CHECK PANEL_BF16 + PIPELINED WIDE PANEL PASS");
+    }
+    // `draft_fast_norm_into` both recorded and unrecorded (paused resident queue, exercising `pad_commands = 4`
+    // around `warm_command!`) bit-exact vs `causal_operation(Op::RoundedNorm)` with guard words.
+    {
+        use spark_gpu_probe::causal_ops::{Op, Shape};
+        for &(rows, dim, prefill) in &[(32usize, 2304usize, false), (128, 2304, true), (1024, 128, true)] {
+            let x_host = (0..rows * dim).map(|k| input(k + rows + dim) * 2.0).collect::<Vec<_>>();
+            let w_host = (0..dim).map(|k| 1.0 + input(k + 73) * 0.25).collect::<Vec<_>>();
+            let (xd, wd) = (b.upload_vector(&x_host)?, b.upload_vector(&w_host)?);
+            let shape = Shape {
+                op: Op::RoundedNorm,
+                heads: rows as u32,
+                dim: dim as u32,
+                taps: 1,
+                rows: 0,
+                cols: 0,
+                epsilon: 1e-6,
+                bound: 0.0,
+            };
+            let want = b.read_vector_values(&b.causal_operation(shape, [Some(&xd), None, None, None], Some(&wd))?)?;
+            // Recorded path
+            let rec_buf = poisoned(b, rows * dim)?;
+            let mut rec_slice = rec_buf.resident_range(GUARD..GUARD + rows * dim)?;
+            b.draft_fast_norm_into(rows, dim, 1e-6, prefill, &xd, &wd, &mut rec_slice)?;
+            let rec = b.read_vector_values(&rec_buf)?;
+            // Unrecorded path (pauses resident launches just like `rows_unrecorded(true)` in `mtp_batch.rs`)
+            let unrec_buf = poisoned(b, rows * dim)?;
+            let mut unrec_slice = unrec_buf.resident_range(GUARD..GUARD + rows * dim)?;
+            let prev = b.pause_resident_launches(true)?;
+            let res = b.draft_fast_norm_into(rows, dim, 1e-6, prefill, &xd, &wd, &mut unrec_slice);
+            let unpause = b.pause_resident_launches(prev);
+            res?;
+            unpause?;
+            let unrec = b.read_vector_values(&unrec_buf)?;
+            for (tag, got) in [("recorded", &rec), ("unrecorded", &unrec)] {
+                if got[..GUARD].iter().chain(&got[GUARD + rows * dim..]).any(|w| w.to_bits() != POISON) {
+                    return Err(format!("draft_fast_norm_into ({tag}) changed a guard word rows={rows} dim={dim}"));
+                }
+                if let Some(at) = got[GUARD..GUARD + rows * dim].iter().zip(&want).position(|(a, w)| a.to_bits() != w.to_bits()) {
+                    return Err(format!("draft_fast_norm_into ({tag}) mismatch at {at} rows={rows} dim={dim} prefill={prefill}"));
+                }
+            }
+        }
+        println!("FEW CHECK DRAFT_FAST_NORM RECORDED+UNRECORDED PASS");
+    }
     Ok(())
 }

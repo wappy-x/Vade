@@ -10,13 +10,15 @@
 use crate::block_ops::{LANES, NORM_CHUNK, root};
 use crate::block_stream::CONV_TOKEN_TAPS;
 use crate::fast_ops::{
-    CONV_KV_CLIP, CONV_KV_DIM, CONV_KV_NORM, KV_FINISH_WORD, ROW_DOTS_THREADS,
-    STREAM_OP_SHORT_CONV_WIN, STREAM_OPS_THREADS, conv_kv_blocks, stream_ops_admitted,
+    CONV_KV_CLIP, CONV_KV_DIM, CONV_KV_NORM, KV_FINISH_WORD, KV_NEXT_RING_WORD,
+    KV_PREFILL_TILE_WORD, ROUTE_FOLD_CONV_TAPS_MAX, ROW_DOTS_THREADS, STREAM_OP_SHORT_CONV_WIN,
+    STREAM_OPS_THREADS, conv_kv_blocks, conv_kv_tiled_blocks_y, stream_ops_admitted,
 };
 use crate::fast_ops::{
-    KV_FINISH_HEAD_DIM, KV_FINISH_TAG, MIX_DOTS, MIX_KEPT_MAX, MIX_LIST_NORM_HALF, MIX_ONE, MIX_ONE_DIM_MAX,
-    MIX_ONE_EPSILON_AT, MIX_ONE_KEPT_MAX, MIX_ONE_NORMED_AT, MIX_ONE_POST_EPS_AT, MIX_ONE_POST_HALF_OUT,
-    MIX_ONE_POST_NORM, MIX_ONE_POST_OUT_AT, MIX_ONE_POST_WEIGHT_AT, MIX_ONE_POST_WEIGHTS_PER_QUERY,
+    KV_FINISH_HEAD_DIM, KV_FINISH_TAG, MIX_DOTS, MIX_KEPT_MAX, MIX_LIST_NORM_HALF, MIX_ONE,
+    MIX_ONE_DIM_MAX, MIX_ONE_EPSILON_AT, MIX_ONE_FUSED_Q, MIX_ONE_FUSED_Q_MAX, MIX_ONE_KEPT_MAX,
+    MIX_ONE_NORMED_AT, MIX_ONE_POST_EPS_AT, MIX_ONE_POST_HALF_OUT, MIX_ONE_POST_NORM,
+    MIX_ONE_POST_OUT_AT, MIX_ONE_POST_WEIGHT_AT, MIX_ONE_POST_WEIGHTS_PER_QUERY,
     MIX_ONE_SKIP_MIXED, kv_finish_admitted, mix_blend_admitted, mix_blend_parts,
     mix_one_admitted, mix_one_parts, mix_one_post_norm_admitted, row_dots_admitted,
 };
@@ -56,6 +58,7 @@ pub(crate) unsafe fn replay_mix_blend(table: *const crate::inkling_launch::Comma
         if c.kind != crate::inkling_launch::FAST_MIX_BLEND { core::arch::nvptx::trap(); }
         let w = c.payload.as_ptr().cast::<u64>();
         let stage = crate::ptx::shared::<{ MIX_ONE_DIM_MAX * 4 }>();
+        let sums = crate::ptx::shared::<{ (3 * NORM_CHUNKS_MAX + 1) * 4 }>();
         // Fused mix (`MIX_ONE` in word 8, optional transpose in bit 0, optional post-blend RoundedNorm in bit 4,
         // skip un-normed blend write in bit 5, per-query post-norm weights in bit 6, packed BF16 post-out in bit 7):
         // grid is `(asked * parts, rows, 1)`. Each block `(q * parts + part, row)` computes the plain norm of
@@ -75,10 +78,13 @@ pub(crate) unsafe fn replay_mix_blend(table: *const crate::inkling_launch::Comma
             let parts = mix_one_parts(rows, asked, dim);
             let post_norm = (flags & MIX_ONE_POST_NORM) != 0;
             let skip_mixed = post_norm && (flags & MIX_ONE_SKIP_MIXED) != 0;
+            let fused_q = (flags & MIX_ONE_FUSED_Q) != 0;
+            let expect_gx = if fused_q { 1 } else { asked * parts };
             if !mix_one_admitted(rows, asked, kept, dim)
-                || core::arch::nvptx::_grid_dim_x() as usize != asked * parts
+                || core::arch::nvptx::_grid_dim_x() as usize != expect_gx
                 || core::arch::nvptx::_grid_dim_y() as usize != rows
                 || core::arch::nvptx::_block_idx_y() as usize >= rows
+                || (fused_q && (!post_norm || asked < 2 || asked > MIX_ONE_FUSED_Q_MAX || parts != 1))
                 || (post_norm && (parts != 1 || !mix_one_post_norm_admitted(dim, threads)))
                 || (!post_norm && threads != MIX_BLEND_THREADS)
             {
@@ -86,17 +92,14 @@ pub(crate) unsafe fn replay_mix_blend(table: *const crate::inkling_launch::Comma
             }
             let bx = core::arch::nvptx::_block_idx_x() as usize;
             let row = core::arch::nvptx::_block_idx_y() as usize;
-            let q = bx / parts;
-            let queries = *w as *const f32;
-            let output = *w.add(2) as *mut f32;
+            let q = if fused_q { 0 } else { bx / parts };
             let row_bytes_off = row * dim;
             let stream = (*w.add(9 + kept - 1) as *const f32).add(row_bytes_off);
-            let post_out = if post_norm { *w.add(MIX_ONE_POST_OUT_AT) as *mut f32 } else { core::ptr::null_mut() };
-            let post_w = if post_norm { *w.add(MIX_ONE_POST_WEIGHT_AT) as *const f32 } else { core::ptr::null() };
-            if ((queries as usize) | (stream as usize)) & 15 != 0
-                || ((output as usize) | (*w.add(MIX_ONE_NORMED_AT) as usize) | (post_out as usize) | (post_w as usize)) & 3 != 0
-                || (!skip_mixed && output.is_null())
-                || (post_norm && post_out.is_null())
+            if ((*w as usize) | (stream as usize)) & 15 != 0
+                || ((*w.add(2) as usize) | (*w.add(MIX_ONE_NORMED_AT) as usize)
+                    | (*w.add(MIX_ONE_POST_OUT_AT) as usize) | (*w.add(MIX_ONE_POST_WEIGHT_AT) as usize)) & 3 != 0
+                || (!skip_mixed && *w.add(2) == 0)
+                || (post_norm && *w.add(MIX_ONE_POST_OUT_AT) == 0)
             {
                 core::arch::nvptx::trap();
             }
@@ -105,30 +108,28 @@ pub(crate) unsafe fn replay_mix_blend(table: *const crate::inkling_launch::Comma
             // A read-only global word (the query rows, list rows and norm weights do not change while the launch runs).
             macro_rules! word {($p:expr)=>{{let v: f32; core::arch::asm!("ld.global.nc.f32 {v}, [{p}];", v = out(reg32) v, p = in(reg64) $p, options(readonly, nostack)); v}}}
             if threads / 32 < kept { core::arch::nvptx::trap(); }
-            let eps = f32::from_bits(*w.add(MIX_ONE_EPSILON_AT) as u32);
-            let dots = crate::ptx::shared::<{ (MIX_ONE_KEPT_MAX + 1) * 4 }>();
+            const NORM_DOT_AT: u32 = (MIX_ONE_FUSED_Q_MAX * MIX_ONE_KEPT_MAX * 4) as u32;
+            let dots = crate::ptx::shared::<{ (MIX_ONE_FUSED_Q_MAX * MIX_ONE_KEPT_MAX + 1) * 4 }>();
             let warps = threads >> 5;
             let chunks = dim / NORM_CHUNK;
+            let b_chunk = warp * NORM_CHUNK + lane;
+            let has_chunk = post_norm && warp < chunks;
+            let queries = *w as *const f32;
             let qrow = queries.add(q * dim);
-            let per_query_w = (flags & MIX_ONE_POST_WEIGHTS_PER_QUERY) != 0;
-            let pw_ptr = if !post_norm || post_w.is_null() {
+            let post_w = if post_norm && !fused_q { *w.add(MIX_ONE_POST_WEIGHT_AT) as *const f32 } else { core::ptr::null() };
+            let pw_ptr = if post_w.is_null() {
                 core::ptr::null()
-            } else if per_query_w {
+            } else if (flags & MIX_ONE_POST_WEIGHTS_PER_QUERY) != 0 {
                 post_w.add(q * dim)
             } else {
                 post_w
             };
-            let b_chunk = warp * NORM_CHUNK + lane;
-            let has_chunk = post_norm && warp < chunks;
             // Release downstream dependent panel/narrow products immediately (all warps at t=0) so their read-only
             // static weight prefetches overlap 100% of `MIX_ONE` without waiting for `Warps 1..kept` dot loops.
             core::arch::asm!("griddepcontrol.launch_dependents;", options(nostack));
-            let mut pw0 = 0.0f32;
-            let mut pw1 = 0.0f32;
-            let mut pw2 = 0.0f32;
-            let mut pw3 = 0.0f32;
+            let (mut pw0, mut pw1, mut pw2, mut pw3) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
             macro_rules! load_pw {() => {
-                if has_chunk && !pw_ptr.is_null() {
+                if !fused_q && has_chunk && !pw_ptr.is_null() {
                     pw0 = word!(pw_ptr.add(b_chunk));
                     pw1 = word!(pw_ptr.add(b_chunk + LANES));
                     pw2 = word!(pw_ptr.add(b_chunk + 2 * LANES));
@@ -156,13 +157,24 @@ pub(crate) unsafe fn replay_mix_blend(table: *const crate::inkling_launch::Comma
                     i += copy_threads;
                 }
             }}}
+            macro_rules! reduce_dot {($s:expr, $slot:expr) => {{
+                let mut r: f32 = $s;
+                r += shfl_xor_f32(r, 16);
+                r += shfl_xor_f32(r, 8);
+                r += shfl_xor_f32(r, 4);
+                r += shfl_xor_f32(r, 2);
+                r += shfl_xor_f32(r, 1);
+                if lane == 0 { store_u32(dots + (4 * ($slot)) as u32, r.to_bits()); }
+            }}}
             if warp == 0 {
-                let mut off = lane * 32;
-                while off < dim {
-                    core::arch::asm!("prefetch.global.L2 [{a}];", a = in(reg64) qrow.add(off) as u64);
-                    off += 32 * 32;
+                if !fused_q {
+                    let mut off = lane * 32;
+                    while off < dim {
+                        core::arch::asm!("prefetch.global.L2 [{a}];", a = in(reg64) qrow.add(off) as u64);
+                        off += 32 * 32;
+                    }
+                    load_pw!();
                 }
-                load_pw!();
                 core::arch::asm!("griddepcontrol.wait;", options(nostack));
                 let mut sq = 0.0f32;
                 let mut j = lane;
@@ -191,36 +203,61 @@ pub(crate) unsafe fn replay_mix_blend(table: *const crate::inkling_launch::Comma
                 sq += shfl_xor_f32(sq, 4);
                 sq += shfl_xor_f32(sq, 2);
                 sq += shfl_xor_f32(sq, 1);
+                let eps = f32::from_bits(*w.add(MIX_ONE_EPSILON_AT) as u32);
                 let norm = 1.0f32 / root(sq / dim as f32 + eps);
-                if lane == 0 { store_u32(dots + (MIX_ONE_KEPT_MAX * 4) as u32, norm.to_bits()); }
-                let mut sum = 0.0f32;
-                j = lane;
-                while j + 3 * LANES < dim {
-                    let q0 = word!(qrow.add(j));
-                    let q1 = word!(qrow.add(j + LANES));
-                    let q2 = word!(qrow.add(j + 2 * LANES));
-                    let q3 = word!(qrow.add(j + 3 * LANES));
-                    let x0 = mul_rn!(*stream.add(j), norm);
-                    let x1 = mul_rn!(*stream.add(j + LANES), norm);
-                    let x2 = mul_rn!(*stream.add(j + 2 * LANES), norm);
-                    let x3 = mul_rn!(*stream.add(j + 3 * LANES), norm);
-                    sum += x0 * q0;
-                    sum += x1 * q1;
-                    sum += x2 * q2;
-                    sum += x3 * q3;
-                    j += 4 * LANES;
+                if lane == 0 { store_u32(dots + NORM_DOT_AT, norm.to_bits()); }
+                if fused_q && asked == 3 {
+                    let (mut s0, mut s1, mut s2) = (0.0f32, 0.0f32, 0.0f32);
+                    j = lane;
+                    while j < dim {
+                        let x = mul_rn!(*stream.add(j), norm);
+                        s0 += x * word!(queries.add(j));
+                        s1 += x * word!(queries.add(dim + j));
+                        s2 += x * word!(queries.add(2 * dim + j));
+                        j += LANES;
+                    }
+                    reduce_dot!(s0, kept - 1);
+                    reduce_dot!(s1, MIX_ONE_KEPT_MAX + kept - 1);
+                    reduce_dot!(s2, 2 * MIX_ONE_KEPT_MAX + kept - 1);
+                } else if fused_q {
+                    let mut qi = 0usize;
+                    while qi < asked {
+                        core::arch::asm!("/* {0} */", inout(reg64) qi, options(nomem, nostack));
+                        let qp = queries.add(qi * dim);
+                        let mut sum = 0.0f32;
+                        j = lane;
+                        while j < dim {
+                            sum += mul_rn!(*stream.add(j), norm) * word!(qp.add(j));
+                            j += LANES;
+                        }
+                        reduce_dot!(sum, qi * MIX_ONE_KEPT_MAX + kept - 1);
+                        qi += 1;
+                    }
+                } else {
+                    let mut sum = 0.0f32;
+                    j = lane;
+                    while j + 3 * LANES < dim {
+                        let q0 = word!(qrow.add(j));
+                        let q1 = word!(qrow.add(j + LANES));
+                        let q2 = word!(qrow.add(j + 2 * LANES));
+                        let q3 = word!(qrow.add(j + 3 * LANES));
+                        let x0 = mul_rn!(*stream.add(j), norm);
+                        let x1 = mul_rn!(*stream.add(j + LANES), norm);
+                        let x2 = mul_rn!(*stream.add(j + 2 * LANES), norm);
+                        let x3 = mul_rn!(*stream.add(j + 3 * LANES), norm);
+                        sum += x0 * q0;
+                        sum += x1 * q1;
+                        sum += x2 * q2;
+                        sum += x3 * q3;
+                        j += 4 * LANES;
+                    }
+                    while j < dim {
+                        let x = mul_rn!(*stream.add(j), norm);
+                        sum += x * word!(qrow.add(j));
+                        j += LANES;
+                    }
+                    reduce_dot!(sum, kept - 1);
                 }
-                while j < dim {
-                    let x = mul_rn!(*stream.add(j), norm);
-                    sum += x * word!(qrow.add(j));
-                    j += LANES;
-                }
-                sum += shfl_xor_f32(sum, 16);
-                sum += shfl_xor_f32(sum, 8);
-                sum += shfl_xor_f32(sum, 4);
-                sum += shfl_xor_f32(sum, 2);
-                sum += shfl_xor_f32(sum, 1);
-                if lane == 0 { store_u32(dots + (4 * (kept - 1)) as u32, sum.to_bits()); }
             } else if warp < kept {
                 let lrow = (*w.add(9 + warp - 1) as *const f32).add(row_bytes_off);
                 let mut off = lane * 32;
@@ -228,34 +265,58 @@ pub(crate) unsafe fn replay_mix_blend(table: *const crate::inkling_launch::Comma
                     core::arch::asm!("prefetch.global.L2 [{a}];", a = in(reg64) lrow.add(off) as u64);
                     off += 32 * 32;
                 }
-                let mut sum = 0.0f32;
-                let mut j = lane;
-                while j + 3 * LANES < dim {
-                    let q0 = word!(qrow.add(j));
-                    let x0 = word!(lrow.add(j));
-                    let q1 = word!(qrow.add(j + LANES));
-                    let x1 = word!(lrow.add(j + LANES));
-                    let q2 = word!(qrow.add(j + 2 * LANES));
-                    let x2 = word!(lrow.add(j + 2 * LANES));
-                    let q3 = word!(qrow.add(j + 3 * LANES));
-                    let x3 = word!(lrow.add(j + 3 * LANES));
-                    sum += x0 * q0;
-                    sum += x1 * q1;
-                    sum += x2 * q2;
-                    sum += x3 * q3;
-                    j += 4 * LANES;
+                if fused_q && asked == 3 {
+                    let (mut s0, mut s1, mut s2) = (0.0f32, 0.0f32, 0.0f32);
+                    let mut j = lane;
+                    while j < dim {
+                        let x = word!(lrow.add(j));
+                        s0 += x * word!(queries.add(j));
+                        s1 += x * word!(queries.add(dim + j));
+                        s2 += x * word!(queries.add(2 * dim + j));
+                        j += LANES;
+                    }
+                    reduce_dot!(s0, warp - 1);
+                    reduce_dot!(s1, MIX_ONE_KEPT_MAX + warp - 1);
+                    reduce_dot!(s2, 2 * MIX_ONE_KEPT_MAX + warp - 1);
+                } else if fused_q {
+                    let mut qi = 0usize;
+                    while qi < asked {
+                        core::arch::asm!("/* {0} */", inout(reg64) qi, options(nomem, nostack));
+                        let qp = queries.add(qi * dim);
+                        let mut sum = 0.0f32;
+                        let mut j = lane;
+                        while j < dim {
+                            sum += word!(lrow.add(j)) * word!(qp.add(j));
+                            j += LANES;
+                        }
+                        reduce_dot!(sum, qi * MIX_ONE_KEPT_MAX + warp - 1);
+                        qi += 1;
+                    }
+                } else {
+                    let mut sum = 0.0f32;
+                    let mut j = lane;
+                    while j + 3 * LANES < dim {
+                        let q0 = word!(qrow.add(j));
+                        let x0 = word!(lrow.add(j));
+                        let q1 = word!(qrow.add(j + LANES));
+                        let x1 = word!(lrow.add(j + LANES));
+                        let q2 = word!(qrow.add(j + 2 * LANES));
+                        let x2 = word!(lrow.add(j + 2 * LANES));
+                        let q3 = word!(qrow.add(j + 3 * LANES));
+                        let x3 = word!(lrow.add(j + 3 * LANES));
+                        sum += x0 * q0;
+                        sum += x1 * q1;
+                        sum += x2 * q2;
+                        sum += x3 * q3;
+                        j += 4 * LANES;
+                    }
+                    while j < dim {
+                        sum += word!(lrow.add(j)) * word!(qrow.add(j));
+                        j += LANES;
+                    }
+                    reduce_dot!(sum, warp - 1);
+                    load_pw!();
                 }
-                while j < dim {
-                    sum += word!(lrow.add(j)) * word!(qrow.add(j));
-                    j += LANES;
-                }
-                sum += shfl_xor_f32(sum, 16);
-                sum += shfl_xor_f32(sum, 8);
-                sum += shfl_xor_f32(sum, 4);
-                sum += shfl_xor_f32(sum, 2);
-                sum += shfl_xor_f32(sum, 1);
-                if lane == 0 { store_u32(dots + (4 * (warp - 1)) as u32, sum.to_bits()); }
-                load_pw!();
                 core::arch::asm!("griddepcontrol.wait;", options(nostack));
                 if warps <= kept {
                     copy_stage!(1usize);
@@ -265,67 +326,291 @@ pub(crate) unsafe fn replay_mix_blend(table: *const crate::inkling_launch::Comma
                 core::arch::asm!("griddepcontrol.wait;", options(nostack));
                 copy_stage!(kept);
             }
-            // Barrier #1: all `dots[0..kept]`, `norm`, and raw `stage` are ready.
+            // Barrier #1: all `dots[0..q_count][0..kept]`, `norm`, and raw `stage` are ready.
             core::arch::nvptx::_syncthreads();
-            // Every warp computes exact softmax weights in registers (eliminates Barrier #2 and SMEM `weights`).
-            let scale = f32::from_bits(*w.add(7) as u32);
-            let val = if lane < kept { f32::from_bits(load_u32(dots + (4 * lane) as u32)) * scale } else { f32::NEG_INFINITY };
-            let mut largest = val;
-            largest = largest.max(shfl_xor_f32(largest, 4));
-            largest = largest.max(shfl_xor_f32(largest, 2));
-            largest = largest.max(shfl_xor_f32(largest, 1));
-            let e_exp = if lane < kept { exp(val - largest) } else { 0.0f32 };
-            let mut total_exp = 0.0f32;
-            let mut k = 0u32;
-            while k < kept as u32 {
-                let ek_bits: u32;
-                core::arch::asm!(
-                    "shfl.sync.idx.b32 {d}, {v}, {s}, 31, 0xffffffff;",
-                    d = out(reg32) ek_bits, v = in(reg32) e_exp.to_bits(), s = in(reg32) k,
-                    options(nomem, nostack),
-                );
-                total_exp += f32::from_bits(ek_bits);
-                k += 1;
-            }
-            let my_w_bits = if lane < kept { (e_exp / total_exp).to_bits() } else { 0u32 };
-            macro_rules! get_wt {($idx:expr)=>{{
+            macro_rules! softmax_reg {($dot_base:expr) => {{
+                let scale = f32::from_bits(*w.add(7) as u32);
+                let val = if lane < kept { f32::from_bits(load_u32(dots + (4 * (($dot_base) + lane)) as u32)) * scale } else { f32::NEG_INFINITY };
+                let mut largest = val;
+                largest = largest.max(shfl_xor_f32(largest, 4));
+                largest = largest.max(shfl_xor_f32(largest, 2));
+                largest = largest.max(shfl_xor_f32(largest, 1));
+                let e_exp = if lane < kept { exp(val - largest) } else { 0.0f32 };
+                let mut total_exp = 0.0f32;
+                let mut k = 0u32;
+                while k < kept as u32 {
+                    let ek_bits: u32;
+                    core::arch::asm!(
+                        "shfl.sync.idx.b32 {d}, {v}, {s}, 31, 0xffffffff;",
+                        d = out(reg32) ek_bits, v = in(reg32) e_exp.to_bits(), s = in(reg32) k,
+                        options(nomem, nostack),
+                    );
+                    total_exp += f32::from_bits(ek_bits);
+                    k += 1;
+                }
+                if lane < kept { (e_exp / total_exp).to_bits() } else { 0u32 }
+            }}}
+            macro_rules! get_wt {($bits:expr, $idx:expr)=>{{
                 let wb: u32;
                 core::arch::asm!(
                     "shfl.sync.idx.b32 {d}, {v}, {s}, 31, 0xffffffff;",
-                    d = out(reg32) wb, v = in(reg32) my_w_bits, s = in(reg32) ($idx as u32),
+                    d = out(reg32) wb, v = in(reg32) $bits, s = in(reg32) ($idx as u32),
                     options(nomem, nostack),
                 );
                 f32::from_bits(wb)
             }}}
-            let norm = f32::from_bits(load_u32(dots + (MIX_ONE_KEPT_MAX * 4) as u32));
+            if post_norm && fused_q {
+                if asked == 3 {
+                    // Single-pass 3-query fused blend: reads `list[0..kept-1]` and `stage` ONCE for all 3 queries,
+                    // parks query-1 in the now-dead `stage` row to keep `<= 56` regs (2 blk/SM at 576t), and
+                    // synchronizes all 3 RMSNorm reductions in ONE Barrier #2.
+                    let wb0 = softmax_reg!(0usize);
+                    let wb1 = softmax_reg!(MIX_ONE_KEPT_MAX);
+                    let wb2 = softmax_reg!(2 * MIX_ONE_KEPT_MAX);
+                    let (mut a0, mut a1, mut a2, mut a3) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+                    let (mut c0, mut c1, mut c2, mut c3) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+                    let d0 = *w.add(6) as usize;
+                    if warp < d0 / NORM_CHUNK {
+                        let bc = warp * NORM_CHUNK + lane;
+                        let k0 = *w.add(5) as usize;
+                        let r_off = (core::arch::nvptx::_block_idx_y() as usize) * d0;
+                        let (mut b0, mut b1, mut b2, mut b3) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+                        let mut e = 0usize;
+                        while e + 1 < k0 {
+                            core::arch::asm!("/* {0} */", inout(reg64) e, options(nomem, nostack));
+                            let ptr = (*w.add(9 + e) as *const f32).add(r_off);
+                            let x0 = word!(ptr.add(bc));
+                            let x1 = word!(ptr.add(bc + LANES));
+                            let x2 = word!(ptr.add(bc + 2 * LANES));
+                            let x3 = word!(ptr.add(bc + 3 * LANES));
+                            let w0 = get_wt!(wb0, e);
+                            a0 += w0 * x0; a1 += w0 * x1; a2 += w0 * x2; a3 += w0 * x3;
+                            let w1 = get_wt!(wb1, e);
+                            b0 += w1 * x0; b1 += w1 * x1; b2 += w1 * x2; b3 += w1 * x3;
+                            let w2 = get_wt!(wb2, e);
+                            c0 += w2 * x0; c1 += w2 * x1; c2 += w2 * x2; c3 += w2 * x3;
+                            e += 1;
+                        }
+                        let norm = f32::from_bits(load_u32(dots + NORM_DOT_AT));
+                        let s0 = mul_rn!(f32::from_bits(load_u32(stage + (4 * bc) as u32)), norm);
+                        let s1 = mul_rn!(f32::from_bits(load_u32(stage + (4 * (bc + LANES)) as u32)), norm);
+                        let s2 = mul_rn!(f32::from_bits(load_u32(stage + (4 * (bc + 2 * LANES)) as u32)), norm);
+                        let s3 = mul_rn!(f32::from_bits(load_u32(stage + (4 * (bc + 3 * LANES)) as u32)), norm);
+                        let normed = *w.add(MIX_ONE_NORMED_AT) as *mut f32;
+                        if !normed.is_null() {
+                            let np = normed.add(r_off);
+                            *np.add(bc) = s0; *np.add(bc + LANES) = s1;
+                            *np.add(bc + 2 * LANES) = s2; *np.add(bc + 3 * LANES) = s3;
+                        }
+                        let w0 = get_wt!(wb0, k0 - 1);
+                        a0 += w0 * s0; a1 += w0 * s1; a2 += w0 * s2; a3 += w0 * s3;
+                        let w1 = get_wt!(wb1, k0 - 1);
+                        b0 += w1 * s0; b1 += w1 * s1; b2 += w1 * s2; b3 += w1 * s3;
+                        let w2 = get_wt!(wb2, k0 - 1);
+                        c0 += w2 * s0; c1 += w2 * s1; c2 += w2 * s2; c3 += w2 * s3;
+                        // Park query-1 into this warp's private slice of `stage` (dead after reading `s0..s3`).
+                        store_u32(stage + (4 * bc) as u32, b0.to_bits());
+                        store_u32(stage + (4 * (bc + LANES)) as u32, b1.to_bits());
+                        store_u32(stage + (4 * (bc + 2 * LANES)) as u32, b2.to_bits());
+                        store_u32(stage + (4 * (bc + 3 * LANES)) as u32, b3.to_bits());
+                        let fl = *w.add(8);
+                        if (fl & MIX_ONE_SKIP_MIXED) == 0 {
+                            let out_base = *w.add(2) as *mut f32;
+                            let r_tot = *w.add(3) as usize;
+                            let r_idx = core::arch::nvptx::_block_idx_y() as usize;
+                            let tr = (fl & 1) != 0;
+                            macro_rules! put_mix3 {($qi:expr, $x0:expr, $x1:expr, $x2:expr, $x3:expr) => {{
+                                let orow = if tr { ($qi) * r_tot + r_idx } else { r_idx * 3 + ($qi) };
+                                let op = out_base.add(orow * d0);
+                                *op.add(bc) = $x0; *op.add(bc + LANES) = $x1;
+                                *op.add(bc + 2 * LANES) = $x2; *op.add(bc + 3 * LANES) = $x3;
+                            }}}
+                            put_mix3!(0usize, a0, a1, a2, a3);
+                            put_mix3!(1usize, b0, b1, b2, b3);
+                            put_mix3!(2usize, c0, c1, c2, c3);
+                        }
+                        macro_rules! put_sq3 {($qi:expr, $x0:expr, $x1:expr, $x2:expr, $x3:expr) => {{
+                            let mut sq = 0.0f32;
+                            sq += ($x0) * ($x0); sq += ($x1) * ($x1); sq += ($x2) * ($x2); sq += ($x3) * ($x3);
+                            sq += shfl_xor_f32(sq, 16); sq += shfl_xor_f32(sq, 8); sq += shfl_xor_f32(sq, 4);
+                            sq += shfl_xor_f32(sq, 2); sq += shfl_xor_f32(sq, 1);
+                            if lane == 0 { store_u32(sums + ((($qi) * NORM_CHUNKS_MAX + warp) * 4) as u32, sq.to_bits()); }
+                        }}}
+                        put_sq3!(0usize, a0, a1, a2, a3);
+                        put_sq3!(1usize, b0, b1, b2, b3);
+                        put_sq3!(2usize, c0, c1, c2, c3);
+                    }
+                    // Single Barrier #2 for all 3 queries.
+                    core::arch::nvptx::_syncthreads();
+                    let d_len = *w.add(6) as usize;
+                    let chks = d_len / NORM_CHUNK;
+                    if warp < chks {
+                        let bc = warp * NORM_CHUNK + lane;
+                        let mut qi = 0usize;
+                        while qi < 3 {
+                            core::arch::asm!("/* {0} */", inout(reg64) qi, options(nomem, nostack));
+                            let (v0, v1, v2, v3) = if qi == 0 {
+                                (a0, a1, a2, a3)
+                            } else if qi == 1 {
+                                (
+                                    f32::from_bits(load_u32(stage + (4 * bc) as u32)),
+                                    f32::from_bits(load_u32(stage + (4 * (bc + LANES)) as u32)),
+                                    f32::from_bits(load_u32(stage + (4 * (bc + 2 * LANES)) as u32)),
+                                    f32::from_bits(load_u32(stage + (4 * (bc + 3 * LANES)) as u32)),
+                                )
+                            } else {
+                                (c0, c1, c2, c3)
+                            };
+                            let mut total = if lane < chks { f32::from_bits(load_u32(sums + ((qi * NORM_CHUNKS_MAX + lane) * 4) as u32)) } else { 0.0f32 };
+                            total += shfl_xor_f32(total, 16); total += shfl_xor_f32(total, 8); total += shfl_xor_f32(total, 4);
+                            total += shfl_xor_f32(total, 2); total += shfl_xor_f32(total, 1);
+                            let post_eps = f32::from_bits(*w.add(MIX_ONE_POST_EPS_AT) as u32);
+                            let nscale = 1.0f32 / root(total / d_len as f32 + post_eps);
+                            let fl2 = *w.add(8);
+                            let post_half = (fl2 & MIX_ONE_POST_HALF_OUT) != 0;
+                            let r_tot = *w.add(3) as usize;
+                            let r_idx = core::arch::nvptx::_block_idx_y() as usize;
+                            let orow = if (fl2 & 1) != 0 { qi * r_tot + r_idx } else { r_idx * 3 + qi };
+                            let post_out = *w.add(MIX_ONE_POST_OUT_AT) as *mut f32;
+                            let pptr = post_out.add(if post_half { orow * (d_len / 2) } else { orow * d_len });
+                            let pw_base = *w.add(MIX_ONE_POST_WEIGHT_AT) as *const f32;
+                            let wp = if pw_base.is_null() { core::ptr::null() }
+                                else if (fl2 & MIX_ONE_POST_WEIGHTS_PER_QUERY) != 0 { pw_base.add(qi * d_len) }
+                                else { pw_base };
+                            macro_rules! put_p {($col:expr, $val:expr) => {{
+                                let mut y: f32 = ($val) * nscale;
+                                if !wp.is_null() { y *= word!(wp.add($col)); }
+                                let y = rn(y);
+                                if post_half {
+                                    let h = y.to_bits() >> 16;
+                                    let pair = h | (shfl_xor_u32(h, 1) << 16);
+                                    if (lane & 1) == 0 { *pptr.cast::<u32>().add(($col) / 2) = pair; }
+                                } else { *pptr.add($col) = y; }
+                            }}}
+                            put_p!(bc, v0); put_p!(bc + LANES, v1); put_p!(bc + 2 * LANES, v2); put_p!(bc + 3 * LANES, v3);
+                            qi += 1;
+                        }
+                    }
+                    return;
+                }
+                // Generic `fused_q` fallback for `asked == 2` or `asked == 4`.
+                if has_chunk {
+                    let norm = f32::from_bits(load_u32(dots + NORM_DOT_AT));
+                    let s0 = mul_rn!(f32::from_bits(load_u32(stage + (4 * b_chunk) as u32)), norm);
+                    let s1 = mul_rn!(f32::from_bits(load_u32(stage + (4 * (b_chunk + LANES)) as u32)), norm);
+                    let s2 = mul_rn!(f32::from_bits(load_u32(stage + (4 * (b_chunk + 2 * LANES)) as u32)), norm);
+                    let s3 = mul_rn!(f32::from_bits(load_u32(stage + (4 * (b_chunk + 3 * LANES)) as u32)), norm);
+                    store_u32(stage + (4 * b_chunk) as u32, s0.to_bits());
+                    store_u32(stage + (4 * (b_chunk + LANES)) as u32, s1.to_bits());
+                    store_u32(stage + (4 * (b_chunk + 2 * LANES)) as u32, s2.to_bits());
+                    store_u32(stage + (4 * (b_chunk + 3 * LANES)) as u32, s3.to_bits());
+                    let np_raw = *w.add(MIX_ONE_NORMED_AT) as *mut f32;
+                    if !np_raw.is_null() {
+                        let np = np_raw.add(row_bytes_off);
+                        *np.add(b_chunk) = s0; *np.add(b_chunk + LANES) = s1;
+                        *np.add(b_chunk + 2 * LANES) = s2; *np.add(b_chunk + 3 * LANES) = s3;
+                    }
+                }
+                let mut cur_q = 0usize;
+                while cur_q < asked {
+                    core::arch::asm!("/* {0} */", inout(reg64) cur_q, options(nomem, nostack));
+                    let fl = *w.add(8);
+                    let (k_cnt, d_len) = (*w.add(5) as usize, *w.add(6) as usize);
+                    let r_idx = core::arch::nvptx::_block_idx_y() as usize;
+                    let r_off = r_idx * d_len;
+                    let my_w_bits = softmax_reg!(cur_q * MIX_ONE_KEPT_MAX);
+                    let (mut v0, mut v1, mut v2, mut v3) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+                    if warp < d_len / NORM_CHUNK {
+                        let bc = warp * NORM_CHUNK + lane;
+                        let mut e = 0usize;
+                        while e + 1 < k_cnt {
+                            core::arch::asm!("/* {0} */", inout(reg64) e, options(nomem, nostack));
+                            let wt = get_wt!(my_w_bits, e);
+                            let ptr = (*w.add(9 + e) as *const f32).add(r_off);
+                            v0 += wt * word!(ptr.add(bc)); v1 += wt * word!(ptr.add(bc + LANES));
+                            v2 += wt * word!(ptr.add(bc + 2 * LANES)); v3 += wt * word!(ptr.add(bc + 3 * LANES));
+                            e += 1;
+                        }
+                        let wt_last = get_wt!(my_w_bits, k_cnt - 1);
+                        v0 += wt_last * f32::from_bits(load_u32(stage + (4 * bc) as u32));
+                        v1 += wt_last * f32::from_bits(load_u32(stage + (4 * (bc + LANES)) as u32));
+                        v2 += wt_last * f32::from_bits(load_u32(stage + (4 * (bc + 2 * LANES)) as u32));
+                        v3 += wt_last * f32::from_bits(load_u32(stage + (4 * (bc + 3 * LANES)) as u32));
+                        if (fl & MIX_ONE_SKIP_MIXED) == 0 {
+                            let (r_tot, a_tot) = (*w.add(3) as usize, *w.add(4) as usize);
+                            let out_row = if (fl & 1) != 0 { cur_q * r_tot + r_idx } else { r_idx * a_tot + cur_q };
+                            let out_ptr = (*w.add(2) as *mut f32).add(out_row * d_len);
+                            *out_ptr.add(bc) = v0; *out_ptr.add(bc + LANES) = v1;
+                            *out_ptr.add(bc + 2 * LANES) = v2; *out_ptr.add(bc + 3 * LANES) = v3;
+                        }
+                        let mut sq = 0.0f32;
+                        sq += v0 * v0; sq += v1 * v1; sq += v2 * v2; sq += v3 * v3;
+                        sq += shfl_xor_f32(sq, 16); sq += shfl_xor_f32(sq, 8); sq += shfl_xor_f32(sq, 4);
+                        sq += shfl_xor_f32(sq, 2); sq += shfl_xor_f32(sq, 1);
+                        if lane == 0 { store_u32(sums + (warp * 4) as u32, sq.to_bits()); }
+                    }
+                    core::arch::nvptx::_syncthreads();
+                    let d_len2 = *w.add(6) as usize;
+                    let chks = d_len2 / NORM_CHUNK;
+                    if warp < chks {
+                        let bc = warp * NORM_CHUNK + lane;
+                        let mut total = if lane < chks { f32::from_bits(load_u32(sums + (lane * 4) as u32)) } else { 0.0f32 };
+                        total += shfl_xor_f32(total, 16); total += shfl_xor_f32(total, 8); total += shfl_xor_f32(total, 4);
+                        total += shfl_xor_f32(total, 2); total += shfl_xor_f32(total, 1);
+                        let post_eps = f32::from_bits(*w.add(MIX_ONE_POST_EPS_AT) as u32);
+                        let nscale = 1.0f32 / root(total / d_len2 as f32 + post_eps);
+                        let fl2 = *w.add(8);
+                        let post_half = (fl2 & MIX_ONE_POST_HALF_OUT) != 0;
+                        let (r_tot, a_tot) = (*w.add(3) as usize, *w.add(4) as usize);
+                        let r_idx2 = core::arch::nvptx::_block_idx_y() as usize;
+                        let out_row = if (fl2 & 1) != 0 { cur_q * r_tot + r_idx2 } else { r_idx2 * a_tot + cur_q };
+                        let post_out = *w.add(MIX_ONE_POST_OUT_AT) as *mut f32;
+                        let post_ptr = post_out.add(if post_half { out_row * (d_len2 / 2) } else { out_row * d_len2 });
+                        let pw_base = *w.add(MIX_ONE_POST_WEIGHT_AT) as *const f32;
+                        let wp = if pw_base.is_null() { core::ptr::null() }
+                            else if (fl2 & MIX_ONE_POST_WEIGHTS_PER_QUERY) != 0 { pw_base.add(cur_q * d_len2) }
+                            else { pw_base };
+                        macro_rules! put_post {($col:expr, $val:expr) => {{
+                            let mut y: f32 = $val * nscale;
+                            if !wp.is_null() { y *= word!(wp.add($col)); }
+                            let y = rn(y);
+                            if post_half {
+                                let h = y.to_bits() >> 16;
+                                let pair = h | (shfl_xor_u32(h, 1) << 16);
+                                if (lane & 1) == 0 { *post_ptr.cast::<u32>().add(($col) / 2) = pair; }
+                            } else { *post_ptr.add($col) = y; }
+                        }}}
+                        put_post!(bc, v0); put_post!(bc + LANES, v1); put_post!(bc + 2 * LANES, v2); put_post!(bc + 3 * LANES, v3);
+                    }
+                    cur_q += 1;
+                    if cur_q < asked { core::arch::nvptx::_syncthreads(); }
+                }
+                return;
+            }
+            let norm = f32::from_bits(load_u32(dots + NORM_DOT_AT));
             let normed = *w.add(MIX_ONE_NORMED_AT) as *mut f32;
             let write_normed = bx == 0 && !normed.is_null();
             let transpose = (flags & 1) != 0;
+            let my_w_bits = softmax_reg!(0usize);
             let out_row = if transpose { q * rows + row } else { row * asked + q };
             if post_norm {
                 let post_eps = f32::from_bits(*w.add(MIX_ONE_POST_EPS_AT) as u32);
-                let sums = crate::ptx::shared::<{ (NORM_CHUNKS_MAX + 1) * 4 }>();
-                let out_ptr = if skip_mixed { core::ptr::null_mut() } else { output.add(out_row * dim) };
-                // 1 warp per 128-element chunk (`warps >= chunks`): each active warp owns exactly 4 floats.
+                let out_ptr = if skip_mixed { core::ptr::null_mut() } else { (*w.add(2) as *mut f32).add(out_row * dim) };
+                let post_out = *w.add(MIX_ONE_POST_OUT_AT) as *mut f32;
                 let (mut v0, mut v1, mut v2, mut v3) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
                 if has_chunk {
                     let mut e = 0usize;
                     while e + 1 < kept {
-                        let wt = get_wt!(e);
+                        core::arch::asm!("/* {0} */", inout(reg64) e, options(nomem, nostack));
+                        let wt = get_wt!(my_w_bits, e);
                         let ptr = (*w.add(9 + e) as *const f32).add(row_bytes_off);
-                        let (x0, x1, x2, x3) = (
-                            word!(ptr.add(b_chunk)),
-                            word!(ptr.add(b_chunk + LANES)),
-                            word!(ptr.add(b_chunk + 2 * LANES)),
-                            word!(ptr.add(b_chunk + 3 * LANES)),
-                        );
-                        v0 += wt * x0;
-                        v1 += wt * x1;
-                        v2 += wt * x2;
-                        v3 += wt * x3;
+                        v0 += wt * word!(ptr.add(b_chunk));
+                        v1 += wt * word!(ptr.add(b_chunk + LANES));
+                        v2 += wt * word!(ptr.add(b_chunk + 2 * LANES));
+                        v3 += wt * word!(ptr.add(b_chunk + 3 * LANES));
                         e += 1;
                     }
-                    let wt_last = get_wt!(kept - 1);
+                    let wt_last = get_wt!(my_w_bits, kept - 1);
                     let s0 = mul_rn!(f32::from_bits(load_u32(stage + (4 * b_chunk) as u32)), norm);
                     let s1 = mul_rn!(f32::from_bits(load_u32(stage + (4 * (b_chunk + LANES)) as u32)), norm);
                     let s2 = mul_rn!(f32::from_bits(load_u32(stage + (4 * (b_chunk + 2 * LANES)) as u32)), norm);
@@ -358,7 +643,6 @@ pub(crate) unsafe fn replay_mix_blend(table: *const crate::inkling_launch::Comma
                     sq += shfl_xor_f32(sq, 1);
                     if lane == 0 { store_u32(sums + (warp * 4) as u32, sq.to_bits()); }
                 }
-                // Barrier #2: all chunk sums ready; every warp reduces `sums[0..chunks]` in registers.
                 core::arch::nvptx::_syncthreads();
                 if has_chunk {
                     let mut total = if lane < chunks { f32::from_bits(load_u32(sums + (lane * 4) as u32)) } else { 0.0f32 };
@@ -396,14 +680,14 @@ pub(crate) unsafe fn replay_mix_blend(table: *const crate::inkling_launch::Comma
                 }
                 return;
             }
-            let out_ptr = output.add(out_row * dim);
-            let wt_last = get_wt!(kept - 1);
+            let out_ptr = (*w.add(2) as *mut f32).add(out_row * dim);
+            let wt_last = get_wt!(my_w_bits, kept - 1);
             let mut ch = (bx % parts) * threads + tid;
             while ch < dim {
                 let mut sum = 0.0f32;
                 let mut i = 0usize;
                 while i + 1 < kept {
-                    let wt = get_wt!(i);
+                    let wt = get_wt!(my_w_bits, i);
                     sum += wt * word!((*w.add(9 + i) as *const f32).add(row_bytes_off + ch));
                     i += 1;
                 }
@@ -522,7 +806,6 @@ pub(crate) unsafe fn replay_mix_blend(table: *const crate::inkling_launch::Comma
                 || ((normed as usize) | (output as usize)) & 3 != 0 { core::arch::nvptx::trap(); }
             let (warp, lane) = (tid / 32, tid % 32);
             let chunks = dim / NORM_CHUNK;
-            let sums = crate::ptx::shared::<{ (NORM_CHUNKS_MAX + 1) * 4 }>();
             let base_j = row * dim;
             let at = (q * rows + row) * dim;
             if dim <= MIX_ONE_DIM_MAX {
@@ -540,6 +823,7 @@ pub(crate) unsafe fn replay_mix_blend(table: *const crate::inkling_launch::Comma
                             let (mut x0, mut x1) = (0.0f32, 0.0f32);
                             let mut e = 0usize;
                             while e < kept {
+                                core::arch::asm!("/* {0} */", inout(reg64) e, options(nomem, nostack));
                                 let wt = f32::from_bits(load_u32(smem + (4 * e) as u32));
                                 let src = (*w.add(9 + e) as *const f32).add(base_j + j);
                                 let (l0, l1) = (word!(src), word!(src.add(LANES)));
@@ -625,6 +909,7 @@ pub(crate) unsafe fn replay_mix_blend(table: *const crate::inkling_launch::Comma
                         let (mut x0, mut x1) = (0.0f32, 0.0f32);
                         let mut e = 0usize;
                         while e < kept {
+                            core::arch::asm!("/* {0} */", inout(reg64) e, options(nomem, nostack));
                             let wt = f32::from_bits(load_u32(smem + (4 * e) as u32));
                             let src = (*w.add(9 + e) as *const f32).add(base_j + j);
                             let (l0, l1) = (*src, *src.add(LANES));
@@ -689,6 +974,7 @@ pub(crate) unsafe fn replay_mix_blend(table: *const crate::inkling_launch::Comma
             let mut sum = 0.0f32;
             let mut i = 0usize;
             while i < kept {
+                core::arch::asm!("/* {0} */", inout(reg64) i, options(nomem, nostack));
                 let wt = f32::from_bits(load_u32(smem + (i * 4) as u32));
                 let stream = if joined.is_null() { *w.add(9 + i) as *const f32 } else { joined.add(i * row_stride) };
                 sum += wt * *stream.add(base_j + ch);
@@ -907,14 +1193,184 @@ pub(crate) unsafe fn replay_row_dots(table: *const crate::inkling_launch::Comman
             let param = f32::from_bits(*w.add(17) as u32);
             let plane_first = *w.add(18) as usize;
             let plane_rows = *w.add(19) as usize;
+            let next_ring = *w.add(KV_NEXT_RING_WORD) as *mut f32;
+            let kv_tile = *w.add(KV_PREFILL_TILE_WORD) as usize;
             if threads != ROW_DOTS_THREADS || !stream_ops_admitted(STREAM_OP_SHORT_CONV_WIN, rows, dim, taps, STREAM_OPS_THREADS)
                 || ring.is_null() || first >= taps || heads == 0 || dim != heads * CONV_KV_DIM
                 || !matches!(finish, CONV_KV_CLIP | CONV_KV_NORM)
                 || form & !CONV_TOKEN_TAPS != 0 || (form & CONV_TOKEN_TAPS != 0) == in1.is_null()
                 || plane_rows < rows || plane_first >= plane_rows
-                || core::arch::nvptx::_grid_dim_x() as usize != conv_kv_blocks(rows, heads)
-                || ((in0 as usize) | (in1 as usize) | (ring as usize) | (weight as usize) | (output as usize)) & 3 != 0
+                || ((in0 as usize) | (in1 as usize) | (ring as usize) | (weight as usize) | (output as usize) | (next_ring as usize)) & 3 != 0
             {
+                core::arch::nvptx::trap();
+            }
+            if kv_tile != 0 {
+                if !matches!(kv_tile, 8 | 16 | 32)
+                    || !(2..=ROUTE_FOLD_CONV_TAPS_MAX).contains(&taps) || rows < taps
+                    || core::arch::nvptx::_grid_dim_x() as usize != heads
+                    || core::arch::nvptx::_grid_dim_y() as usize != conv_kv_tiled_blocks_y(rows, kv_tile)
+                {
+                    core::arch::nvptx::trap();
+                }
+                let head = core::arch::nvptx::_block_idx_x() as usize;
+                let tile_y = core::arch::nvptx::_block_idx_y() as usize;
+                let tid = core::arch::nvptx::_thread_idx_x() as usize;
+                let (warp, lane) = (tid >> 5, tid & 31);
+                let r_start = (tile_y * 4 + warp) * kv_tile;
+                if r_start >= rows { return; }
+                let r_end = (r_start + kv_tile).min(rows);
+                let ch = head * CONV_KV_DIM + lane;
+                macro_rules! ld_ev {($p:expr, $ev:expr)=>{{
+                    let v: f32;
+                    core::arch::asm!("ld.global.nc.L2::cache_hint.f32 {v}, [{p}], {q};",
+                        v = out(reg32) v, p = in(reg64) $p, q = in(reg64) $ev, options(readonly, nostack));
+                    v
+                }}}
+                macro_rules! st_ev_u32 {($p:expr, $v:expr, $ev:expr)=>{{
+                    core::arch::asm!("st.global.L2::cache_hint.u32 [{p}], {v}, {q};",
+                        p = in(reg64) $p, v = in(reg32) $v, q = in(reg64) $ev, options(nostack));
+                }}}
+                // Pack 4 `rn` BF16 values into 2 `u32` regs (low 16 bits of each `rn` f32 are 0 -> 100% bit-exact).
+                macro_rules! pack2 {($a:expr, $b:expr)=>{ ($a.to_bits() >> 16) | ($b.to_bits() & 0xffff_0000) }}
+                macro_rules! unlo {($p:expr)=>{ f32::from_bits(($p) << 16) }}
+                macro_rules! unhi {($p:expr)=>{ f32::from_bits(($p) & 0xffff_0000) }}
+                macro_rules! load4_pk {($base:expr, $ev:expr)=>{{
+                    let p = $base;
+                    let (a, b, c, d) = (rn(ld_ev!(p, $ev)), rn(ld_ev!(p.add(32), $ev)), rn(ld_ev!(p.add(64), $ev)), rn(ld_ev!(p.add(96), $ev)));
+                    [pack2!(a, b), pack2!(c, d)]
+                }}}
+                let (mut p1, mut p2, mut p3) = {
+                    let ev0 = crate::tc_ptx::l2_evict_first();
+                    if r_start == 0 {
+                        let rptr = *w.add(12) as *const f32;
+                        let mut slot = if first == 0 { taps - 1 } else { first - 1 };
+                        let v1 = load4_pk!(rptr.add(slot * dim + ch), ev0);
+                        let v2 = if taps >= 3 {
+                            slot = if slot == 0 { taps - 1 } else { slot - 1 };
+                            load4_pk!(rptr.add(slot * dim + ch), ev0)
+                        } else { [0u32; 2] };
+                        let v3 = if taps >= 4 {
+                            slot = if slot == 0 { taps - 1 } else { slot - 1 };
+                            load4_pk!(rptr.add(slot * dim + ch), ev0)
+                        } else { [0u32; 2] };
+                        (v1, v2, v3)
+                    } else {
+                        (
+                            load4_pk!(in0.add((r_start - 1) * dim + ch), ev0),
+                            if taps >= 3 { load4_pk!(in0.add((r_start - 2) * dim + ch), ev0) } else { [0u32; 2] },
+                            if taps >= 4 { load4_pk!(in0.add((r_start - 3) * dim + ch), ev0) } else { [0u32; 2] },
+                        )
+                    }
+                };
+                let mut row = r_start;
+                while row < r_end {
+                    let cur = {
+                        let ev = crate::tc_ptx::l2_evict_first();
+                        load4_pk!(in0.add(row * dim + ch), ev)
+                    };
+                    let in1_p = *w.add(2) as *const f32;
+                    let has_tok = !in1_p.is_null();
+                    let (tk01, tk23) = if has_tok {
+                        let tok_ptr = in1_p.add((row * heads + head) * taps);
+                        if taps == 4 && (tok_ptr as usize) & 15 == 0 {
+                            let tv = crate::tc_ptx::ld_global_nc_v4(tok_ptr);
+                            (pack2!(rn(tv[0]), rn(tv[1])), pack2!(rn(tv[2]), rn(tv[3])))
+                        } else {
+                            let t0 = rn(f32::from_bits(crate::tc_ptx::ld_global_nc_u32(tok_ptr.cast())));
+                            let t1 = rn(f32::from_bits(crate::tc_ptx::ld_global_nc_u32(tok_ptr.add(1).cast())));
+                            let t2 = if taps >= 3 { rn(f32::from_bits(crate::tc_ptx::ld_global_nc_u32(tok_ptr.add(2).cast()))) } else { 0.0f32 };
+                            let t3 = if taps >= 4 { rn(f32::from_bits(crate::tc_ptx::ld_global_nc_u32(tok_ptr.add(3).cast()))) } else { 0.0f32 };
+                            (pack2!(t0, t1), pack2!(t2, t3))
+                        }
+                    } else {
+                        (0u32, 0u32)
+                    };
+                    let w_ptr = *w.add(4) as *const f32;
+                    let fast_w4 = taps == 4 && (w_ptr as usize) & 15 == 0;
+                    let bound_r = f32::from_bits(*w.add(11) as u32);
+                    macro_rules! conv_val {($ck:expr, $c0:expr, $c1:expr, $c2:expr, $c3:expr)=>{{
+                        let ck = $ck;
+                        let (f0, f1, f2, f3) = if fast_w4 {
+                            let ft = crate::tc_ptx::ld_global_nc_v4(w_ptr.add(ck * 4));
+                            (ft[0], ft[1], ft[2], ft[3])
+                        } else {
+                            (
+                                f32::from_bits(crate::tc_ptx::ld_global_nc_u32(w_ptr.add(ck * taps).cast())),
+                                f32::from_bits(crate::tc_ptx::ld_global_nc_u32(w_ptr.add(ck * taps + 1).cast())),
+                                if taps >= 3 { f32::from_bits(crate::tc_ptx::ld_global_nc_u32(w_ptr.add(ck * taps + 2).cast())) } else { 0.0f32 },
+                                if taps >= 4 { f32::from_bits(crate::tc_ptx::ld_global_nc_u32(w_ptr.add(ck * taps + 3).cast())) } else { 0.0f32 },
+                            )
+                        };
+                        let mut s = 0.0f32;
+                        if taps >= 4 { s += (if has_tok { f3 + unhi!(tk23) } else { f3 }) * $c3; }
+                        if taps >= 3 { s += (if has_tok { f2 + unlo!(tk23) } else { f2 }) * $c2; }
+                        s += (if has_tok { f1 + unhi!(tk01) } else { f1 }) * $c1;
+                        s += (if has_tok { f0 + unlo!(tk01) } else { f0 }) * $c0;
+                        rn((s + $c0) * bound_r)
+                    }}}
+                    let v0 = conv_val!(ch, unlo!(cur[0]), unlo!(p1[0]), unlo!(p2[0]), unlo!(p3[0]));
+                    let v1 = conv_val!(ch + 32, unhi!(cur[0]), unhi!(p1[0]), unhi!(p2[0]), unhi!(p3[0]));
+                    let v2 = conv_val!(ch + 64, unlo!(cur[1]), unlo!(p1[1]), unlo!(p2[1]), unlo!(p3[1]));
+                    let v3 = conv_val!(ch + 96, unhi!(cur[1]), unhi!(p1[1]), unhi!(p2[1]), unhi!(p3[1]));
+                    p3 = p2;
+                    p2 = p1;
+                    p1 = cur;
+                    let mut sum = 0.0f32;
+                    sum += v0 * v0;
+                    sum += v1 * v1;
+                    sum += v2 * v2;
+                    sum += v3 * v3;
+                    sum += shfl_xor_f32(sum, 16);
+                    sum += shfl_xor_f32(sum, 8);
+                    sum += shfl_xor_f32(sum, 4);
+                    sum += shfl_xor_f32(sum, 2);
+                    sum += shfl_xor_f32(sum, 1);
+                    let fin_r = *w.add(KV_FINISH_WORD);
+                    let par_r = f32::from_bits(*w.add(17) as u32);
+                    let scale = if fin_r == CONV_KV_CLIP {
+                        let bits: u32;
+                        core::arch::asm!("shfl.sync.idx.b32 {got}, {v}, 0, 31, 0xffffffff;",
+                            got = out(reg32) bits, v = in(reg32) sum.to_bits());
+                        crate::block_attention::clip_factor(crate::block_ops::root(f32::from_bits(bits)), par_r)
+                    } else {
+                        1.0 / crate::block_ops::root(sum / CONV_KV_DIM as f32 + par_r)
+                    };
+                    let pf = *w.add(18) as usize;
+                    let pr = *w.add(19) as usize;
+                    let slot = if row < pr - pf { pf + row } else { row - (pr - pf) };
+                    let plane = (*w.add(5) as *mut u32).add(slot * (dim / 2) + ch / 2);
+                    let ev_st = crate::tc_ptx::l2_evict_first();
+                    let store_pair = |part: usize, value: f32| {
+                        let bits = rn(value * scale).to_bits();
+                        let peer = shfl_xor_u32(bits, 1);
+                        if lane % 2 == 0 { st_ev_u32!(plane.add(part * 16), (bits >> 16) | (peer & 0xffff_0000), ev_st); }
+                    };
+                    store_pair(0, v0);
+                    store_pair(1, v1);
+                    store_pair(2, v2);
+                    store_pair(3, v3);
+                    row += 1;
+                }
+                let rows_r = *w.add(6) as usize;
+                let nr = *w.add(KV_NEXT_RING_WORD) as *mut f32;
+                if r_end == rows_r && !nr.is_null() {
+                    let first_r = *w.add(13) as usize;
+                    let mut slot = ((first_r as u32 + rows_r as u32 - 1) % (taps as u32)) as usize;
+                    let mut back = 0usize;
+                    while back < taps {
+                        let src = in0.add((rows_r - 1 - back) * dim + ch);
+                        let dst = nr.add(slot * dim + ch);
+                        *dst = *src;
+                        *dst.add(32) = *src.add(32);
+                        *dst.add(64) = *src.add(64);
+                        *dst.add(96) = *src.add(96);
+                        slot = if slot == 0 { taps - 1 } else { slot - 1 };
+                        back += 1;
+                    }
+                }
+                return;
+            }
+            if core::arch::nvptx::_grid_dim_x() as usize != conv_kv_blocks(rows, heads) || !next_ring.is_null() {
                 core::arch::nvptx::trap();
             }
             let tid = core::arch::nvptx::_thread_idx_x() as usize;

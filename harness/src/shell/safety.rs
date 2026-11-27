@@ -753,17 +753,29 @@ impl Ctx {
     }
 
     fn credentials(&mut self, word: &Word, display: &[String]) {
-        let text = word.text.rsplit('=').next().unwrap_or(&word.text);
-        // Each word of a brace expansion (`~/.{ssh,x}/id_rsa`) counts, and
-        // names match in any case: macOS file names ignore it.
-        let Some(paths) = braces(text) else {
-            return self.add(Class::Ask, format!("has a brace expansion that the checker cannot list: {}", word.text), display, false);
-        };
+        // Check every `=`-separated value segment (not only the last one, so
+        // `git -c k=.ssh/id_rsa=1` still matches), expand braces, and split on
+        // `/` and `:` (so `git show HEAD:.env` matches `.env`).
+        let option = word.text.starts_with('-');
+        let mut expanded = Vec::new();
+        for (eq_index, segment) in word.text.split('=').enumerate() {
+            let Some(paths) = braces(segment) else {
+                return self.add(Class::Ask, format!("has a brace expansion that the checker cannot list: {}", word.text), display, false);
+            };
+            for path in paths {
+                expanded.push((eq_index == 0, path));
+            }
+        }
         // An option word can end with an attached value (`-tfid_rsa`,
         // `-C.ssh`) on any program path: its first part counts when it ends
         // with a name.
-        let option = word.text.starts_with('-');
-        let parts = || paths.iter().flat_map(|path| path.split('/').enumerate()).map(|(at, part)| (option && at == 0, part.to_ascii_lowercase()));
+        let parts = || {
+            expanded.iter().flat_map(|(first_eq, path)| {
+                path.split(['/', ':'])
+                    .enumerate()
+                    .map(move |(at, part)| (option && *first_eq && at == 0, part.to_ascii_lowercase()))
+            })
+        };
         let hit = parts().any(|(attached, lower)| if attached {
             crate::tools::SECRET_PATH_RULES.iter().any(|rule| rule.matches_attached(&lower))
         } else {
@@ -827,8 +839,9 @@ struct Resolved {
 /// Folders whose recursive removal or permission change is never wanted.
 const SYSTEM_DIRS: &[&str] = &[
     "/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/lib64", "/opt", "/private", "/proc",
-    "/root", "/sbin", "/sys", "/usr", "/var", "/System", "/Library", "/Applications", "/Users",
-    "/Volumes", "/private/etc", "/private/var", "/usr/local", "/usr/bin", "/usr/lib",
+    "/root", "/sbin", "/sys", "/usr", "/var", "/System", "/System/Volumes/Data", "/Library",
+    "/Applications", "/Users", "/Volumes", "/private/etc", "/private/var", "/usr/local",
+    "/usr/bin", "/usr/lib",
 ];
 
 /// True for `/`, the home folder and top-level system folders, in the usual

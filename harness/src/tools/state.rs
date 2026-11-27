@@ -99,6 +99,15 @@ pub(super) fn open_home(home: &Path, root: &Path) -> io::Result<super::anchored:
     Ok(dir)
 }
 
+/// Opens the per-project state directory inside an already-verified Vade home.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub(super) fn open_safe_home(
+    home: &crate::home_guard::Home,
+    root: &Path,
+) -> io::Result<super::anchored::Dir> {
+    home.dir().private_child("projects")?.private_child(&project_key(root))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
