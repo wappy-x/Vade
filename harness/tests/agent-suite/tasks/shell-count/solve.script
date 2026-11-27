@@ -1,0 +1,7 @@
+# A correct transcript for the dry run.
+>>> call workspace_shell
+{"argv":["/bin/sh","-c","find logs -type f -name '*.log.txt' | LC_ALL=C sort"],"timeout_ms":30000}
+>>> call workspace_shell
+{"argv":["/bin/sh","-c","t=0; for f in $(find logs -type f -name '*.log.txt' | LC_ALL=C sort); do n=$(grep -c ERROR \"$f\"); echo \"$f $n\"; t=$((t+n)); done > report.txt; echo \"total $t\" >> report.txt; cat report.txt"],"timeout_ms":30000}
+>>> answer
+report.txt lists the four .log.txt files with their ERROR line counts and the total of 8.

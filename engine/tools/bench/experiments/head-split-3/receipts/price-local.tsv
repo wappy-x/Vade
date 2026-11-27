@@ -1,0 +1,48 @@
+METHOD model_only; rc8 census rows scaled by synthetic full/owned kernel ratios; no real-pair gain measured
+COMPUTE Step baseline 1.120128 ms from ORDER c1040, used at each cell because the shape is fixed; Prepare/GatedNorm split from ORDER 0.340064/0.176832 and scaled to each DETAIL grid16 total; Conv uses each DETAIL grid192 total; quantizer saving credited zero
+TRANSPORT sender: grid8 -> grid2 and grid5 -> grid3 using per-call DETAIL means; receiver byte proxy from ORDER minima: (0.00512-0.003328) ms / ((12448-1168)*4) bytes; saved KDA payload=2232576 bytes; fixed-message and prefetch saving=0; wire/peer timing is not separately observed
+LATENT only q_b remains: 360448 payload bytes; put6 reference 0.050688 ms from one ORDER step, new put2 from each DETAIL row; no compute or message-count credit
+SENSITIVITY adds a larger 0.476680 ms byte budget instead of the census transport proxy: 34*((22.63-13.77)+(22.02-16.86)) us from fuse-exchange/form2 at fixed 8us proxy delay. This removes MORE payload than proposed and is a local proxy, not a fabric bound.
+cell	latent_ms	transport_ms	kda_split_ms	kda_register_ms	kda_split_sensitivity_ms	kda_register_sensitivity_ms
+c15	0.024732	0.194719	0.771611	0.481389	1.053573	0.763350
+c127	0.023427	0.196034	0.775051	0.484909	1.055697	0.765555
+c1040	0.023055	0.197555	0.778786	0.488572	1.057912	0.767698
+c4158	0.021190	0.203290	0.789844	0.499550	1.063234	0.772940
+WEIGHTED 63/63/31/47 0.023258 0.777965 0.487752 1.057114 0.766901
+RAW ConvParts H64=321152 H32=222944 C64=322495 C32=220512 ns_per_34_calls
+RAW Prepare H64=250752 H32=247519 C64=247071 C32=252480 ns_per_34_calls
+RAW StepPlanar H64=1522719 H32=866144 C64=1933887 C32=1253823 ns_per_34_calls
+RAW GatedNorm H64=147039 H32=147136 C64=147551 C32=147520 ns_per_34_calls
+SYNTHETIC_EVENT_SPANS split_saved_ms=0.757919 candidate_saved_ms=0.367327; includes recording/submission gaps, not a whole-model gain
+ORDER_SENSITIVITY arm=H op=ConvParts heads=32 trial_parity=0 median_ns=234687 min_ns=222944 max_ns=241408
+ORDER_SENSITIVITY arm=H op=ConvParts heads=32 trial_parity=1 median_ns=168543 min_ns=164959 max_ns=168704
+ORDER_SENSITIVITY arm=H op=ConvParts heads=64 trial_parity=0 median_ns=320607 min_ns=318239 max_ns=324160
+ORDER_SENSITIVITY arm=H op=ConvParts heads=64 trial_parity=1 median_ns=321152 min_ns=318751 max_ns=332895
+ORDER_SENSITIVITY arm=H op=GatedNorm heads=32 trial_parity=0 median_ns=147295 min_ns=146464 max_ns=147712
+ORDER_SENSITIVITY arm=H op=GatedNorm heads=32 trial_parity=1 median_ns=147103 min_ns=146431 max_ns=147648
+ORDER_SENSITIVITY arm=H op=GatedNorm heads=64 trial_parity=0 median_ns=146623 min_ns=144608 max_ns=148287
+ORDER_SENSITIVITY arm=H op=GatedNorm heads=64 trial_parity=1 median_ns=147039 min_ns=145119 max_ns=147743
+ORDER_SENSITIVITY arm=H op=Prepare heads=32 trial_parity=0 median_ns=248704 min_ns=247519 max_ns=248799
+ORDER_SENSITIVITY arm=H op=Prepare heads=32 trial_parity=1 median_ns=240224 min_ns=230880 max_ns=241983
+ORDER_SENSITIVITY arm=H op=Prepare heads=64 trial_parity=0 median_ns=240544 min_ns=240447 max_ns=240608
+ORDER_SENSITIVITY arm=H op=Prepare heads=64 trial_parity=1 median_ns=250815 min_ns=250752 max_ns=250880
+ORDER_SENSITIVITY arm=H op=StepPlanar heads=32 trial_parity=0 median_ns=867007 min_ns=848352 max_ns=872255
+ORDER_SENSITIVITY arm=H op=StepPlanar heads=32 trial_parity=1 median_ns=862911 min_ns=854496 max_ns=878816
+ORDER_SENSITIVITY arm=H op=StepPlanar heads=64 trial_parity=0 median_ns=1527904 min_ns=1513952 max_ns=1539072
+ORDER_SENSITIVITY arm=H op=StepPlanar heads=64 trial_parity=1 median_ns=1516384 min_ns=1510879 max_ns=1522719
+ORDER_SENSITIVITY arm=C op=ConvParts heads=32 trial_parity=0 median_ns=225183 min_ns=220512 max_ns=230816
+ORDER_SENSITIVITY arm=C op=ConvParts heads=32 trial_parity=1 median_ns=179744 min_ns=171455 max_ns=179839
+ORDER_SENSITIVITY arm=C op=ConvParts heads=64 trial_parity=0 median_ns=323071 min_ns=318751 max_ns=329567
+ORDER_SENSITIVITY arm=C op=ConvParts heads=64 trial_parity=1 median_ns=320223 min_ns=318304 max_ns=330720
+ORDER_SENSITIVITY arm=C op=GatedNorm heads=32 trial_parity=0 median_ns=147487 min_ns=145183 max_ns=147615
+ORDER_SENSITIVITY arm=C op=GatedNorm heads=32 trial_parity=1 median_ns=147584 min_ns=144255 max_ns=156767
+ORDER_SENSITIVITY arm=C op=GatedNorm heads=64 trial_parity=0 median_ns=147231 min_ns=144608 max_ns=148479
+ORDER_SENSITIVITY arm=C op=GatedNorm heads=64 trial_parity=1 median_ns=147551 min_ns=147392 max_ns=157600
+ORDER_SENSITIVITY arm=C op=Prepare heads=32 trial_parity=0 median_ns=255551 min_ns=252480 max_ns=257055
+ORDER_SENSITIVITY arm=C op=Prepare heads=32 trial_parity=1 median_ns=240927 min_ns=239104 max_ns=244576
+ORDER_SENSITIVITY arm=C op=Prepare heads=64 trial_parity=0 median_ns=239296 min_ns=239263 max_ns=239455
+ORDER_SENSITIVITY arm=C op=Prepare heads=64 trial_parity=1 median_ns=247615 min_ns=247071 max_ns=257824
+ORDER_SENSITIVITY arm=C op=StepPlanar heads=32 trial_parity=0 median_ns=1253823 min_ns=1244575 max_ns=1357056
+ORDER_SENSITIVITY arm=C op=StepPlanar heads=32 trial_parity=1 median_ns=1247455 min_ns=1241727 max_ns=1266592
+ORDER_SENSITIVITY arm=C op=StepPlanar heads=64 trial_parity=0 median_ns=1946720 min_ns=1921856 max_ns=2203135
+ORDER_SENSITIVITY arm=C op=StepPlanar heads=64 trial_parity=1 median_ns=1926751 min_ns=1925439 max_ns=2427583

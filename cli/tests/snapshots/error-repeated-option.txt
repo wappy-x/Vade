@@ -1,0 +1,5 @@
+$ vade up --mtp 1 --mtp 2
+--- stderr
+error: Use --mtp only once.
+ hint: Run vade up --help.
+--- exit 1

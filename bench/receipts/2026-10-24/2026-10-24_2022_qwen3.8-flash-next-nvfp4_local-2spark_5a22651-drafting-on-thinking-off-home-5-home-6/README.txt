@@ -1,0 +1,15 @@
+Drafting ON (as served), thinking OFF. Requests omit draft.
+Engine 5a226519a2a44a0ff7ea9be43118b8b9ec0d8f9e (v0.1.0 public release, tag tree 5a22651) NEW FOLDER
+Boxes: LOCAL home-5 (rank 0, HTTP) + home-6 (rank 1); 2xGB10 (DGX Spark, driver 580.178.04), one QSFP cable, RDMA (default). One engine, two ranks (layer pipeline, engine topology tag 'pipeline').
+Install: fresh public GitHub clone wappy-x/vade main on a macOS controller, INSTALL.md 'Route B from a controller' + 'Two and more Sparks'; vade install staged tracked source and built engine/helper on both Sparks (Route B offers no bundle choice for the Sparks).
+Install timing (wall, first paste line to 'vade up' ready, model check excluded): 279.0 s = controller cargo build cli 9.2 s + vade install 245.3 s + vade up --sparks 2 23.9 s (dry-runs 0.4 s). Rust toolchains pre-existing on both Sparks. Model manifest check (33/33 OK): home-5 72.4 s, home-6 72.5 s.
+Server: vade up --sparks 2 defaults (context 32768, output 8192, drafting engine-selected ON = resident MTP depth 3, cache off); vade status: 9 chats engine-admitted; vade doctor passed.
+vade verify: IDENTICAL: 20/20 runs, 1 machine, 128 tokens (receipt vade-verify.json).
+vade bench (public, no flags, drafting as served; receipt vade-bench.json): C1 43.000 tok/s ; C2 74.890 tok/s ; C4 132.254 tok/s ; C8 177.523 tok/s ; C16 171.041 tok/s.
+RigMark52c29c3 pinned copy (card-tools: full-card-api.py + rigmark/, stdlib) run on rank 0 (home-5) against 127.0.0.1:18080, FLASHNEXT_WORLD=2: 5 runs x3 decode workloads cap 8192; 3 cold 8K/replay pairs; C1/C2/C4/C8 x3 rounds x256 tokens; seed 20260905; thinking off. OFF then ON on one server start.
+Token IDs: 66/66 identical (token_ids) vs today's 1438 one-Spark drafting-on card (73f7a9d), the H3-J1 ON cards on home-5 (1946-home-5) and home-6 (1947-home-6), and 66/66 vs this pair's drafting-OFF card (paired by body minus draft/cache_salt/stream).
+Tooling (measurement only, sha256): full-card-api.py 37b24f0b4ac1f3d1; full-card-api-served.py 38dade92300a9f1d; rigmark/bench.py 7ef9389626d3317a; finalize-2spark.py 460175cb9fb7acb2 (= the H3-J1 world-1 copy of <path> finalize-cloud-a4.py plus a world-2 branch: accepted topology pipeline, two-Spark appliance text); README.txt rewritten by hand after finalize; SHA256SUMS rebuilt.
+Status PASS; complete=True; gates 15/15; audit 66 responses, 0 with provenance errors; health OK.
+ON audit rule (as served, same as the H3-J1 ON cards): decode/concurrency requests omit draft and the engine selects strict MTP3 or plain per request; prefill rows are the pinned plain prefill requests. The engine chose plain on 12 of 24 C8 streams (card warnings).
+Deviations: v0.1.0 public-release fresh-install test card (two Sparks, controller defaults); informative, no gate. | No rank logs supplied; provenance rests on the per-response vade blocks and /health. | Output limit is the v0.1.0 controller default 8192 (today's 1452 pair card ran 16384); decode cap 8192 fits it.
+started 20:15, ended 20:22 CDT

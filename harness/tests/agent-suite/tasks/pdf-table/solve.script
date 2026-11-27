@@ -1,0 +1,14 @@
+# A correct transcript for the dry run.
+>>> call workspace_read
+{"path":"invoice.pdf"}
+>>> patch
+*** Begin Patch
+*** Add File: items.csv
++item,quantity,unit_price,total
++Copper wire,12,3.50,42.00
++Brass hinge,4,7.25,29.00
++Steel bracket,30,1.10,33.00
++Rubber gasket,150,0.08,12.00
+*** End Patch
+>>> answer
+items.csv holds the four line items.

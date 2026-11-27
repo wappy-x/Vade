@@ -1,0 +1,7 @@
+2026-10-01T08:00:01Z INFO api started on port 8080
+2026-10-01T08:00:05Z INFO GET /health 200
+2026-10-01T08:01:12Z ERROR GET /orders/17 500 upstream timeout
+2026-10-01T08:02:40Z WARN slow query 812 ms
+2026-10-01T08:03:02Z ERROR POST /orders 500 database locked
+2026-10-01T08:04:10Z INFO GET /orders 200
+2026-10-01T08:05:55Z info retrying after error in cache warmup

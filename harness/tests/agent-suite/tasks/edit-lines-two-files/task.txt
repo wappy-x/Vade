@@ -1,0 +1,22 @@
+id: edit-lines-two-files
+title: Edit two files with line edits after reading both
+category: edit-in-place
+inputs: Cargo.toml src/lib.rs src/a.rs src/b.rs tests/pair.rs
+budget_seconds: 300
+
+# The agent reads both files before it edits. An edit tag of the first read
+# can stop working after the second read; the agent must read again and
+# finish both edits.
+step: new
+prompt:
+  Read src/a.rs and src/b.rs. Then change `SCHEMA_A` in src/a.rs and
+  `SCHEMA_B` in src/b.rs from 3 to 4 with workspace_edit_lines. Do not change
+  tests/pair.rs. Finish when `cargo test --offline` passes.
+
+check: last-exit-zero
+check: unchanged Cargo.toml
+check: unchanged tests
+check: unchanged src/lib.rs
+check: file-equals src/a.rs expected/a.rs
+check: file-equals src/b.rs expected/b.rs
+check: run cargo test --offline --quiet

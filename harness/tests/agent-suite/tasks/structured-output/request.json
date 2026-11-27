@@ -1,0 +1,10 @@
+{
+  "messages": [
+    {"role": "system", "content": "Extract the order from the message. Reply with one JSON object and nothing else. Use exactly these fields: order_id (integer), customer (string), item (one of \"M6 bolts\", \"M8 bolts\", \"M6 nuts\"), boxes (integer), price_per_box (number), ship_date (string, YYYY-MM-DD)."},
+    {"role": "user", "content": "Hi, this is Lindqvist Tools. Please book order 4471: three boxes of M6 bolts at 4.20 dollars per box. We need them shipped on 2026-11-03. Thanks!"}
+  ],
+  "temperature": 0,
+  "max_tokens": 200,
+  "enable_thinking": false,
+  "response_format": {"type": "json_object"}
+}

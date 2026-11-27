@@ -1,0 +1,11 @@
+<!-- vade read: note.tar | tar archive | pages 1 | chars 178 | skipped: none -->
+1 entry, 12 bytes when unpacked.
+
+| # | Path | Size (bytes) | Type |
+| --- | --- | --- | --- |
+| 1 | first.txt | 12 | file |
+
+<!-- file 1 of 1 -->
+## File first.txt
+
+First file.

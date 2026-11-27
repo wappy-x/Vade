@@ -1,0 +1,22 @@
+id: edit-indent-scope
+title: Change one of two identical lines that differ only in indentation
+category: edit-in-place
+inputs: Cargo.toml src/lib.rs tests/throttle.rs
+budget_seconds: 300
+
+# src/lib.rs holds the same three lines twice, at two indentation depths.
+# An edit that matches lines with the indentation ignored changes the wrong
+# function. The agent must change only the copy inside Inner::burst_limit.
+step: new
+prompt:
+  In src/lib.rs, change `let limit = 10;` to `let limit = 25;` inside
+  `Inner::burst_limit` (in `pub mod nested`). Do not change `outer_limit`, and
+  do not change any file under tests/. Finish when `cargo test --offline`
+  passes.
+
+check: last-exit-zero
+check: unchanged Cargo.toml
+check: unchanged tests
+check: count src/lib.rs 1 let limit = 10;
+check: count src/lib.rs 1 let limit = 25;
+check: run cargo test --offline --quiet

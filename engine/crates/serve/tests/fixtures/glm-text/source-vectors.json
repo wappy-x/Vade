@@ -1,0 +1,24 @@
+{
+  "proof": "source-derived IDs and decode bytes; no upstream runtime receipt",
+  "checkpoint_revision": "76348ddb2be2e35e39ecfc00e75dc07703f4f3d5",
+  "artifacts": {
+    "tokenizer.json": "19e773648cb4e65de8660ea6365e10acca112d42a854923df93db4a6f333a82d",
+    "tokenizer_config.json": "98b1271574f41abf89427ae2dda030d94dc9478f0edc5a8bd240db213c6fd5fc",
+    "generation_config.json": "230c30609ecbbb9e6583bedde8e7bdda0c6eb8fe5fad0eaeb3d1b293d751cb4f",
+    "chat_template.jinja": "0c4099f3382d6c92700dfb99725025360966fd73032f0ecf32377c0d9e6309c5"
+  },
+  "plain": [
+    {"text":"", "ids":[]},
+    {"text":"Hello world", "ids":[9703,1879]},
+    {"text":"1234567", "ids":[108714,100461,21,22]},
+    {"text":"雪", "ids":[99785]},
+    {"text":"é", "ids":[963]},
+    {"text":"e\u0301", "ids":[68,53481]},
+    {"text":"日本語", "ids":[99799,131513]},
+    {"text":"🚀", "ids":[9281,248,222]},
+    {"text":"\n", "ids":[198]},
+    {"text":"\t", "ids":[197]},
+    {"text":" ", "ids":[220]}
+  ],
+  "probe_ids": [9703,1879,99785,154841]
+}

@@ -1,0 +1,17 @@
+[package]
+name = "spark-rust-kernels"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+repository = "https://github.com/wappy-x/vade"
+rust-version = "1.99"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+
+[features]
+tensor-cores = []
+fp4 = ["tensor-cores"]

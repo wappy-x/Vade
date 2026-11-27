@@ -1,0 +1,16 @@
+struct Shape { output_rank: Option<usize>, tp: Vec<Vec<usize>> }
+trait Plan { fn shape(world: usize) -> Vec<Vec<usize>>; }
+type RankPlan = Vec<Vec<usize>>;
+fn run(world: usize, rank: usize) -> Result<Vec<usize>> {
+    let rows = split_rows(total, rank, world);
+    let size = world * width;
+    let halves = world >> 1;
+    let rows = (0..world).map(|rank| rows[rank]).collect::<Vec<_>>();
+    for rank in 0..world { send(rank, &rows); }
+    if rows.is_empty() { return; }
+    if tokens > capacity { reject(); }
+    match dtype { Dtype::F32 => f32_rows(), Dtype::Bf16 => bf16_rows() }
+    let note = "if world == 2 { alternate(); }";
+    // if rank == 0 { alternate(); }
+    /* match topology { Topology::Ring => alternate() } */
+}

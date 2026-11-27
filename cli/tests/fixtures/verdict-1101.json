@@ -1,0 +1,37 @@
+[
+  {"case":"c2c2575","verdict":"SCREEN PASS","reads":["INSIDE (X faster)","FLOOR","INSIDE"],"why":"OFF 8K/warm_replay FLOOR",
+   "input":{"screen":"syn","order":"a1 x1","cells":[
+     {"cell":"ON prose","unit":"tok/s","a":[37.845],"x":[38.349]},
+     {"cell":"OFF 8K/warm_replay","unit":"s","a":[0.103941],"x":[0.106423]},
+     {"cell":"OFF 8K/cold","unit":"s","a":[5.953397],"x":[5.955971]}]}},
+  {"case":"f0d9414","verdict":"SCREEN PASS","reads":["FLOOR","INSIDE (X faster)"],"why":"OFF 8K/warm_replay FLOOR",
+   "input":{"screen":"syn","cells":[
+     {"cell":"OFF 8K/warm_replay","unit":"s","a":[0.103941],"x":[0.108158,0.107736]},
+     {"cell":"ON 8K/cold","unit":"s","a":[5.960361],"x":[5.783974]}]}},
+  {"case":"e1e6f65","verdict":"SCREEN FAIL","reads":["FAIL","INSIDE (X faster)"],"why":"ON 32K turn2-cache-r1 FAIL",
+   "input":{"screen":"syn","cells":[
+     {"cell":"ON 32K turn2-cache-r1","unit":"s","a":[0.781],"x":[0.787,0.803,0.788]},
+     {"cell":"ON prose","unit":"tok/s","a":[50.0],"x":[50.1]}]}},
+  {"case":"floor edge","verdict":"SCREEN PASS","reads":["FLOOR"],"why":"ON 8K/warm_replay FLOOR",
+   "input":{"screen":"syn","cells":[{"cell":"ON 8K/warm_replay","unit":"s","a":[0.5],"x":[0.51]}]}},
+  {"case":"cached A at least one second","verdict":"SECOND-START","reads":["SECOND-START"],"why":"ON 32K turn2-cache-r1 SECOND-START",
+   "input":{"screen":"syn","cells":[{"cell":"ON 32K turn2-cache-r1","unit":"s","a":[1.05],"x":[1.059]}]}},
+  {"case":"nocache","verdict":"SECOND-START","reads":["SECOND-START"],"why":"ON 32K turn2-nocache SECOND-START",
+   "input":{"screen":"syn","cells":[{"cell":"ON 32K turn2-nocache","unit":"s","a":[0.5],"x":[0.505]}]}},
+  {"case":"rate has no floor","verdict":"SECOND-START","reads":["SECOND-START"],"why":"ON C1 SECOND-START",
+   "input":{"screen":"syn","cells":[{"cell":"ON C1","unit":"tok/s","a":[100.0],"x":[98.8]}]}},
+  {"case":"one X far outside","verdict":"SCREEN FAIL","reads":["FAIL"],"why":"ON C1 FAIL",
+   "input":{"screen":"syn","cells":[{"cell":"ON C1","unit":"tok/s","a":[100.0],"x":[98.0]}]}},
+  {"case":"second X edge","verdict":"SECOND-START","reads":["SECOND-START"],"why":"ON C1 SECOND-START",
+   "input":{"screen":"syn","cells":[{"cell":"ON C1","unit":"tok/s","a":[100.0],"x":[98.4]}]}},
+  {"case":"no third X","verdict":"SCREEN FAIL","reads":["FAIL"],"why":"ON C1 FAIL",
+   "input":{"screen":"syn","cells":[{"cell":"ON C1","unit":"tok/s","a":[100.0],"x":[99.0,99.0]}]}},
+  {"case":"one X inside or faster","verdict":"SCREEN PASS","reads":["INSIDE","INSIDE (X faster)"],"why":"every cell inside or X faster",
+   "input":{"screen":"syn","cells":[{"cell":"ON C1","unit":"tok/s","a":[100.0],"x":[99.3]},
+     {"cell":"ON prose","unit":"tok/s","a":[50.0],"x":[51.0]}]}},
+  {"case":"IDs override floor","verdict":"SCREEN FAIL","reads":["INSIDE (X faster)","FLOOR","INSIDE"],"why":"IDS DIFFER (exactness gate), OFF 8K/warm_replay FLOOR",
+   "input":{"screen":"syn","order":"a1 x1","ids_equal":false,"cells":[
+     {"cell":"ON prose","unit":"tok/s","a":[37.845],"x":[38.349]},
+     {"cell":"OFF 8K/warm_replay","unit":"s","a":[0.103941],"x":[0.106423]},
+     {"cell":"OFF 8K/cold","unit":"s","a":[5.953397],"x":[5.955971]}]}}
+]

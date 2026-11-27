@@ -1,0 +1,32 @@
+# A correct transcript for the dry run.
+>>> call workspace_read
+{"path":"src/lib.rs"}
+>>> patch
+*** Begin Patch
+*** Add File: tests/slugify.rs
++use slug::slugify;
++
++#[test]
++fn upper_case_becomes_lower_case() {
++    assert_eq!(slugify("Hello World"), "hello-world");
++}
++
++#[test]
++fn runs_of_separators_become_one_dash() {
++    assert_eq!(slugify("a  --  b!!c"), "a-b-c");
++}
++
++#[test]
++fn leading_separators_are_dropped() {
++    assert_eq!(slugify("  ...Rust"), "rust");
++}
++
++#[test]
++fn trailing_separators_are_dropped() {
++    assert_eq!(slugify("Rust 2026!?  "), "rust-2026");
++}
+*** End Patch
+>>> call workspace_shell
+{"argv":["cargo","test","--offline"],"timeout_ms":120000}
+>>> answer
+tests/slugify.rs has four tests; `cargo test --offline` passes.

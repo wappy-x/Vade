@@ -1,0 +1,48 @@
+# A correct transcript for the dry run.
+>>> call workspace_read
+{"path":"src/lib.rs"}
+>>> patch
+*** Begin Patch
+*** Add File: src/temperature.rs
++//! Temperature conversions.
++
++/// Degrees Celsius to degrees Fahrenheit.
++pub fn celsius_to_fahrenheit(c: f64) -> f64 {
++    c * 9.0 / 5.0 + 32.0
++}
++
++/// Degrees Fahrenheit to degrees Celsius.
++pub fn fahrenheit_to_celsius(f: f64) -> f64 {
++    (f - 32.0) * 5.0 / 9.0
++}
++
++/// Degrees Celsius to kelvin.
++pub fn celsius_to_kelvin(c: f64) -> f64 {
++    c + 273.15
++}
+*** Update File: src/lib.rs
+@@
+ //! Unit conversions for the weather station.
+ 
+-/// Degrees Celsius to degrees Fahrenheit.
+-pub fn celsius_to_fahrenheit(c: f64) -> f64 {
+-    c * 9.0 / 5.0 + 32.0
+-}
+-
+-/// Degrees Fahrenheit to degrees Celsius.
+-pub fn fahrenheit_to_celsius(f: f64) -> f64 {
+-    (f - 32.0) * 5.0 / 9.0
+-}
+-
+-/// Degrees Celsius to kelvin.
+-pub fn celsius_to_kelvin(c: f64) -> f64 {
+-    c + 273.15
+-}
++pub mod temperature;
++
++pub use temperature::{celsius_to_fahrenheit, celsius_to_kelvin, fahrenheit_to_celsius};
+ 
+ /// Kilometers per hour to meters per second.
+*** End Patch
+>>> answer
+The temperature functions are in src/temperature.rs, and src/lib.rs re-exports them.

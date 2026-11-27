@@ -1,0 +1,8 @@
+PARTIAL FRESH REPEAT: one-chat requests only; not the complete four-load rule-1 proof
+runs a-gate-main-a1-1 / a-gate-main-b1-1
+PASS
+   lists equal 3 of 3, tokens compared 768, servers compared ['PL'], commit 1508efce96fd732edf93704c95c34b813afcebaf
+PL/out-PL/PL-one-code-s1-P.json 256 equal
+PL/out-PL/PL-one-prose-s1-P.json 256 equal
+PL/out-PL/PL-one-structured-s1-P.json 256 equal
+server starts A/B {'PL': (('1794798539.707796961', '810923', '1d50f6eba8e1818c', '49a26dae1180ae91'), 1)} {'PL': (('1794803148.934516746', '847286', '1d50f6eba8e1818c', '49a26dae1180ae91'), 1)}

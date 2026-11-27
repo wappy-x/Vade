@@ -1,0 +1,10 @@
+Vade wants to change 12 files       can overwrite or delete work
+■  source/long-file-1.rs, source/long-file-2.rs,    this project
+│  source/long-file-3.rs, source/long-file-4.rs,
+│  source/long-file-5.rs, source/long-file-6.rs,
+│  source/long-file-7.rs, source/long-file-8.rs, and 4 more
+      A wrong change can overwrite or delete your work.
+----------------------------------------------------------------
+Your turn.  1  Yes, one time
+            2  No, leave the files unchanged
+            5  Show the exact change

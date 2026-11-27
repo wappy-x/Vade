@@ -1,0 +1,19 @@
+id: html-rate-table
+title: Read an HTML page and extract one of its two tables as JSON
+category: document-reading
+inputs: endpoints.html
+budget_seconds: 300
+
+# The page has two tables: the live routes and the retired routes. Only the
+# live routes belong in the answer, in route order.
+step: new
+prompt:
+  endpoints.html lists the API routes and their rate limits. Write
+  quotas.json: a JSON array with one object for each route in the "Live
+  routes" table, sorted by route, with the members "route" (a string),
+  "per_minute" (a number) and "burst" (a number). Leave out the retired
+  routes. Do not change endpoints.html.
+
+check: last-exit-zero
+check: json-equals quotas.json expected/quotas.json
+check: unchanged endpoints.html

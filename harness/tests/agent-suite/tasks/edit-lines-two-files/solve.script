@@ -1,0 +1,23 @@
+# A correct transcript for the dry run. The runner fills in each
+# {{edit_tag PATH}} with the tag that workspace_read_lines gives for the file
+# as it is at that moment, as a model copies it from the read result.
+# The first edit of src/a.rs comes after the read of src/b.rs. When the
+# harness keeps only the latest read, that edit is refused and the agent
+# reads src/a.rs again; when it keeps both, the second edit of src/a.rs
+# writes the same line again. Both ways end with both files changed.
+>>> call workspace_read_lines
+{"path":"src/a.rs","start_line":1,"end_line":2}
+>>> call workspace_read_lines
+{"path":"src/b.rs","start_line":1,"end_line":2}
+>>> call workspace_edit_lines
+{"path":"src/a.rs","start_line":2,"end_line":2,"edit_tag":"{{edit_tag src/a.rs}}","operation":"replace","new_text":"pub const SCHEMA_A: u32 = 4;\n"}
+>>> call workspace_read_lines
+{"path":"src/a.rs","start_line":1,"end_line":2}
+>>> call workspace_edit_lines
+{"path":"src/a.rs","start_line":2,"end_line":2,"edit_tag":"{{edit_tag src/a.rs}}","operation":"replace","new_text":"pub const SCHEMA_A: u32 = 4;\n"}
+>>> call workspace_read_lines
+{"path":"src/b.rs","start_line":1,"end_line":2}
+>>> call workspace_edit_lines
+{"path":"src/b.rs","start_line":2,"end_line":2,"edit_tag":"{{edit_tag src/b.rs}}","operation":"replace","new_text":"pub const SCHEMA_B: u32 = 4;\n"}
+>>> answer
+`SCHEMA_A` and `SCHEMA_B` are now 4.

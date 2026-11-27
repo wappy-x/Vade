@@ -1,0 +1,8 @@
+# A near miss for the dry run: the agent edits src/a.rs and forgets src/b.rs.
+# `file-equals src/b.rs` and `run cargo test` must fail.
+>>> call workspace_read_lines
+{"path":"src/a.rs","start_line":1,"end_line":2}
+>>> call workspace_edit_lines
+{"path":"src/a.rs","start_line":2,"end_line":2,"edit_tag":"{{edit_tag src/a.rs}}","operation":"replace","new_text":"pub const SCHEMA_A: u32 = 4;\n"}
+>>> answer
+The schema constants are now 4.

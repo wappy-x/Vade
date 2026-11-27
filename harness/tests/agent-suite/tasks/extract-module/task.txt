@@ -1,0 +1,25 @@
+id: extract-module
+title: Move functions into a new module and keep the old paths working
+category: multi-file-refactor
+inputs: Cargo.toml src/lib.rs tests/convert.rs
+budget_seconds: 300
+
+# The hidden test calls the functions through the new module path. The
+# visible tests call them through the crate root, so the root must re-export.
+step: new
+prompt:
+  Move the three temperature functions (`celsius_to_fahrenheit`,
+  `fahrenheit_to_celsius` and `celsius_to_kelvin`) from src/lib.rs into a new
+  module in src/temperature.rs, declared as `pub mod temperature;`. Keep
+  `units::celsius_to_fahrenheit` and the other old paths working with a
+  re-export. Do not change any file under tests/. Finish when
+  `cargo test --offline` passes.
+
+check: last-exit-zero
+check: unchanged Cargo.toml
+check: unchanged tests
+check: exists src/temperature.rs
+check: absent src/lib.rs fn celsius_to_fahrenheit
+check: count src/temperature.rs 1 pub fn celsius_to_kelvin
+check: run cargo test --offline --quiet
+check: run-with hidden/module_paths.rs tests/hidden_module_paths.rs -- cargo test --offline --quiet --test hidden_module_paths

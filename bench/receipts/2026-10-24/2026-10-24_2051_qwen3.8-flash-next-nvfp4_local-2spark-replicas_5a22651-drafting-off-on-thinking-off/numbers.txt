@@ -1,0 +1,11 @@
+2-Spark REPLICAS (vade up --replicas 2, home-1 + home-2, gateway on the macOS controller), Vade v0.1.0 5a22651, thinking OFF, context 32768
+Card concurrency rows (pinned RigMark 52c29c3 code workload, 256 tokens/stream, 3 rounds, seed 20260905), aggregate end-to-end tok/s, median of 3 rounds [rounds]
+drafting | C8 tok/s                          | C16 tok/s                         | C8 ids vs J1 1-Spark C8 (home-1 / home-2) | ids ON vs OFF (C8+C16)
+OFF      | 165.936 [167.206 165.936 161.802] | 271.139 [271.139 154.164 288.222] | 24/24 / 24/24 identical                  | 72/72 identical
+ON       | 290.608 [282.451 291.956 290.608] | 259.271 [259.271 262.118 251.558] | 24/24 / 24/24 identical                  | 72/72 identical
+Single-server reference (H1-J1 1-Spark 5a22651 cards, C8 aggregate median): home-1 OFF 136.084 / ON 173.884; home-2 OFF 135.544 / ON 167.134
+Per-stream decode median tok/s: OFF C8 22.008, C16 19.226; ON C8 40.945, C16 23.279. TTFT median s: OFF C8 0.522, C16 0.959; ON C8 0.53, C16 1.007
+Gateway split per round (home-1:home-2): OFF C8 4:4 x3, OFF C16 8:8, 4:12, 8:8; ON C8 4:4 x3, ON C16 8:8, 8:8, 9:7
+ON served modes: C8 24/24 strict depth 3; C16 21/48 strict depth 3, 27/48 plain depth 0
+Public vade bench through the gateway (zero flags, drafting as served): C1 45.300 | C2 90.916 | C4 159.879 | C8 286.896 | C16 253.146 tok/s
+vade verify: IDENTICAL 20/20 runs, 128 tokens via the gateway and on each replica directly (reference ids sha256 1231c2da8c7193dbb56029a729f3ec78674d8cc273c3ee2a6462d79c9d22c84a)

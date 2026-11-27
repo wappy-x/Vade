@@ -1,0 +1,20 @@
+# A correct transcript for the dry run.
+>>> call workspace_read
+{"path":"QUESTIONS.md"}
+>>> call workspace_search
+{"path":"DIGEST.md","literal":"HARBOR_PORT"}
+>>> call workspace_search
+{"path":"DIGEST.md","literal":"reconcile_ledger"}
+>>> call workspace_shell
+{"argv":["/bin/sh","-c","grep -n 'RETRY_LIMIT' DIGEST.md; grep -c '#\\[deprecated' DIGEST.md; grep -c '^## File: ' DIGEST.md; grep -n -B1 -A4 'fn reconcile_ledger' DIGEST.md; grep -n -B12 'HARBOR_PORT' DIGEST.md | grep 'File:'"],"timeout_ms":30000}
+>>> patch
+*** Begin Patch
+*** Add File: ANSWERS.txt
++1: crates/net/src/listener.rs 47113
++2: settle_batch_v2
++3: 19
++4: 23
++5: 87
+*** End Patch
+>>> answer
+ANSWERS.txt holds the five answers.

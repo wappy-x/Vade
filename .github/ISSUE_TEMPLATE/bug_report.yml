@@ -1,0 +1,87 @@
+name: Bug report
+description: Report a part of Vade that does not work the way the docs say.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For a security problem, use **Security → Report a vulnerability** instead of this form. See .github/SECURITY.md.
+
+        Remove credentials, private prompts and connection details before you attach commands or logs.
+  - type: input
+    id: version
+    attributes:
+      label: Vade version
+      description: The output of `vade --version`. If you built from source, add the full commit ID from `git rev-parse HEAD`.
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Checkpoint and revision
+      description: Give the checkpoint name and revision or file hashes. Include the tokenizer revision if it differs.
+      placeholder: nvidia/Qwen3.8-Flash-Next-FP4-Local
+    validations:
+      required: true
+  - type: dropdown
+    id: sparks
+    attributes:
+      label: Number of Sparks
+      options:
+        - "1"
+        - "2"
+        - More (give the exact count below)
+        - None, the problem happens on the controller alone
+    validations:
+      required: true
+  - type: dropdown
+    id: route
+    attributes:
+      label: How you run Vade
+      options:
+        - On the Spark itself (vade launch)
+        - From a controller computer (vade install, vade up)
+        - Something else (say what below)
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command you ran
+      description: Give the exact command and every flag. Add nonsecret environment settings and the request body. Replace private values with clear placeholders.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+      description: State the result you expected from this command or request.
+    validations:
+      required: true
+  - type: textarea
+    id: seen
+    attributes:
+      label: What you saw
+      description: State the result you got. Say whether it repeats. If your Spark count is not in the list above, give the exact count.
+    validations:
+      required: true
+  - type: textarea
+    id: error
+    attributes:
+      label: Error text and logs
+      description: Paste relevant text from the error or `vade logs`. If there is no error, say so.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: ids
+    attributes:
+      label: Token IDs and exactness receipt
+      description: For an answer that changes or is wrong, attach the expected and seen token IDs, or the `vade verify` receipt. Include the sampling, drafting and cache settings. If you cannot collect a check, say which one is missing. Do not attach private prompt text.
+      render: text
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Give the operating system, the launcher source and any other settings that someone needs to reproduce this bug. For more Sparks than the options above, give the exact count.

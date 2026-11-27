@@ -1,0 +1,268 @@
+//! An exact-source, owner-provided Linux bundle. Missing is a source fallback;
+//! a corrupt matching bundle is rejected before falling back to source.
+use std::{fs::{self, File}, io::Read, path::{Path, PathBuf}};
+use crate::{sha256, text};
+/// A verified prebuilt Linux bundle for one engine and CLI revision, with the
+/// SHA-256 of each file in [`FILES`] order.
+pub struct Bundle { pub dir: PathBuf, pub hashes: [String; 3], fields: text::Fields }
+/// The bundle's verified host-side CLI and harness for this computer.
+pub struct HostBundle { pub cli: PathBuf, pub harness: PathBuf, pub hashes: [String; 2] }
+/// The Spark files every bundle carries.
+pub const FILES: [&str; 3] = ["flash-serve", "flash.ptx", "vade"];
+/// The release launcher bundle's manifest (`vade-launch-bundle-v1`).
+const LAUNCHER: &str = "launcher-bundle.conf";
+/// What a Spark needs for this bundle, from the `MANIFEST` of a main bundle.
+/// Other bundles have no such file and give no floor.
+#[derive(Debug, Default, PartialEq)]
+pub struct Floors { pub driver: Option<String>, pub glibc: Option<String> }
+/// What one Spark reports. An empty fact is not known and refuses nothing.
+#[derive(Debug, Default, PartialEq)]
+pub struct Rank { pub arch: String, pub glibc: String, pub driver: String }
+impl Floors {
+    /// Why this bundle does not fit `rank`, or `None`.
+    pub fn misfit(&self, rank: &Rank) -> Option<String> {
+        if !rank.arch.is_empty() && rank.arch != "aarch64" {
+            return Some(format!("it is for aarch64, and this Spark is {}", text::terminal_text(&rank.arch)));
+        }
+        let lower = |floor: &Option<String>, have: &str| floor.as_deref().filter(|floor| !at_least(have, floor)).map(str::to_owned);
+        if let Some(floor) = lower(&self.driver, &rank.driver) {
+            return Some(format!("it needs NVIDIA driver {floor} or newer, and this Spark has {}", text::terminal_text(&rank.driver)));
+        }
+        lower(&self.glibc, &rank.glibc).map(|floor| format!("it needs glibc {floor} or newer, and this Spark has {}", text::terminal_text(&rank.glibc)))
+    }
+}
+/// `have` >= `need`, as dotted numbers. A value that is not one refuses nothing.
+fn at_least(have: &str, need: &str) -> bool {
+    let parts = |value: &str| value.split('.').map(|part| part.parse::<u64>().ok()).collect::<Option<Vec<_>>>();
+    let (Some(have), Some(need)) = (parts(have), parts(need)) else { return true };
+    let width = have.len().max(need.len());
+    let pad = |mut list: Vec<u64>| { list.resize(width, 0); list };
+    pad(have) >= pad(need)
+}
+impl Bundle {
+    /// The floors in this bundle's `MANIFEST`, if it has one.
+    pub fn floors(&self) -> Floors {
+        let mut manifest = String::new();
+        if File::open(self.dir.join("MANIFEST")).and_then(|file| file.take(1 << 20).read_to_string(&mut manifest)).is_err() { return Floors::default(); }
+        let field = |key: &str| manifest.lines().find_map(|line| line.strip_prefix(key)).map(str::to_owned);
+        Floors { driver: field("min_driver="), glibc: field("glibc=") }
+    }
+    /// The bundle in `root/<engine>-<cli>` after checking its manifest and hashes;
+    /// `None` when there is none, an error when a matching one is corrupt.
+    /// An unpacked release launcher bundle (`launcher-bundle.conf`) carries the
+    /// same Spark files and serves too, in that folder or the matching one.
+    pub fn find(root: Option<&Path>, engine: &str, cli: &str) -> Result<Option<Self>, String> {
+        let Some(root) = root else { return Ok(None); };
+        let mut dir = root.join(format!("{engine}-{cli}"));
+        let launcher = |dir: &Path| dir.join(LAUNCHER).try_exists().map_err(|_| "Cannot inspect prebuilt_dir.");
+        if !dir.try_exists().map_err(|_| "Cannot inspect prebuilt_dir.")? {
+            if !launcher(root)? { return Ok(None); }
+            dir = root.to_path_buf();
+        }
+        let release = launcher(&dir)?;
+        let mut manifest = String::new();
+        File::open(dir.join(if release { LAUNCHER } else { "manifest.conf" })).and_then(|f| f.take(4097).read_to_string(&mut manifest))
+            .map_err(|_| "Matching prebuilt bundle has no readable manifest.conf; repair it or remove it to build from source.")?;
+        if manifest.len() > 4096 { return Err("Prebuilt manifest exceeds 4 KiB.".into()); }
+        let mut fields = text::parse(&manifest)?;
+        if release {
+            if fields.get("engine_sha").map(String::as_str) != Some(engine) || fields.get("cli_sha").map(String::as_str) != Some(cli) {
+                // Another release's bundle: build this checkout's revisions from source.
+                if dir == root { return Ok(None); }
+            }
+            // Same files under the launcher's names; it has no host pair.
+            let mut mapped = text::Fields::new();
+            for (key, value) in fields {
+                let key = match key.as_str() {
+                    "format" if value == "vade-launch-bundle-v1" => { mapped.insert(key, "vade-prebuilt-v1".into()); continue; }
+                    "format" => key,
+                    "engine_sha256" => "flash-serve.sha256".into(),
+                    "ptx_sha256" => "flash.ptx.sha256".into(),
+                    "vade_sha256" => "vade.sha256".into(),
+                    "harness_sha256" => "vade-harness.sha256".into(),
+                    "target" | "engine_sha" | "cli_sha" => key,
+                    _ => continue,
+                };
+                mapped.insert(key, value);
+            }
+            fields = mapped;
+        }
+        for (key, expected) in [("format", "vade-prebuilt-v1"), ("target", "aarch64-unknown-linux-gnu"), ("engine_sha", engine), ("cli_sha", cli)] {
+            if fields.get(key).map(String::as_str) != Some(expected) {
+                return Err(format!("Prebuilt {key} does not match this source/platform. Repair the matching bundle; nothing installed."));
+            }
+        }
+        let mut hashes = Vec::new();
+        for name in FILES {
+            let expected = fields.get(&format!("{name}.sha256")).filter(|s| text::is_lower_hex(s, 64))
+                .ok_or("Prebuilt manifest is missing an artifact SHA256.")?;
+            let path = dir.join(name);
+            if !fs::metadata(&path).is_ok_and(|m| m.is_file() && m.len() > 0) {
+                return Err(format!("Prebuilt {name} is missing or empty."));
+            }
+            let actual = sha256::digest_reader(File::open(&path).map_err(|_| "Cannot read prebuilt artifact.")?)
+                .map_err(|_| "Cannot hash prebuilt artifact.")?;
+            if actual != *expected { return Err(format!("Prebuilt {name} SHA256 mismatch; nothing installed.")); }
+            if name != "flash.ptx" {
+                let mut header = [0; 20];
+                File::open(&path).and_then(|mut f| f.read_exact(&mut header)).map_err(|_| "Prebuilt executable is truncated.")?;
+                if &header[..6] != b"\x7fELF\x02\x01" || header[18..20] != [183, 0] {
+                    return Err("Prebuilt executable must be Linux AArch64 ELF64.".into());
+                }
+            }
+            hashes.push(actual);
+        }
+        Ok(Some(Self { dir, hashes: hashes.try_into().unwrap(), fields }))
+    }
+    /// The host executables for this platform and harness revision, if the bundle
+    /// has any; mismatched or corrupt ones are errors.
+    pub fn host(&self, harness: &str) -> Result<Option<HostBundle>, String> {
+        if !self.fields.keys().any(|key| key.starts_with("host-") || key == "host_target") {
+            return Ok(None);
+        }
+        if host_target() == "unsupported" || self.fields.get("host_target").map(String::as_str) != Some(host_target())
+            || self.fields.get("harness_sha").map(String::as_str) != Some(harness) {
+            return Err("Prebuilt host target or harness revision does not match.".into());
+        }
+        self.host_pair("host-vade-harness", "host-vade").map(Some)
+    }
+    /// The launcher bundle's own vade and vade-harness, for a controller that is
+    /// a Spark and has no checkout to build them from.
+    pub fn launcher_host(&self) -> Result<HostBundle, String> { self.host_pair("vade-harness", "vade") }
+    /// The two files after checking their hashes and their platform.
+    fn host_pair(&self, harness: &str, cli: &str) -> Result<HostBundle, String> {
+        let mut hashes = Vec::new();
+        for name in [harness, cli] {
+            let expected = self.fields.get(&format!("{name}.sha256")).filter(|s| text::is_lower_hex(s, 64))
+                .ok_or("Prebuilt host artifact SHA256 is missing.")?;
+            let path = self.dir.join(name);
+            if !fs::metadata(&path).is_ok_and(|meta| meta.is_file()) {
+                return Err("Prebuilt host artifact is missing.".into());
+            }
+            let actual = sha256::digest_reader(File::open(&path).map_err(|_| "Cannot read prebuilt host artifact.")?)
+                .map_err(|_| "Cannot hash prebuilt host artifact.")?;
+            if actual != *expected { return Err("Prebuilt host artifact SHA256 mismatch.".into()); }
+            let mut header = [0; 20];
+            File::open(&path).and_then(|mut f| f.read_exact(&mut header)).map_err(|_| "Prebuilt host executable is truncated.")?;
+            if !host_executable(&header) { return Err("Prebuilt host executable has the wrong platform.".into()); }
+            hashes.push(actual);
+        }
+        Ok(HostBundle { cli: self.dir.join(cli), harness: self.dir.join(harness), hashes: hashes.try_into().unwrap() })
+    }
+}
+/// The engine, harness and CLI revisions in the launcher bundle in `dir`.
+pub fn revisions(dir: &Path) -> Result<[String; 3], String> {
+    let mut manifest = String::new();
+    File::open(dir.join(LAUNCHER)).and_then(|f| f.take(4097).read_to_string(&mut manifest))
+        .map_err(|_| format!("Cannot read {LAUNCHER} in the installed Vade bundle. Run the install command again."))?;
+    if manifest.len() > 4096 { return Err(format!("{LAUNCHER} exceeds 4 KiB. Run the install command again.")); }
+    let fields = text::parse(&manifest)?;
+    let revision = |key: &str| fields.get(key).filter(|sha| text::is_lower_hex(sha, 40)).cloned()
+        .ok_or_else(|| format!("{LAUNCHER} has no full {key}. Run the install command again."));
+    Ok([revision("engine_sha")?, revision("harness_sha")?, revision("cli_sha")?])
+}
+/// This computer's Rust target triple, or "unsupported".
+pub(crate) fn host_target() -> &'static str {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => "aarch64-apple-darwin",
+        ("macos", "x86_64") => "x86_64-apple-darwin",
+        ("linux", "aarch64") => "aarch64-unknown-linux-gnu",
+        ("linux", "x86_64") => "x86_64-unknown-linux-gnu",
+        _ => "unsupported",
+    }
+}
+#[cfg(test)]
+thread_local! {
+    /// Lets a test on a Mac stage a launcher bundle, which holds Linux programs only.
+    pub(crate) static LINUX_HOST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+fn host_executable(header: &[u8; 20]) -> bool {
+    #[cfg(test)]
+    if LINUX_HOST.get() { return &header[..6] == b"\x7fELF\x02\x01" && header[18..20] == [183, 0]; }
+    let arm = cfg!(target_arch = "aarch64");
+    if cfg!(target_os = "macos") {
+        header[..4] == [0xcf, 0xfa, 0xed, 0xfe]
+            && u32::from_le_bytes(header[4..8].try_into().unwrap()) == if arm { 0x0100_000c } else { 0x0100_0007 }
+    } else if cfg!(target_os = "linux") {
+        &header[..6] == b"\x7fELF\x02\x01" && u16::from_le_bytes(header[18..20].try_into().unwrap()) == if arm { 183 } else { 62 }
+    } else { false }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn a_rank_fits_unless_a_known_fact_is_below_the_floor() {
+        let floors = Floors { driver: Some("580".into()), glibc: Some("2.39".into()) };
+        let rank = |arch: &str, glibc: &str, driver: &str| Rank { arch: arch.into(), glibc: glibc.into(), driver: driver.into() };
+        for fits in [rank("aarch64", "2.39", "580"), rank("aarch64", "2.41", "580.178.04"), rank("", "", ""), rank("aarch64", "unknown", "n/a")] {
+            assert_eq!(floors.misfit(&fits), None, "{fits:?}");
+        }
+        assert_eq!(floors.misfit(&rank("x86_64", "2.39", "580")).unwrap(), "it is for aarch64, and this Spark is x86_64");
+        assert_eq!(floors.misfit(&rank("aarch64", "2.39", "575.51.03")).unwrap(), "it needs NVIDIA driver 580 or newer, and this Spark has 575.51.03");
+        assert_eq!(floors.misfit(&rank("aarch64", "2.35", "580.159.03")).unwrap(), "it needs glibc 2.39 or newer, and this Spark has 2.35");
+        // A bundle with no MANIFEST has no floor, so only the machine type can refuse it.
+        assert_eq!(Floors::default().misfit(&rank("aarch64", "2.0", "1")), None);
+    }
+
+    #[test]
+    fn exact_bundle_checks_hashes_target_and_source_before_use() {
+        let root = std::env::temp_dir().join(format!("vade-prebuilt-{}", text::random_hex(8).unwrap()));
+        let engine = "a".repeat(40); let cli = "b".repeat(40);
+        assert!(Bundle::find(Some(&root), &engine, &cli).unwrap().is_none());
+        let dir = root.join(format!("{engine}-{cli}")); fs::create_dir_all(&dir).unwrap();
+        let mut manifest = format!("format=vade-prebuilt-v1\ntarget=aarch64-unknown-linux-gnu\nengine_sha={engine}\ncli_sha={cli}\n");
+        for name in FILES {
+            let mut bytes = vec![0; 32]; bytes[..6].copy_from_slice(b"\x7fELF\x02\x01"); bytes[18] = 183;
+            fs::write(dir.join(name), &bytes).unwrap();
+            manifest.push_str(&format!("{name}.sha256={}\n", sha256::sha(&bytes)));
+        }
+        fs::write(dir.join("manifest.conf"), &manifest).unwrap();
+        assert!(Bundle::find(Some(&root), &engine, &cli).unwrap().is_some());
+        assert!(Bundle::find(Some(&root), &"c".repeat(40), &cli).unwrap().is_none());
+        fs::write(dir.join("manifest.conf"), manifest.replace("aarch64", "x86_64")).unwrap();
+        assert!(Bundle::find(Some(&root), &engine, &cli).err().unwrap().contains("platform"));
+        fs::write(dir.join("manifest.conf"), manifest).unwrap();
+        fs::write(dir.join("flash.ptx"), b"changed").unwrap();
+        assert!(Bundle::find(Some(&root), &engine, &cli).err().unwrap().contains("SHA256 mismatch"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unpacked_release_launcher_bundle_installs_the_same_spark_files() {
+        let root = std::env::temp_dir().join(format!("vade-launch-bundle-{}", text::random_hex(8).unwrap()));
+        fs::create_dir_all(&root).unwrap();
+        let engine = "a".repeat(40); let cli = "b".repeat(40);
+        let mut conf = format!("format=vade-launch-bundle-v1\ntarget=aarch64-unknown-linux-gnu\nengine_sha={engine}\ncli_sha={cli}\nharness_sha={cli}\n");
+        for (name, key) in [("flash-serve", "engine_sha256"), ("flash.ptx", "ptx_sha256"), ("vade", "vade_sha256"), ("vade-harness", "harness_sha256")] {
+            let mut bytes = vec![0; 32]; bytes[..6].copy_from_slice(b"\x7fELF\x02\x01"); bytes[18] = 183; bytes[31] = name.len() as u8;
+            fs::write(root.join(name), &bytes).unwrap();
+            conf.push_str(&format!("{key}={}\n", sha256::sha(&bytes)));
+        }
+        fs::write(root.join(LAUNCHER), &conf).unwrap();
+        // prebuilt_dir may name the unpacked folder itself.
+        let bundle = Bundle::find(Some(&root), &engine, &cli).unwrap().unwrap();
+        assert_eq!(bundle.dir, root);
+        assert_eq!(bundle.hashes[0], sha256::sha(&fs::read(root.join("flash-serve")).unwrap()));
+        assert!(bundle.host(&cli).unwrap().is_none(), "no host pair: the controller builds its own CLI and harness");
+        // With no checkout, the same file names the revisions and the two local programs.
+        assert_eq!(revisions(&root).unwrap(), [engine.clone(), cli.clone(), cli.clone()]);
+        LINUX_HOST.set(true);
+        let host = bundle.launcher_host().unwrap();
+        assert_eq!((host.cli, host.harness), (root.join("vade"), root.join("vade-harness")));
+        assert_eq!(host.hashes, [sha256::sha(&fs::read(root.join("vade-harness")).unwrap()), bundle.hashes[2].clone()]);
+        fs::write(root.join("vade-harness"), b"changed").unwrap();
+        assert!(bundle.launcher_host().err().unwrap().contains("host artifact SHA256 mismatch"));
+        LINUX_HOST.set(false);
+        fs::write(root.join(LAUNCHER), conf.replace(&format!("harness_sha={cli}"), "harness_sha=short")).unwrap();
+        assert!(revisions(&root).unwrap_err().contains("has no full harness_sha"));
+        fs::write(root.join(LAUNCHER), &conf).unwrap();
+        assert!(revisions(Path::new("/no/such/bundle")).unwrap_err().contains("Run the install command again"));
+        // Another revision's bundle there means: build from source.
+        assert!(Bundle::find(Some(&root), &"c".repeat(40), &cli).unwrap().is_none());
+        fs::write(root.join("vade"), b"changed").unwrap();
+        assert!(Bundle::find(Some(&root), &engine, &cli).err().unwrap().contains("SHA256 mismatch"));
+        fs::write(root.join(LAUNCHER), conf.replace("vade-launch-bundle-v1", "vade-launch-bundle-v9")).unwrap();
+        assert!(Bundle::find(Some(&root), &engine, &cli).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+}

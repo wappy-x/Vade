@@ -1,0 +1,10 @@
+<!-- vade read: note.json | JSON | pages 1 | chars 60 | skipped: none -->
+```json
+{
+  "key": [
+    1,
+    true,
+    "value"
+  ]
+}
+```

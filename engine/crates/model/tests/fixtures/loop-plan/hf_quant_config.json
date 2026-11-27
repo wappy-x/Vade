@@ -1,0 +1,105 @@
+{
+  "model": {
+    "parameter_groups": [
+      {
+        "compute_dtype": "float32",
+        "output_dtype": "float32",
+        "required_activation_quantization": null,
+        "tensors": [
+          "model.llm.attn_res.output_query",
+          "model.llm.layers.0.mlp.gate.bias"
+        ],
+        "weight_block_shape": [],
+        "weight_transform": "cast"
+      },
+      {
+        "compute_dtype": "bfloat16",
+        "output_dtype": "bfloat16",
+        "required_activation_quantization": null,
+        "tensors": [
+          "model.llm.embed.weight",
+          "model.llm.layers.0.attn.wq_du.weight",
+          "model.visual.backbone.layers.0.ln_1.weight"
+        ],
+        "weight_block_shape": [],
+        "weight_transform": "cast"
+      },
+      {
+        "compute_dtype": "nvfp4",
+        "output_dtype": "uint8",
+        "required_activation_quantization": {
+          "amax_type": "per_token",
+          "block_size": 16,
+          "format": "nvfp4_e2m1",
+          "rounding": "nearest",
+          "scale_dtype": "float8_e4m3fn",
+          "scale_selection_rule": "fouroversix_mae"
+        },
+        "tensors": [
+          "model.llm.layers.0.mlp.experts.w13_weight",
+          "model.llm.layers.0.mlp.experts.w2_weight",
+          "model.llm.layers.1.mlp.experts.w13_weight",
+          "model.llm.layers.1.mlp.experts.w2_weight",
+          "model.llm.layers.2.mlp.experts.w13_weight",
+          "model.llm.layers.2.mlp.experts.w2_weight",
+          "model.llm.layers.3.mlp.experts.w13_weight",
+          "model.llm.layers.3.mlp.experts.w2_weight"
+        ],
+        "weight_block_shape": [
+          1,
+          16
+        ],
+        "weight_scale_format": "amax_denominator",
+        "weight_transform": "nvfp4_nearest"
+      },
+      {
+        "compute_dtype": "mxfp8",
+        "output_dtype": "float8_e4m3fn",
+        "required_activation_quantization": {
+          "block_size": 32,
+          "format": "mxfp8_e4m3",
+          "rounding": "nearest",
+          "scale_dtype": "ue8m0"
+        },
+        "tensors": [
+          "model.llm.layers.4.mlp.experts.w13_weight",
+          "model.llm.layers.4.mlp.experts.w2_weight",
+          "model.llm.layers.5.mlp.experts.w13_weight",
+          "model.llm.layers.5.mlp.experts.w2_weight"
+        ],
+        "weight_block_shape": [
+          32,
+          32
+        ],
+        "weight_transform": "mxfp8_nearest"
+      },
+      {
+        "compute_dtype": "bfloat16",
+        "fwd_output_dtype": "float32",
+        "output_dtype": "bfloat16",
+        "required_activation_quantization": null,
+        "tensors": [
+          "model.llm.unembed.weight"
+        ],
+        "weight_block_shape": [],
+        "weight_transform": "cast"
+      }
+    ]
+  },
+  "mtp": {
+    "parameter_groups": [
+      {
+        "compute_dtype": "bfloat16",
+        "output_dtype": "bfloat16",
+        "required_activation_quantization": null,
+        "tensors": [
+          "fuse_weight",
+          "norm.weight"
+        ],
+        "weight_block_shape": [],
+        "weight_transform": "cast"
+      }
+    ]
+  },
+  "quant_method": "inkling2"
+}

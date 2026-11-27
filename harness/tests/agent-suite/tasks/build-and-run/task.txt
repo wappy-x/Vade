@@ -1,0 +1,21 @@
+id: build-and-run
+title: Fix a build error, then run the tool and save its output
+category: shell-build
+inputs: Cargo.toml src/main.rs data/sales.csv
+budget_seconds: 300
+needs: workspace_shell (the macOS command sandbox)
+
+# The answer is the tool's own output, so the agent must make it build and
+# run it. The fix must not change what the tool prints.
+step: new
+prompt:
+  The `tally` tool in this crate does not build. Fix the build error without
+  changing what the tool prints. Then run it with
+  `cargo run --offline -q -- data/sales.csv` and save its exact output in
+  SUMMARY.txt. Do not change data/sales.csv.
+
+check: last-exit-zero
+check: unchanged Cargo.toml
+check: unchanged data
+check: file-equals SUMMARY.txt expected/SUMMARY.txt
+check: run cargo build --offline --quiet

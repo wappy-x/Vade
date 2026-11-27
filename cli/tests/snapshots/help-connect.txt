@@ -1,0 +1,32 @@
+$ vade connect --help
+Configure and launch an external coding agent against the running engine.
+
+Examples:
+  vade connect codex --print
+  vade connect claude --dry-run
+  vade connect opencode
+  vade connect hermes --write --no-launch
+
+Usage: vade connect <CLIENT> [OPTIONS] [-- CLIENT_ARGS...]
+
+Options:
+  --print                  Print the generated client configuration and launch
+                           command
+  --dry-run                Show what would be configured and launched; change
+                           nothing
+  --url URL                Server base URL (default: VADE_API_URL or the active
+                           setup)
+  --target direct|gateway  Direct loopback or gateway mode (default: direct)
+  --write                  Write the client configuration file to disk
+  --client-bin PATH        Override the external client binary path
+  --no-launch              Configure the client without launching it
+  --api-key-file PATH      Bearer credential file (or VADE_API_KEY_FILE)
+
+Notes:
+  - Supported clients: claude, codex, opencode, hermes, pi.
+  - Reads GET <endpoint>/v1/capabilities from the running engine to pick the
+    served model, context_limit and output_limit automatically.
+  - Pass extra arguments to the client after --, for example: vade connect codex
+    -- --help.
+--- stderr
+--- exit 0

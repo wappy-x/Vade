@@ -1,0 +1,24 @@
+# A near miss for the dry run: after the cancel, the resumed run writes
+# out/b.upper.txt and stops before notes/c.txt. `file-equals out/c.upper.txt`
+# must fail.
+>>> call workspace_read
+{"path":"notes/a.txt"}
+>>> patch
+*** Begin Patch
+*** Add File: out/a.upper.txt
++HARBOR
++LANTERN
++QUIET TIDE
+*** End Patch
+>>> call workspace_list
+{"path":"out"}
+>>> call workspace_read
+{"path":"notes/b.txt"}
+>>> patch
+*** Begin Patch
+*** Add File: out/b.upper.txt
++COPPER
++NORTH WIND
+*** End Patch
+>>> answer
+out/a.upper.txt and out/b.upper.txt are written.

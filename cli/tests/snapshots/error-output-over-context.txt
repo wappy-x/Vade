@@ -1,0 +1,5 @@
+$ vade up --context 4096 --output 8192
+--- stderr
+error: Output must fit in context.
+ hint: Set --output no larger than --context, then run vade up.
+--- exit 1

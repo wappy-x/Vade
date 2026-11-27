@@ -1,0 +1,503 @@
+//! Owned complete MXFP8 rows. Calls use ordered queue retention or complete before borrowed operands can leave.
+use super::*;
+use crate::{mxfp8_projection::Shape,norm_boundary::WeightType};
+
+/// `mode` is the word function of every launch of this matrix (`next_params::MX_SCALAR` or `MX_TC`): the one-row entries, the
+/// merged batches, the row stage, the row groups and the prompt tile all read it from the descriptor, so no path can stay on
+/// another word.
+/// `layer`: a matrix of a layer (not the output head, not a check tool's own matrix); only the counter `mx_scalar_layer` reads it.
+pub struct ResidentMxfp8Projection<'b,'a> {backend:&'b Backend<'a>,shape:Shape,weights:Buffer<'a>,scales:Buffer<'a>,mode:u32,layer:bool}
+pub struct Mxfp8ProjectionPass<'a> {accumulator:DeviceVector<'a>,output:Bf16Vector<'a>}
+pub enum ResidentProjection<'v,'b,'a> {
+    Mxfp8 {matrix:&'v ResidentMxfp8Projection<'b,'a>,input:&'v DeviceVector<'v>},
+    Plain {rows:usize,cols:usize,weight:&'v DeviceVector<'v>,input:&'v DeviceVector<'v>},
+    PlainBf16 {rows:usize,cols:usize,weight:&'v DeviceVector<'v>,input:&'v DeviceVector<'v>},
+}
+impl ResidentMxfp8Projection<'_,'_> {
+    /// Output rows of this rank's matrix.
+    pub fn rows(&self)->usize {self.shape.rows()}
+    /// Bytes of the E4M3 rows, without scales.
+    pub fn weight_bytes(&self)->usize {self.weights.bytes}
+    /// The word function of this matrix (`next_params::MX_SCALAR` or `MX_TC`).
+    pub fn mode(&self)->u32 {self.mode}
+    /// Mark a layer's matrix, so a launch of it on the scalar word is counted (`mx_scalar_layer`). No effect on any word.
+    pub fn counted_as_layer(mut self)->Self {self.layer=true;self}
+    /// One launch descriptor of this matrix: the tensor-core counter `tc`, or the scalar counter of a layer matrix.
+    fn count(&self,tc:&str) {
+        if self.mode==crate::next_params::MX_TC {crate::prompt_launches::record(tc);} else if self.layer {crate::prompt_launches::record("mx_scalar_layer");}
+    }
+    /// CHAIN-SHADOW: the byte span `[offset, offset+bytes)` of the E4M3 rows.
+    pub fn shadow_range(&self,offset:usize,bytes:usize)->Result<super::ShadowRange<'_>,String> {
+        super::ShadowRange::checked(self.weights.address,self.weights.bytes,offset,bytes,self.backend.context)
+    }
+}
+impl<'a> Backend<'a> {
+    pub fn resident_projection_batch(&self,jobs:&[ResidentProjection<'_,'_,'a>],output:&mut DeviceVector<'_>,round:bool)->Result<(),String> {
+        use crate::next_params::{MxProjection,ResidentProjectionBatch};
+        self.require_resident_stream()?;
+        if jobs.is_empty() || jobs.len()>9 {return Err("resident projection batch count differs".into());}
+        let bf16=jobs.iter().all(|job|!matches!(job,ResidentProjection::Plain {..}));
+        if !bf16 && jobs.iter().any(|job|matches!(job,ResidentProjection::PlainBf16 {..})) {return Err("resident projection batch mixes plain weight precisions".into());}
+        let folded=bf16 && jobs.iter().all(|job|match job {
+            ResidentProjection::PlainBf16 {rows,cols,weight,input}=>crate::plain_admission::fold_admitted(*rows,*cols,weight.device_address() as usize,input.device_address() as usize,crate::plain_admission::FOLD_THREADS),
+            _=>false,
+        });
+        let mut batch=ResidentProjectionBatch {round:u32::from(round),..Default::default()};let mut offset=0usize;let mut borrowed=Vec::new();
+        for job in jobs {
+            let mode=if let ResidentProjection::Mxfp8 {matrix,..}=job {matrix.mode} else {crate::next_params::MX_SCALAR};
+            let (rows,cols,weight,scales,input,plain)=match job {
+                ResidentProjection::Mxfp8 {matrix,input}=>{
+                    if !ptr::eq(matrix.backend.context,self.context) || matrix.shape.input()!=WeightType::F32 {return Err("resident MXFP8 batch context or input precision differs".into());}
+                    borrowed.push((matrix.weights.address,matrix.weights.bytes));borrowed.push((matrix.scales.address,matrix.scales.bytes));
+                    (matrix.shape.rows(),matrix.shape.cols(),matrix.weights.address,matrix.scales.address,*input,false)
+                },
+                ResidentProjection::Plain {rows,cols,weight,input}=>{
+                    let words=rows.checked_mul(*cols).ok_or("resident plain batch weight overflow")?;self.check_vector(weight,words)?;
+                    if weight.is_segmented() {return Err("resident plain batch weights must be contiguous".into());}
+                    borrowed.push((weight.device_address(),weight.len()*4));
+                    (*rows,*cols,weight.device_address(),4,*input,true)
+                },
+                ResidentProjection::PlainBf16 {rows,cols,weight,input}=>{
+                    let elements=rows.checked_mul(*cols).ok_or("resident BF16 batch weight overflow")?;self.check_vector(weight,elements.div_ceil(2))?;
+                    if weight.is_segmented() {return Err("resident BF16 batch weights must be contiguous".into());}
+                    if !crate::plain_admission::deep_admitted(*rows,*cols,weight.device_address() as usize,input.device_address() as usize) {return Err("resident BF16 batch shape differs from the ordered reader envelope".into());}
+                    borrowed.push((weight.device_address(),weight.len()*4));
+                    (*rows,*cols,weight.device_address(),2,*input,true)
+                },
+            };
+            self.check_vector(input,cols)?;if input.is_segmented() {return Err("resident projection batch input must be contiguous".into());}
+            borrowed.push((input.device_address(),input.len()*4));
+            let end=offset.checked_add(rows).ok_or("resident projection batch output overflow")?;
+            if end>output.len() {return Err("resident projection batch output is short".into());}
+            batch.push(MxProjection {weights:weight,scales,input:input.device_address(),output:output.device_address().checked_add((offset*4) as u64).ok_or("resident projection batch address overflow")?,
+                rows:rows.try_into().map_err(|_|"resident projection batch rows exceed ABI")?,cols:cols.try_into().map_err(|_|"resident projection batch columns exceed ABI")?,tokens:1,input_bf16:0,round:0,mode},plain)?;
+            if let ResidentProjection::Mxfp8 {matrix,..}=job {matrix.count("mx_tc_step");}
+            offset=end;
+        }
+        if folded {let mut end=0u32;for index in 0..batch.layer.count as usize {
+            end=end.checked_add(batch.layer.projections[index].rows.div_ceil(crate::plain_admission::FOLD_ROWS as u32)).ok_or("resident BF16 fold grid overflow")?;batch.layer.ends[index+1]=end;
+        }}
+        self.check_vector(output,offset)?;if output.is_segmented() {return Err("resident projection batch output must be contiguous".into());}
+        let end=output.device_address().checked_add((offset*4) as u64).ok_or("resident projection batch output address overflow")?;
+        for (start,bytes) in borrowed {let borrowed_end=start.checked_add(bytes as u64).ok_or("resident projection batch operand address overflow")?;
+            if output.device_address()<borrowed_end && start<end {return Err("resident projection batch output aliases an operand".into());}
+        }
+        let scalar_fold=!bf16 && crate::plain_admission::batch_fold(&batch);
+        let entry=if scalar_fold {"project_f32_ordered"} else if folded {"flash_resident_projection_plain_bf16"} else if bf16 {"flash_resident_projection_bf16"} else {"flash_resident_projection_batch"};
+        self.require_arm_kernels(&[entry])?;
+        // No fill: the region is fully written by flash_resident_projection_batch before any read.
+        self.skip_fill(output)?;self.resident_completion()?;
+        // SAFETY: Every descriptor comes from checked immutable resident MXFP8
+        // views or exact same-context contiguous FP32/BF16 owners. BF16 rows
+        // have half as many storage words; mixed precision is rejected. The
+        // fold admits complete aligned rows, four rows per 160-thread block.
+        // The repeated FP32 matrix uses the same fold, once per descriptor. Its
+        // original checked output spans stay disjoint; no intermediate copy or
+        // allocation is needed. The selector excludes rounded and mixed jobs.
+        // The other entries keep 128 threads and their original row schedules.
+        // Exact output length, checked address sums,
+        // and retained private storage fund disjoint output spans. Each span is fully written by this kernel with raw stores before any read of it (fill_free). All borrowed
+        // owners and the by-value descriptor batch live through stream completion.
+        // An owned queue defers dropped allocations through submission and its
+        // real drain. Ordinary callers retain the same completion guarantee.
+        let launched=unsafe {
+            if scalar_fold {
+                batch.layer.projections[..batch.layer.count as usize].iter_mut().try_for_each(|p| {
+                    let (blocks,threads)=crate::plain_admission::plain_geometry(p.rows as usize,p.cols as usize);
+                    self.launch_flash(entry,blocks,threads,&mut [parameter(&mut p.weights),parameter(&mut p.input),parameter(&mut p.output),parameter(&mut p.rows),parameter(&mut p.cols)])
+                })
+            } else {self.launch_flash(entry,batch.layer.ends[batch.layer.count as usize],if folded {crate::plain_admission::FOLD_THREADS as u32} else {128},&mut [parameter(&mut batch)])}
+        };
+        if scalar_fold && launched.is_ok() {crate::prompt_launches::record("shared_plain_fold");}
+        let completed=self.resident_completion();launched.and(completed)
+    }
+    /// ROW STAGE: the merged launch of `resident_projection_batch` for `tokens` = 2 to 8 source rows (a verify pass, a batch
+    /// of chats; STAGE EIGHT, 2026-11-17: was 2 to 4). Each job
+    /// reads `[tokens][cols]` FP32 words and writes `[tokens][rows]` words at its place in `output`, jobs in order. One launch
+    /// reads every weight once for all source rows; every output word keeps the one-row entry's arithmetic and order
+    /// (`flash_resident_projection_bf16_rows`; kernel-bench --rows-p1 compares every byte with the one-row entry).
+    /// The caller admits by shape and storage alone (`plain_admission::rows_admitted`), so every rank makes the same choice;
+    /// a job outside the entry's contract here is an error, never another path.
+    pub fn resident_projection_batch_rows(&self,jobs:&[ResidentProjection<'_,'_,'a>],output:&mut DeviceVector<'_>,round:bool,tokens:usize)->Result<(),String> {
+        use crate::next_params::{MxProjection,ResidentProjectionBatch};
+        self.require_resident_stream()?;
+        if jobs.is_empty() || jobs.len()>9 || !(2..=8).contains(&tokens) {return Err("resident projection row batch count differs".into());}
+        let mut batch=ResidentProjectionBatch {round:u32::from(round),..Default::default()};let mut offset=0usize;let mut borrowed=Vec::new();
+        for job in jobs {
+            let mode=if let ResidentProjection::Mxfp8 {matrix,..}=job {matrix.mode} else {crate::next_params::MX_SCALAR};
+            let (rows,cols,weight,scales,input,plain)=match job {
+                ResidentProjection::Mxfp8 {matrix,input}=>{
+                    if !ptr::eq(matrix.backend.context,self.context) || matrix.shape.input()!=WeightType::F32 {return Err("resident MXFP8 row batch context or input precision differs".into());}
+                    borrowed.push((matrix.weights.address,matrix.weights.bytes));borrowed.push((matrix.scales.address,matrix.scales.bytes));
+                    (matrix.shape.rows(),matrix.shape.cols(),matrix.weights.address,matrix.scales.address,*input,false)
+                },
+                ResidentProjection::Plain {..}=>return Err("resident projection row batch takes BF16 plain weights".into()),
+                ResidentProjection::PlainBf16 {rows,cols,weight,input}=>{
+                    let elements=rows.checked_mul(*cols).ok_or("resident BF16 row batch weight overflow")?;self.check_vector(weight,elements.div_ceil(2))?;
+                    if weight.is_segmented() || !crate::plain_admission::deep_admitted(*rows,*cols,weight.device_address() as usize,input.device_address() as usize) {
+                        return Err("resident BF16 row batch shape differs from the ordered reader envelope".into());
+                    }
+                    borrowed.push((weight.device_address(),weight.len()*4));
+                    (*rows,*cols,weight.device_address(),2,*input,true)
+                },
+            };
+            self.check_vector(input,tokens.checked_mul(cols).ok_or("resident projection row batch input overflow")?)?;
+            if input.is_segmented() {return Err("resident projection row batch input must be contiguous".into());}
+            borrowed.push((input.device_address(),input.len()*4));
+            let end=rows.checked_mul(tokens).and_then(|words|offset.checked_add(words)).ok_or("resident projection row batch output overflow")?;
+            if end>output.len() {return Err("resident projection row batch output is short".into());}
+            let address=output.device_address().checked_add((offset*4) as u64).ok_or("resident projection row batch address overflow")?;
+            batch.push_rows(MxProjection {weights:weight,scales,input:input.device_address(),output:address,
+                rows:rows.try_into().map_err(|_|"resident projection row batch rows exceed ABI")?,
+                cols:cols.try_into().map_err(|_|"resident projection row batch columns exceed ABI")?,tokens:tokens as u32,input_bf16:0,round:0,mode},plain)?;
+            if let ResidentProjection::Mxfp8 {matrix,..}=job {matrix.count("mx_tc_rows_stage");}
+            offset=end;
+        }
+        self.check_vector(output,offset)?;if output.is_segmented() {return Err("resident projection row batch output must be contiguous".into());}
+        let end=output.device_address().checked_add((offset*4) as u64).ok_or("resident projection row batch output address overflow")?;
+        for (start,bytes) in borrowed {let borrowed_end=start.checked_add(bytes as u64).ok_or("resident projection row batch operand address overflow")?;
+            if output.device_address()<borrowed_end && start<end {return Err("resident projection row batch output aliases an operand".into());}
+        }
+        let entry="flash_resident_projection_bf16_rows";self.require_arm_kernels(&[entry])?;
+        // No fill: every word of the region is written by the entry before any read (a warp stores its weight row's `tokens`
+        // words, a plain thread its one word; the grid covers every (weight row, source row) once).
+        self.skip_fill(output)?;self.resident_completion()?;crate::prompt_launches::record("mixed_rows_stage");
+        // SAFETY: Every descriptor comes from a checked immutable resident MXFP8 view or an exact same-context contiguous BF16
+        // owner inside the ordered reader's envelope, with `tokens` in 2..=8, `tokens * cols` initialized input words and
+        // `tokens * rows` output words, 16-byte aligned inputs and weights and cols a multiple of 32 (`push_rows` and
+        // `MxLayer::push` refuse anything else). `push_rows` gives an MXFP8 descriptor rows.div_ceil(4) blocks on the scalar word
+        // or rows.div_ceil(16) on the tensor-core word (`MX_TC_ROWS`) and a plain one tokens * rows.div_ceil(128) blocks: the entry's grid contract. Exact output length, checked address sums and
+        // retained private storage fund disjoint output spans, each fully written before any read. All borrowed owners and
+        // the by-value descriptor batch live through stream completion (the owned queue defers dropped allocations;
+        // ordinary callers complete here).
+        let launched=unsafe {self.launch_flash(entry,batch.layer.ends[batch.layer.count as usize],128,&mut [parameter(&mut batch)])};
+        let completed=self.resident_completion();launched.and(completed)
+    }
+    /// FOLD ROWS: one fold launch for `tokens` = 2 to 16 source rows of plain matrices with few rows and long rows (the router gate,
+    /// the narrow BF16 groups). Each job is ONE matrix: it reads `[tokens][cols]` FP32 words and writes `[tokens][rows]` words at
+    /// its place in `output`, jobs in order. A block reads a weight vector once for up to eight source rows; every output word keeps the
+    /// one-row fold's arithmetic and order for its own source row (`plain_warp::rows_fold_rows`; kernel-bench --fold-rows compares
+    /// every byte with the one-row forms, a source row alone). All jobs hold FP32 weights or all hold BF16 patterns. The caller
+    /// admits by shape, storage and alignment (`plain_admission::fold_rows_admitted`); a job outside the envelope here is an
+    /// error, never another path.
+    pub fn resident_projection_fold_rows(&self,jobs:&[ResidentProjection<'_,'_,'a>],output:&mut DeviceVector<'_>,round:bool,tokens:usize)->Result<(),String> {
+        use crate::next_params::{MxProjection,ResidentProjectionBatch};
+        self.require_resident_stream()?;
+        if jobs.is_empty() || jobs.len()>9 || !(2..=crate::plain_admission::FOLD_ROWS_MAX_TOKENS).contains(&tokens) {return Err("resident projection fold rows count differs".into());}
+        let bf16=matches!(jobs[0],ResidentProjection::PlainBf16 {..});
+        let mut batch=ResidentProjectionBatch {round:u32::from(round),..Default::default()};let mut offset=0usize;let mut borrowed=Vec::new();
+        for job in jobs {
+            let (rows,cols,weight,scales,input)=match job {
+                ResidentProjection::Plain {rows,cols,weight,input} if !bf16=>{
+                    let words=rows.checked_mul(*cols).ok_or("resident fold rows weight overflow")?;self.check_vector(weight,words)?;(*rows,*cols,*weight,4,*input)
+                },
+                ResidentProjection::PlainBf16 {rows,cols,weight,input} if bf16=>{
+                    let elements=rows.checked_mul(*cols).ok_or("resident fold rows weight overflow")?;self.check_vector(weight,elements.div_ceil(2))?;(*rows,*cols,*weight,2,*input)
+                },
+                _=>return Err("resident projection fold rows take plain weights of one precision".into()),
+            };
+            if weight.is_segmented() || !crate::plain_admission::fold_rows_admitted(rows,cols,weight.device_address() as usize,input.device_address() as usize,tokens) {
+                return Err("resident fold rows shape differs from the fold envelope".into());
+            }
+            borrowed.push((weight.device_address(),weight.len()*4));
+            self.check_vector(input,tokens.checked_mul(cols).ok_or("resident fold rows input overflow")?)?;
+            if input.is_segmented() {return Err("resident fold rows input must be contiguous".into());}
+            borrowed.push((input.device_address(),input.len()*4));
+            let end=rows.checked_mul(tokens).and_then(|words|offset.checked_add(words)).ok_or("resident fold rows output overflow")?;
+            if end>output.len() {return Err("resident fold rows output is short".into());}
+            let address=output.device_address().checked_add((offset*4) as u64).ok_or("resident fold rows address overflow")?;
+            batch.push_fold_rows(MxProjection {weights:weight.device_address(),scales,input:input.device_address(),output:address,
+                rows:rows.try_into().map_err(|_|"resident fold rows exceed ABI")?,cols:cols.try_into().map_err(|_|"resident fold rows columns exceed ABI")?,
+                tokens:tokens as u32,input_bf16:0,round:0,mode:crate::next_params::MX_SCALAR})?;
+            offset=end;
+        }
+        self.check_vector(output,offset)?;if output.is_segmented() {return Err("resident fold rows output must be contiguous".into());}
+        let end=output.device_address().checked_add((offset*4) as u64).ok_or("resident fold rows output address overflow")?;
+        for (start,bytes) in borrowed {let borrowed_end=start.checked_add(bytes as u64).ok_or("resident fold rows operand address overflow")?;
+            if output.device_address()<borrowed_end && start<end {return Err("resident fold rows output aliases an operand".into());}
+        }
+        let entry=if bf16 {"flash_resident_projection_fold_rows"} else {"flash_resident_projection_fold_rows_f32"};self.require_arm_kernels(&[entry])?;
+        // No fill: every word of the region is written by the entry before any read (the live folding lane of each
+        // (source row, weight row) stores its one word; the grid covers every (weight row, token tile) once).
+        self.skip_fill(output)?;self.resident_completion()?;crate::prompt_launches::record("fold_rows");
+        // SAFETY: Every descriptor is an exact same-context contiguous FP32 or BF16 owner inside the fold-rows envelope
+        // (`fold_rows_admitted`: 1 to 512 rows, 1,024 to 8,192 columns in whole 32-column groups, 16-byte aligned weights and
+        // source rows), with `tokens` in 2..=16, `tokens * cols` initialized input words and `tokens * rows` output words;
+        // one weight precision a batch, matching the entry (`push_fold_rows` and `MxLayer::push` refuse anything else).
+        // `push_fold_rows` gives a descriptor rows.div_ceil(4) * tokens.div_ceil(8) blocks of FOLD_THREADS threads: the entry's grid contract.
+        // Exact output length, checked address sums and retained private storage fund disjoint output spans, each fully
+        // written before any read. All borrowed owners and the by-value descriptor batch live through stream completion
+        // (the owned queue defers dropped allocations; ordinary callers complete here).
+        let launched=unsafe {self.launch_flash(entry,batch.layer.ends[batch.layer.count as usize],crate::plain_admission::FOLD_THREADS as u32,&mut [parameter(&mut batch)])};
+        let completed=self.resident_completion();launched.and(completed)
+    }
+    /// The arena of `load_weight_arena` from bytes the caller already read. The parts cover the arena from 0 to `bytes`
+    /// in order with no gap, so every byte is written (no fill is needed); they go through the upload staging in pieces of
+    /// at most its first size, so the staging never grows. All copies are complete on return.
+    pub fn upload_weight_arena(&self,bytes:usize,parts:&[(usize,&[u8])])->Result<WeightArena<'a>,String> {
+        let mut end=0;
+        for &(destination,part) in parts {
+            if destination!=end {return Err("weight arena parts leave a gap or overlap".into());}
+            end=destination.checked_add(part.len()).ok_or("weight arena part overflow")?;
+        }
+        if end!=bytes {return Err("weight arena parts do not cover the arena".into());}
+        self.synchronize()?;
+        let start=Instant::now();let buffer=Buffer::new(self.context,bytes)?;self.stats.borrow_mut().allocation_ns+=start.elapsed().as_nanos();
+        let start=Instant::now();
+        for &(destination,part) in parts {
+            for (index,piece) in part.chunks(crate::staging::UPLOAD_BYTES).enumerate() {self.write_buffer(&buffer,destination+index*crate::staging::UPLOAD_BYTES,piece)?;}
+        }
+        self.synchronize()?;
+        let mut stats=self.stats.borrow_mut();stats.weight_bytes+=bytes as u128;stats.weight_read_upload_ns+=start.elapsed().as_nanos();
+        Ok(WeightArena {buffer:Rc::new(buffer)})
+    }
+    /// The arena holds E4M3 rows followed by their original UE8M0 scale rows.
+    pub fn resident_mxfp8_projection(&self,arena:&WeightArena<'a>,shape:Shape)->Result<ResidentMxfp8Projection<'_,'a>,String> {
+        self.require_resident_stream()?;
+        if !ptr::eq(arena.buffer._context,self.context) || arena.bytes()!=shape.arena_bytes()? {
+            return Err("MXFP8 arena context or complete row extent differs".into());
+        }
+        self.require_arm_kernels(&["flash_next_mxfp8_m1"])?;
+        let weights=Buffer::view(&arena.buffer,0,shape.weight_bytes())?;
+        let scales=Buffer::view(&arena.buffer,shape.weight_bytes(),shape.scale_bytes())?;
+        Ok(ResidentMxfp8Projection {backend:self,shape,weights,scales,mode:crate::next_params::MX_SCALAR,layer:false})
+    }
+    /// `resident_mxfp8_projection` with the word function of the binding. The tensor-core word (`next_params::MX_TC`) needs
+    /// decoded FP32 activations and rows that start on 16 bytes (the arena start and whole 32-column rows give that).
+    pub fn resident_mxfp8_projection_mode(&self,arena:&WeightArena<'a>,shape:Shape,mode:u32)->Result<ResidentMxfp8Projection<'_,'a>,String> {
+        let mut projection=self.resident_mxfp8_projection(arena,shape)?;
+        match mode {
+            crate::next_params::MX_SCALAR=>{},
+            crate::next_params::MX_TC=>{
+                if shape.input()!=WeightType::F32 || projection.weights.address&15!=0 {return Err("the tensor-core MXFP8 word needs FP32 activations and 16-byte aligned rows".into());}
+                self.require_arm_kernels(&["mx_tc_tile","mx_tc_quantize_pack","mx_tc_tile_packed","mx_rows_small8"])?;
+            },
+            _=>return Err("unknown MXFP8 word function".into()),
+        }
+        projection.mode=mode;Ok(projection)
+    }
+}
+impl<'a> ResidentMxfp8Projection<'_,'a> {
+    pub fn storage_bytes(&self)->[usize;2] {[self.weights.bytes,self.scales.bytes]}
+    pub fn read_storage(&self,scale:bool,offset:usize,bytes:usize)->Result<Vec<u8>,String> {
+        self.backend.read_storage_bytes(if scale {&self.scales} else {&self.weights},offset,bytes)
+    }
+    /// Preserve the completed norm's actual dtype. Do not round FP32 input lanes.
+    /// Output rows stay local until the layer's declared gather is complete.
+    pub fn apply(&self,input:&NormOutput<'_>)->Result<Mxfp8ProjectionPass<'a>,String> {
+        let b=self.backend;let s=self.shape;b.require_resident_stream()?;
+        let dtype=match input {NormOutput::Bf16(_)=>WeightType::Bf16,NormOutput::F32(_)=>WeightType::F32};
+        if dtype!=s.input() {return Err("MXFP8 norm output dtype differs from the bound producer".into());}
+        let input=input.vector();b.check_vector(input,s.cols())?;
+        if input.is_segmented() {return Err("MXFP8 projection requires complete contiguous input features".into());}
+        let accumulator=b.vector(s.rows())?;
+        let mut args=crate::next_params::MxLayer::default();
+        args.push(crate::next_params::MxProjection {weights:self.weights.address,scales:self.scales.address,
+            input:input.device_address(),output:accumulator.device_address(),rows:s.rows() as u32,
+            cols:s.cols() as u32,tokens:1,input_bf16:0,round:0,mode:self.mode})?;
+        self.count("mx_tc_step");
+        // SAFETY: Shape bounds complete E4M3 rows and UE8M0 groups in the retained arena views.
+        // check_vector checks the input context and full feature extent. MxLayer checks alignment and ABI limits.
+        // The accumulator is a new disjoint allocation. By-value arguments are copied at submission. Dropped owners are retained
+        // by the active queue until its real drain; ordinary calls complete here.
+        let launched=unsafe {b.launch_flash("flash_next_mxfp8_m1",args.ends[1],128,&mut [parameter(&mut args)])};
+        let completed=b.resident_completion();launched.and(completed)?;
+        let output=b.round_bf16_lanes(&accumulator)?;
+        Ok(Mxfp8ProjectionPass {accumulator,output})
+    }
+}
+impl<'a> Backend<'a> {
+    /// The raw quarter accumulators of an MXFP8 second matrix (KDA out_proj, dense down) for one token row: one
+    /// projection a column quarter that the owner holds, in quarter order (4, 2 or 1 pairs of matrix and input). Each
+    /// matrix is the quarter as its own matrix (its columns of every row and their scale bytes); each input holds the
+    /// quarter's columns. One launch of today's one-token kernel, which stores the raw FP32 sum of its 32 lanes; no
+    /// round follows. The output is QUARTER-MAJOR, `[quarter][row]` FP32 words (CPU twin `tc_twin_quarter::mx_chain`).
+    pub fn mxfp8_quarters(&self,jobs:&[(&ResidentMxfp8Projection<'_,'a>,&DeviceVector<'_>)])->Result<DeviceVector<'a>,String> {
+        self.require_resident_stream()?;
+        let first=jobs.first().ok_or("quarter projection batch is empty")?.0.shape;
+        // The quarter jobs exist for the scalar word only. A tensor-core matrix has no quarter entry yet: refuse, never another word.
+        if jobs.iter().any(|(matrix,_)|matrix.mode!=crate::next_params::MX_SCALAR) {return Err("MXFP8 quarter projection has no tensor-core entry".into());}
+        for (matrix,_) in jobs {matrix.count("");}
+        if crate::pair_split::quarters_entry(jobs.len()).is_none() || first.input()!=WeightType::F32 || !first.cols().is_multiple_of(256)
+            || jobs.iter().any(|(matrix,_)|!ptr::eq(matrix.backend.context,self.context) || matrix.shape!=first) {
+            return Err("MXFP8 quarter projection needs 4, 2 or 1 equal FP32-input quarter matrices of whole tiles".into());
+        }
+        let rows=first.rows();
+        let output=self.vector(rows.checked_mul(jobs.len()).ok_or("MXFP8 quarter output overflow")?)?;
+        let mut args=crate::next_params::MxLayer::default();
+        for (index,(matrix,input)) in jobs.iter().enumerate() {
+            self.check_vector(input,first.cols())?;
+            if input.is_segmented() {return Err("MXFP8 quarter projection requires complete contiguous input features".into());}
+            args.push(crate::next_params::MxProjection {weights:matrix.weights.address,scales:matrix.scales.address,input:input.device_address(),
+                output:output.device_address()+(index*rows*4) as u64,rows:rows as u32,cols:first.cols() as u32,tokens:1,input_bf16:0,round:0,mode:crate::next_params::MX_SCALAR})?;
+        }
+        // SAFETY: As `ResidentMxfp8Projection::apply`, for up to four projections. Each Shape bounds complete E4M3 rows and
+        // UE8M0 groups in its retained arena views. check_vector checks each input's context and full feature extent. MxLayer
+        // checks alignment and ABI limits. The output is a new allocation of `rows` words a projection: the spans are disjoint
+        // and overlap no operand. By-value arguments are copied at submission. Dropped owners are retained by the active queue
+        // until its real drain; ordinary calls complete here.
+        let launched=unsafe {self.launch_flash("flash_next_mxfp8_m1",args.ends[jobs.len()],128,&mut [parameter(&mut args)])};
+        let completed=self.resident_completion();launched.and(completed)?;Ok(output)
+    }
+}
+impl<'a> ResidentMxfp8Projection<'_,'a> {
+    /// Decoded FP32 token rows `[tokens,cols]`. Output accumulators are
+    /// `[tokens,rows]`. Each (row,token) keeps the same element set, ascending
+    /// FMA chain and shuffle tree as M=1. Groups use the existing M kernels.
+    pub fn apply_rows(&self,input:&DeviceVector<'_>,tokens:usize)->Result<DeviceVector<'a>,String> {
+        let b=self.backend;let s=self.shape;b.require_resident_stream()?;
+        if s.input()!=WeightType::F32 {return Err("MXFP8 prompt rows require FP32 decoded activations".into());}
+        let cols=s.cols();let rows=s.rows();b.check_vector(input,tokens.checked_mul(cols).ok_or("MXFP8 token rows overflow")?)?;
+        if input.is_segmented() || tokens==0 {return Err("MXFP8 projection requires complete contiguous input features".into());}
+        let output=b.vector(tokens*rows)?;let mut token=0;
+        // The tensor-core word (`mode` MX_TC): one row body for 1 to 8 token rows (a block owns 16 weight rows and all the token rows; the
+        // recorded small entry name, whose body reads the descriptor's mode), the tensor-core tile on FP32 rows for more, in pieces
+        // of the tile sizes the scalar path uses. There is no other kernel for this word: a call outside the entries' contract is an
+        // error, never the scalar word. A prompt group whose rows pack (`packs_rows`) does not come here: its caller packs the RAW
+        // rows once (`pack_rows`) and each matrix reads them (`apply_packed_rows`), the same word.
+        let tc=self.mode==crate::next_params::MX_TC;
+        let abi=|n:usize|u32::try_from(n).map_err(|_|"tensor-core MXFP8 rows exceed ABI".to_string());
+        if tc {
+            if self.weights.address&15!=0 || input.device_address()&15!=0 || output.device_address()&3!=0 {return Err("tensor-core MXFP8 rows need 16-byte aligned weights and input".into());}
+            b.require_arm_kernels(if tokens<=crate::next_params::MX_TC_TOKENS as usize {&["mx_rows_small8"]} else {&["mx_tc_tile"]})?;
+        } else {self.count("");}
+        // The scalar word. Which kernel runs is decided by small_choice::mx (its order is tested on the host): the small entries for 2 to 8 tokens of the listed shapes (the
+        // one-token kernel's load schedule for that many tokens, the mx_rows_small entries, same bytes), else lane K's tile when its predicate admits a piece, else
+        // the old kernels. One token keeps the old M1 kernel (97 against 126 us at 4096 x 4096). Output rows are by token, so tile pieces of the largest
+        // proven size simply follow each other.
+        let piece=crate::mx_rows::token_limit(rows,cols);
+        let choice=(!tc).then(||crate::small_choice::mx(rows,cols,tokens,self.weights.address,input.device_address(),output.device_address()));
+        let small=if let Some(crate::small_choice::Mx::Small(entry,per))=choice {Some((entry,per))} else {None};
+        let tiled=choice==Some(crate::small_choice::Mx::Tile);
+        if let Some((entry,_))=small {b.require_arm_kernels(&[entry])?;} else if tiled {b.require_arm_kernels(&["mx_rows_tile"])?;}
+        // SAFETY: Shape bounds complete E4M3 rows and UE8M0 groups in the retained arena views.
+        // check_vector checks the context and all token rows, and the offsets stay inside them.
+        // The output is a new disjoint allocation. Buffer::drop drains the stream, so all
+        // owners outlive the launch. The argument is copied at launch. The small and the tile kernels take one
+        // projection of all tokens (the small ones 2 to 8), and each traps unless the alignment its predicate checked holds.
+        // The two tensor-core arms take the same descriptors with the tensor-core grids: 16 weight rows a block of 128 threads
+        // and one token tile of up to 8 (`mx_rows_small8` reads the mode), or `mx_tc_tile`'s 128 weight rows and 64 tokens a
+        // block of 256 threads for the tokens `token .. token + count` (grid: token tiles on x, row tiles on y); the alignment both bodies trap on was checked above.
+        unsafe {
+        if tc && tokens<=crate::next_params::MX_TC_TOKENS as usize {
+            let mut p=crate::next_params::MxProjection {weights:self.weights.address,scales:self.scales.address,input:input.device_address(),output:output.device_address(),rows:abi(rows)?,
+                cols:abi(cols)?,tokens:abi(tokens)?,input_bf16:0,round:0,mode:self.mode};
+            crate::prompt_launches::record("mx_tc_rows");
+            b.launch_flash_grid("mx_rows_small8",abi(rows.div_ceil(crate::next_params::MX_TC_ROWS as usize))?,1,1,crate::mx_small::THREADS,0,&mut [parameter(&mut p)])?;
+        } else if tc {
+            while token<tokens {let count=(tokens-token).min(piece);
+                let mut p=crate::next_params::MxProjection {weights:self.weights.address,scales:self.scales.address,input:input.device_address()+(token*cols*4) as u64,output:output.device_address()+(token*rows*4) as u64,
+                    rows:abi(rows)?,cols:abi(cols)?,tokens:abi(count)?,input_bf16:0,round:0,mode:self.mode};
+                crate::prompt_launches::record("mx_tc_tile");
+                b.launch_flash_grid("mx_tc_tile",abi(count.div_ceil(crate::mx_rows::TC_TOKENS_PER_BLOCK))?,abi(rows.div_ceil(crate::mx_rows::TC_ROWS_PER_BLOCK))?,1,crate::mx_rows::TC_THREADS,0,&mut [parameter(&mut p)])?;
+                token+=count;
+            }
+        } else if let Some((entry,_))=small {
+            let [row_tiles,token_tiles]=crate::mx_small::grid(rows,cols,tokens).ok_or("MXFP8 small grid overflow")?;
+            let mut p=crate::next_params::MxProjection {weights:self.weights.address,scales:self.scales.address,input:input.device_address(),output:output.device_address(),rows:rows as u32,
+                cols:cols as u32,tokens:tokens as u32,input_bf16:0,round:0,mode:self.mode};
+            crate::prompt_launches::record("mx_rows_small");
+            b.launch_flash_grid(entry,row_tiles,token_tiles,1,crate::mx_small::THREADS,0,&mut [parameter(&mut p)])?;
+        } else if tiled {
+            while token<tokens {let count=(tokens-token).min(piece);
+                let [row_tiles,token_tiles]=crate::mx_rows::grid(rows,count).ok_or("MXFP8 tile grid overflow")?;
+                let mut p=crate::next_params::MxProjection {weights:self.weights.address,scales:self.scales.address,input:input.device_address()+(token*cols*4) as u64,output:output.device_address()+(token*rows*4) as u64,rows:rows as u32,
+                    cols:cols as u32,tokens:count as u32,input_bf16:0,round:0,mode:self.mode};
+                crate::prompt_launches::record("mx_rows_tile");
+                b.launch_flash_grid("mx_rows_tile",row_tiles,token_tiles,1,crate::mx_rows::THREADS,0,&mut [parameter(&mut p)])?;
+                token+=count;
+            }
+        } else {
+        while token<tokens {let count=(tokens-token).min(16);
+            let mut args=crate::next_params::MxLayer::default();
+            let p=crate::next_params::MxProjection {weights:self.weights.address,scales:self.scales.address,
+                input:input.device_address()+(token*cols*4) as u64,output:output.device_address()+(token*rows*4) as u64,rows:rows as u32,
+                cols:cols as u32,tokens:count as u32,input_bf16:0,round:0,mode:self.mode};
+            let kernel=p.kernel();args.push(p)?;
+            b.require_arm_kernels(&[kernel])?;
+            crate::prompt_launches::record("mx_rows_groups");
+            b.launch_flash(kernel,args.ends[1],128,&mut [parameter(&mut args)])?;
+            token+=count;
+        }
+        }
+        }
+        Ok(output)
+    }
+    /// True when `tokens` rows of this matrix run as the tensor-core tile on PACKED rows (`pack_rows`, then
+    /// `apply_packed_rows`): the tensor-core word, more rows than the row body takes, a width of whole 1,024 columns, and
+    /// the scale plane 4-byte aligned (the tile on packed rows reads a weight row's scale codes four at a time; an arena
+    /// view is aligned). Every other call keeps `apply_rows` on decoded rows, the same word.
+    pub fn packs_rows(&self,tokens:usize)->bool {
+        self.mode==crate::next_params::MX_TC && tokens>crate::next_params::MX_TC_TOKENS as usize && crate::mx_rows::tc_packed(self.shape.cols()) && self.scales.address&3==0
+    }
+    /// The packed rows of a prompt group from its RAW FP32 rows `[tokens,cols]`, in one launch (`mx_tc_quantize_pack`): the
+    /// bytes the quantize launch (`Op::Mxfp8Quantize`) and then a pack of its decoded rows give (kernel-bench --mx-quant
+    /// pack). They depend on the rows and the width alone, never on a weight, so every matrix of this width that reads the
+    /// same rows may read them.
+    pub fn pack_rows(&self,input:&DeviceVector<'_>,tokens:usize)->Result<MxPackedRows<'a>,String> {
+        let b=self.backend;let s=self.shape;b.require_resident_stream()?;
+        if s.input()!=WeightType::F32 || !self.packs_rows(tokens) {return Err("MXFP8 prompt rows of this call are not packed".into());}
+        let cols=s.cols();b.check_vector(input,tokens.checked_mul(cols).ok_or("MXFP8 token rows overflow")?)?;
+        if input.is_segmented() || input.device_address()&15!=0 {return Err("tensor-core MXFP8 packed rows need complete 16-byte aligned input rows".into());}
+        b.require_arm_kernels(&["mx_tc_quantize_pack"])?;
+        let abi=|n:usize|u32::try_from(n).map_err(|_|"tensor-core MXFP8 rows exceed ABI".to_string());
+        let plane=b.vector(tokens.checked_mul(crate::mx_rows::tc_packed_line(cols)).ok_or("MXFP8 packed rows overflow")?/4)?;
+        if plane.device_address()&15!=0 {return Err("tensor-core MXFP8 packed rows need a 16-byte aligned plane".into());}
+        let mut p=crate::next_params::MxProjection {weights:0,scales:0,input:input.device_address(),output:plane.device_address(),rows:abi(s.rows())?,cols:abi(cols)?,tokens:abi(tokens)?,
+            input_bf16:0,round:0,mode:self.mode};
+        crate::prompt_launches::record("mx_tc_quantize_pack");
+        // SAFETY: check_vector checks the context and the `tokens * cols` FP32 words of the contiguous input; it and the plane are
+        // 16-byte aligned (checked above) and `cols` is a multiple of 1,024 (`packs_rows`), the kernel's own conditions. The plane is
+        // a new disjoint allocation of `tokens` lines of `tc_packed_line` bytes (a line is a whole number of words); the launch writes
+        // every byte of it and reads only the input. The argument is copied at launch. Buffer::drop drains the stream, so both
+        // owners outlive the launch.
+        unsafe {b.launch_flash_grid("mx_tc_quantize_pack",crate::mx_rows::tc_pack_blocks(tokens,cols).ok_or("tensor-core MXFP8 rows exceed ABI")?,1,1,crate::mx_rows::TC_THREADS,0,&mut [parameter(&mut p)])?;}
+        Ok(MxPackedRows {plane,tokens,cols})
+    }
+    /// The ROUNDED output `[tokens,rows]` of this matrix on the packed rows `pack_rows` made for its width: the tile on packed
+    /// rows in pieces of `TC_PACKED_TOKENS`, each word stored BF16-rounded (`round` 1). These are the words of `apply_rows` on
+    /// the decoded rows and then `round_bf16_lanes`, without the round launch and its second pass over the output.
+    pub fn apply_packed_rows(&self,packed:&MxPackedRows<'_>)->Result<DeviceVector<'a>,String> {
+        let b=self.backend;let s=self.shape;b.require_resident_stream()?;
+        let (rows,cols,tokens)=(s.rows(),s.cols(),packed.tokens);let line=crate::mx_rows::tc_packed_line(cols);
+        if s.input()!=WeightType::F32 || packed.cols!=cols || !self.packs_rows(tokens) {return Err("MXFP8 packed rows differ from this matrix".into());}
+        b.check_vector(&packed.plane,tokens*line/4)?;
+        let (entry, tile_tokens) = crate::small_choice::packed_mx_tile(tokens);
+        b.require_arm_kernels(&[entry])?;
+        let output=b.vector(tokens.checked_mul(rows).ok_or("MXFP8 token rows overflow")?)?;
+        if self.weights.address&15!=0 || packed.plane.device_address()&15!=0 || output.device_address()&3!=0 {return Err("tensor-core MXFP8 rows need 16-byte aligned weights and packed rows".into());}
+        let abi=|n:usize|u32::try_from(n).map_err(|_|"tensor-core MXFP8 rows exceed ABI".to_string());
+        // SAFETY: Shape bounds complete E4M3 rows and UE8M0 groups in the retained arena views; the weights are 16-byte aligned and
+        // the scale plane 4-byte aligned (`packs_rows`). check_vector checks the context and the whole plane, which `pack_rows` made
+        // as `tokens` lines of `line` bytes; the launch reads all `tokens` lines and writes all `tokens * rows` words of the new
+        // disjoint output (4-byte aligned). The grid covers 16 weight rows and up to 16 tokens on 128 threads for the short entry
+        // (row tiles on x), or 128 weight rows and 64 tokens on 256 threads for the wide entry (token tiles on x). `round` 1
+        // changes the stored value only. The argument is copied at launch. Buffer::drop drains the stream, so all owners outlive
+        // the launch.
+        unsafe {
+            let mut p=crate::next_params::MxProjection {weights:self.weights.address,scales:self.scales.address,input:packed.plane.device_address(),
+                output:output.device_address(),rows:abi(rows)?,cols:abi(cols)?,tokens:abi(tokens)?,input_bf16:0,round:1,mode:self.mode};
+            crate::prompt_launches::record("mx_tc_tile");
+            let (gx,gy,threads)=if tile_tokens==16 {
+                (rows.div_ceil(crate::next_params::MX_TC_ROWS as usize),1,crate::mx_small::THREADS)
+            } else {
+                (tokens.div_ceil(tile_tokens),rows.div_ceil(crate::mx_rows::TC_ROWS_PER_BLOCK),crate::mx_rows::TC_THREADS)
+            };
+            b.launch_flash_grid(entry,abi(gx)?,abi(gy)?,1,threads,0,&mut [parameter(&mut p)])?;
+        }
+        Ok(output)
+    }
+}
+/// The packed token rows of one prompt group at one width (`ResidentMxfp8Projection::pack_rows`): `tokens` lines of
+/// `mx_rows::tc_packed_line(cols)` bytes, a row's E4M3 codes and then one UE8M0 scale code a group of 32 columns.
+pub struct MxPackedRows<'a> {plane:DeviceVector<'a>,tokens:usize,cols:usize}
+impl MxPackedRows<'_> {
+    pub fn tokens(&self)->usize {self.tokens}
+    pub fn cols(&self)->usize {self.cols}
+}
+impl<'a> Mxfp8ProjectionPass<'a> {
+    pub fn accumulator(&self)->&DeviceVector<'a> {&self.accumulator}
+    pub fn output(&self)->&Bf16Vector<'a> {&self.output}
+    /// Keep the already-rounded output and release the completed accumulator.
+    pub fn into_output(self)->Bf16Vector<'a> {self.output}
+}

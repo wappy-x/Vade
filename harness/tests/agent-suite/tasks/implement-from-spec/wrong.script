@@ -1,0 +1,47 @@
+# A near miss for the dry run: units in any order are accepted, so `1m1h`
+# passes. The agent's own tests pass; the hidden tests must fail.
+>>> patch
+*** Begin Patch
+*** Update File: src/lib.rs
+@@
+ pub fn parse_duration(text: &str) -> Result<u64, DurationError> {
+-    let _ = text;
+-    todo!("implement parse_duration as SPEC.md describes")
++    if text.is_empty() {
++        return Err(DurationError::Empty);
++    }
++    let (mut total, mut digits) = (0u64, String::new());
++    for c in text.chars() {
++        if c.is_ascii_digit() {
++            digits.push(c);
++            continue;
++        }
++        let unit = match c {
++            'd' => 86_400,
++            'h' => 3_600,
++            'm' => 60,
++            's' => 1,
++            _ => return Err(DurationError::Invalid),
++        };
++        let n: u64 = digits.parse().map_err(|_| DurationError::Invalid)?;
++        digits.clear();
++        total = n.checked_mul(unit).and_then(|v| total.checked_add(v)).ok_or(DurationError::Overflow)?;
++    }
++    if !digits.is_empty() {
++        return Err(DurationError::Invalid);
++    }
++    Ok(total)
+ }
+*** Add File: tests/examples.rs
++use duration::parse_duration;
++
++#[test]
++fn spec_examples() {
++    assert_eq!(parse_duration("45s"), Ok(45));
++    assert_eq!(parse_duration("1h30m"), Ok(5400));
++}
+*** End Patch
+>>> call workspace_shell
+{"argv":["cargo","test","--offline"],"timeout_ms":120000}
+>>> answer
+Done.

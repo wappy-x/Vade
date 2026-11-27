@@ -1,0 +1,28 @@
+▌ Fix the parser
+[file: src/parser.rs, 2 lines]
+
+▸ thinking hh:mm:ss–hh:mm:ss · 1.2k tokens · 14.0s
+
+I'll read the parser first.
+╰ hh:mm:ss
+
+● Read src/parser.rs
+  ⎿ 120 lines · 0.1s
+
+The test failed because the last token was dropped.
+╰ hh:mm:ss · 29.6s · 412 tokens out · 23 tok/s
+
+▲ Warning
+The next reply would not fit in the model's context.
+Vade stopped and kept the history.
+Use /compact to shrink older turns, or /new to start over.
+
+
+
+
+
+
+
+
+qwen3-8b · harness · approval: ask · session-1
+›

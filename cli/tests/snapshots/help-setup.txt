@@ -1,0 +1,61 @@
+$ vade setup --help
+Ask a few questions, then install, start and check Vade.
+
+Examples:
+  vade setup
+  vade setup --yes
+  vade setup --yes --hosts spark-a,spark-b
+  vade setup --yes --hosts spark-a,spark-b --dry-run
+
+Usage: vade setup [OPTIONS]
+
+Options:
+  --yes                Ask nothing; take the defaults and the flags below
+  --hosts a,b          The Sparks, as you type them after ssh, in any order.
+                       This is the same as vade up --sparks a,b
+  --fp8                The FP8 checkpoint on 2 or 4 Sparks (6 Sparks start but
+                       are not covered); --fp4-local is the default
+  --replace-local      Older option, kept for scripts; it has no effect
+  --model PATH         The model folder, absolute or under ~/ (on each Spark
+                       from a controller)
+  --link FROM:TO=ADDR  FROM's own address on its cable to TO, to override what
+                       Vade reads; once per cable end
+  --dry-run            Print the answers, the config and the steps; change
+                       nothing
+
+Notes:
+  - Asks which Sparks to use (on a Spark the default is this Spark), FP4-Local
+    or FP8 (only for 2, 4 or 6 Sparks; 6 Sparks are not covered yet), and where
+    the model is. Each question shows its default in brackets; press Enter to
+    take it.
+  - Controller setup lists the cabling and saves named sets in cable order. A
+    set is one [group NAME]. A layout lists sets that can run together. For
+    eight Sparks, the layouts are 4 + 2 + 2 (a quad and two pairs), 4 + 4 (two
+    quads), or 8 (all together). Smaller inventories use the same partition
+    rules. Setup keeps a detected closing cable. Use VADE_GROUP=NAME with up,
+    status, chat, logs and down to select a set. Setup still starts the full
+    inventory by default.
+  - On this Spark, vade install saves the local defaults in ~/.vade/config. From
+    another computer, setup writes a controller config at the path vade config
+    shows (VADE_CONFIG, else the user config folder). It points at the installed
+    bundle when vade runs from one, else at this checkout, and keeps Vade's
+    private folders on this computer under ~/.vade. With no list of Sparks,
+    setup uses the config that is there. A list moves that config aside.
+  - Then it runs vade install, vade up and vade doctor, and stops at the first
+    step that fails. Doctor runs last, so it checks the Sparks that up started.
+    Run vade setup again after a fix, without the answer options: it uses the
+    setup it finds and repeats only the work that needs it. When a controller
+    config already has an install, setup skips vade install; after a pull, run
+    vade update.
+  - A list of Sparks, from --hosts or from the question, replaces the setup in
+    place with no flag: a local setup moves to config.local, a controller config
+    moves to config.before, and a running engine stops first. Setup deletes
+    nothing. Press Enter at the question to keep the setup. It asks for a cable
+    address only when it cannot read one.
+  - Without a terminal, setup asks nothing; add --yes. It does not download
+    models: see vade pull.
+  - Explicit VADE_CONFIG selects the controller; otherwise generated local setup
+    wins. Keep the same VADE_CONFIG and VADE_HOME from start through chat,
+    status, logs and down.
+--- stderr
+--- exit 0

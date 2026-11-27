@@ -1,0 +1,14 @@
+[package]
+name = "engine-tokenizer"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+repository = "https://github.com/wappy-x/vade"
+rust-version = "1.99"
+
+[dependencies]
+engine-model = { path = "../model" }
+
+[lints.rust]
+unsafe_code = "forbid"

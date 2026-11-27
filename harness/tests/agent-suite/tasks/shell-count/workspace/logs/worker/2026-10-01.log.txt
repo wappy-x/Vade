@@ -1,0 +1,4 @@
+2026-10-01T00:00:00Z INFO worker started with 4 threads
+2026-10-01T00:10:00Z INFO job 101 done
+2026-10-01T00:20:00Z INFO job 102 done
+2026-10-01T00:30:00Z WARN job 103 slow

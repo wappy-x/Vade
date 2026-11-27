@@ -1,0 +1,19 @@
+# A near miss for the dry run: after the read error the agent writes a new
+# file at the old path. `missing src/v1` and `run cargo test` must fail.
+>>> call workspace_read
+{"path":"src/v1/token.rs"}
+>>> patch
+*** Begin Patch
+*** Add File: src/v1/token.rs
++pub struct Token {
++    pub expires_at: u64,
++}
++
++impl Token {
++    pub fn is_expired(&self, now: u64) -> bool {
++        now >= self.expires_at
++    }
++}
+*** End Patch
+>>> answer
+Fixed `is_expired` in src/v1/token.rs.

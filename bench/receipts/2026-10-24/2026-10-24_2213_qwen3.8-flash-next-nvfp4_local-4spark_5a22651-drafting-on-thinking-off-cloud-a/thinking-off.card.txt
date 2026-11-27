@@ -1,0 +1,81 @@
+╭────────────────────────────────────────────────────────────────────────╮
+│                                                                        │
+│  R I G M A R K   //   AGENT WORKLOAD RECEIPT                           │
+│  BENCHMARKS LOCAL AI HOW CODING AGENTS ACTUALLY USE IT                 │
+│  ●  15/15 BASIC OUTPUT GATES PASSED                                    │
+│                                                                        │
+├─ MODEL ────────────────────────────────────────────────────────────────┤
+│                                                                        │
+│  qwen3.8-flash-next-fp4-local                                          │
+│                                                                        │
+├─ SINGLE STREAM ────────────────────────────────────────────────────────┤
+│                                                                        │
+│  WORKLOAD         tok/s       Range tok/s   Last (s)    Checks         │
+│  PROSE             29.0         28.1–29.6       32.0     ✓ 5/5         │
+│  CODE              51.6         49.1–52.9       34.2     ✓ 5/5         │
+│  STRUCTURED*       56.6         54.2–57.6       10.1     ✓ 5/5         │
+│                                                                        │
+│  * Predictable JSON ceiling; not general agent performance.            │
+│  Decode medians are estimates; rates include streamed reasoning.       │
+│                                                                        │
+├─ PREFILL ──────────────────────────────────────────────────────────────┤
+│                                                                        │
+│  DEPTH       Cold tok/s      Cold TTFT (s)    Replay TTFT (s)          │
+│  8K               3,390               2.42               2.32          │
+│  Medians; replay is an immediate repeat, not a proven hit.             │
+│                                                                        │
+├─ CAPPED CONCURRENT GENERATION ─────────────────────────────────────────┤
+│                                                                        │
+│  Aggregate tok/s: C1 43.6 | C2 70.7 | C4 108.1 | C8 104.2              │
+│  C8: 0/24 normal stops; 24/24 with visible output.                     │
+│  Capped throughput includes reasoning; not completed agent tasks.      │
+│                                                                        │
+├─ APPLIANCE ────────────────────────────────────────────────────────────┤
+│                                                                        │
+│  Hardware: 4 x NVIDIA GB10 (4 rented GB10 VMs: 4 rented VMs            │
+│    (containers), one NVIDIA GB10 each, 116 GiB RAM each, driver        │
+│    580.173.02); vm-a rank0 (HTTP 127.0.0.1:18080) <link-a>; vm-b rank1 │
+│    <link-b>; vm-c rank2 <link-c>; vm-d rank3 <link-d>; 200G            │
+│    point-to-point links (ring cabling, closing link unused), TCP       │
+│    (SEQPAR_RDMA=0)                                                     │
+│  Topology: world4 four-Spark layer chain (one engine, four ranks,      │
+│    logical path, no closing cable) started by Route B controller vade  │
+│    up --sparks 4; engine topology tag 'pipeline'; rank0 binds HTTP     │
+│    127.0.0.1:18080                                                     │
+│  Checkpoint: nvidia/Qwen3.8-Flash-Next-FP4-Local @                     │
+│    d99ccbed3a9db8a2f099eca98e17c0bc3a2ebe84df95852f3b07c87c20a32716    │
+│  Quantisation: NVFP4 FP4-Local checkpoint                              │
+│  KV cache: FP32 K/V; FP32 index and recurrent history                  │
+│  Engine: Vade 5a226519a2a44a0ff7ea9be43118b8b9ec0d8f9e v0.1.0 public   │
+│    release, installed by INSTALL.md (build route) and started by Route │
+│    B controller vade up --sparks 4 on four rented GB10 VMs; drafting ON│
+│    as served (requests omit draft; server default MTP + lookup;        │
+│    measured mtp_depth per response); informative, no gate              │
+│  Recipe: Route B vade up --sparks 4 defaults (SEQPAR_RDMA=0, TCP):     │
+│    NVFP4 FP4-Local; context32768/output8192; drafting ON as served     │
+│    (requests omit draft; server default MTP + lookup; measured         │
+│    mtp_depth per response); thinking OFF; standard prefill 3           │
+│    cold/replay 8192 pairs; HTTP 127.0.0.1:18080.                       │
+│                                                                        │
+├─ SETTINGS ─────────────────────────────────────────────────────────────┤
+│                                                                        │
+│  SUITE: CUSTOM SETTINGS                                                │
+│  Changed: --prefill-depths=8192                                        │
+│  Changed: --concurrency=1,2,4,8                                        │
+│  REQUEST: {"cache": false, "chat_template_kwargs": {"enable_thinking": │
+│    false}, "frequency_penalty": 0, "presence_penalty": 0,              │
+│    "repetition_penalty": 1, "top_k": 0}                                │
+│  Temperature 0.0 | top_p 1.0 | seed 20260905 | protocol 1.3.0          │
+│  Decode: 5 runs, 8192-token cap | Prefill: 8K, 3 pairs                 │
+│  Concurrency: C1/C2/C4/C8, 3 rounds, 256-token cap; workload code      │
+│  Cache isolation: random-salt-per-pair                                 │
+│  Comparison ID: 2026-10-11-vade-rigmark-compat-thinking-off            │
+│                                                                        │
+├─ RECEIPT ──────────────────────────────────────────────────────────────┤
+│                                                                        │
+│  SOURCE     git:52c29c3fc1d7  •  state unknown                         │
+│  JSON sha256:f812b7ee14afcffb…                                         │
+│  SHARE THE CARD • LINK THE JSON RECEIPT • #RIGMARK                     │
+│  github.com/alexellis/rigmark                                          │
+│                                                                        │
+╰────────────────────────────────────────────────────────────────────────╯

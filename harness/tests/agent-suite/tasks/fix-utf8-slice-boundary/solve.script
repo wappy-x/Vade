@@ -1,0 +1,18 @@
+# A correct transcript for the dry run: step back to a character boundary.
+>>> call workspace_read
+{"path":"src/lib.rs"}
+>>> call workspace_read
+{"path":"tests/preview.rs"}
+>>> patch
+*** Begin Patch
+*** Update File: src/lib.rs
+@@
+-    &input[..max_bytes]
++    let mut end = max_bytes;
++    while !input.is_char_boundary(end) {
++        end -= 1;
++    }
++    &input[..end]
+*** End Patch
+>>> answer
+`truncate_utf8_prefix` now steps back to the nearest character boundary at or below `max_bytes`.

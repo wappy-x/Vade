@@ -1,0 +1,5 @@
+$ vade config --all
+--- stderr
+error: Unexpected argument "--all" for vade config. This command takes no options except --json and --dry-run.
+ hint: Run vade config --help.
+--- exit 1

@@ -1,0 +1,11 @@
+null
+{}
+{"choices":null}
+{"choices":[]}
+{"choices":[null]}
+{"choices":[{}]}
+{"choices":[{"message":null,"finish_reason":"stop"}]}
+{"choices":[{"message":{"role":"user","content":"wrong speaker"},"finish_reason":"stop"}]}
+{"choices":[{"message":{"role":"assistant","content":"text"}}]}
+{"choices":[{"message":{"role":"assistant","content":"text"},"finish_reason":null}]}
+{"choices":[{"message":{"role":"assistant","content":"text"},"finish_reason":""}]}
